@@ -9,21 +9,25 @@
 | 网页原型（根目录） | [PROTOTYPE.md](PROTOTYPE.md) | 视觉与交互基座，双击即开，桌面版直接加载 |
 | Electron 主进程 | [desktop/electron/MODULE.md](../../desktop/electron/MODULE.md) | 窗口、菜单、IPC、Agent 启动、打包路径 |
 | CAD 查看 | [desktop/src/cad/MODULE.md](../../desktop/src/cad/MODULE.md) | STEP/IGES/STL/OBJ/GLTF 解析与 three.js 渲染、运动学标注层与自动识别建议（名称/型号 + 层级 + 几何，需逐条确认） |
+| CAD 参数化导入与重建 | [desktop/src/parametric/MODULE.md](../../desktop/src/parametric/MODULE.md) | 可选 `cad.parametric-import`（v1.0.0 / API 1）；控制参数化特征树编辑、sidecar 重建与 STEP/STL 导出；关闭不禁用 STEP/IGES/CAD 只读查看，不删除特征树、原 CAD 或叠加体 |
+| 客户可选模块注册与启停 | [desktop/src/modules/MODULE.md](../../desktop/src/modules/MODULE.md) | 内置模块 ID/API/依赖/能力目录、默认状态、持久化开关与跨 renderer/主进程门控边界 |
+| Windows 应用内更新 | [desktop/docs/update-channel.md](../../desktop/docs/update-channel.md) | 可选 `system.update`（v1.0.0 / API 1）；稳定/测试渠道、显式下载与确认安装、NSIS blockmap 与签名/完整性发布门禁 |
+| 可移植工程档案 | [desktop/src/project-archive/MODULE.md](../../desktop/src/project-archive/MODULE.md) | 可选 `project.portable` v2.0.0；stable project ID/source hash 绑定 schema-v2 状态+CAD 候选档案，strict read-only preview；事务恢复仍未实现 |
 | 主视口 3D | [desktop/src/orbit/MODULE.md](../../desktop/src/orbit/MODULE.md) | 原型装配/干涉视口换成可旋转 three.js：标准视图、透视/正交、适合、树↔3D 选择、属性编辑改几何、剖切与包围盒干涉叠加；WebGL 不可用退回原型等轴测 |
 | 元器件数据包 | [desktop/src/packs/MODULE.md](../../desktop/src/packs/MODULE.md) | manifest-only 索引、`loadPack/unloadPack` 懒加载、跨包去重、partId 全局索引、检索与面板；`validatePack` 全包校验、`partsSha256` 完整性、schema 迁移、依赖与统计报表 |
 | 内置包数据 | [packs/builtin/MODULE.md](../../packs/builtin/MODULE.md) | 10 个包：iec-cn 377 / smc-cn 8 / servo-cn 25 / sensor-cn 32 / pneumatic-cn 44 / vision-cn 32 / drive-cn 33 / safety-cn 33（28+5 alias）/ frame-cn 33 + pricebook-cn |
 | Agent 接口 | [desktop/src/agent/MODULE.md](../../desktop/src/agent/MODULE.md) | 工具注册表、JSON-RPC、MCP stdio、离线规则路由、多步规划/执行、上下文快照与指代消解、会话记忆、多轮状态/工程指纹/续跑（thread）、本地知识检索（离线 RAG）、结果裁剪、执行进度/取消、失败建议、主动建议（next-best-action）、可复用流程模板（recipes）、模型输出纠错与重试（repair/retry）、确认与导出路径策略（policy）、审计筛选与导出、上下文预算与成本可见性（budget/pricing）、同轮去重（dedupe）、只读并行（parallel）、会话短缓存（cache）、侧栏问答/建议/计划/流程卡片 UI、能力报告与 SVG 一页图（agent-report.mjs） |
 | 公共健壮性 / 诊断 / 性能 | [desktop/electron/MODULE.md](../../desktop/electron/MODULE.md)、[PERF.md](PERF.md) | 输入上限、显式资源计数、错误摘要与脱敏、崩溃落盘、性能基线 |
 | 智慧工厂 | [desktop/src/factory/MODULE.md](../../desktop/src/factory/MODULE.md) | demo / OPC UA / MQTT 适配器与点位模型 |
-| 智慧工厂同步 | [desktop/src/sync/MODULE.md](../../desktop/src/sync/MODULE.md) | 设计包 ZIP、manifest、上传/列表/diff 与设置页 |
+| 智慧工厂同步 | [desktop/src/sync/MODULE.md](../../desktop/src/sync/MODULE.md) | 设计包 ZIP、manifest、上传/列表/diff；`factory.plc-sync` 独立控制 PLC 源码/IO mapping 扩展，依赖 `plcgen`，普通设计包不受影响 |
 | PLC | [desktop/src/plc/MODULE.md](../../desktop/src/plc/MODULE.md) | sim / Modbus TCP 适配器、28 点位与 plc.json |
 | PLC 代码生成 | [desktop/src/plcgen/MODULE.md](../../desktop/src/plcgen/MODULE.md) | 全量预检、IO 变量表 CSV、五个基础块 + 自动序列/报警/安全 FC、mapping、确定性 11 文件汇总、生成面板、zip 导出与历史、内置模拟器 `simulate` / `verifyGenerated` |
-| 通电联调 | [desktop/src/commission/MODULE.md](../../desktop/src/commission/MODULE.md) | 6 步上电、3 条用例、序列执行与报告 |
+| 通电联调 / 可选 IO 测试 | [desktop/src/commission/MODULE.md](../../desktop/src/commission/MODULE.md) | `commission.io-test` 独立开关 6 步上电、3 条 IO 用例与诊断；PLC 实时连接、读写和监视保持独立 |
 | 机型方案设计 | [MACHINE-DESIGN.md](MACHINE-DESIGN.md) | 中文需求抽取、`MachineConfig` 方案合成、整机形态库 `forms.ts`（11 种整机形态，含龙门四工位、转盘+直线混合、单元式四工位、8–12 工位长线体/转盘）、并行同工序 / 流水线分工序两套节拍模型、点位/功率/BOM 估算、只读 `design_machine` 与写工具 `apply_machine_design`；落盘、active 指针、3D/BOM/PLC 联动与撤销；`machine/geometry*.ts` 参数化整机几何（机架/底板/门架/气缸/夹爪/旋转台/传感器/光栅/输送线或转盘/多头龙门/混合线/单元矩阵/安全围栏，mm）、STL/glTF 导出与 build123d 实体列表 |
 | 机型设计完整案例 | [MACHINE-DESIGN-DEMO.md](MACHINE-DESIGN-DEMO.md) | 六工位锁螺丝机真实解析/合成、节拍与功率计算、同一需求转盘/直线两种形态对比、真实元件包 BOM 映射、19 行 PLC IO 与四张全流程截图 |
 | 机械校核 | [desktop/src/mech/MODULE.md](../../desktop/src/mech/MODULE.md) | 包围盒干涉初筛 + 气缸/悬臂梁/螺栓计算 |
-| 电气校验 | [desktop/src/elec/MODULE.md](../../desktop/src/elec/MODULE.md) | 线号合规、功率统计、导线截面与断路器配合、校验面板与 PDF |
-| 成本估算 | [desktop/src/cost/MODULE.md](../../desktop/src/cost/MODULE.md) | 价格簿校验、成本引擎、成本面板、A4 PDF 与 CSV 导出、Agent 工具 `run_cost_report` |
+| 电气校验 | [desktop/src/elec/MODULE.md](../../desktop/src/elec/MODULE.md) | 可选 `elec.validation`（v1.0.0 / API 1）；规则校验、面板/PDF 与 Agent/MCP；电气原理图、元件库和底板布置独立保留 |
+| 成本估算 | [desktop/src/cost/MODULE.md](../../desktop/src/cost/MODULE.md) | 可选 `cost.estimation`（v1.0.0 / API 1）；面板、价格簿读取、A4 PDF/CSV 与 Agent `run_cost_report` / `export_cost_report`；关闭保留数据并不影响普通 BOM/通用导出 |
 | 导出 | [desktop/src/export/MODULE.md](../../desktop/src/export/MODULE.md) | PDF 报告 / DXF / GLB / OBJ / BOM |
 | 渲染层扩展与面板 | [desktop/src/ui/MODULE.md](../../desktop/src/ui/MODULE.md) | 注入方式、DOM 契约、三块面板 |
 | 测试与构建 | [desktop/test/MODULE.md](../../desktop/test/MODULE.md) | 单测/smoke/打包链与证据口径 |
@@ -74,13 +78,15 @@ Electron 实跑抓取（共 18 张：`01`–`10` 为 1440×873；`11`–`18` 为
 ## 当前总体进度（2026-10-24）
 
 - ✅ v0.2.0 已发布：GitHub Actions `windows-latest` 产出 NSIS 安装包（手动触发 `workflow_dispatch`）
-- ✅ 1655 个单测 + 完整 smoke 断言全绿（含 `SMOKE_KINEMATICS_AUTO_OK high=4 low=1 accepted=1 autoApplied=0`）
+- ✅ 最新 `main` 基线上 `TZ=UTC npm test` 1800/1800、`npm run build:ext` 及 fake-sidecar Electron headless smoke 全部通过（最终 `SMOKE_OK`）；本轮详细记录见 [STATUS.md](./STATUS.md)。
 - ✅ CAD 轻量化查看（STEP 实测 18 零件 / 5,040 面 / 559 ms）、WebGL 降级
 - ✅ 数据包机制 + 面板 + Agent 检索；iec-cn 电气元件库（377 型号 / 26 分类 / 219 带符号）；内置包扩至 10 个：servo-cn / sensor-cn / pneumatic-cn / vision-cn（32）/ drive-cn（33）/ safety-cn（33，28 实型号 + 5 alias）/ frame-cn（33），启动只读 manifest，命中包才加载 `parts.json`；`SMOKE_PACKS_LAZY_OK packs=10 loaded=2`、`SMOKE_PACKS_COUNT servo=25 sensor=32 pneumatic=44 vision=32 drive=33 safety=28 frame=33`、`SMOKE_PACKS_VALIDATE_OK packs=10 errors=0`；`npm run packs:stats` 产出 `PACK-STATS.md` / `pack-stats.json`（617 条 / 612 实型号 / 612 唯一型号 / 55 分类，尺寸 55.9%、价格 7.2%）
 - ✅ 机械校核（干涉 AABB + 气缸/悬臂梁/螺栓）与五种导出（PDF / DXF / GLB / OBJ / BOM）
-- ✅ 电气校验面板（9 卡 + 问题表 + A3 PDF）与成本估算面板（9 卡 + 明细 + 缺价 + A4 PDF/CSV）
-- ✅ 成本 Agent 工具 `run_cost_report`（只读，与面板共用同一份 `CostReport`，明细/缺价窄输出）
+- ✅ 可选 `elec.validation` 与 `cost.estimation` 默认启用；成本模块关闭时面板/Agent/RPC/MCP/专用 PDF/CSV fail-closed、无报告落盘，既有数据/历史保留；普通 BOM、通用导出、机械/电气设计和机型方案估价不受影响
+- ✅ 成本 Agent 工具 `run_cost_report`（只读，与面板共用同一份 `CostReport`，明细/缺价窄输出）及 `export_cost_report`（PDF/CSV）；均受 `cost.estimation` 开关控制
 - ✅ PLC 抽象 + 仿真/Modbus TCP + 通电联调（6 步 + 3 用例）
+- ✅ 可选模块迭代：`commission.io-test` 独立控制上电与标准 IO 用例；`factory.plc-sync` 独立控制同步包 PLC 源码/IO mapping，依赖 `plcgen`；`cad.parametric-import` 独立控制特征树编辑、sidecar 重建和 STEP/STL 导出，关闭保留 CAD 只读查看及现存数据；`project.portable` v2 使用 stable project ID/source SHA 打包可支持的 feature tree、stable-object 运动学、CAD 视角候选与原件，严格预览但不应用/覆盖当前工程；关闭隐藏入口且主进程拒绝文件副作用；事务恢复、异机 CAD 几何复核及 PLC/工厂/Agent 模块数据仍不支持；普通 BOM/PDF/GLB/DXF 包不受影响；PLC 实时连接、读写、监视与强制写入保持独立
+- ✅ `system.update` 更新通道 MVP 已接入：stable/beta、手动检查/下载、进度、原生确认后非静默安装；关闭模块会隐藏 UI 并由主进程拒绝所有更新 IPC；GitHub Releases/NSIS blockmap 与缺签名 fail-closed 发布门禁已配置。真实 Windows Authenticode 签名、升级、hash 与差分回退尚未实测；见 [update-channel.md](../../desktop/docs/update-channel.md)
 - ✅ PLC 代码生成 P8-1～P8-4：预检 + IO 变量表 + 五个基础块 + 自动序列/报警/安全 FC + mapping + 生成面板 + zip 导出 + 最近 10 次历史；内置模拟器按行程时间执行生成序列，超时/SafeStop/传感器矛盾可验证（11 文件；`SMOKE_PLCGEN_OK files=5 tags=32`、`SMOKE_PLCGEN_SEQ_OK files=11 steps=2`、`SMOKE_PLCGEN_SIM_OK steps=6 ok=1 alarms=0`、`SMOKE_PLCGEN_UI_OK files=11 history=1`）
 - ✅ 智慧工厂三适配器 + 设计包同步客户端 + 设置页（真实服务端待实现）
 - ✅ Agent 写操作（导入/插入/底板放置/修改/移除/撤销/BOM/干涉/PLC 落盘/通用导出）+ MCP 本机代理 + 应用内对话面板

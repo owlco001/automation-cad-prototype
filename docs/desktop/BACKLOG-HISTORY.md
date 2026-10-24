@@ -2,6 +2,28 @@
 
 从 [BACKLOG.md](BACKLOG.md) 移出的已完成迭代记录，原文保留、按时间倒序。本文件**不进入**智能体离线知识索引（`desktop/src/agent/kb/index.ts` 的 `KB_DOC_FILES`），需要时直接打开阅读。
 
+## 可选模块、工程导入安全与应用更新（2026-10-24，本轮）
+
+- 状态：✅ 本地实现完成；实现提交 `eb0c830`。最新 `main` 基线 `0d69dc0` 上 `TZ=UTC npm test` **1800/1800**、`npm run build:ext` 和 fake-sidecar Electron headless smoke 全绿（最终 `SMOKE_OK`）。
+- 可选模块：增加版本化 registry、依赖/API/能力检查、本地设置与 renderer→主进程同步门控；接入 Agent `agent.resume` checkpoint、PLC 生成、成本、电气校验、联调 IO 测试、工厂 PLC 同步、参数化 CAD/历史、可移植工程档案和系统更新。停用入口在 UI、IPC、命令总线、Agent/RPC/MCP 和文件/网络副作用边界被拒绝；数据保留。模块开关不等于代码卸载，也不授予 PLC 安全互锁。
+- CAD 与工程：导入采用身份事务，解析/候选模型应用失败时保留既有文档；参数化输出改用独立叠加体，原 CAD 保留为只读参考；运动学标注按稳定对象身份绑定。`.acproj` v2 采用稳定 project ID/source hash 和严格只读预览，不自动应用、覆盖或恢复工程状态。
+- Agent/PLC：跨重启 checkpoint 仅保存哈希与有限步骤状态，不保存计划参数、结果、对话或凭据；写步骤副作用状态不确定时拒绝恢复。PLC 仿真初值/写入范围统一校验，空序列不再按成功处理；标准 IO 测试增加机型映射兼容检查。
+- 更新与同步：实现 stable/beta 手动检查/下载/确认后非静默安装、NSIS blockmap 回退与发布产物签名/hash 预检；设计包可选附带 PLC 源码与 IO mapping，并执行路径、容量、哈希、版本和凭据检查，解析只产生需显式应用的候选。
+- 本地验证：`npm run build:ext` 通过（含 TypeScript）；Electron smoke 通过，覆盖 `SMOKE_MODULE_UI_OK`、`SMOKE_MODULE_GATE_IPC_OK`、`SMOKE_AGENT_PLAN_CHECKPOINT_OK`、`SMOKE_COMMISSION_MODULE_BOUNDARY_OK`、`SMOKE_COST_MODULE_GATE_OK`、`SMOKE_PARAMETRIC_MODULE_GATE_OK`、`SMOKE_PARAMETRIC_HISTORY_GATE_OK`、`SMOKE_PACKS_VALIDATE_OK`。smoke 收尾有一次 fake sidecar 退出后的非致命 health retry `ECONNREFUSED`，但进程以 `SMOKE_OK` / 退出码 0 结束。
+- 未完成验收：未配置真实 Authenticode 证书，未在 Windows VM 完成真实 stable/beta 升级、签名/哈希拒绝与差分回退；PLC 扩展未向外部服务端验证；工程档案尚无显式状态恢复/事务回滚；可选模块仍随应用整体打包。
+
+## 前一轮：包生命周期与库统计（2026-10-24，已完成）
+
+- 状态：✅ 完成；10 个包全部通过 `validatePackCatalog`，`errors=0`。
+- 校验器：`desktop/src/packs/validate.ts` 的 `validatePack(dir)` 返回 `{ ok, errors, warnings, stats }`；覆盖 manifest 必填/semver、`partsCount`、包内与跨包 id 唯一、category 白名单、model 非空、数值有限、`partsSha256`、`requires` 依赖；坏 JSON 返回错误不抛异常。
+- 完整性：9 个元器件包 manifest 增加 `partsSha256`；registry 加载时校验，不匹配抛 `PACK_INTEGRITY_FAILED`，不静默返回缓存。
+- 迁移：`parts.schemaVersion: 1` 自动补 `specs: {}` 与条目 `schemaVersion: 2` 并记 `PACK_SCHEMA_MIGRATED`；数组与 v2 文档继续兼容。
+- 统计：`scripts/pack-stats.mjs` 产出 `docs/desktop/PACK-STATS.md` + `pack-stats.json`；共 10 包 / 617 条（612 实型号 + 5 alias）/ 617 唯一 id / 612 唯一型号 / 55 分类；尺寸 342/612（55.9%）、价格 44/612（7.2%）、BOM 常见型号价格命中 8/11；跨包重复 0。
+- 命令：`npm run packs:validate`、`npm run packs:stats`、`npm run packs:add -- <dir>`；新骨架为 manifest + 空 parts + README，可直接通过校验。
+- smoke：新增 `SMOKE_PACKS_VALIDATE_OK packs=10 errors=0`；diagnose 增加 `packStats` 摘要与「包统计」文本行。
+- 测试：`desktop/test/packs/lifecycle.test.mjs` 31 条，覆盖正/负例、迁移、依赖、registry 校验和、统计一致性、跨包重复、骨架与 diagnose 摘要。
+- 验收：`tsc` 干净；`TZ=Asia/Shanghai npm test` **1655/1655**；`npm run packs:validate` = `packs=10 errors=0`；`npm run packs:stats` 产出 md + json。
+
 ## 上一轮：安全件 + 机架结构件扩包（2026-10-24）
 
 - 状态：✅ 完成；`safety-cn` 33 条、`frame-cn` 33 条；10 个 manifest，可检索 612 条 / 612 唯一 id。

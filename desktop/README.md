@@ -10,12 +10,14 @@ Windows 11 桌面外壳（Electron）+ 原型渲染层扩展。根目录的 `ind
 cd desktop
 npm ci
 npm run build:ext   # tsc + Vite 扩展 + Electron main/preload + MCP 入口
-npm test            # 1624 个单元/集成测试（node:test）
+npm test            # 1800 个单元/集成测试（node:test）
 npm run smoke       # xvfb + Electron --headless-smoke，强制无 WebGL 路径
 npm run check:orbit-webgl  # 手动：swiftshader 打开 WebGL，验证主视口 3D（需先 build:ext）
 npm start           # 启动桌面应用
 npm run mcp         # 启动 stdio MCP server（需先 build:ext）
 ```
+
+模块设置采用版本化目录与功能门控（Core + 10 个可选模块），覆盖 UI、IPC、Agent/RPC/MCP 和受控副作用入口；关闭模块会保留工程数据，但不会卸载随应用打包的代码。可移植工程档案 v2 当前只做严格预览，尚未应用或恢复状态；Windows stable/beta 更新 MVP 也尚未完成真实签名/升级验收。详见 [开发计划](../docs/desktop/DEVELOPMENT-PLAN.md)、[当前状态](../docs/desktop/STATUS.md) 与 [更新通道说明](docs/update-channel.md)。
 
 `npm run smoke` 会验证：
 
@@ -28,7 +30,7 @@ npm run mcp         # 启动 stdio MCP server（需先 build:ext）
 
 ## MCP（stdio）接入
 
-MCP 入口直接复用 `src/agent/tools.ts` 的 20 个工具（只读 10 + 写 10）：`list_components`、`search_components`、`search_docs`、`design_machine`、`apply_machine_design`、`import_cad`、`get_bom`、`get_project_context`、`run_interference_check`、`insert_component`、`place_component`、`update_component`、`remove_component`、`run_electrical_check`、`run_cost_report`、`run_plc_generate`、`export_files`、`export_cost_report`、`verify_plc_program`、`undo_last`。MCP 进程会读取桌面 token 并优先把工具调用转发到 `127.0.0.1:7420`；桌面未启动时，只读检索（含 `search_docs`）回退本地 registry，其余工具返回 `DESKTOP_NOT_RUNNING`，不会假装成功。
+MCP 入口直接复用 `src/agent/tools.ts` 的 21 个工具（只读 11 + 写 10）：`list_components`、`search_components`、`search_docs`、`suggest_kinematics`、`design_machine`、`apply_machine_design`、`import_cad`、`get_bom`、`get_project_context`、`run_interference_check`、`insert_component`、`place_component`、`update_component`、`remove_component`、`run_electrical_check`、`run_cost_report`、`run_plc_generate`、`export_files`、`export_cost_report`、`verify_plc_program`、`undo_last`。MCP 进程会读取桌面 token 并优先把工具调用转发到 `127.0.0.1:7420`；桌面未启动时，只读检索（含 `search_docs`）回退本地 registry，其余工具返回 `DESKTOP_NOT_RUNNING`，不会假装成功。
 
 先构建：
 

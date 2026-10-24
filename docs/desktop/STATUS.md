@@ -2,23 +2,24 @@
 
 ## 概览
 
-- 分支：`main`（GitHub `owlco001/automation-cad-prototype`）；集成分支 `integ/3d-all` 合并迭代 34/35/36 三条 3D 分支，本轮不 push。
-- 版本：`desktop/package.json` → **0.3.0**（源码与文档就绪；本轮未打包、未触发 CI、未打 tag）。
-- 测试：**1479/1479 全绿**（含 11 种整机形态与多头龙门/混合线/单元矩阵几何回归；沙箱需 `TZ=Asia/Shanghai`）。
-- 冒烟：`npm run smoke` 全绿；`SMOKE_MACHINE_CYCLE_OK mode=cell throughput=32 meets=1`、`SMOKE_MACHINE_FORMS_OK forms=11 picked=dial-12 meets=1`，并保留 `SMOKE_MACHINE_GEOMETRY_OK`、`SMOKE_ORBIT_VIEW_OK`、`SMOKE_KINEMATICS_AUTO_OK`、`SMOKE_AGENT_KINEMATICS_OK`（P10-4 起另有 `npm run screenshots:machine` 四张案例截图），最终 `SMOKE_OK`。
-- 评估：`npm run eval:agent` → `EVAL_AGENT_OK accuracy=1.00 tools=1.00 refused=1.00`（102/102 意图、102/102 工具、53/53 参数、7/7 超纲、5/5 多步）；真实模型 36/36。
-- 最近发布：`v0.3.0` NSIS `AutomationCAD-Setup-0.3.0.exe`（129 MB，未签名，Windows runner 1248 单测 0 失败）；上一版 `v0.2.0`。
+- 基线：远端 `main` 为 `0d69dc0`；本轮实现提交 `eb0c830`，位于独立分支 `feat/desktop-module-safety-update`，PR 待审且未合并。PR #6、#7 与原 PR #8 分支均保持不变。
+- 版本：`desktop/package.json` → **0.3.0**；本轮未打包、未触发 Windows workflow、未打 tag 或创建 Release。
+- 测试：最新 main 基线上 `TZ=UTC npm test` **1800/1800 通过，0 失败、0 跳过**。
+- 构建与冒烟：`npm run build:ext` 通过（含 TypeScript 检查）；fake parametric sidecar 下 Electron headless smoke 最终输出 `SMOKE_OK`。覆盖模块门控、Agent checkpoint、CAD 只读导入/参数化、PLC/sync 和 10 个元器件包校验。
+- 评估：最近一次既有记录 `npm run eval:agent` 为 `EVAL_AGENT_OK accuracy=1.00 tools=1.00 refused=1.00`；本轮未重跑离线或真实模型评估。
+- 最近发布：`v0.3.0` NSIS `AutomationCAD-Setup-0.3.0.exe`（129 MB，未签名；上一版 `v0.2.0`）。本轮更新通道只有 mock/本机代码路径验证，未做真实签名或升级验收。
 
 ## 验证记录（本轮真实执行）
 
 | 命令 | 结果 |
 |------|------|
-| `npx tsc --noEmit` | 通过，0 错误 |
-| `npm test` | 1479 pass / 0 fail / 0 skipped |
-| `npm run build:ext` | 通过（Vite 扩展 + Electron main/preload + MCP） |
-| `npm run smoke` | 全绿；含机型落盘/3D/BOM/PLC/撤销断言，最终 `SMOKE_OK` |
-| `npm run screenshots:machine` | 4 张 1600×1000 真实 Electron 截图，尺寸/文件大小/颜色数校验通过 |
-| `npm run eval:agent` | `EVAL_AGENT_OK accuracy=1.00 tools=1.00 refused=1.00` |
+| `TZ=UTC npm test` | 1800 pass / 0 fail / 0 skipped |
+| `npm run build:ext` | 通过（`tsc --noEmit`、Vite 扩展、Electron main/preload、MCP） |
+| `AUTOMATIONCAD_PARAMETRIC_CMD="node $PWD/scripts/fake-parametric-sidecar.mjs" npm run smoke` | 通过；新增模块 gate/checkpoint/CAD/sync/包校验断言，最终 `SMOKE_OK`；退出码 0 |
+| `git diff --check` | 通过（提交前复核） |
+| `npm run screenshots:machine` / `npm run eval:agent` | 本轮未重跑；不作为本轮验收声明 |
+
+Smoke 日志在 fake sidecar 退出收尾时记录一次非致命 `ECONNREFUSED 127.0.0.1:7440` health retry；所有断言通过且命令以 `SMOKE_OK` / 退出码 0 结束。
 
 ## Smoke 断言清单
 
@@ -110,7 +111,7 @@
 2. **价格簿为示例价**：内置价格簿条目标注「示例，需替换」，引擎自动排除示例价；正式报价前必须导入企业价格表（D1）。
 3. **运动学需人工标注**：STEP/IGES/BREP 不含动件、轴、行程与 IO 绑定；未标注时 3D 联调回退到机型配置，不能从几何自动推导。
 4. **生产环境不可达**：设计同步后端 0.22.0 已实现并通过 30 项测试，本地临时 DB 端到端通过；生产实例 `221.231.106.194:5556` 从开发机不可达，线上部署/HTTPS/真实网络未验证（D2）。
-5. **安装包未签名**：Win11 SmartScreen 首次拦截；未做自动更新。
+5. **生产安装包未签名/更新未验收**：更新通道 MVP 已接入，但本地没有真实 Windows Authenticode 凭据；tag 发布会因缺少 `CSC_LINK` / `CSC_KEY_PASSWORD` 安全阻断。尚未在 Windows 上完成签名者、SHA-512、stable/beta、NSIS blockmap 差分与完整包回退的真实升级验收；详见 [update-channel.md](../../desktop/docs/update-channel.md)。
 6. **工业协议未接真机**：OPC UA 仅 `SecurityPolicy=None`；MQTT 未连真实 broker；Modbus TCP 未连真机（仿真器已实测）。
 7. **干涉为 AABB 初筛**：不是精确布尔求交；贴合面、螺纹啮合可能误报，需要白名单收口。
 8. **智能体真实模型兼容性有限**：只按 OpenAI 兼容协议、用本地假服务验证；不同服务商差异需逐个补测。离线路由是关键词规则，不是语义理解。
@@ -142,10 +143,10 @@ BACKLOG 另含 D9（离线规则是否在模型可用时前置）与 D10（评�
 ```bash
 cd desktop
 npx tsc --noEmit                    # 类型检查
-npm test                            # 1316 条单测/集成测试
+npm test                            # 1800 条单测/集成测试
 npm run build:ext                   # tsc + Vite + Electron main/preload + MCP
 npm run smoke                       # xvfb + Electron headless（无 WebGL）
-AUTOMATIONCAD_PARAMETRIC_CMD="$PWD/scripts/fake-parametric-sidecar.mjs" npm run smoke
+AUTOMATIONCAD_PARAMETRIC_CMD="node $PWD/scripts/fake-parametric-sidecar.mjs" npm run smoke
 npm run eval:agent                  # 74 条中文 Agent 评估集
 npm run sync:e2e                    # 本地临时 DB 的设计同步端到端
 npm run screenshots                 # 真实 Electron 截图（14 张）

@@ -4,21 +4,19 @@
 维护规则：完成一项把状态改为 ✅ 并写提交号；新问题追加到「已知问题」，不要删除历史。
 历史归档：只保留最近一轮的迭代记录；更早的完整记录按原文移入 [BACKLOG-HISTORY.md](BACKLOG-HISTORY.md)（不进入离线知识索引，避免挤占 400 KB 上限）。
 
-## 包生命周期与库统计（2026-10-24，本轮）
+## 模块门控、工程安全与更新通道（2026-10-24，本轮）
 
-- 状态：✅ 完成；10 个包全部通过 `validatePackCatalog`，`errors=0`。
-- 校验器：`desktop/src/packs/validate.ts` 的 `validatePack(dir)` 返回 `{ ok, errors, warnings, stats }`；覆盖 manifest 必填/semver、`partsCount`、包内与跨包 id 唯一、category 白名单、model 非空、数值有限、`partsSha256`、`requires` 依赖；坏 JSON 返回错误不抛异常。
-- 完整性：9 个元器件包 manifest 增加 `partsSha256`；registry 加载时校验，不匹配抛 `PACK_INTEGRITY_FAILED`，不静默返回缓存。
-- 迁移：`parts.schemaVersion: 1` 自动补 `specs: {}` 与条目 `schemaVersion: 2` 并记 `PACK_SCHEMA_MIGRATED`；数组与 v2 文档继续兼容。
-- 统计：`scripts/pack-stats.mjs` 产出 `docs/desktop/PACK-STATS.md` + `pack-stats.json`；共 10 包 / 617 条（612 实型号 + 5 alias）/ 617 唯一 id / 612 唯一型号 / 55 分类；尺寸 342/612（55.9%）、价格 44/612（7.2%）、BOM 常见型号价格命中 8/11；跨包重复 0。
-- 命令：`npm run packs:validate`、`npm run packs:stats`、`npm run packs:add -- <dir>`；新骨架为 manifest + 空 parts + README，可直接通过校验。
-- smoke：新增 `SMOKE_PACKS_VALIDATE_OK packs=10 errors=0`；diagnose 增加 `packStats` 摘要与「包统计」文本行。
-- 测试：`desktop/test/packs/lifecycle.test.mjs` 31 条，覆盖正/负例、迁移、依赖、registry 校验和、统计一致性、跨包重复、骨架与 diagnose 摘要。
-- 验收：`tsc` 干净；`TZ=Asia/Shanghai npm test` **1655/1655**；`npm run packs:validate` = `packs=10 errors=0`；`npm run packs:stats` 产出 md + json。
+- 状态：✅ 本地实现与验证完成；实现提交 `eb0c830`；`TZ=UTC npm test` **1800/1800**、`npm run build:ext`、fake-sidecar Electron smoke（`SMOKE_OK`）通过。
+- 范围：内置可选模块注册/依赖/能力检查和多入口门控；Agent 跨重启 checkpoint；CAD 导入/候选加载事务；可移植工程档案严格预览；PLC 值范围/空序列校验、联调兼容检查与 PLC 设计包扩展；stable/beta 手动应用更新和签名发布预检。
+- 边界：关闭模块是功能门控，不是代码卸载；工程档案尚不应用/恢复状态；PLC 扩展尚未接入外部服务端验收；更新通道尚未做真实 Windows 签名/安装验收。
+- 详情与验证边界见 [BACKLOG-HISTORY.md](BACKLOG-HISTORY.md) 本轮归档、[STATUS.md](STATUS.md) 和 [DEVELOPMENT-PLAN.md](DEVELOPMENT-PLAN.md)。
 
 ## 待办（按优先级）
 
-- 当前无待推进的 P1–P7 项；已完成记录已移入 [BACKLOG-HISTORY.md](BACKLOG-HISTORY.md)「已完成迭代归档（P1–P7）」。
+- **P0：Windows 更新真实验收**：维护者配置并保护代码签名证书/密码、核对 Authenticode Subject；在隔离 Windows 环境验证 stable/beta 升级、签名与 SHA-512 拒绝、blockmap 失败回退、断网/磁盘不足及安装恢复。当前本地 mock/Linux smoke 不替代此项，未通过前不发布。
+- **P1：PLC 同步扩展外部联调**：服务端先兼容 `manifest.plc` 与 `plc/` 文件，再验证真实上传/下载；补目标 PLC 平台选择、下载候选 UI 与显式应用流程，并决定机型安全 IO mapping 的持久化口径。
+- **P1：可移植工程档案恢复**：在只读严格预览后设计用户确认的显式应用、备份与事务回滚；补跨机器 CAD 几何复核，并继续定义尚未纳入的 PLC/工厂/Agent 数据迁移。
+- **P1/P2：扩展模块化边界**：继续迁移尚未门控的机械、CAD 只读/运动学、工厂、同步和通用导出能力；当前开关不卸载应用内代码。真正的按需下载须另行设计签名包、兼容性、离线安装和回滚。
 
 ## 待决策（需要老王拍板，不阻塞其他开发）
 

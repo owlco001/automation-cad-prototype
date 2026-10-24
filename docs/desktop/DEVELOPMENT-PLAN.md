@@ -17,7 +17,7 @@
 | 增量更新 | Windows NSIS 包启用 blockmap 差分；更新器保留 SHA-512 完整包校验，差分失败走完整包回退。 | 在两个相邻签名版本间实测差分字节量、网络中断和损坏 blockmap；确认完整包回退与最终安装器 Authenticode 校验均有效。差分下载不是签名或完整性校验的替代品。 |
 | 客户自选模块 | 注册表、依赖/API/能力校验、本机持久化开关和模块设置面板已实现；当前已接入 `plcgen`、`elec.validation`、`commission.io-test`、`factory.plc-sync`、`cad.parametric-import`、`parametric.history`、`agent.resume`、`project.portable`、`cost.estimation`、`system.update` 等可选能力。关键入口由 renderer 与主进程等层共同门控。 | 当前代码仍随桌面应用整体打包，开关只启停功能，不会卸载代码或按需下载。需要继续将尚未迁移的 CAD 只读/运动学、机械、电气设计、工厂、Agent、同步、通用导出等能力定义清晰边界，并设计真正的按需安装/更新。 |
 | 工程与导入安全 | 可移植工程档案采用稳定工程身份和来源哈希；导入先做严格预览。CAD 导入身份事务、候选模型加载失败回滚以及 PLC 整数范围校验已有本轮测试覆盖。 | 工程档案的事务恢复与候选状态应用仍需独立设计；跨机器 CAD 几何复核及 PLC/工厂/Agent 等状态迁移尚不支持。 |
-| 当前工作树验证 | 本轮复验：`TZ=UTC npm test` 1727/1727、TypeScript、`build:ext`、Electron smoke（`SMOKE_OK`）和 `git diff --check` 均通过。 | 真实 Windows Authenticode、升级发布和真实 PLC 不在本轮执行范围。 |
+| 当前工作树验证 | 基于最新 `main`：`TZ=UTC npm test` 1800/1800、`build:ext`（含 TypeScript）、fake-sidecar Electron smoke（`SMOKE_OK`）通过；`git diff --check` 在提交前复核。 | 真实 Windows Authenticode、升级发布、外部同步服务和真实 PLC 不在本轮执行范围。 |
 
 ## 分阶段路线
 
@@ -76,7 +76,7 @@
 
 - 任何应用/模块发布、Windows 签名或真实升级都需要维护者明确安排；本计划本身不触发发布。
 - 本地自动化测试、mock、仿真和 smoke 仅证明对应软件路径，不替代 Windows 签名、真实网络或真实 PLC 验收。
-- PR #6 与 PR #7 保持独立，不并入本轮；本轮 Git 提交只包含本计划文档，不改写或清理其余工作树改动。
+- PR #6、PR #7 与 PR #8 的原有源分支保持不变；本轮功能改动在独立分支 `feat/desktop-module-safety-update` 组织为单独 PR，保持未合并。PR #8 仍是原有文档专用变更；它的分支未被追加本轮提交。
 - 用户选择模块是产品功能，不代表授权、付费状态或代码卸载；商业规则、企业管理策略和在线模块目录的托管方式仍需另行决策。
 
 ## 关键参考
