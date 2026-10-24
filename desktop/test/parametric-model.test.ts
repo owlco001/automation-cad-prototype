@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   addFeature,
+  createUndoRedoHistory,
   createParametricStore,
   debouncePlan,
   deserializeDoc,
@@ -138,6 +139,22 @@ test('model：序列化往返保留特征、抑制与来源文件', () => {
   assert.deepEqual(parsed.doc, withSuppressed);
 });
 
+test('model：相同 CAD 文件名的不同 project ID 分桶隔离且不删除旧文件名桶', () => {
+  const storage = memoryStorage();
+  const store = createParametricStore(storage);
+  const projectA = 'acproj-00000000-0000-4000-8000-000000000001';
+  const projectB = 'acproj-00000000-0000-4000-8000-000000000002';
+  const first = addFeature(makeDoc([], { sourceFile: 'fixture.step', now: NOW }), 'box', { now: NOW }).doc;
+  const second = addFeature(makeDoc([], { sourceFile: 'fixture.step', now: NOW }), 'slot', { now: NOW }).doc;
+  const legacy = addFeature(makeDoc([], { sourceFile: 'fixture.step', now: NOW }), 'holes', { now: NOW }).doc;
+  store.set(projectA, first);
+  store.set(projectB, second);
+  store.set('fixture.step', legacy);
+  assert.equal(store.get(projectA)?.features[0]?.type, 'box');
+  assert.equal(store.get(projectB)?.features[0]?.type, 'slot');
+  assert.equal(store.get('fixture.step')?.features[0]?.type, 'holes');
+});
+
 test('model：非法 JSON 与错误 schema 返回中文错误', () => {
   const broken = deserializeDoc('{not json');
   assert.equal(broken.ok, false);
@@ -195,4 +212,48 @@ test('model：findFeature 支持空 id 与不存在 id', () => {
   assert.equal(findFeature(doc, 'f1')?.type, 'box');
   assert.equal(findFeature(doc, 'f9'), null);
   assert.equal(findFeature(doc, null), null);
+});
+
+test('model：新增特征可撤销和重做，历史快照相互隔离', () => {
+  const history = createUndoRedoHistory<ReturnType<typeof makeDoc>>();
+  const initial = makeDoc([], { now: NOW });
+  const added = addFeature(initial, 'box', { now: NOW }).doc;
+  history.push(initial, { now: NOW });
+  const undone = history.undo(added);
+  assert.deepEqual(undone, initial);
+  assert.equal(history.canRedo(), true);
+  const redone = history.redo(undone!);
+  assert.deepEqual(redone, added);
+  assert.equal(history.canUndo(), true);
+  assert.equal(history.canRedo(), false);
+});
+
+test('model：同一数值字段在合并窗口内连续编辑只占一个撤销点', () => {
+  const history = createUndoRedoHistory<ReturnType<typeof makeDoc>>({ mergeWindowMs: 500 });
+  const initial = addFeature(makeDoc([], { now: NOW }), 'box', { now: NOW }).doc;
+  const first = updateParams(initial, 'f1', { length: 121 }, NOW);
+  const second = updateParams(first, 'f1', { length: 122 }, NOW);
+  history.push(initial, { mergeKey: 'p1:f1:length', now: 1_000 });
+  history.push(first, { mergeKey: 'p1:f1:length', now: 1_200 });
+  assert.equal(history.undoCount(), 1);
+  assert.deepEqual(history.undo(second), initial);
+  assert.deepEqual(history.redo(initial), second);
+});
+
+test('model：撤销后分支编辑清空 redo，超限时裁剪最旧撤销点但保留可用 redo 栈', () => {
+  const history = createUndoRedoHistory<number>({ limit: 2 });
+  history.push(0, { now: 0 });
+  history.push(1, { now: 1 });
+  history.push(2, { now: 2 });
+  assert.equal(history.undoCount(), 2);
+  const at2 = history.undo(3);
+  const at1 = history.undo(at2!);
+  assert.equal(at1, 1);
+  assert.equal(history.undo(at1!), null, '最早的历史已裁剪');
+  const redone = history.redo(at1!);
+  assert.equal(redone, 2);
+  history.undo(2);
+  history.push(1, { now: 10 });
+  assert.equal(history.canRedo(), false, '从撤销位置继续编辑会清空重做分支');
+  assert.equal(history.redo(1), null);
 });

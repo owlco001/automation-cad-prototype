@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
@@ -34,7 +34,7 @@ function designFor(options = {}) {
   });
 }
 
-function setup() {
+function setup(options = {}) {
   const root = mkdtempSync(join(tmpdir(), 'cad-machine-apply-'));
   roots.push(root);
   const calls = [];
@@ -53,7 +53,9 @@ function setup() {
   const bus = createAgentCommandBus(registry, bridge, {
     userDataRoot: root,
     exportsRoot: join(root, 'exports'),
-    now: () => new Date('2026-10-23T08:00:00.000Z')
+    now: () => new Date('2026-10-23T08:00:00.000Z'),
+    ...(options.isModuleEnabled ? { isModuleEnabled: options.isModuleEnabled } : {}),
+    ...(options.buildSolids ? { buildSolids: options.buildSolids } : {})
   });
   return { root, calls, bridge, bus, tools: new AgentTools(registry, bus) };
 }
@@ -118,6 +120,26 @@ test('brief 与 design 同时提供返回 INVALID_ARGUMENT，不落盘', async (
   assert.equal(result.error.code, 'INVALID_ARGUMENT');
   assert.match(result.error.message, /二选一/);
   assert.equal(existsSync(activeMachinePath(root)), false);
+});
+
+test('参数化 CAD 模块关闭时拒绝 withSolids，且在方案/几何落盘与 sidecar 调用前失败', async () => {
+  let buildCalls = 0;
+  const { root, bus, bridge } = setup({
+    isModuleEnabled: (moduleId) => moduleId !== 'cad.parametric-import',
+    buildSolids: async () => {
+      buildCalls += 1;
+      return { ok: true };
+    }
+  });
+
+  const result = await apply(bus, { brief: BRIEF, withGeometry: true, withSolids: true });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, 'MODULE_DISABLED');
+  assert.match(result.error.message, /cad\.parametric-import.*已关闭/);
+  assert.equal(buildCalls, 0);
+  assert.deepEqual(bridge.calls, []);
+  assert.deepEqual(readdirSync(root), [], '不得写入方案、几何、BOM 或 PLC side effect 文件');
 });
 
 test('brief 与 design 都缺失返回 INVALID_ARGUMENT', async () => {

@@ -23,6 +23,10 @@ import { costReportCsv, describeCost, money, renderCostReportHtml } from './repo
 import { bomSignatureFromRows } from '../agent/advisor.ts';
 import { recordDiagnosticError } from '../shared/diagnostics.ts';
 import { assertBomRowCount } from '../shared/input-limits.ts';
+import {
+  CostEstimationModuleDisabledError,
+  costEstimationDisabledResult
+} from '../modules/cost-estimation-gate.ts';
 
 const COST_ICON = '<svg viewBox="0 0 16 16"><path d="M2.5 13.5V2.5h8.2l2.8 2.8v8.2z"/><path d="M4.8 6.4h4.4M4.8 9h4.4M4.8 11.4h2.8"/><path d="M10.7 2.7v2.8h2.8"/></svg>';
 const NO_PRICEBOOK_HINT = '尚未加载价格簿：请导入正式价目表 JSON，或确认桌面版内置价格簿可用';
@@ -47,6 +51,10 @@ interface BookState {
   examples: number;
 }
 
+export interface CostPanelHandle {
+  setEnabled(enabled: boolean): void;
+}
+
 let drawer: DrawerHandle | null = null;
 let nodes: PanelNodes | null = null;
 let lastReport: CostReport | null = null;
@@ -56,6 +64,11 @@ let lastComputedAt = '';
 let bookState: BookState | null = null;
 let pendingBom: Partial<CostInput> | null = null;
 let bomLabel = '未载入 BOM';
+let costEstimationEnabled = true;
+
+function assertCostEstimationEnabled(): void {
+  if (!costEstimationEnabled) throw new CostEstimationModuleDisabledError();
+}
 
 function projectInfo(): { name: string; code: string; author: string; currency: string } {
   return {
@@ -77,6 +90,7 @@ function countItems(book: Pricebook): { usable: number; examples: number } {
 }
 
 function setBook(book: Pricebook, label: string): BookState {
+  assertCostEstimationEnabled();
   const counts = countItems(book);
   bookState = { book, label, ...counts };
   return bookState;
@@ -97,6 +111,7 @@ function renderBookSource(): void {
 }
 
 async function ensureBook(): Promise<BookState> {
+  assertCostEstimationEnabled();
   if (bookState) return bookState;
   const provider = window.__CostPricebookProvider;
   if (typeof provider === 'function') {
@@ -106,6 +121,8 @@ async function ensureBook(): Promise<BookState> {
   const api = window.desktop?.cost;
   if (!api) throw new Error('未加载价格簿：请导入正式价目表 JSON');
   const result = await api.pricebook();
+  assertCostEstimationEnabled();
+  if (result.code === 'MODULE_DISABLED') throw new CostEstimationModuleDisabledError();
   if (!result.ok || !result.book) {
     throw new Error(`内置价格簿不可用：${result.message ?? '未知原因'}`);
   }
@@ -166,6 +183,7 @@ function issueBlocks(report: CostReport): string {
 }
 
 function render(report: CostReport): void {
+  assertCostEstimationEnabled();
   lastReport = report;
   lastHtml = renderCostReportHtml(projectInfo(), report);
   if (!nodes) return;
@@ -213,7 +231,8 @@ function bomFromSource(input: Partial<CostInput> | null): CostBomRow[] | null {
   return null;
 }
 
-async function runWith(input: Partial<CostInput> | null): Promise<CostReport | null> {
+async function runWith(input: Partial<CostInput> | null): Promise<CostReport | { ok: false; code: 'MODULE_DISABLED'; message: string } | null> {
+  if (!costEstimationEnabled) return costEstimationDisabledResult();
   try {
     const bom = bomFromSource(input);
     if (!bom) {
@@ -222,6 +241,7 @@ async function runWith(input: Partial<CostInput> | null): Promise<CostReport | n
     }
     assertBomRowCount(bom.length);
     const book = input?.pricebook ? setBook(validatePricebook(input.pricebook), '本次指定价格簿') : await ensureBook();
+    if (!costEstimationEnabled) return costEstimationDisabledResult();
     renderBookSource();
     const merged: CostInput = {
       bom,
@@ -252,6 +272,7 @@ async function runWith(input: Partial<CostInput> | null): Promise<CostReport | n
     }
     return report;
   } catch (error) {
+    if (error instanceof CostEstimationModuleDisabledError) return costEstimationDisabledResult();
     recordDiagnosticError('COST_COMPUTE_FAILED', error, { site: 'desktop/src/cost/ui.ts' });
     notify(`成本计算失败：${errorMessage(error)}。请检查 BOM 行与价格簿后重试。`, true);
     return null;
@@ -292,8 +313,9 @@ function pickTextFile(accept: string): Promise<{ name: string; text: string } | 
 }
 
 async function importPricebook(): Promise<BookState | null> {
+  if (!costEstimationEnabled) return null;
   const picked = await pickTextFile('.json,application/json');
-  if (!picked) return null;
+  if (!picked || !costEstimationEnabled) return null;
   try {
     const book = validatePricebook(JSON.parse(picked.text) as unknown);
     const state = setBook(book, picked.name);
@@ -334,9 +356,10 @@ function parseBomPayload(text: string): Partial<CostInput> {
   return payload;
 }
 
-async function importBom(): Promise<CostReport | null> {
+async function importBom(): Promise<CostReport | { ok: false; code: 'MODULE_DISABLED'; message: string } | null> {
+  if (!costEstimationEnabled) return null;
   const picked = await pickTextFile('.json,application/json');
-  if (!picked) return null;
+  if (!picked || !costEstimationEnabled) return null;
   try {
     pendingBom = parseBomPayload(picked.text);
     bomLabel = picked.name;
@@ -349,35 +372,40 @@ async function importBom(): Promise<CostReport | null> {
   }
 }
 
-async function exportPdf(): Promise<{ path: string; htmlPath: string }> {
+async function exportPdf(): Promise<{ ok: boolean; path?: string; htmlPath?: string; code?: string; message?: string }> {
+  if (!costEstimationEnabled) return costEstimationDisabledResult();
   if (!lastReport) throw new Error('请先计算成本再导出 PDF');
-  if (!window.desktop) throw new Error('导出 PDF 仅在桌面版可用');
+  if (!window.desktop?.cost) throw new Error('导出 PDF 仅在桌面版可用');
   const html = lastHtml || renderCostReportHtml(projectInfo(), lastReport);
-  return await window.desktop.exportReport({
+  return await window.desktop.cost.exportPanelPdf({
     html,
     projectName: projectInfo().name,
     page: { size: 'A4', landscape: false }
   });
 }
 
-async function exportCsv(): Promise<{ canceled: boolean; path: string | null }> {
+async function exportCsv(): Promise<{ ok?: boolean; canceled?: boolean; path?: string | null; code?: string; message?: string }> {
+  if (!costEstimationEnabled) return costEstimationDisabledResult();
   if (!lastReport) throw new Error('请先计算成本再导出 CSV');
-  if (!window.desktop) throw new Error('导出 CSV 仅在桌面版可用');
+  if (!window.desktop?.cost) throw new Error('导出 CSV 仅在桌面版可用');
   const csv = costReportCsv(lastReport);
   const base = projectInfo().name.replace(/\.[^.]+$/, '') || '成本估算';
-  return await window.desktop.exportFile(`${base}-成本.csv`, csv);
+  return await window.desktop.cost.exportPanelCsv({ name: `${base}-成本.csv`, data: csv });
 }
 
-export function initCostPanel(): void {
+export function initCostPanel(options: { enabled?: boolean } = {}): CostPanelHandle {
+  costEstimationEnabled = options.enabled ?? true;
   ensurePanelStyles();
   const entry = buildEntryButton('costEntryButton', '成本估算', COST_ICON, () => {
+    if (!costEstimationEnabled) return;
     drawer?.open();
     void ensureBook().then(renderBookSource).catch((error: unknown) => {
       notify(errorMessage(error), true);
       renderBookSource();
     });
   });
-  if (!entry) return;
+  if (!entry) return { setEnabled: (enabled) => { costEstimationEnabled = enabled; } };
+  entry.hidden = !costEstimationEnabled;
 
   drawer = createDrawer('costDrawer', '机台成本估算', '价格簿 · BOM · 人工辅材 · 加成税金');
   drawer.body.innerHTML = `
@@ -418,18 +446,32 @@ export function initCostPanel(): void {
   const csv = required<HTMLButtonElement>('costCsv');
   nodes = { status, source, summary, table, issues, run, loadBom, loadBook, pdf, csv };
 
+  const setEnabled = (enabled: boolean): void => {
+    costEstimationEnabled = enabled === true;
+    entry.hidden = !costEstimationEnabled;
+    if (!costEstimationEnabled) drawer?.close();
+    run.disabled = !costEstimationEnabled;
+    loadBom.disabled = !costEstimationEnabled;
+    loadBook.disabled = !costEstimationEnabled;
+    pdf.disabled = !costEstimationEnabled || !lastReport || lastReport.lines.length === 0;
+    csv.disabled = !costEstimationEnabled || !lastReport || lastReport.lines.length === 0;
+  };
+  setEnabled(costEstimationEnabled);
+
   for (const id of ['costMarkup', 'costTax', 'costFreight']) {
     document.getElementById(id)?.addEventListener('change', syncOptionValues);
   }
 
   const withBusy = (button: HTMLButtonElement, task: () => Promise<void>): void => {
+    if (!costEstimationEnabled) return;
     button.disabled = true;
     void task().finally(() => {
-      button.disabled = false;
+      setEnabled(costEstimationEnabled);
     });
   };
 
   run.addEventListener('click', () => withBusy(run, async () => {
+    if (!costEstimationEnabled) return;
     syncOptionValues();
     const wireSection = (document.getElementById('costWireSection') as HTMLInputElement | null)?.value.trim();
     await runWith({ ...(wireSection ? { wireSection } : {}) });
@@ -443,6 +485,7 @@ export function initCostPanel(): void {
   pdf.addEventListener('click', () => withBusy(pdf, async () => {
     try {
       const saved = await exportPdf();
+      if (!saved.ok) throw new CostEstimationModuleDisabledError();
       notify(`成本报告已保存：${saved.path}`);
     } catch (error) {
       notify(`导出失败：${errorMessage(error)}`, true);
@@ -451,6 +494,7 @@ export function initCostPanel(): void {
   csv.addEventListener('click', () => withBusy(csv, async () => {
     try {
       const saved = await exportCsv();
+      if (saved.ok === false) throw new CostEstimationModuleDisabledError();
       notify(saved.canceled ? '导出已取消' : `成本明细已保存：${saved.path}`);
     } catch (error) {
       notify(`导出失败：${errorMessage(error)}`, true);
@@ -459,33 +503,42 @@ export function initCostPanel(): void {
 
   window.__CostPanel = {
     open: () => {
+      if (!costEstimationEnabled) return costEstimationDisabledResult();
       drawer?.open();
     },
     close: () => drawer?.close(),
     setPricebook: (value: unknown) => {
+      assertCostEstimationEnabled();
       const state = setBook(validatePricebook(value), '脚本指定价格簿');
       renderBookSource();
       return { usable: state.usable, examples: state.examples };
     },
     loadPricebookText: (text: string, label = '文本价格簿') => {
+      assertCostEstimationEnabled();
       const state = setBook(validatePricebook(JSON.parse(text) as unknown), label);
       renderBookSource();
       return { usable: state.usable, examples: state.examples };
     },
     setBom: (payload: Partial<CostInput>, label = '脚本指定 BOM') => {
+      assertCostEstimationEnabled();
       if (payload.bom) assertBomRowCount(payload.bom.length);
       pendingBom = payload;
       bomLabel = label;
       return { rows: payload.bom?.length ?? 0 };
     },
     run: async (input: Partial<CostInput>) => await runWith(input),
-    result: () => lastReport,
-    state: () => ({ hasReport: Boolean(lastReport), computedAt: lastComputedAt, bomSignature: lastBomSignature }),
-    html: () => lastHtml,
-    csv: () => (lastReport ? costReportCsv(lastReport) : ''),
+    result: () => costEstimationEnabled ? lastReport : costEstimationDisabledResult(),
+    state: () => costEstimationEnabled
+      ? { hasReport: Boolean(lastReport), computedAt: lastComputedAt, bomSignature: lastBomSignature }
+      : costEstimationDisabledResult(),
+    html: () => costEstimationEnabled ? lastHtml : costEstimationDisabledResult(),
+    csv: () => costEstimationEnabled ? (lastReport ? costReportCsv(lastReport) : '') : costEstimationDisabledResult(),
     exportPdf,
     exportCsv,
-    status: () => status.textContent ?? '',
-    pricebook: () => (bookState ? { label: bookState.label, usable: bookState.usable, examples: bookState.examples } : null)
+    status: () => costEstimationEnabled ? status.textContent ?? '' : costEstimationDisabledResult(),
+    pricebook: () => costEstimationEnabled
+      ? (bookState ? { label: bookState.label, usable: bookState.usable, examples: bookState.examples } : null)
+      : costEstimationDisabledResult()
   };
+  return { setEnabled };
 }

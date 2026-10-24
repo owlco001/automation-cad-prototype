@@ -42,6 +42,12 @@ const CLOSE_ICON = '<svg viewBox="0 0 16 16"><path d="M4.4 4.4l7.2 7.2M11.6 4.4l
 
 interface PlcGenUiOptions {
   getConfig?: () => PlcGenConfig | null;
+  enabled?: boolean;
+}
+
+export interface PlcGenUiHandle {
+  setEnabled(enabled: boolean): void;
+  isEnabled(): boolean;
 }
 
 interface PanelNodes {
@@ -72,6 +78,7 @@ interface PanelNodes {
 
 let initialized = false;
 let options: PlcGenUiOptions = {};
+let moduleEnabled = true;
 let entryElement: HTMLButtonElement | null = null;
 let nodes: PanelNodes | null = null;
 let config: PlcGenConfig | null = null;
@@ -365,6 +372,7 @@ function showHistoryFiles(entry: PlcHistoryEntry): void {
 }
 
 async function runPrecheck(): Promise<PrecheckResult | null> {
+  if (!moduleEnabled) return null;
   if (!config) {
     lastPrecheck = null;
     renderPrecheck();
@@ -435,6 +443,7 @@ async function loadHistory(): Promise<void> {
 }
 
 async function runSimulate(): Promise<VerifyResult | null> {
+  if (!moduleEnabled) return null;
   if (!config || generating) return null;
   generating = true;
   refreshActionButtons();
@@ -457,7 +466,11 @@ async function runSimulate(): Promise<VerifyResult | null> {
       setStatus(message, 'ok');
       notify(message);
     } else {
+      const sequenceError = result.errors.find((error) =>
+        error.code === 'SEQUENCE_EMPTY' || error.code === 'SEQUENCE_MISSING'
+      );
       const reason = summary.failure?.reason
+        ?? sequenceError?.message
         ?? result.errors[0]?.message
         ?? `预检 ${result.precheck.errors.length} 个错误`;
       const message = `模拟验证失败：${reason}`;
@@ -478,6 +491,7 @@ async function runSimulate(): Promise<VerifyResult | null> {
 }
 
 async function runGenerate(): Promise<GenerateProjectSuccess | null> {
+  if (!moduleEnabled) return null;
   if (!config || generating) return null;
   if (!lastPrecheck) await runPrecheck();
   if (isGenerateDisabled({ hasConfig: Boolean(config), precheck: lastPrecheck })) {
@@ -542,6 +556,7 @@ async function runGenerate(): Promise<GenerateProjectSuccess | null> {
 }
 
 async function exportZip(): Promise<{ ok: boolean; path?: string; zipPath?: string; message?: string }> {
+  if (!moduleEnabled) throw new Error('PLC 程序模块已关闭');
   if (lastFiles.length === 0) throw new Error('请先生成 PLC 文件');
   if (!config) throw new Error('未加载机型配置');
   const api = window.desktop?.plcgen;
@@ -584,6 +599,10 @@ async function copyText(text: string, label: string): Promise<void> {
 }
 
 async function openExportDir(): Promise<void> {
+  if (!moduleEnabled) {
+    notify('PLC 程序模块已关闭', true);
+    return;
+  }
   const api = window.desktop?.plcgen;
   if (!api) {
     notify('打开导出目录仅在桌面版可用', true);
@@ -607,6 +626,7 @@ function close(): void {
 }
 
 function open(): void {
+  if (!moduleEnabled) return;
   buildOverlay();
   if (!nodes) return;
   window.AutomationCadViewer?.close();
@@ -788,13 +808,15 @@ function setEntryVisibility(): void {
   if (!entryElement) return;
   const activeDomain = document.querySelector<HTMLElement>('.domsw-btn.is-active')?.dataset.domain;
   const domain = document.body.dataset.domain ?? activeDomain ?? 'mech';
-  entryElement.hidden = domain !== 'elec';
+  entryElement.hidden = !moduleEnabled || domain !== 'elec';
 }
-
-export function initPlcGenUi(uiOptions: PlcGenUiOptions = {}): void {
-  if (initialized) return;
+export function initPlcGenUi(uiOptions: PlcGenUiOptions = {}): PlcGenUiHandle {
+  if (initialized) {
+    return { setEnabled: setModuleEnabled, isEnabled: () => moduleEnabled };
+  }
   initialized = true;
   options = uiOptions;
+  moduleEnabled = uiOptions.enabled ?? true;
   injectStyles();
   entryElement = buildEntryButton(ENTRY_ID, 'PLC 程序', ENTRY_ICON, open);
   entryElement?.classList.add('plc-entry-btn');
@@ -847,9 +869,18 @@ export function initPlcGenUi(uiOptions: PlcGenUiOptions = {}): void {
       history: history.length,
       previewPath: selectedFile,
       precheckErrors: lastPrecheck?.errors.length ?? -1,
+      enabled: moduleEnabled,
       stats: nodes?.stats.textContent ?? ''
     })
   };
+  setEntryVisibility();
+  return { setEnabled: setModuleEnabled, isEnabled: () => moduleEnabled };
+}
+
+function setModuleEnabled(enabled: boolean): void {
+  moduleEnabled = enabled;
+  if (!enabled) close();
+  setEntryVisibility();
 }
 
 /** 兼容别名：保留对外导出，当前仓库内无调用；新代码请使用 `open`。 */

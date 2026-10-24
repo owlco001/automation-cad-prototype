@@ -84,6 +84,22 @@ function simulationIssues(result: SimResult): Issue[] {
   if (result.ok) return [];
   const issues: Issue[] = [];
   for (const alarm of result.alarms) {
+    if (alarm.startsWith('EMPTY_SEQUENCE:')) {
+      issues.push({
+        code: 'SEQUENCE_EMPTY',
+        message: '联调步序为空，无法验证；请至少配置一个有效步序。',
+        path: 'sequence'
+      });
+      continue;
+    }
+    if (alarm.includes('mapping.json.sequence')) {
+      issues.push({
+        code: 'SEQUENCE_MISSING',
+        message: '生成结果缺少有效的 PLC 步序，无法验证；请重新生成 PLC 项目。',
+        path: 'mapping.json.sequence'
+      });
+      continue;
+    }
     issues.push({ code: 'SIMULATION_ALARM', message: alarm });
   }
   const failed = result.steps.find((step) => !step.ok);
@@ -98,6 +114,22 @@ function simulationIssues(result: SimResult): Issue[] {
     issues.push({ code: 'SIMULATION_FAILED', message: '模拟验证未通过' });
   }
   return issues;
+}
+
+function emptySequencePrecheckFailure(
+  precheck: PrecheckResult,
+  sequenceEmpty: boolean
+): VerifyResult | null {
+  if (!sequenceEmpty) return null;
+  const issue: Issue = {
+    code: 'SEQUENCE_EMPTY',
+    message: '联调步序为空，无法验证；请至少配置一个有效步序。',
+    path: 'sequence'
+  };
+  const warnings = precheck.warnings.filter((warning) => warning.code !== 'SEQUENCE_EMPTY');
+  const errors = [...precheck.errors, issue];
+  const failedPrecheck: PrecheckResult = { errors, warnings };
+  return { ok: false, stage: 'precheck', precheck: failedPrecheck, errors, warnings };
 }
 
 function precheckOf(result: GenerateProjectResult): PrecheckResult {
@@ -165,7 +197,8 @@ export function verifyGenerated(
   }
 
   if (providedProject) {
-    const check = generateProject(inputOf(config, options)).precheck;
+    const generatedCheck = generateProject(inputOf(config, options));
+    const check = generatedCheck.precheck;
     if (check.errors.length > 0) {
       return {
         ok: false,
@@ -175,6 +208,11 @@ export function verifyGenerated(
         warnings: check.warnings
       };
     }
+    const emptySequenceFailure = emptySequencePrecheckFailure(
+      check,
+      generatedCheck.ok && generatedCheck.stats.sequenceEmpty
+    );
+    if (emptySequenceFailure) return emptySequenceFailure;
     const simulation = simulate({ project: providedProject, config, ...options });
     const errors = simulationIssues(simulation);
     return {
@@ -198,6 +236,12 @@ export function verifyGenerated(
       warnings: generated.precheck.warnings
     };
   }
+
+  const emptySequenceFailure = emptySequencePrecheckFailure(
+    generated.precheck,
+    generated.stats.sequenceEmpty
+  );
+  if (emptySequenceFailure) return emptySequenceFailure;
 
   const simulation = simulate({ project: generated, config, ...options });
   const errors = simulationIssues(simulation);

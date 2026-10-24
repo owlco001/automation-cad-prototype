@@ -10,6 +10,7 @@ import {
   type PlcValue,
   type SimRule
 } from './types.ts';
+import { validatePlcValue } from './value.ts';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -127,12 +128,7 @@ export function parsePlcConfig(value: unknown): PlcConfig {
       if (!ids.has(id)) throw new Error(`仿真初始值引用了不存在的点位：${id}`);
       const point = points.find((entry) => entry.id === id);
       if (!point) continue;
-      if (point.dataType === 'bool') {
-        if (typeof raw !== 'boolean') throw new Error(`仿真初始值「${id}」需要布尔值`);
-      } else if (typeof raw !== 'number' || !Number.isInteger(raw)) {
-        throw new Error(`仿真初始值「${id}」需要整数`);
-      }
-      initial[id] = raw;
+      initial[id] = validatePlcValue(point, raw);
     }
     config.initialValues = initial;
   }

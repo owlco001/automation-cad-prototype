@@ -1,4 +1,7 @@
+import type { PlcTarget } from '../plcgen/types.ts';
+
 export const DESIGN_MANIFEST_SCHEMA_VERSION = 1 as const;
+export const PLC_SYNC_EXTENSION_SCHEMA_VERSION = 1 as const;
 
 export interface SyncConfig {
   baseUrl: string;
@@ -26,6 +29,23 @@ export interface DesignBomRow {
   remark?: string;
 }
 
+/** PLC 子清单记录：所有路径都位于 plc/ 下，且带字节长度与 SHA-256。 */
+export interface SyncPlcFileRecord {
+  path: string;
+  size: number;
+  sha256: string;
+}
+
+/** 以可选扩展承载 PLC 数据，保持既有 design-sync schemaVersion 1 可读。 */
+export interface DesignPlcManifest {
+  schemaVersion: 1;
+  target: PlcTarget;
+  generatedVersion: string;
+  machineId: string;
+  programFiles: SyncPlcFileRecord[];
+  mapping: SyncPlcFileRecord;
+}
+
 export interface DesignManifest {
   schemaVersion: 1;
   projectId: string;
@@ -35,9 +55,20 @@ export interface DesignManifest {
   bomSha256: string;
   files: DesignFileEntry[];
   bom: DesignBomRow[];
+  /** 缺省表示旧版 BOM/PDF/GLB/DXF 包。 */
+  plc?: DesignPlcManifest;
 }
 
-/** 渲染层交给主进程的导出物；主进程负责打 zip 并上传。 */
+/** 仅接受生成器产生的文本源文件以及机型 IO map CSV；主进程会再次校验白名单。 */
+export interface SyncPlcUploadPayload {
+  target: PlcTarget;
+  generatedVersion: string;
+  machineId: string;
+  programFiles: Array<{ path: string; content: string }>;
+  mappingCsv: string;
+}
+
+/** 渲染层交给主进程的导出物；主进程负责校验、打 zip 并上传。 */
 export interface SyncUploadPayload {
   projectName: string;
   bomCsv: string | Uint8Array;
@@ -45,6 +76,7 @@ export interface SyncUploadPayload {
   glb: Uint8Array;
   dxf: string | Uint8Array;
   bom: DesignBomRow[];
+  plc?: SyncPlcUploadPayload;
 }
 
 export type SyncStage = '打包' | '连接' | '上传' | '解析' | '列表' | '比对' | '下载';
@@ -89,6 +121,24 @@ export type SyncDiffResult =
 
 export type SyncDownloadResult =
   | { ok: true; zip: Uint8Array; bytes: number; sha256: string; etag?: string }
+  | { ok: false; message: string; stage?: SyncStage; code?: string };
+
+export interface SyncImportCandidate {
+  manifest: DesignManifest;
+  plc?: {
+    target: PlcTarget;
+    generatedVersion: string;
+    machineId: string;
+    programFiles: Array<{ path: string; content: string }>;
+    mappingCsv: string;
+  };
+  machineContextStatus: 'not-applicable' | 'unavailable' | 'matched';
+  /** 解析从不落盘；即使匹配机型，也必须由后续显式应用操作处理。 */
+  requiresExplicitApply: true;
+}
+
+export type SyncDownloadCandidateResult =
+  | { ok: true; candidate: SyncImportCandidate; bytes: number; sha256: string; etag?: string }
   | { ok: false; message: string; stage?: SyncStage; code?: string };
 
 /** 给 UI 的配置视图，绝不包含明文 apiKey。 */

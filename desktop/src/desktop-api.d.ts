@@ -1,3 +1,17 @@
+type DesktopUpdateChannel = 'stable' | 'beta';
+type DesktopUpdateStatus = 'disabled' | 'idle' | 'checking' | 'available' | 'not-available' | 'downloading' | 'downloaded' | 'error';
+
+interface DesktopUpdateSnapshot {
+  status: DesktopUpdateStatus;
+  currentVersion: string;
+  channel: DesktopUpdateChannel;
+  availableVersion?: string;
+  releaseName?: string;
+  releaseNotes?: string;
+  progress?: { percent: number; transferred: number; total: number; bytesPerSecond: number };
+  message: string;
+}
+
 interface DesktopVersion {
   app: string;
   electron: string;
@@ -116,6 +130,7 @@ interface DesktopSyncPublicConfig {
 
 interface DesktopSyncResult {
   ok: boolean;
+  code?: string;
   packageId?: string;
   version?: number;
   duplicated?: boolean;
@@ -159,6 +174,35 @@ interface DesktopSyncUploadPayload {
   glb: Uint8Array;
   dxf: string | Uint8Array;
   bom: Array<{ no: number; name: string; spec: string; qty: number; mat: string; remark?: string }>;
+  plc?: {
+    target: 'generic' | 's7-1200' | 's7-1500' | 'codesys';
+    generatedVersion: string;
+    machineId: string;
+    programFiles: Array<{ path: string; content: string }>;
+    mappingCsv: string;
+  };
+}
+
+interface DesktopSyncDownloadCandidateResult {
+  ok: boolean;
+  candidate?: {
+    manifest: unknown;
+    plc?: {
+      target: 'generic' | 's7-1200' | 's7-1500' | 'codesys';
+      generatedVersion: string;
+      machineId: string;
+      programFiles: Array<{ path: string; content: string }>;
+      mappingCsv: string;
+    };
+    machineContextStatus: 'not-applicable' | 'unavailable' | 'matched';
+    requiresExplicitApply: true;
+  };
+  bytes?: number;
+  sha256?: string;
+  etag?: string;
+  message?: string;
+  stage?: '下载' | '解析';
+  code?: string;
 }
 
 type DesktopParametricStatus = 'stopped' | 'starting' | 'ready' | 'unavailable' | 'crashed';
@@ -171,11 +215,12 @@ interface DesktopParametricStatusInfo {
 
 interface DesktopParametricStartResult extends DesktopParametricStatusInfo {
   ok: boolean;
+  code?: 'MODULE_DISABLED';
 }
 
 interface DesktopParametricBuildResult {
   ok: boolean;
-  code?: 'UNAVAILABLE' | 'TIMEOUT' | 'BUILD_FAILED';
+  code?: 'MODULE_DISABLED' | 'UNAVAILABLE' | 'TIMEOUT' | 'BUILD_FAILED';
   message?: string;
   stats?: Record<string, unknown>;
   buildMs?: number;
@@ -493,6 +538,8 @@ interface AgentBridgeApi {
     units: string | null;
     recentActions?: Array<{ tool?: string; name?: string; summary?: string; at: string }>;
   } | AgentBridgeFailure;
+  /** 完整项目状态的 SHA-256 摘要；不可读取或无法摘要时返回 null。 */
+  getProjectCheckpointFingerprint(): Promise<string | null>;
   getAdvisorState(): import('./agent/advisor').AdvisorProjectState | AgentBridgeFailure;
   markPlcGenerated(): { ok: boolean };
   insertComponent(part: { id: string; model: string; vendor?: string; category: string }): { ok: boolean; meshIndex?: number; name?: string; message?: string };
@@ -594,9 +641,72 @@ interface DesktopPlcGenExportResult {
   message?: string;
 }
 
+interface DesktopModuleStatus {
+  id: string;
+  name: string;
+  version: string;
+  apiCompatibility: { min: number; max: number };
+  dependencies: string[];
+  requiredCapabilities: string[];
+  description: string;
+  kind: 'core' | 'optional';
+  defaultEnabled: boolean;
+  implemented: boolean;
+  status: 'enabled' | 'disabled' | 'unavailable';
+  enabled: boolean;
+  reason: string | null;
+}
+
+interface DesktopProjectArchivePreview {
+  project: {
+    id: string;
+    name: string;
+    identity?: {
+      sourceName: string;
+      sourceSha256: string;
+      sourceSize: number;
+      modelObjects: Array<{ objectId: string; name: string; path: string[]; geometrySha256: string }>;
+    };
+  };
+  appVersion: string;
+  createdAt: string;
+  schemaVersion: number;
+  coreSchemaVersion: number;
+  state: { featureTree: boolean; kinematics: boolean; viewState: boolean };
+  omittedState: string[];
+  dependencies: Array<{ originalName: string; format: string; size: number; sha256: string }>;
+  integrity: { algorithm: string; scope: string; authenticity: string };
+  restoreMode: 'archive-api-only';
+  unsupported: string[];
+}
+
+type DesktopProjectArchiveResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; code: 'MODULE_DISABLED' | 'CANCELED' | 'FAILED'; stage?: string; message: string };
+
+interface DesktopProjectExportSnapshot {
+  projectId: string;
+  sourceName: string;
+  sourceSha256: string;
+  sourceSize: number;
+  modelObjects: Array<{ objectId: string; name: string; path: string[]; geometrySha256: string }>;
+  featureTreeJson: string | null;
+  kinematicsJson: string | null;
+  viewStateJson: string | null;
+  excludedState: string[];
+}
+
 interface Window {
   desktop?: {
     version(): Promise<DesktopVersion>;
+    update: {
+      state(): Promise<DesktopUpdateSnapshot>;
+      setChannel(channel: DesktopUpdateChannel): Promise<DesktopUpdateSnapshot>;
+      check(): Promise<DesktopUpdateSnapshot>;
+      download(): Promise<DesktopUpdateSnapshot>;
+      install(): Promise<DesktopUpdateSnapshot>;
+      onState(callback: (state: DesktopUpdateSnapshot) => void): () => void;
+    };
     extensionBaseUrl: string | null;
     openCadDialog(): Promise<{ canceled: boolean; filePaths: string[] }>;
     readFileBuffer(path: string): Promise<Uint8Array>;
@@ -613,6 +723,7 @@ interface Window {
     cost: {
       pricebook(): Promise<{
         ok: boolean;
+        code?: string;
         message?: string;
         book?: unknown;
         path?: string;
@@ -620,6 +731,20 @@ interface Window {
         updatedAt?: string;
         usableItems?: number;
         exampleItems?: number;
+      }>;
+      exportPanelPdf(payload: { html: string; projectName?: string; page?: { size?: 'A3' | 'A4'; landscape?: boolean } }): Promise<{
+        ok: boolean;
+        path?: string;
+        htmlPath?: string;
+        code?: string;
+        message?: string;
+      }>;
+      exportPanelCsv(payload: { name: string; data: string }): Promise<{
+        ok?: boolean;
+        canceled?: boolean;
+        path?: string | null;
+        code?: string;
+        message?: string;
       }>;
     };
     machine: {
@@ -649,6 +774,29 @@ interface Window {
       remove(id: string): Promise<{ ok: boolean }>;
       listParts(filter?: { q?: string; category?: string; packId?: string }): Promise<DesktopComponentPart[]>;
     };
+    projectArchive: {
+      exportProject(snapshot: DesktopProjectExportSnapshot): Promise<DesktopProjectArchiveResult<{
+        path: string;
+        bytes: number;
+        sha256: string;
+        projectName: string;
+        dependencyName: string;
+        projectId: string;
+        includedState: { featureTree: boolean; kinematics: boolean; viewState: boolean };
+        excludedState: string[];
+      }>>;
+      preview(): Promise<DesktopProjectArchiveResult<DesktopProjectArchivePreview>>;
+    };
+    modules: {
+      syncPlcgenEnabled(enabled: boolean): boolean;
+      syncElecValidationEnabled(enabled: boolean): boolean;
+      syncCostEstimationEnabled(enabled: boolean): boolean;
+      syncFactoryPlcSyncEnabled(enabled: boolean): boolean;
+      syncParametricImportEnabled(enabled: boolean): boolean;
+      syncAgentResumeEnabled(enabled: boolean): boolean;
+      syncProjectPortableEnabled(enabled: boolean): boolean;
+      syncSystemUpdateEnabled(enabled: boolean): boolean;
+    };
     agent: {
       info(): Promise<DesktopAgentInfo>;
       getLlmConfig(): Promise<DesktopAgentLlmConfig>;
@@ -668,6 +816,18 @@ interface Window {
           resumeFrom?: number;
           resume?: boolean;
         }): Promise<DesktopAgentPlanExecuteResult>;
+        restore(payload: { plan: DesktopAgentPlan }): Promise<{
+          ok: boolean;
+          available: boolean;
+          disabled?: boolean;
+          blocked?: boolean;
+          requiresReplan?: boolean;
+          message?: string;
+          cursor?: number;
+          steps?: Array<{ index: number; tool: string; wrote: boolean; state: 'pending' | 'running' | 'completed' | 'failed' | 'uncertain' }>;
+          needsReconfirmation?: boolean;
+        }>;
+        clearCheckpoint(): Promise<{ ok: boolean; code?: string; message?: string }>;
         cancel(): Promise<{ ok: boolean; cancelled: boolean; message?: string }>;
       };
       recipe: {
@@ -721,7 +881,7 @@ interface Window {
     };
     plcgen: {
       history(): Promise<DesktopPlcGenHistoryEntry[]>;
-      recordHistory(entry: DesktopPlcGenHistoryEntry): Promise<DesktopPlcGenHistoryEntry[]>;
+      recordHistory(entry: DesktopPlcGenHistoryEntry): Promise<DesktopPlcGenHistoryEntry[] | { ok: false; code: 'MODULE_DISABLED'; message: string }>;
       exportProject(payload: {
         machineName: string;
         namePrefix?: string;
@@ -737,10 +897,16 @@ interface Window {
       upload(payload: DesktopSyncUploadPayload): Promise<DesktopSyncResult>;
       list(): Promise<DesktopSyncListResult>;
       diff(packageId: string): Promise<DesktopSyncDiffResult>;
+      downloadCandidate(packageId: string, machineContext?: unknown): Promise<DesktopSyncDownloadCandidateResult>;
     };
     onOpenCad(callback: (payload: { path: string; source: string }) => void): () => void;
     onImportPack(callback: (payload: { path: string }) => void): () => void;
     onSetDomain(callback: (domain: 'mech' | 'elec') => void): () => void;
+  };
+  __ModuleRegistry?: {
+    list(): DesktopModuleStatus[];
+    getStatus(id: string): DesktopModuleStatus;
+    setEnabled(id: string, enabled: boolean): DesktopModuleStatus[];
   };
   __AgentBridge?: AgentBridgeApi;
   __Commission3D?: {
@@ -845,6 +1011,7 @@ interface Window {
       history: number;
       previewPath: string | null;
       precheckErrors: number;
+      enabled?: boolean;
       generated?: boolean;
       generatedAt?: string;
       stats: string;
@@ -856,7 +1023,7 @@ interface Window {
   __ElecCheckPanel?: {
     open(): void;
     close(): void;
-    run(doc: import('./elec/check').ElecDocument): Promise<import('./elec/check').ElecCheckResult | null>;
+    run(doc: import('./elec/check').ElecDocument): Promise<import('./elec/check').ElecCheckResult | { ok: false; code: 'MODULE_DISABLED'; message: string } | null>;
     result(): import('./elec/check').ElecCheckResult | null;
     html(): string;
     exportPdf(): Promise<{ path: string; htmlPath: string }>;
@@ -868,20 +1035,20 @@ interface Window {
   __CostPricebookProvider?: () => unknown | null;
   /** 成本估算面板：脚本化计算、报告 HTML/CSV 与导出（冒烟与后续 Agent 工具共用）。 */
   __CostPanel?: {
-    open(): void;
+    open(): void | { ok: false; code: 'MODULE_DISABLED'; message: string };
     close(): void;
     setPricebook(value: unknown): { usable: number; examples: number };
     loadPricebookText(text: string, label?: string): { usable: number; examples: number };
     setBom(payload: Partial<import('./cost/engine').CostInput>, label?: string): { rows: number };
-    run(input: Partial<import('./cost/engine').CostInput>): Promise<import('./cost/engine').CostReport | null>;
-    result(): import('./cost/engine').CostReport | null;
-    state(): { hasReport: boolean; computedAt: string; bomSignature: string };
-    html(): string;
-    csv(): string;
-    exportPdf(): Promise<{ path: string; htmlPath: string }>;
-    exportCsv(): Promise<{ canceled: boolean; path: string | null }>;
-    status(): string;
-    pricebook(): { label: string; usable: number; examples: number } | null;
+    run(input: Partial<import('./cost/engine').CostInput>): Promise<import('./cost/engine').CostReport | null | { ok: false; code: 'MODULE_DISABLED'; message: string }>;
+    result(): import('./cost/engine').CostReport | null | { ok: false; code: 'MODULE_DISABLED'; message: string };
+    state(): { hasReport: boolean; computedAt: string; bomSignature: string } | { ok: false; code: 'MODULE_DISABLED'; message: string };
+    html(): string | { ok: false; code: 'MODULE_DISABLED'; message: string };
+    csv(): string | { ok: false; code: 'MODULE_DISABLED'; message: string };
+    exportPdf(): Promise<{ ok: boolean; path?: string; htmlPath?: string; code?: string; message?: string }>;
+    exportCsv(): Promise<{ ok?: boolean; canceled?: boolean; path?: string | null; code?: string; message?: string }>;
+    status(): string | { ok: false; code: 'MODULE_DISABLED'; message: string };
+    pricebook(): { label: string; usable: number; examples: number } | null | { ok: false; code: 'MODULE_DISABLED'; message: string };
   };
   AutomationCadViewer?: {
     open(): void;
@@ -952,6 +1119,9 @@ interface Window {
       stlLoaded: boolean;
       ghost: boolean;
     };
+    historyState(): { enabled: boolean; undoCount: number; redoCount: number };
+    undo(): boolean;
+    redo(): boolean;
     setSource(sourceFile: string): void;
     setDoc(doc: unknown): void;
     getDoc(): unknown;

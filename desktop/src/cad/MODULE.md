@@ -145,6 +145,7 @@ suggestionToMovingPart(suggestion, meshes) → MovingPart   // 复用 draftFromM
 
 - ✅ STEP/IGES/BREP 解析（实测 424 KB 装配 5040 面 / 559 ms）
 - ✅ STL/OBJ/GLTF/GLB
+- ✅ CAD 导入事务：先准备稳定身份候选，解析通过后才持久登记；解析阶段失败保留当前文档身份/对象映射和视图，首次导入失败显示空状态错误
 - ✅ 零件树、三角面统计、包围盒测量、fit、线框、拖放导入
 - ✅ WebGL 降级（3 条单测）
 - ✅ 智能体占位件（20×20×20 mm 实体 + 线框）、按索引移除与重排、场景/选择/BOM 快照

@@ -16,6 +16,12 @@ ElecDocument ──runElectricalCheck()──→ ElecCheckResult
 | `report.ts` | `renderElecCheckHtml(project, result)` 生成可打印报告，全部字段做 HTML 转义 |
 | `ui.ts` | 「电气校验」抽屉面板：入口按钮 `elecCheckEntryButton`、抽屉 `elecCheckDrawer`、脚本 API `window.__ElecCheckPanel` |
 
+## 可选模块 `elec.validation`
+
+- v1.0.0 / Module API 1，默认启用以兼容既有安装，依赖 `core`。能力声明：`elec.validation.rules`、`elec.validation.panel`、`agent.electrical-check`、`elec.validation.report.export`。
+- 控制校验面板、PDF 导出及 Agent `run_electrical_check` 命令/工具、JSON-RPC 与 MCP。关闭后面板入口隐藏并收起，脚本运行/PDF 导出、旧工具名与命令直调均在执行前失败关闭并返回 `MODULE_DISABLED`；renderer 状态同步获主进程接受后才开启，主进程工具列表与 MCP 代理使用同一状态。桌面状态不可达时 MCP 隐藏该工具且不回退本地执行。
+- 重新启用后规则、结果和报告恢复。开关只保存模块状态，不改电气原理图/项目数据、元件库、底板布置或 Agent 审计历史；这些设计与数据入口不归本模块管理。
+
 ## 数据契约
 
 - `ElecDocument = { wires?, loads?, circuits?, options? }`；`ElecCheckResult = { findings, summary, counts }`。

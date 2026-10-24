@@ -187,7 +187,7 @@ async function uploadNow(): Promise<void> {
 
   setBusy(true);
   try {
-    setStatus('正在生成 PDF / GLB / DXF / BOM 导出物…', 'idle');
+    setStatus('正在生成 PDF / GLB / DXF / BOM；若启用了 PLC 同步扩展，会附带 PLC 与机型 IO mapping…', 'idle');
     let payload: SyncUploadPayload;
     try {
       payload = await panelOptions!.buildPayload();
@@ -289,7 +289,7 @@ export function initSyncPanel(options: SyncPanelOptions): void {
     <div class="acp-note" id="syncLastResult">尚无同步记录。点击「立即同步」先生成导出物，再打包并上传。</div>
     <div class="acp-section-title"><span>最近设计包</span><b>20</b></div>
     <div id="syncPackages"><div class="acp-empty">打开面板后点击「刷新列表」读取服务端设计包。</div></div>
-    <div class="acp-note">流程：生成 PDF / GLB / DXF / BOM → 生成 manifest 与 SHA-256 → ZIP → 上传。失败会标明「打包 / 连接 / 上传 / 解析」阶段；不会做后台自动同步。</div>`;
+    <div class="acp-note">流程：生成 PDF / GLB / DXF / BOM；仅在「factory.plc-sync」启用且 plcgen 可用时附带 PLC ST 与机型 IO mapping → 校验路径、大小、机型与 SHA-256 → ZIP → 上传。关闭 PLC 同步扩展后，普通设计包仍可上传/下载；含 PLC 的下载候选会被拒绝，不会自动覆盖工程或后台同步。</div>`;
   drawer.footer.innerHTML = '<span class="acp-pill">15 秒超时</span><span class="acp-pill">Idempotency-Key = ZIP SHA-256</span><span class="acp-pill">API Key 脱敏</span>';
 
   const baseUrl = drawer.body.querySelector<HTMLInputElement>('#syncBaseUrl');

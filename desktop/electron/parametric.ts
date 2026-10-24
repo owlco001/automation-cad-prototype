@@ -6,6 +6,11 @@ import { createServer } from 'node:net';
 import { trackedClearTimeout, trackedSetTimeout } from '../src/shared/resources.ts';
 import { delimiter, extname, isAbsolute, join, resolve } from 'node:path';
 import {
+  PARAMETRIC_MODULE_DISABLED_MESSAGE,
+  isParametricImportEnabled,
+  parametricModuleDisabledBuildResult
+} from '../src/modules/parametric-gate.ts';
+import {
   compileOps,
   isAssemblyDoc,
   validateFeatures,
@@ -25,6 +30,7 @@ export interface ParametricStartInfo {
   ok: boolean;
   status: ParametricStatus;
   message: string;
+  code?: 'MODULE_DISABLED';
   port?: number;
   token?: string;
   version?: string;
@@ -32,7 +38,7 @@ export interface ParametricStartInfo {
 
 export interface ParametricBuildResult {
   ok: boolean;
-  code?: 'UNAVAILABLE' | 'TIMEOUT' | 'BUILD_FAILED';
+  code?: 'MODULE_DISABLED' | 'UNAVAILABLE' | 'TIMEOUT' | 'BUILD_FAILED';
   message?: string;
   stats?: Record<string, unknown>;
   buildMs?: number;
@@ -51,6 +57,7 @@ export interface ParametricManagerOptions {
   resourcesPath?: string;
   appRoot?: string;
   command?: string;
+  isEnabled?: () => boolean;
   onStatus?: (state: ParametricStatusInfo) => void;
 }
 
@@ -249,6 +256,9 @@ export class ParametricManager {
   }
 
   async start(): Promise<ParametricStartInfo> {
+    if (!isParametricImportEnabled(this.options.isEnabled)) {
+      return { ok: false, status: 'unavailable', code: 'MODULE_DISABLED', message: PARAMETRIC_MODULE_DISABLED_MESSAGE };
+    }
     if (this.stopping) await this.stopping;
     if (this.state.status === 'ready' && this.proc && this.port !== null && this.token) {
       return {
@@ -297,6 +307,7 @@ export class ParametricManager {
   }
 
   build(doc: FeatureDoc | AssemblyDoc): Promise<ParametricBuildResult> {
+    if (!isParametricImportEnabled(this.options.isEnabled)) return Promise.resolve(parametricModuleDisabledBuildResult());
     const run = this.buildChain.then(
       () => this.buildOnce(doc),
       () => this.buildOnce(doc)
@@ -307,6 +318,7 @@ export class ParametricManager {
 
   private async buildOnce(doc: FeatureDoc | AssemblyDoc): Promise<ParametricBuildResult> {
     try {
+      if (!isParametricImportEnabled(this.options.isEnabled)) return parametricModuleDisabledBuildResult();
       const errors = validateFeatures(doc);
       if (errors.length > 0) {
         return { ok: false, code: 'BUILD_FAILED', message: `特征树校验失败：${errors.join('；')}` };
@@ -314,6 +326,7 @@ export class ParametricManager {
       if (this.state.status !== 'ready' || this.port === null || !this.token) {
         return { ok: false, code: 'UNAVAILABLE', message: '参数化建模内核不可用，请先启动或检查 Python 环境' };
       }
+      if (!isParametricImportEnabled(this.options.isEnabled)) return parametricModuleDisabledBuildResult();
 
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.buildTimeoutMs);
@@ -384,6 +397,9 @@ export class ParametricManager {
   }
 
   private async launch(isRestart: boolean, generation: number): Promise<ParametricStartInfo> {
+    if (!isParametricImportEnabled(this.options.isEnabled)) {
+      return { ok: false, status: 'unavailable', code: 'MODULE_DISABLED', message: PARAMETRIC_MODULE_DISABLED_MESSAGE };
+    }
     if (this.expectedStop || generation !== this.generation) {
       return { ok: false, status: 'stopped', message: this.state.message };
     }
@@ -404,6 +420,9 @@ export class ParametricManager {
     }
     if (this.expectedStop || generation !== this.generation) {
       return { ok: false, status: 'stopped', message: this.state.message };
+    }
+    if (!isParametricImportEnabled(this.options.isEnabled)) {
+      return { ok: false, status: 'unavailable', code: 'MODULE_DISABLED', message: PARAMETRIC_MODULE_DISABLED_MESSAGE };
     }
     const token = randomBytes(32).toString('base64url');
     const args = [...spec.args, '--port', String(port), '--token', token];

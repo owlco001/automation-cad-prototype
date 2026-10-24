@@ -1,4 +1,4 @@
-import { sha256Hex } from './package.ts';
+import { MAX_DESIGN_PACKAGE_BYTES, sha256Hex } from './package.ts';
 import type {
   DesignDiff,
   DesignManifest,
@@ -71,6 +71,42 @@ async function safeText(response: Response): Promise<string> {
     console.warn('[SYNC_RESPONSE_BODY_READ_FAILED]', { site: 'desktop/src/sync/client.ts' }, error);
     return '';
   }
+}
+
+async function readBoundedBytes(response: Response, maxBytes: number): Promise<Uint8Array> {
+  const contentLength = Number(response.headers.get('content-length'));
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+    throw new Error(`下载设计包超过 ${Math.floor(maxBytes / (1024 * 1024))} MiB 大小上限`);
+  }
+  if (!response.body) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength > maxBytes) throw new Error(`下载设计包超过 ${Math.floor(maxBytes / (1024 * 1024))} MiB 大小上限`);
+    return bytes;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new Error(`下载设计包超过 ${Math.floor(maxBytes / (1024 * 1024))} MiB 大小上限`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 function parseJson(text: string): unknown {
@@ -151,6 +187,7 @@ export class SyncClient {
     try {
       requireConfig(this.config);
       if (!(zip instanceof Uint8Array) || zip.byteLength === 0) return { ok: false, message: '设计包 ZIP 不能为空' };
+      if (zip.byteLength > MAX_DESIGN_PACKAGE_BYTES) return { ok: false, message: '设计包超过 200 MiB 大小上限', stage: '打包', code: 'PACKAGE_TOO_LARGE' };
       if (!manifest || manifest.schemaVersion !== 1) return { ok: false, message: 'manifest schemaVersion 必须为 1' };
 
       const idempotencyKey = sha256Hex(zip);
@@ -394,7 +431,7 @@ export class SyncClient {
           code: 'DOWNLOAD_FAILED'
         };
       }
-      const zip = new Uint8Array(await response.arrayBuffer());
+      const zip = await readBoundedBytes(response, MAX_DESIGN_PACKAGE_BYTES);
       if (zip.byteLength === 0) {
         return {
           ok: false,

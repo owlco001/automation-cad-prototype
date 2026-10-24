@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { test } from 'node:test';
-import { buildDesignPackage, PACKAGE_ENTRIES, sha256Hex, toLocalIsoString } from '../../src/sync/package.ts';
+import { buildDesignPackage, MAX_PLC_FILE_BYTES, PACKAGE_ENTRIES, parseDesignPackage, sha256Hex, toLocalIsoString } from '../../src/sync/package.ts';
+import { demoMachineConfig } from '../../src/commission/machine-config.ts';
+import { buildMachineIoMap } from '../../src/machine/io-map.ts';
 
 const require = createRequire(import.meta.url);
 const AdmZip = require('adm-zip');
@@ -119,4 +121,170 @@ test('合法正整数 BOM 数量通过并原样写入 manifest', () => {
   const built = buildDesignPackage(sources({ bom: [{ ...bom[0], qty: 3 }, { ...bom[1], qty: 12 }] }));
   assert.deepEqual(built.manifest.bom.map((row) => row.qty), [3, 12]);
   assert.equal(typeof built.manifest.bom[0].qty, 'number');
+});
+
+
+const plcProgramPaths = [
+  'src/OB1_Main.st',
+  'src/DB_IO.st',
+  'src/FB_Cylinder.st',
+  'src/FB_Gripper.st',
+  'src/FB_RotaryAxis.st',
+  'src/FC_AutoSequence.st',
+  'src/FC_Alarms.st',
+  'src/FC_Safety.st',
+  'io-tags.csv',
+  'mapping.json'
+];
+
+function plcPayload(config = demoMachineConfig(), overrides = {}) {
+  return {
+    target: 's7-1200',
+    generatedVersion: '1.0.0',
+    machineId: config.id,
+    programFiles: plcProgramPaths.map((path) => ({
+      path,
+      content: path.endsWith('.json')
+        ? JSON.stringify({ machineId: config.id, target: 's7-1200' })
+        : `${path}\ncontent for ${config.id}\n`
+    })),
+    mappingCsv: buildMachineIoMap(config).csv,
+    ...overrides
+  };
+}
+
+function buildWithPlc(config = demoMachineConfig(), plcOverrides = {}) {
+  return buildDesignPackage(sources({ plc: plcPayload(config, plcOverrides) }));
+}
+
+function mutateManifest(archiveBytes, mutate) {
+  const zip = new AdmZip(Buffer.from(archiveBytes));
+  const entry = zip.getEntry(PACKAGE_ENTRIES.manifest);
+  assert.ok(entry);
+  const manifest = JSON.parse(entry.getData().toString('utf8'));
+  mutate(manifest);
+  entry.setData(Buffer.from(JSON.stringify(manifest, null, 2), 'utf8'));
+  return new Uint8Array(zip.toBuffer());
+}
+
+test('PLC + 机型 IO mapping 导出/解析往返校验全部哈希并要求显式应用', () => {
+  const machine = demoMachineConfig();
+  const built = buildWithPlc(machine);
+  assert.equal(built.manifest.schemaVersion, 1);
+  assert.equal(built.manifest.plc.schemaVersion, 1);
+  assert.equal(built.manifest.plc.target, 's7-1200');
+  assert.equal(built.manifest.plc.generatedVersion, '1.0.0');
+  assert.equal(built.manifest.plc.machineId, machine.id);
+  assert.equal(built.manifest.plc.programFiles.length, 10);
+  assert.equal(built.manifest.plc.mapping.path, 'plc/machine-io-map.csv');
+  assert.equal(built.manifest.plc.mapping.size, Buffer.byteLength(buildMachineIoMap(machine).csv));
+  assert.equal(built.manifest.plc.mapping.sha256, sha256Hex(buildMachineIoMap(machine).csv));
+  const parsed = parseDesignPackage(built.zip, machine);
+  assert.equal(parsed.machineContextStatus, 'matched');
+  assert.equal(parsed.requiresExplicitApply, true);
+  assert.equal(parsed.plc.mappingCsv, buildMachineIoMap(machine).csv);
+  assert.equal(parsed.plc.programFiles.length, 10);
+  assert.equal(parsed.plc.programFiles.find((file) => file.path === 'src/OB1_Main.st').content, 'src/OB1_Main.st\ncontent for demo-4x3\n');
+});
+
+test('PLC 同步模块关闭时构建和候选解析均拒绝 PLC 源码与 IO mapping', () => {
+  const built = buildWithPlc();
+  assert.throws(
+    () => buildDesignPackage(sources({ plc: plcPayload() }), { allowPlc: false }),
+    /PLC 同步模块当前已关闭.*拒绝生成/
+  );
+  assert.throws(
+    () => parseDesignPackage(built.zip, undefined, { allowPlc: false }),
+    /PLC 同步模块当前已关闭.*拒绝读取或应用/
+  );
+});
+
+test('PLC 同步模块关闭后普通 BOM/PDF/GLB/DXF 包仍可构建并下载解析', () => {
+  const built = buildDesignPackage(sources(), { allowPlc: false });
+  const parsed = parseDesignPackage(built.zip, undefined, { allowPlc: false });
+  assert.equal(built.manifest.files.length, 4);
+  assert.equal(Object.hasOwn(built.manifest, 'plc'), false);
+  assert.equal(parsed.plc, undefined);
+  assert.equal(parsed.machineContextStatus, 'not-applicable');
+  assert.deepEqual(parsed.manifest.files.map((file) => file.path), [
+    'bom.csv', 'report.pdf', 'model.glb', 'drawing.dxf'
+  ]);
+});
+
+test('旧版 schema v1 设计包仍可解析且不需要 PLC 扩展字段', () => {
+  const built = buildDesignPackage(sources());
+  assert.equal(Object.hasOwn(built.manifest, 'plc'), false);
+  const parsed = parseDesignPackage(built.zip);
+  assert.equal(parsed.machineContextStatus, 'not-applicable');
+  assert.equal(parsed.requiresExplicitApply, true);
+  assert.equal(parsed.plc, undefined);
+  assert.deepEqual(parsed.manifest.files.map((file) => file.path), ['bom.csv', 'report.pdf', 'model.glb', 'drawing.dxf']);
+});
+
+test('PLC manifest 声明文件缺失时拒绝候选包', () => {
+  const built = buildWithPlc();
+  const zip = new AdmZip(Buffer.from(built.zip));
+  zip.deleteFile('plc/src/OB1_Main.st');
+  assert.throws(() => parseDesignPackage(new Uint8Array(zip.toBuffer())), /缺少 manifest 声明的文件/);
+});
+
+test('PLC 文件内容篡改但未同步 SHA-256 时拒绝候选包', () => {
+  const built = buildWithPlc();
+  const zip = new AdmZip(Buffer.from(built.zip));
+  const entry = zip.getEntry('plc/src/OB1_Main.st');
+  assert.ok(entry);
+  entry.setData(Buffer.from('tampered PLC source\n', 'utf8'));
+  assert.throws(() => parseDesignPackage(new Uint8Array(zip.toBuffer())), /文件长度与 manifest 不一致|文件 SHA-256 与 manifest 不一致/);
+});
+
+test('PLC 单文件超过 1 MiB 上限时在创建 ZIP 前拒绝', () => {
+  const plc = plcPayload();
+  plc.programFiles[0].content = 'x'.repeat(MAX_PLC_FILE_BYTES + 1);
+  assert.throws(() => buildDesignPackage(sources({ plc })), /PLC 文件超过 1 MiB 上限/);
+});
+
+test('PLC 多文件总量超过 8 MiB 上限时拒绝打包', () => {
+  const plc = plcPayload();
+  for (const file of plc.programFiles.slice(0, 9)) file.content = 'x'.repeat(MAX_PLC_FILE_BYTES);
+  assert.throws(() => buildDesignPackage(sources({ plc })), /PLC 程序与 IO mapping 总大小超过 8 MiB 上限/);
+});
+
+test('PLC 路径穿越和 manifest 中的恶意路径均被拒绝', () => {
+  const plc = plcPayload();
+  plc.programFiles[0].path = '../escape.st';
+  assert.throws(() => buildDesignPackage(sources({ plc })), /路径不在白名单中/);
+  const built = buildWithPlc();
+  const malformed = mutateManifest(built.zip, (manifest) => {
+    manifest.plc.programFiles[0].path = '../escape.st';
+  });
+  assert.throws(() => parseDesignPackage(malformed), /路径不合法/);
+});
+
+test('PLC 源文件中疑似明文凭据时拒绝打包', () => {
+  const plc = plcPayload();
+  plc.programFiles[0].content = 'api_key = "example-token-value-12345"';
+  assert.throws(() => buildDesignPackage(sources({ plc })), /疑似包含密钥或凭据/);
+  plc.programFiles[0].content = 'OPENAI_API_KEY = "example-secret-value-12345"';
+  assert.throws(() => buildDesignPackage(sources({ plc })), /疑似包含密钥或凭据/);
+});
+
+test('目的地没有机型上下文时仅解析候选，提供错误 IO mapping 时拒绝应用前校验', () => {
+  const machine = demoMachineConfig();
+  const built = buildWithPlc(machine);
+  const withoutContext = parseDesignPackage(built.zip);
+  assert.equal(withoutContext.machineContextStatus, 'unavailable');
+  assert.equal(withoutContext.requiresExplicitApply, true);
+  const differentIo = demoMachineConfig();
+  differentIo.actuators[0].extendPoint = 'Y999';
+  assert.throws(() => parseDesignPackage(built.zip, differentIo), /机型 IO 不匹配/);
+  const differentMachine = { ...machine, id: 'another-machine' };
+  assert.throws(() => parseDesignPackage(built.zip, differentMachine), /机型 IO 不匹配/);
+});
+
+test('PLC manifest 未知生成版本拒绝解析，不会产生可应用候选', () => {
+  const built = buildWithPlc();
+  const unsupported = mutateManifest(built.zip, (manifest) => {
+    manifest.plc.generatedVersion = '9.9.9';
+  });
+  assert.throws(() => parseDesignPackage(unsupported), /不支持的 PLC generatedVersion/);
 });

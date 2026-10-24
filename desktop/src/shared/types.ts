@@ -3,6 +3,8 @@ export interface CadMeshData {
   positions: Float32Array;
   normals: Float32Array | null;
   indices: Uint32Array | null;
+  /** 运行时工程身份标记；不写入 CAD 来源文件或通用导出数据。 */
+  stableObjectId?: string;
   color?: [number, number, number];
   /** 装配层级路径（根 → 父节点名，不含网格自身名）；STEP/IGES 有层级时才有。 */
   path?: string[];

@@ -77,6 +77,13 @@ const server = http.createServer((req, res) => {
         return send(400, { ok: false, error: 'JSON 解析失败' });
       }
       const instances = Array.isArray(payload.instances) ? payload.instances : null;
+      const allOps = [
+        ...(Array.isArray(payload.ops) ? payload.ops : []),
+        ...(instances ?? []).flatMap((instance) => Array.isArray(instance.ops) ? instance.ops : [])
+      ];
+      if (allOps.some((op) => op && op.op === 'box' && op.length === 999)) {
+        return send(200, { ok: false, error: 'smoke requested deterministic build failure' });
+      }
       const stats = instances && instances.length > 1
         ? {
             volumeMm3: 214487.1,

@@ -121,8 +121,11 @@ function parseMapping(project: GeneratedProjectLike): MappingDocument {
   if (content === null) throw new Error('生成结果文件不存在：mapping.json');
   const raw = JSON.parse(content) as unknown;
   const record = asRecord(raw);
-  if (!record || !Array.isArray(record.points) || !Array.isArray(record.sequence)) {
-    throw new Error('缺少必填参数：mapping.json.points / sequence');
+  if (!record || !Array.isArray(record.points)) {
+    throw new Error('缺少必填参数：mapping.json.points');
+  }
+  if (!Array.isArray(record.sequence)) {
+    throw new Error('缺少必填参数：mapping.json.sequence');
   }
   const points = record.points.map((value, index): MappingPoint => {
     const point = asRecord(value);
@@ -409,6 +412,10 @@ export function simulate(
     if (!alarms.includes(message)) alarms.push(message);
   };
 
+  if (mapping.sequence.length === 0) {
+    addAlarm('EMPTY_SEQUENCE:联调步序为空，无法进行模拟验证');
+  }
+
   const checkSensorConflicts = (): void => {
     for (const model of actuators) {
       if (model.sensors.length < 2) continue;
@@ -670,7 +677,8 @@ export function simulate(
     finalOutputs[point.point] = outputs.get(key) === true;
   }
 
-  const ok = alarms.length === 0 && steps.every((step) => step.ok);
+  // 空序列不能靠 every() 的空集合语义误判为验证通过。
+  const ok = mapping.sequence.length > 0 && alarms.length === 0 && steps.every((step) => step.ok);
   return {
     ok,
     steps,

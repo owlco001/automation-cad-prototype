@@ -31,6 +31,7 @@
 .commission-case-head span{margin-left:auto;font:9px/1 var(--font-mono,monospace);color:#7f8a92}
 .commission-case p{margin:4px 0 7px;color:#7f8a92;font-size:9px;line-height:1.5}
 .commission-case-actions{display:flex;gap:6px}
+.commission-map-warning{margin:6px 0;padding:6px 8px;border:1px solid #655536;border-left:3px solid #e8b84a;border-radius:3px;background:#292720;color:#e8d49b;font-size:9px;line-height:1.55;word-break:break-word}
 .commission-badge{display:inline-flex;align-items:center;padding:1px 5px;border-radius:8px;font:9px/1.4 var(--font-mono,monospace);border:1px solid #414850;color:#8f9aa3}
 .commission-badge.pass{border-color:#2a6b4d;background:#1d3a2d;color:#72d8a9}
 .commission-badge.fail{border-color:#7b3c38;background:#3a2322;color:#ff9b93}

@@ -289,9 +289,11 @@ interface ThreadState {
 - **注入**：`formatThreadContext(previous, currentContext)` 输出完成/失败/拒绝、工程指纹差异、未确认操作与跨轮指代目标；系统提示顺序为 `SYSTEM_PROMPT → [上一轮会话] → [工程上下文] → [最近工具调用]`。
 - **指纹**：`projectFacts` 取机型名、BOM 行数、底板放置数、CAD 模型有/无；`fingerprintChanges` 返回可读差异。变化时固定文案「工程已变化，不要沿用旧结论」。
 - **续跑**：`runPlan(plan, { resumeFrom, previous|thread, currentContext })`，指纹一致时从 `resumeFrom` 起跳过 `completedSteps` 中成功的下标；指纹不同返回 `{refused:true, stale:true, changed[]}` 且不调用 `execute`。`executePlan` 新增 `confirmOutcome: allowed|denied|timeout|aborted|unavailable|error`，区分拒绝与超时。
+- **跨重启计划 checkpoint**：受可选内置模块 `agent.resume`（v1.0.0，模块 API 1，依赖 `core`，能力 `agent.plan.checkpoint` 与 `agent.plan.cross-restart-resume`）控制，默认启用以保持现有行为。checkpoint 独立写入 Electron `userData/agent-plan-checkpoint.json`，使用版本化 schema、原子替换、0600 权限及 SHA-256 完整性校验；只保存计划签名哈希、从 CAD 网格/BOM/机型/底板内容计算的工程摘要哈希、工具名和有限步骤状态，不保存计划输入、参数、结果、对话或凭据；含凭据字段的计划拒绝创建 checkpoint。主进程在每个工具调用前先落盘 `running`，写成功后将写后工程摘要与 `completed` 一并保存；已完成写步骤被保留并跳过，未开始写步骤需用户重新查看并走既有原生确认。崩溃时仍 `running` 或失败的写步骤视为副作用不确定，恢复被拒绝并要求重新规划；只读步骤可在用户点击后安全重试。摘要不可用、schema/签名/工程指纹/游标变化、记录损坏或无法落盘时均 fail-closed。恢复绝不自动续跑；只有旧计划全部完成时，新签名/新工程的独立计划才可替换旧 checkpoint。
+- **恢复模块关闭边界**：模块状态通过可信 preload→主进程同步；主进程的 restore、clear、checkpoint 创建/读写均实时检查开关。关闭时不查询、不创建、不覆盖、不删除磁盘 checkpoint；恢复 UI 与显式跨重启 `resumeFrom` 入口停用，普通计划（包括当前会话内的逐步 `startAt`）、Agent 对话及原生写操作确认不变。重新开启不会执行工具；只能在用户再次输入计划后按原有 schema、签名、强工程指纹、游标和副作用校验展示恢复状态，再由用户显式点击继续。模块状态未知/同步失败按关闭处理。
 - **确认中断**：确认等待被 abort → `pendingConfirm.reason='cancelled'`；确认回调抛超时 → `'timeout'`。用户主动拒绝记 `USER_DENIED`，不写 pending，提示层明确「不要自动重试」。
 - **跨轮指代**：`augmentContextWithThreadReference` 把上一轮 `targetRefs` 合成 `[target=kind:id:label]` 最近操作，`resolveThreadReference` 复用现有三级指代解析；当前选中优先。
-- **IPC**：`agent:plan:execute` 与 `AgentSession` 共享同一个 `AgentThread`；`resumeFrom` / `startAt>0` 进入指纹校验，计划中断后状态留在侧栏。
+- **IPC**：`agent:plan:execute` 与 `AgentSession` 共享同一个 `AgentThread`；模块启用时 `resumeFrom` / `startAt>0` 进入 checkpoint 指纹/游标校验；模块关闭时 `startAt` 仅表达当前会话内逐步执行，不读写 checkpoint。计划中断后不自动调用后续工具。
 - **验证**：`test/agent/thread.test.mjs` 28 条；smoke `SMOKE_AGENT_THREAD_OK turns=3 resume=1 stale=1`；多轮真实模型评测 `scripts/agent-multiturn.mjs` + `agent-multiturn-cases.json`（6 场景，阈值 0.8）。
 
 ## 侧栏只读问答 UI（P7-A-2）

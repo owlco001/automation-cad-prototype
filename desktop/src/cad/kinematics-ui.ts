@@ -31,8 +31,10 @@ export const KINEMATICS_STORAGE_KEY = 'automationcad.kinematics.v1';
 export const KINEMATICS_STORAGE_VERSION = 1;
 
 export interface KinematicsMeshInfo {
-  /** CadViewer 中的稳定索引；不是 STEP 内部 id。 */
+  /** 当前 CadViewer 中的临时索引；不作为跨重导入的身份。 */
   id: number;
+  /** 从源字节、装配路径、名称与几何摘要派生的候选稳定标识；歧义对象不提供此字段。 */
+  stableObjectId?: string;
   name: string;
   triangles: number;
   center: [number, number, number];
@@ -44,6 +46,8 @@ export interface MovingPart {
   name: string;
   meshIds: number[];
   meshNames: string[];
+  /** 与 meshIds 一一对应的稳定 CAD 对象 ID；缺失时不得自动跨导入恢复。 */
+  meshObjectIds?: string[];
   /** 合并后网格的包围盒中心，作为初始位置/旋转枢轴。 */
   center: [number, number, number];
   size: [number, number, number];
@@ -65,8 +69,10 @@ export interface MovingPart {
 }
 
 export interface KinematicsAnnotation {
-  version: 1;
+  version: 1 | 2;
   sourceFile: string;
+  /** v2 必填；将此标注绑定到持久工程身份。 */
+  projectId?: string;
   parts: MovingPart[];
   updatedAt?: string;
 }
@@ -124,7 +130,7 @@ export interface KinematicsStore {
   files(): string[];
 }
 
-type PartOverrides = Partial<Omit<MovingPart, 'meshIds' | 'meshNames' | 'center' | 'size'>>;
+type PartOverrides = Partial<Omit<MovingPart, 'meshIds' | 'meshNames' | 'meshObjectIds' | 'center' | 'size'>>;
 
 let partSerial = 0;
 
@@ -142,6 +148,7 @@ function clonePart(part: MovingPart): MovingPart {
     ...part,
     meshIds: [...part.meshIds],
     meshNames: [...part.meshNames],
+    ...(part.meshObjectIds ? { meshObjectIds: [...part.meshObjectIds] } : {}),
     center: [...part.center] as [number, number, number],
     size: [...part.size] as [number, number, number]
   };
@@ -187,6 +194,7 @@ export function draftFromMesh(mesh: KinematicsMeshInfo, overrides: PartOverrides
     name: overrides.name ?? mesh.name,
     meshIds: [mesh.id],
     meshNames: [mesh.name],
+    ...(mesh.stableObjectId ? { meshObjectIds: [mesh.stableObjectId] } : {}),
     center: [...mesh.center] as [number, number, number],
     size: [...mesh.size] as [number, number, number]
   };
@@ -219,6 +227,9 @@ export function draftFromMeshes(
     ...emptyMovingPart({ ...overrides, name }),
     meshIds: meshes.map((mesh) => mesh.id),
     meshNames: meshes.map((mesh) => mesh.name),
+    ...(meshes.every((mesh) => !!mesh.stableObjectId)
+      ? { meshObjectIds: meshes.map((mesh) => mesh.stableObjectId!) }
+      : {}),
     center,
     size
   };
@@ -277,11 +288,58 @@ export function partToAxis(part: MovingPart): KinematicsAxis {
   };
 }
 
-export function annotationFromParts(sourceFile: string, parts: readonly MovingPart[]): KinematicsAnnotation {
+export function annotationFromParts(sourceFile: string, parts: readonly MovingPart[], projectId?: string): KinematicsAnnotation {
+  const stableBinding = !!projectId && parts.every((part) =>
+    Array.isArray(part.meshObjectIds) && part.meshObjectIds.length === part.meshIds.length
+      && part.meshObjectIds.every((id) => /^cadobj-[a-f0-9]{64}$/.test(id))
+  );
   return {
-    version: 1,
+    version: stableBinding ? 2 : 1,
     sourceFile: sourceFile.trim(),
+    ...(stableBinding ? { projectId } : {}),
     parts: parts.map(clonePart)
+  };
+}
+
+export interface KinematicsRemapResult {
+  ok: boolean;
+  annotation: KinematicsAnnotation | null;
+  reason?: string;
+}
+
+/** Rebind v2 annotation references by stable object ID; legacy index-only data is never auto-applied. */
+export function remapKinematicsAnnotation(
+  annotation: KinematicsAnnotation,
+  projectId: string,
+  meshes: readonly KinematicsMeshInfo[]
+): KinematicsRemapResult {
+  if (annotation.version !== 2 || annotation.projectId !== projectId) {
+    return { ok: false, annotation: null, reason: '运动学标注没有匹配的持久工程 ID 与稳定对象映射' };
+  }
+  const indexByObjectId = new Map<string, number>();
+  const duplicates = new Set<string>();
+  for (const mesh of meshes) {
+    const id = mesh.stableObjectId;
+    if (!id) continue;
+    if (indexByObjectId.has(id)) duplicates.add(id);
+    else indexByObjectId.set(id, mesh.id);
+  }
+  if (duplicates.size > 0) for (const id of duplicates) indexByObjectId.delete(id);
+  const remapped: MovingPart[] = [];
+  for (const part of annotation.parts) {
+    const objectIds = part.meshObjectIds;
+    if (!objectIds || objectIds.length === 0 || objectIds.length !== part.meshIds.length) {
+      return { ok: false, annotation: null, reason: `动件「${part.name}」缺少完整稳定对象映射` };
+    }
+    const nextIds = objectIds.map((id) => indexByObjectId.get(id));
+    if (nextIds.some((id) => id === undefined)) {
+      return { ok: false, annotation: null, reason: `动件「${part.name}」引用的 CAD 对象缺失或存在歧义` };
+    }
+    remapped.push({ ...clonePart(part), meshIds: nextIds as number[] });
+  }
+  return {
+    ok: true,
+    annotation: { ...annotation, sourceFile: annotation.sourceFile, projectId, parts: remapped }
   };
 }
 
@@ -392,15 +450,25 @@ export function applySlide(part: MovingPart, percent: number): SlidePose {
 }
 
 export function serializeAnnotation(annotation: KinematicsAnnotation): string {
+  if (annotation.version === 2) {
+    if (!annotation.projectId || !/^acproj-[0-9a-f-]{36}$/i.test(annotation.projectId)) {
+      throw new Error('运动学标注 v2 缺少有效 projectId');
+    }
+    if (annotation.parts.some((part) => !part.meshObjectIds || part.meshObjectIds.length !== part.meshIds.length)) {
+      throw new Error('运动学标注 v2 缺少完整稳定对象映射');
+    }
+  }
   return `${JSON.stringify(
     {
-      version: 1,
+      version: annotation.version,
       sourceFile: annotation.sourceFile,
+      ...(annotation.version === 2 ? { projectId: annotation.projectId } : {}),
       parts: annotation.parts.map((part) => ({
         id: part.id,
         name: part.name,
         meshIds: [...part.meshIds],
         meshNames: [...part.meshNames],
+        ...(annotation.version === 2 ? { meshObjectIds: [...(part.meshObjectIds ?? [])] } : {}),
         center: [...part.center],
         size: [...part.size],
         kind: part.kind,
@@ -433,8 +501,11 @@ export function deserializeAnnotation(text: string): AnnotationParseResult {
   }
   const record = raw as Record<string, unknown>;
   const issues: KinematicsIssue[] = [];
-  if (record.version !== 1) {
-    issues.push({ code: 'json.version', level: 'error', message: '运动学标注 version 必须为 1' });
+  if (record.version !== 1 && record.version !== 2) {
+    issues.push({ code: 'json.version', level: 'error', message: '运动学标注 version 必须为 1 或 2' });
+  }
+  if (record.version === 2 && (typeof record.projectId !== 'string' || !/^acproj-[0-9a-f-]{36}$/i.test(record.projectId))) {
+    issues.push({ code: 'json.projectId', level: 'error', message: '运动学标注 v2 缺少有效 projectId' });
   }
   if (typeof record.sourceFile !== 'string') {
     issues.push({ code: 'json.sourceFile', level: 'error', message: '缺少必填参数：sourceFile' });
@@ -466,6 +537,14 @@ export function deserializeAnnotation(text: string): AnnotationParseResult {
     if (!Array.isArray(rawPart.meshIds) || meshIds.length === 0) {
       issues.push({ code: 'part.meshIds', level: 'error', message: `缺少必填参数：动件「${name || index + 1}」的 meshIds` });
     }
+    const meshObjectIds = Array.isArray(rawPart.meshObjectIds)
+      ? rawPart.meshObjectIds.filter((id): id is string => typeof id === 'string' && /^cadobj-[a-f0-9]{64}$/.test(id))
+      : [];
+    if (record.version === 2 && (!Array.isArray(rawPart.meshObjectIds)
+      || meshObjectIds.length !== meshIds.length
+      || meshObjectIds.length === 0)) {
+      issues.push({ code: 'part.meshObjectIds', level: 'error', message: `运动学标注 v2 的动件「${name || index + 1}」缺少完整稳定对象 ID` });
+    }
     const direction = rawPart.direction === -1 ? -1 : 1;
     const role = rawPart.role;
     parts.push({
@@ -475,6 +554,7 @@ export function deserializeAnnotation(text: string): AnnotationParseResult {
       meshNames: Array.isArray(rawPart.meshNames)
         ? rawPart.meshNames.filter((entry): entry is string => typeof entry === 'string')
         : [],
+      ...(record.version === 2 ? { meshObjectIds } : {}),
       center: asVec3(rawPart.center),
       size: asVec3(rawPart.size),
       kind: kind === 'rotary' ? 'rotary' : 'linear',
@@ -489,8 +569,9 @@ export function deserializeAnnotation(text: string): AnnotationParseResult {
     });
   });
   const annotation: KinematicsAnnotation = {
-    version: 1,
+    version: record.version === 2 ? 2 : 1,
     sourceFile: typeof record.sourceFile === 'string' ? record.sourceFile : '',
+    ...(record.version === 2 && typeof record.projectId === 'string' ? { projectId: record.projectId } : {}),
     parts
   };
   return { ok: issues.length === 0, annotation, issues };
@@ -533,13 +614,26 @@ export function createKinematicsStore(storage: StorageLike): KinematicsStore {
       if (!key) return null;
       const entry = readBucket(storage).files[key];
       if (!entry || !Array.isArray(entry.parts)) return null;
-      return { ...entry, version: 1, sourceFile: key, parts: entry.parts.map(clonePart) };
+      const version = entry.version === 2 ? 2 : 1;
+      return {
+        ...entry,
+        version,
+        sourceFile: typeof entry.sourceFile === 'string' ? entry.sourceFile : key,
+        ...(version === 2 && typeof entry.projectId === 'string' ? { projectId: entry.projectId } : {}),
+        parts: entry.parts.map(clonePart)
+      };
     },
     set(sourceFile: string, annotation: KinematicsAnnotation): void {
       const key = fileKey(sourceFile);
       if (!key) throw new Error('保存运动学标注前需要先导入 CAD 文件');
       const bucket = readBucket(storage);
-      bucket.files[key] = { ...annotation, version: 1, sourceFile: key, parts: annotation.parts.map(clonePart) };
+      bucket.files[key] = {
+        ...annotation,
+        version: annotation.version,
+        sourceFile: annotation.sourceFile,
+        ...(annotation.version === 2 ? { projectId: annotation.projectId } : {}),
+        parts: annotation.parts.map(clonePart)
+      };
       storage.setItem(KINEMATICS_STORAGE_KEY, JSON.stringify(bucket));
     },
     remove(sourceFile: string): void {
@@ -584,7 +678,7 @@ export interface KinematicsUiHandle {
   open(): void;
   close(): void;
   isOpen(): boolean;
-  setSource(sourceFile: string, meshes: readonly KinematicsMeshInfo[]): void;
+  setSource(sourceFile: string, meshes: readonly KinematicsMeshInfo[], projectId?: string, projectStorageKey?: string): void;
   getAnnotation(): KinematicsAnnotation;
   getValidation(): DraftValidation;
   addMovingPart(meshIds: readonly number[], name?: string): string;
@@ -641,6 +735,8 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
   const store = storage ? createKinematicsStore(storage) : null;
   const { container, viewer } = options;
   let sourceFile = '';
+  let projectId = '';
+  let storageKey = '';
   let meshes: KinematicsMeshInfo[] = [];
   let parts: MovingPart[] = [];
   let selected = new Set<number>();
@@ -728,10 +824,10 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
 
   const pointOptions = (): readonly KinematicsPointOption[] => options.getPointOptions();
 
-  const annotation = (): KinematicsAnnotation =>
-    annotationFromParts(sourceFile, parts).parts.length > 0
-      ? { ...annotationFromParts(sourceFile, parts), updatedAt: new Date().toISOString() }
-      : annotationFromParts(sourceFile, parts);
+  const annotation = (): KinematicsAnnotation => {
+    const current = annotationFromParts(sourceFile, parts, projectId || undefined);
+    return current.parts.length > 0 ? { ...current, updatedAt: new Date().toISOString() } : current;
+  };
 
   const emit = (): void => {
     options.onChange?.(annotation(), validation);
@@ -1016,7 +1112,7 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
       return false;
     }
     try {
-      store.set(sourceFile, annotation());
+      store.set(storageKey || sourceFile, annotation());
       notify(`运动学标注已保存：${sourceFile}`);
       emit();
       return true;
@@ -1086,11 +1182,20 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
         notify(parsed.issues[0]?.message ?? '导入失败', true);
         return;
       }
-      parts = parsed.annotation.parts;
-      sourceFile = parsed.annotation.sourceFile || sourceFile;
+      if (!projectId || parsed.annotation.version !== 2) {
+        notify('旧版运动学 JSON 仅含导入索引，无法安全绑定到当前 CAD；候选未应用，原状态未改动。', true);
+        return;
+      }
+      const remapped = remapKinematicsAnnotation(parsed.annotation, projectId, meshes);
+      if (!remapped.ok || !remapped.annotation) {
+        notify(`运动学候选未应用：${remapped.reason ?? '稳定对象映射失败'}`, true);
+        return;
+      }
+      parts = remapped.annotation.parts;
+      sourceFile = remapped.annotation.sourceFile || sourceFile;
       slides.clear();
       renderAll();
-      notify(`已导入 ${parts.length} 个动件`);
+      notify(`已导入 ${parts.length} 个动件；稳定对象映射已校验`);
     });
   });
 
@@ -1159,8 +1264,10 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
     isOpen(): boolean {
       return !container.hidden;
     },
-    setSource(nextSourceFile: string, nextMeshes: readonly KinematicsMeshInfo[]): void {
+    setSource(nextSourceFile: string, nextMeshes: readonly KinematicsMeshInfo[], nextProjectId?: string, nextStorageKey?: string): void {
       sourceFile = nextSourceFile.trim();
+      projectId = nextProjectId?.trim() ?? '';
+      storageKey = nextStorageKey?.trim() || projectId || `session:${Date.now()}:${Math.random().toString(36).slice(2)}`;
       meshes = nextMeshes.map((mesh) => ({
         ...mesh,
         center: [...mesh.center] as [number, number, number],
@@ -1168,8 +1275,17 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
       }));
       selected = new Set();
       slides.clear();
-      const saved = store?.get(sourceFile) ?? null;
-      parts = saved ? saved.parts.map(clonePart) : [];
+      const saved = store?.get(storageKey) ?? null;
+      if (!saved) {
+        parts = [];
+      } else if (saved.version === 2 && saved.projectId === projectId) {
+        const remapped = remapKinematicsAnnotation(saved, projectId, meshes);
+        parts = remapped.ok && remapped.annotation ? remapped.annotation.parts.map(clonePart) : [];
+        if (!remapped.ok) notify(`未自动恢复运动学标注：${remapped.reason ?? '稳定对象映射失败'}。本地候选仍保留。`, true);
+      } else {
+        parts = [];
+        notify('检测到旧版索引式运动学数据；为避免网格错绑，未自动恢复，原始本地记录仍保留。', true);
+      }
       suggestResult = emptySuggest();
       if (options.getGeometry && meshes.length > 0) {
         try {

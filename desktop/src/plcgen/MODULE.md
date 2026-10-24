@@ -22,7 +22,7 @@
 | `view-model.ts` | 面板纯数据层：文件树、200 行预览、按钮禁用、问题定位、统计文案、复制包 |
 | `export.ts` | `planPlcExportDirectory`：`<机型>-<yyyyMMdd-HHmm>`、同名 `-2` 递增，复用 `src/shared/filename.ts` |
 | `history.ts` | 最近 10 次历史：按 inputHash 去重、新→旧、解析/合并纯函数 |
-| `ui.ts` | 电气域顶栏「PLC 程序」全屏面板；预检 / 生成 / 模拟验证 / 导出；`window.__PlcGenPanel` 供冒烟与命令式调用 |
+| `ui.ts` | 电气域顶栏「PLC 程序」全屏面板；预检 / 生成 / 模拟验证 / 导出；`window.__PlcGenPanel` 供冒烟与命令式调用；作为首个 `plcgen` 可选模块，关闭时隐藏入口、关闭面板并拦截命令式调用 |
 | `plcgen.css` | 面板样式（三栏：配置/预检、文件树、预览；底部历史与操作） |
 
 ## 关键约定
@@ -40,6 +40,7 @@
 11. **模拟器只认 mapping**：`simulate` 从 `mapping.json` 的 `points/sequence` 取点位映射与 `timeoutMs`，不解析任意 ST，也不产生真实 IO。
 12. **模拟是纯函数**：使用虚拟时钟与 `timeScale`，不读墙钟；超时/`SafeStop` 后当前步失败、后续步记为跳过，重复调用结果一致。
 13. **验证不落盘**：`verifyGenerated` / Agent 工具 `verify_plc_program` 只返回摘要，不写 zip、不写历史、不连接 PLC。
+14. **模块关闭不清数据**：模块状态由 `src/modules/registry.ts` 管理，缺省开启以兼容旧体验；关闭不删除机型配置、PLC 项目数据、生成历史或已导出文件，不做热卸载。面板、Agent `verify_plc_program` / `run_plc_generate`（包括 JSON-RPC/MCP）、本地 PLC 文件生成/导出、`plcgen:recordHistory` 和 `plcgen:export` IPC 共用 `plcgen` 门禁；关闭后动态隐藏工具并在写入/生成前拒绝旧名称或底层直调。智慧工厂同步包中的 PLC 源码与 IO mapping 另受 `factory.plc-sync` 门禁，只有两个模块都启用时才生成和上传同步扩展；关闭同步扩展不影响本地 PLC 生成/导出。历史读取和打开已有导出目录保留，以便访问旧数据。
 
 ## 进度与验证
 

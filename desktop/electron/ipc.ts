@@ -1,5 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain, shell, type OpenDialogOptions } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell, type OpenDialogOptions, type WebContents } from 'electron';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { PackRegistry } from '../src/packs/registry';
 import { FactoryManager } from '../src/factory/manager.ts';
@@ -7,8 +8,9 @@ import type { TagValue } from '../src/factory/types.ts';
 import { PlcManager } from '../src/plc/manager.ts';
 import { SyncClient } from '../src/sync/client.ts';
 import { mergeSyncConfig, publicSyncConfig, readSyncConfig, writeSyncConfig } from '../src/sync/config.ts';
-import { buildDesignPackage } from '../src/sync/package.ts';
-import type { DesignBomRow, SyncConfig, SyncUploadPayload } from '../src/sync/types.ts';
+import { buildDesignPackage, parseDesignPackage } from '../src/sync/package.ts';
+import { validateMachineConfig } from '../src/commission/machine-config.ts';
+import type { DesignBomRow, SyncConfig, SyncPlcUploadPayload, SyncUploadPayload } from '../src/sync/types.ts';
 import {
   EXPORT_EXTENSIONS,
   assertAllowedTargetPath,
@@ -20,15 +22,40 @@ import { assertCadFileSize } from '../src/shared/input-limits.ts';
 import { recordDiagnosticError, setDiagnosticOperation } from '../src/shared/diagnostics.ts';
 import { isUsablePricebookItem, validatePricebook } from '../src/cost/pricebook.ts';
 import { CostExportError, planExportName } from '../src/cost/export.ts';
+import { costEstimationDisabledResult } from '../src/modules/cost-estimation-gate.ts';
 import type { AgentTools } from '../src/agent/tools.ts';
 import type { CommandBus } from '../src/agent/commands.ts';
+import {
+  AGENT_RESUME_DISABLED_MESSAGE,
+  isAgentResumeEnabled
+} from '../src/modules/agent-resume-gate.ts';
+import {
+  isParametricImportEnabled,
+  parametricModuleDisabledBuildResult,
+  parametricModuleDisabledStatus
+} from '../src/modules/parametric-gate.ts';
 import { mergeLlmConfig, readLlmConfig, publicLlmConfig, saveLlmConfig } from '../src/agent/llm-config.ts';
 import { OpenAiCompatibleClient, testLlmConnection } from '../src/agent/llm.ts';
 import { AgentCancelledError, AgentSession, emptyAgentUsage } from '../src/agent/session.ts';
 import { BYPASS_CONFIRMATION_NOTICE } from '../src/agent/policy.ts';
 import { collectAgentContext } from '../src/agent/context.ts';
 import type { AgentPlan, PlanStep } from '../src/agent/planner.ts';
-import { AgentThread, runPlan } from '../src/agent/thread.ts';
+import { READ_ONLY_TOOLS } from '../src/agent/router.ts';
+import { AgentThread, planSignature, projectFingerprint, runPlan, type ThreadState } from '../src/agent/thread.ts';
+import {
+  clearPlanCheckpoint,
+  createPlanCheckpoint,
+  inspectPlanCheckpoint,
+  isPlanCheckpointFullyCompleted,
+  isProjectFingerprint,
+  loadPlanCheckpoint,
+  planCheckpointSignature,
+  savePlanCheckpoint,
+  updatePlanCheckpoint,
+  updatePlanCheckpointFingerprint,
+  type PlanCheckpoint,
+  type PlanCheckpointStepState
+} from '../src/agent/plan-checkpoint.ts';
 import { runRecipe, type RecipeContext, type RecipeProgressEvent } from '../src/agent/recipes.ts';
 import { createAuditLog, summarizeAudit } from '../src/agent/audit.ts';
 import { createAuditFileWriter, loadAuditRetention, readAuditEntries } from '../src/agent/audit-store.ts';
@@ -38,6 +65,11 @@ import type { AgentProgressEvent } from '../src/agent/feedback.ts';
 import type { FeatureDoc } from '../src/parametric/features.ts';
 import type { ParametricManager, ParametricStartInfo } from './parametric.ts';
 import { createZip, normalizeZipPath, type ZipEntry } from '../src/shared/zip.ts';
+import {
+  exportSelectedCadAsPortableArchive,
+  previewSelectedPortableArchive,
+  writePortableArchiveExclusively
+} from '../src/project-archive/desktop.ts';
 import { planPlcExportDirectory } from '../src/plcgen/export.ts';
 import { readActiveMachineDesign } from '../src/machine/store.ts';
 import { buildMachineIoMap } from '../src/machine/io-map.ts';
@@ -57,7 +89,22 @@ export interface IpcContext {
   syncConfigFile: string;
   version: string;
   getAgentInfo(): unknown;
+  isMainWindowSender(sender: WebContents): boolean;
   getParametric(): ParametricManager | null;
+  isParametricImportEnabled(): boolean;
+  setParametricImportEnabled(enabled: boolean): void;
+  isPlcgenEnabled(): boolean;
+  setPlcgenEnabled(enabled: boolean): void;
+  isFactoryPlcSyncEnabled(): boolean;
+  setFactoryPlcSyncEnabled(enabled: boolean): void;
+  isAgentResumeEnabled(): boolean;
+  setAgentResumeEnabled(enabled: boolean): void;
+  isProjectPortableEnabled(): boolean;
+  setProjectPortableEnabled(enabled: boolean): void;
+  isCostEstimationEnabled(): boolean;
+  setCostEstimationEnabled(enabled: boolean): void;
+  setElecValidationEnabled(enabled: boolean): void;
+  setSystemUpdateEnabled(enabled: boolean): void;
 }
 
 export interface AgentChatIpcContext {
@@ -65,6 +112,7 @@ export interface AgentChatIpcContext {
   getTools(): AgentTools | null;
   getBus(): CommandBus | null;
   getWindow(): BrowserWindow | null;
+  isAgentResumeEnabled(): boolean;
 }
 
 export { CAD_EXTENSIONS } from '../src/shared/cad';
@@ -141,6 +189,49 @@ async function exportReport(payload: unknown): Promise<{ path: string; htmlPath:
   return { path: pdfPath, htmlPath };
 }
 
+async function exportCostPanelPdf(
+  payload: unknown,
+  isEnabled: () => boolean
+): Promise<{ ok: true; path: string; htmlPath: string } | { ok: false; code: string; message: string }> {
+  if (!isEnabled()) return costEstimationDisabledResult();
+  const source = typeof payload === 'object' && payload !== null ? payload as Record<string, unknown> : null;
+  if (typeof source?.html !== 'string' || !source.html.trim()) {
+    return { ok: false, code: 'INVALID_ARGUMENT', message: '报告 HTML 不能为空' };
+  }
+
+  const staging = mkdtempSync(join(tmpdir(), 'automationcad-cost-panel-'));
+  try {
+    const page = typeof source.page === 'object' && source.page !== null ? source.page as Record<string, unknown> : {};
+    const { pdf } = await printHtmlToPdf(source.html, {
+      size: page.size === 'A4' ? 'A4' : 'A3',
+      landscape: page.landscape === undefined ? true : page.landscape === true
+    }, staging);
+    if (!isEnabled()) return costEstimationDisabledResult();
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const exportsRoot = join(app.getPath('userData'), 'exports');
+    mkdirSync(exportsRoot, { recursive: true });
+    const directory = mkdtempSync(join(exportsRoot, `${timestamp}-cost-panel-`));
+    if (!isEnabled()) {
+      rmSync(directory, { recursive: true, force: true });
+      return costEstimationDisabledResult();
+    }
+    const htmlPath = join(directory, 'report.html');
+    const pdfPath = join(directory, 'report.pdf');
+    writeFileSync(htmlPath, source.html, 'utf8');
+    if (!isEnabled()) {
+      rmSync(directory, { recursive: true, force: true });
+      return costEstimationDisabledResult();
+    }
+    writeFileSync(pdfPath, pdf);
+    return { ok: true, path: pdfPath, htmlPath };
+  } catch (error) {
+    return { ok: false, code: 'WRITE_FAILED', message: error instanceof Error ? error.message : String(error) };
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
+  }
+}
+
 /** Agent 导出 PDF：复用 A4 打印管线，返回字节；临时目录用完即删。 */
 export async function renderCostReportPdf(html: string): Promise<Uint8Array> {
   const root = join(app.getPath('userData'), 'exports');
@@ -169,6 +260,35 @@ export async function renderAssemblyReportPdf(html: string): Promise<Uint8Array>
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseCheckpointPlan(value: unknown, tools: AgentTools): AgentPlan {
+  if (!isRecord(value) || !Array.isArray(value.steps) || value.steps.length < 1 || value.steps.length > 200) {
+    throw new Error('恢复计划步骤结构无效');
+  }
+  const steps = value.steps.map((entry, index): PlanStep => {
+    if (!isRecord(entry) || typeof entry.tool !== 'string' || !entry.tool.trim()) {
+      throw new Error(`恢复计划第 ${index + 1} 步无效`);
+    }
+    const tool = entry.tool.trim();
+    if (!tools.has(tool)) throw new Error(`恢复计划第 ${index + 1} 步工具未注册：${tool}`);
+    if (entry.args !== undefined && !isRecord(entry.args)) throw new Error(`恢复计划第 ${index + 1} 步参数无效`);
+    const missing = Array.isArray(entry.missing)
+      ? entry.missing.filter((item): item is string => typeof item === 'string')
+      : [];
+    return {
+      tool,
+      args: isRecord(entry.args) ? { ...entry.args } : {},
+      why: typeof entry.why === 'string' ? entry.why : '',
+      // 副作用分类始终来自主进程工具表，不采信 renderer 的 readOnly 布尔值。
+      readOnly: READ_ONLY_TOOLS.has(tool),
+      ...(missing.length > 0 ? { missing } : {})
+    };
+  });
+  return {
+    steps,
+    confidence: typeof value.confidence === 'number' && Number.isFinite(value.confidence) ? value.confidence : 0
+  };
 }
 
 function costExportFailure(error: unknown): { ok: false; code: string; message: string } {
@@ -214,6 +334,29 @@ function syncBom(value: unknown): DesignBomRow[] {
   });
 }
 
+function parseSyncPlcPayload(value: unknown): SyncPlcUploadPayload {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('PLC 同步数据必须是对象');
+  const source = value as Record<string, unknown>;
+  if (typeof source.target !== 'string') throw new Error('PLC target 必须是字符串');
+  if (typeof source.generatedVersion !== 'string') throw new Error('PLC generatedVersion 必须是字符串');
+  if (typeof source.machineId !== 'string') throw new Error('PLC machineId 必须是字符串');
+  if (!Array.isArray(source.programFiles)) throw new Error('PLC programFiles 必须是数组');
+  const programFiles = source.programFiles.map((entry, index) => {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) throw new Error(`PLC programFiles[${index}] 必须是对象`);
+    const file = entry as Record<string, unknown>;
+    if (typeof file.path !== 'string' || typeof file.content !== 'string') throw new Error(`PLC programFiles[${index}] 缺少 path/content`);
+    return { path: file.path, content: file.content };
+  });
+  if (typeof source.mappingCsv !== 'string') throw new Error('PLC mappingCsv 必须是字符串');
+  return {
+    target: source.target as SyncPlcUploadPayload['target'],
+    generatedVersion: source.generatedVersion,
+    machineId: source.machineId,
+    programFiles,
+    mappingCsv: source.mappingCsv
+  };
+}
+
 function parseSyncPayload(value: unknown): SyncUploadPayload {
   if (typeof value !== 'object' || value === null) throw new Error('同步数据必须是对象');
   const source = value as Record<string, unknown>;
@@ -223,7 +366,8 @@ function parseSyncPayload(value: unknown): SyncUploadPayload {
     reportHtml: syncText(source.reportHtml, '报告 HTML'),
     glb: syncBytes(source.glb, 'model.glb'),
     dxf: typeof source.dxf === 'string' ? source.dxf : syncBytes(source.dxf, 'drawing.dxf'),
-    bom: syncBom(source.bom)
+    bom: syncBom(source.bom),
+    ...(source.plc === undefined ? {} : { plc: parseSyncPlcPayload(source.plc) })
   };
 }
 
@@ -314,6 +458,99 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
     platform: process.platform
   }));
 
+  ipcMain.on('modules:sync-plcgen-enabled', (event, enabled: unknown) => {
+    const trustedWindow = BrowserWindow.getAllWindows().some((window) =>
+      !window.isDestroyed() && window.webContents === event.sender
+    );
+    if (!trustedWindow || typeof enabled !== 'boolean') {
+      event.returnValue = false;
+      return;
+    }
+    context.setPlcgenEnabled(enabled);
+    event.returnValue = true;
+  });
+
+  ipcMain.on('modules:sync-elec-validation-enabled', (event, enabled: unknown) => {
+    const frame = event.senderFrame;
+    const trustedMainFrame = Boolean(frame && frame === event.sender.mainFrame && frame.url.startsWith('file://'));
+    if (!context.isMainWindowSender(event.sender) || !trustedMainFrame || typeof enabled !== 'boolean') {
+      event.returnValue = false;
+      return;
+    }
+    context.setElecValidationEnabled(enabled);
+    event.returnValue = true;
+  });
+
+  ipcMain.on('modules:sync-cost-estimation-enabled', (event, enabled: unknown) => {
+    const frame = event.senderFrame;
+    const trustedMainFrame = Boolean(frame && frame === event.sender.mainFrame && frame.url.startsWith('file://'));
+    if (!context.isMainWindowSender(event.sender) || !trustedMainFrame || typeof enabled !== 'boolean') {
+      event.returnValue = false;
+      return;
+    }
+    context.setCostEstimationEnabled(enabled);
+    event.returnValue = true;
+  });
+
+  ipcMain.on('modules:sync-factory-plc-sync-enabled', (event, enabled: unknown) => {
+    const trustedWindow = BrowserWindow.getAllWindows().some((window) =>
+      !window.isDestroyed() && window.webContents === event.sender
+    );
+    if (!trustedWindow || typeof enabled !== 'boolean') {
+      event.returnValue = false;
+      return;
+    }
+    context.setFactoryPlcSyncEnabled(enabled);
+    event.returnValue = true;
+  });
+
+  ipcMain.on('modules:sync-cad-parametric-import-enabled', (event, enabled: unknown) => {
+    const trustedWindow = BrowserWindow.getAllWindows().some((window) =>
+      !window.isDestroyed() && window.webContents === event.sender
+    );
+    if (!trustedWindow || typeof enabled !== 'boolean') {
+      event.returnValue = false;
+      return;
+    }
+    context.setParametricImportEnabled(enabled);
+    event.returnValue = true;
+  });
+
+  ipcMain.on('modules:sync-agent-resume-enabled', (event, enabled: unknown) => {
+    const trustedWindow = BrowserWindow.getAllWindows().some((window) =>
+      !window.isDestroyed() && window.webContents === event.sender
+    );
+    if (!trustedWindow || typeof enabled !== 'boolean') {
+      event.returnValue = false;
+      return;
+    }
+    context.setAgentResumeEnabled(enabled);
+    event.returnValue = true;
+  });
+
+  ipcMain.on('modules:sync-project-portable-enabled', (event, enabled: unknown) => {
+    const trustedWindow = BrowserWindow.getAllWindows().some((window) =>
+      !window.isDestroyed() && window.webContents === event.sender
+    );
+    if (!trustedWindow || typeof enabled !== 'boolean') {
+      event.returnValue = false;
+      return;
+    }
+    context.setProjectPortableEnabled(enabled);
+    event.returnValue = true;
+  });
+
+  ipcMain.on('modules:sync-system-update-enabled', (event, enabled: unknown) => {
+    const frame = event.senderFrame;
+    const trustedMainFrame = Boolean(frame && frame === event.sender.mainFrame && frame.url.startsWith('file://'));
+    if (!context.isMainWindowSender(event.sender) || !trustedMainFrame || typeof enabled !== 'boolean') {
+      event.returnValue = false;
+      return;
+    }
+    context.setSystemUpdateEnabled(enabled);
+    event.returnValue = true;
+  });
+
   ipcMain.handle('export:saveFile', async (_event, name: unknown, data: unknown) => {
     const validated = validateExportFileName(name);
     const content = exportPayload(data);
@@ -336,11 +573,109 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
     return { canceled: false, path: target };
   });
 
+  const chooseProjectArchiveOpenFile = async (
+    title: string,
+    filters: NonNullable<OpenDialogOptions['filters']>
+  ): Promise<{ canceled: true } | { canceled: false; path: string }> => {
+    const options: OpenDialogOptions = { title, properties: ['openFile'], filters };
+    const window = BrowserWindow.getFocusedWindow();
+    const result = window
+      ? await dialog.showOpenDialog(window, options)
+      : await dialog.showOpenDialog(options);
+    const path = result.filePaths[0];
+    return result.canceled || !path ? { canceled: true } : { canceled: false, path };
+  };
+
+  const createProjectArchiveDependencies = () => ({
+    isEnabled: context.isProjectPortableEnabled,
+    chooseCadFile: () => chooseProjectArchiveOpenFile('选择要收录的 CAD 原件', [
+      { name: '支持的单文件 CAD', extensions: ['step', 'stp', 'iges', 'igs', 'brep', 'stl', 'glb'] },
+      { name: '所有文件', extensions: ['*'] }
+    ]),
+    chooseArchiveDestination: async (suggestedName: string) => {
+      const options = {
+        title: '保存 CAD 原件工程档案',
+        defaultPath: suggestedName,
+        filters: [{ name: 'AutomationCAD 工程档案', extensions: ['acproj'] }]
+      };
+      const window = BrowserWindow.getFocusedWindow();
+      const result = window
+        ? await dialog.showSaveDialog(window, options)
+        : await dialog.showSaveDialog(options);
+      return result.canceled || !result.filePath
+        ? { canceled: true as const }
+        : { canceled: false as const, path: result.filePath };
+    },
+    chooseArchiveFile: () => chooseProjectArchiveOpenFile('选择要校验与预览的工程档案', [
+      { name: 'AutomationCAD 工程档案', extensions: ['acproj'] },
+      { name: '所有文件', extensions: ['*'] }
+    ]),
+    statFile: (path: string) => {
+      if (!existsSync(path)) return { isFile: false, size: 0 };
+      const info = statSync(path);
+      return { isFile: info.isFile(), size: info.size };
+    },
+    readFile: (path: string) => readFileSync(path),
+    writeFileExclusive: writePortableArchiveExclusively,
+    appVersion: context.version
+  });
+
+  ipcMain.handle('project-archive:export', async (event, snapshot: unknown) => {
+    const trustedWindow = BrowserWindow.getAllWindows().some((window) =>
+      !window.isDestroyed() && window.webContents === event.sender
+    );
+    if (!trustedWindow) return { ok: false, code: 'FAILED', message: '拒绝非应用窗口的工程档案请求。' };
+    return await exportSelectedCadAsPortableArchive(createProjectArchiveDependencies(), snapshot);
+  });
+
+  ipcMain.handle('project-archive:preview', async (event) => {
+    const trustedWindow = BrowserWindow.getAllWindows().some((window) =>
+      !window.isDestroyed() && window.webContents === event.sender
+    );
+    if (!trustedWindow) return { ok: false, code: 'FAILED', message: '拒绝非应用窗口的工程档案请求。' };
+    return await previewSelectedPortableArchive(createProjectArchiveDependencies());
+  });
+
   ipcMain.handle('export:report', async (_event, payload: unknown) => await exportReport(payload));
+
+  ipcMain.handle('cost:exportPanelPdf', async (_event, payload: unknown) =>
+    await exportCostPanelPdf(payload, context.isCostEstimationEnabled));
+
+  ipcMain.handle('cost:exportPanelCsv', async (event, payload: unknown) => {
+    if (!context.isCostEstimationEnabled()) return costEstimationDisabledResult();
+    const trustedMainFrame = Boolean(event.senderFrame && event.senderFrame === event.sender.mainFrame && event.senderFrame.url.startsWith('file://'));
+    if (!context.isMainWindowSender(event.sender) || !trustedMainFrame) {
+      return { ok: false, code: 'FORBIDDEN', message: '拒绝非应用窗口的成本报告请求。' };
+    }
+    try {
+      if (!isRecord(payload) || typeof payload.name !== 'string' || typeof payload.data !== 'string' || !payload.data) {
+        return { ok: false, code: 'INVALID_ARGUMENT', message: 'CSV 导出参数不合法或内容为空。' };
+      }
+      const validated = validateExportFileName(payload.name);
+      const window = BrowserWindow.fromWebContents(event.sender);
+      const options = {
+        title: '导出成本明细 CSV',
+        defaultPath: validated.name,
+        filters: [{ name: 'CSV 文件', extensions: ['csv'] }, { name: '所有文件', extensions: ['*'] }]
+      };
+      const result = window
+        ? await dialog.showSaveDialog(window, options)
+        : await dialog.showSaveDialog(options);
+      if (result.canceled || !result.filePath) return { canceled: true, path: null };
+      if (!context.isCostEstimationEnabled()) return costEstimationDisabledResult();
+      const target = ensureExportExtension(result.filePath, '.csv');
+      assertAllowedTargetPath(target);
+      writeFileSync(target, payload.data, 'utf8');
+      return { ok: true, canceled: false, path: target };
+    } catch (error) {
+      return { ok: false, code: 'WRITE_FAILED', message: `成本报告写入失败：${error instanceof Error ? error.message : String(error)}` };
+    }
+  });
 
   // Agent 成本报告落盘：目录固定 userData/exports，不接受调用方传入路径，也不弹系统对话框。
   ipcMain.handle('export:costFile', async (_event, payload: unknown) => {
     try {
+      if (!context.isCostEstimationEnabled()) return costEstimationDisabledResult();
       if (!isRecord(payload)) throw new Error('导出参数必须是对象');
       const format = payload.format;
       if (format !== 'pdf' && format !== 'csv') {
@@ -377,6 +712,9 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
   ipcMain.handle('plcgen:history', () => readPlcGenHistory());
 
   ipcMain.handle('plcgen:recordHistory', (_event, value: unknown) => {
+    if (!context.isPlcgenEnabled()) {
+      return { ok: false, code: 'MODULE_DISABLED', message: 'PLC 模块当前已关闭，已拒绝写入生成历史。' };
+    }
     const entry = normalizeHistoryEntry(value);
     if (!entry) throw new Error('PLC 生成历史条目格式不合法');
     const next = parsePlcHistory(mergePlcHistory(readPlcGenHistory(), entry));
@@ -385,6 +723,9 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
   });
 
   ipcMain.handle('plcgen:export', (_event, payload: unknown) => {
+    if (!context.isPlcgenEnabled()) {
+      return { ok: false, code: 'MODULE_DISABLED', message: 'PLC 模块当前已关闭，已拒绝导出文件。' };
+    }
     try {
       if (!isRecord(payload)) throw new Error('PLC 导出参数必须是对象');
       const files = plcExportFiles(payload.files);
@@ -473,6 +814,7 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
 
   // 成本估算的内置价格簿：只读，返回校验后的价格簿与条目统计（示例条目不计价）。
   ipcMain.handle('cost:pricebook', () => {
+    if (!context.isCostEstimationEnabled()) return costEstimationDisabledResult();
     const pricebookPath = join(context.builtinDir, 'pricebook-cn', 'pricebook.json');
     if (!existsSync(pricebookPath)) {
       return { ok: false, message: `内置价格簿缺失：${pricebookPath}` };
@@ -536,6 +878,7 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
 
   const getParametric = (): ParametricManager | null => context.getParametric();
   const unavailableStatus = { status: 'unavailable' as const, message: '参数化建模内核不可用' };
+  const parametricEnabled = (): boolean => isParametricImportEnabled(context.isParametricImportEnabled);
   const publicStart = (info: ParametricStartInfo): Omit<ParametricStartInfo, 'port' | 'token'> => ({
     ok: info.ok,
     status: info.status,
@@ -544,13 +887,20 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
   });
   const parametric = getParametric();
   parametric?.onStatus((state) => broadcast('parametric:status-changed', state));
-  ipcMain.handle('parametric:status', () => getParametric()?.status() ?? unavailableStatus);
+  ipcMain.handle('parametric:status', () => {
+    if (!parametricEnabled()) return parametricModuleDisabledStatus();
+    return getParametric()?.status() ?? unavailableStatus;
+  });
   ipcMain.handle('parametric:start', async () => {
+    if (!parametricEnabled()) {
+      return { ok: false, code: 'MODULE_DISABLED' as const, ...parametricModuleDisabledStatus() };
+    }
     const manager = getParametric();
     if (!manager) return { ok: false, status: 'unavailable', message: unavailableStatus.message };
     return publicStart(await manager.start());
   });
   ipcMain.handle('parametric:build', async (_event, doc: unknown) => {
+    if (!parametricEnabled()) return parametricModuleDisabledBuildResult();
     const manager = getParametric();
     if (!manager) return { ok: false, code: 'UNAVAILABLE', message: unavailableStatus.message };
     if (typeof doc !== 'object' || doc === null || Array.isArray(doc)) {
@@ -618,6 +968,7 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
 
   const syncConfig = (): SyncConfig => readSyncConfig(context.syncConfigFile);
   const syncClient = (config: SyncConfig): SyncClient => new SyncClient(config);
+  const syncPlcEnabled = (): boolean => context.isPlcgenEnabled() && context.isFactoryPlcSyncEnabled();
 
   ipcMain.handle('sync:getConfig', () => publicSyncConfig(syncConfig()));
   ipcMain.handle('sync:saveConfig', (_event, patch: unknown) => {
@@ -649,7 +1000,61 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
       return { ok: false, message: error instanceof Error ? error.message : String(error) };
     }
   });
+  ipcMain.handle('sync:downloadCandidate', async (_event, packageId: unknown, machineContext: unknown) => {
+    if (typeof packageId !== 'string' || !packageId.trim()) {
+      return { ok: false, stage: '下载', code: 'DOWNLOAD_FAILED', message: '缺少 packageId' };
+    }
+    let currentMachine: ReturnType<typeof validateMachineConfig> | undefined;
+    if (machineContext !== undefined && machineContext !== null) {
+      try {
+        currentMachine = validateMachineConfig(machineContext);
+      } catch (error) {
+        return {
+          ok: false,
+          stage: '解析',
+          code: 'INVALID_MACHINE_CONTEXT',
+          message: `当前机型上下文无效：${error instanceof Error ? error.message : String(error)}`
+        };
+      }
+    }
+    try {
+      const downloaded = await syncClient(syncConfig()).downloadPackage(packageId);
+      if (!downloaded.ok) return downloaded;
+      try {
+        const candidate = parseDesignPackage(downloaded.zip, currentMachine, { allowPlc: syncPlcEnabled() });
+        return {
+          ok: true,
+          candidate,
+          bytes: downloaded.bytes,
+          sha256: downloaded.sha256,
+          ...(downloaded.etag ? { etag: downloaded.etag } : {})
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          stage: '解析',
+          code: 'PACKAGE_VALIDATION_FAILED',
+          message: `下载包校验失败，未写入本地工程：${error instanceof Error ? error.message : String(error)}`
+        };
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        stage: '下载',
+        code: 'DOWNLOAD_FAILED',
+        message: error instanceof Error ? error.message : String(error)
+      };
+    }
+  });
   ipcMain.handle('sync:upload', async (_event, value: unknown) => {
+    if (isRecord(value) && value.plc !== undefined && !syncPlcEnabled()) {
+      return {
+        ok: false,
+        stage: '打包',
+        code: 'MODULE_DISABLED',
+        message: '智慧工厂 PLC 同步模块或 PLC 生成模块当前已关闭，已拒绝生成或上传包含 PLC 源码/IO mapping 的同步包。'
+      };
+    }
     let payload: SyncUploadPayload;
     try {
       payload = parseSyncPayload(value);
@@ -690,6 +1095,15 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
       };
     }
 
+    if (payload.plc && !syncPlcEnabled()) {
+      return {
+        ok: false,
+        stage: '打包',
+        code: 'MODULE_DISABLED',
+        message: '智慧工厂 PLC 同步模块或 PLC 生成模块已关闭，已拒绝继续生成/上传 PLC 内容。'
+      };
+    }
+
     let built: ReturnType<typeof buildDesignPackage>;
     try {
       built = buildDesignPackage({
@@ -700,13 +1114,23 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
         bomCsv: payload.bomCsv,
         pdf,
         glb: payload.glb,
-        dxf: payload.dxf
-      });
+        dxf: payload.dxf,
+        ...(payload.plc ? { plc: payload.plc } : {})
+      }, { allowPlc: syncPlcEnabled() });
     } catch (error) {
       return {
         ok: false,
         stage: '打包',
         message: `打包失败：${error instanceof Error ? error.message : String(error)}`
+      };
+    }
+
+    if (payload.plc && !syncPlcEnabled()) {
+      return {
+        ok: false,
+        stage: '上传',
+        code: 'MODULE_DISABLED',
+        message: '智慧工厂 PLC 同步模块或 PLC 生成模块已关闭，已拒绝上传 PLC 内容。'
       };
     }
 
@@ -741,6 +1165,7 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
   let activeChat: AbortController | null = null;
   let activePlan: AbortController | null = null;
   let activeRecipe: AbortController | null = null;
+  const canUsePlanResume = (): boolean => isAgentResumeEnabled(() => context.isAgentResumeEnabled());
 
   // 审计写入：超过 maxBytes 轮转为 agent-audit.N.jsonl，并按保留期清理；
   // 参数来自 userData/agent-audit-retention.json（可选，缺省 5 MB × 5 份 × 90 天）。
@@ -751,6 +1176,29 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
       onError: (error) => console.warn('[agent-audit] 轮转/清理失败', error instanceof Error ? error.message : error)
     }
   );
+
+  const currentProjectCheckpointFingerprint = async (): Promise<string | null> => {
+    const window = context.getWindow();
+    if (!window || window.isDestroyed() || window.webContents.isDestroyed()) return null;
+    try {
+      const value = await window.webContents.executeJavaScript(
+        'window.__AgentBridge?.getProjectCheckpointFingerprint?.() ?? null'
+      );
+      return isProjectFingerprint(value) ? value : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const planCheckpointRefusal = (summary: string) => ({
+    ok: false,
+    confirmationRequired: false,
+    confirmed: false,
+    refused: true,
+    results: [],
+    totalMs: 0,
+    summary
+  });
 
   const clearSession = (): void => {
     session = null;
@@ -768,7 +1216,7 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
       baseUrl: config.baseUrl,
       apiKey: config.apiKey,
       model: config.model,
-      tools: tools.summaries()
+      tools: () => tools.summaries()
     });
     const audit = createAuditLog({ write: agentAuditWriter() });
     // 智能体工具层包含只读的 design_machine / search_* 等纯工具，它们不在
@@ -807,7 +1255,7 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
       thread,
       model: config.model,
       pricing: DEFAULT_PRICING,
-      toolSchemas: Object.fromEntries(tools.summaries().map((tool) => [tool.name, tool.inputSchema])),
+      toolSchemas: (name) => tools.summaries().find((tool) => tool.name === name)?.inputSchema,
       audit: (record) => audit.record(record),
       contextProvider: async () => {
         try {
@@ -921,6 +1369,67 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
     return { ok: true, messages: [] };
   });
 
+  ipcMain.handle('agent:plan:checkpoint:clear', () => {
+    if (!canUsePlanResume()) {
+      return { ok: false, code: 'MODULE_DISABLED', message: AGENT_RESUME_DISABLED_MESSAGE };
+    }
+    try {
+      clearPlanCheckpoint(context.userDataDir);
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
+  ipcMain.handle('agent:plan:checkpoint:restore', async (_event, payload: unknown) => {
+    if (!canUsePlanResume()) {
+      return { ok: true, available: false, disabled: true, message: AGENT_RESUME_DISABLED_MESSAGE };
+    }
+    const tools = context.getTools();
+    if (!tools) return { ok: false, available: false, message: '智能体服务尚未启动' };
+    let plan: AgentPlan;
+    try {
+      if (!isRecord(payload)) throw new Error('恢复请求无效');
+      plan = parseCheckpointPlan(payload.plan, tools);
+      planCheckpointSignature(plan);
+    } catch (error) {
+      return { ok: false, available: false, message: error instanceof Error ? error.message : String(error) };
+    }
+
+    const loaded = loadPlanCheckpoint(context.userDataDir);
+    if (!loaded.checkpoint) {
+      return loaded.error
+        ? { ok: true, available: true, blocked: true, message: `${loaded.error}；请丢弃旧进度后重新规划` }
+        : { ok: true, available: false };
+    }
+    const fingerprint = await currentProjectCheckpointFingerprint();
+    if (!canUsePlanResume()) {
+      return { ok: true, available: false, disabled: true, message: AGENT_RESUME_DISABLED_MESSAGE };
+    }
+    const inspection = inspectPlanCheckpoint(loaded.checkpoint, plan, fingerprint);
+    if (!inspection.ok) {
+      if (isPlanCheckpointFullyCompleted(loaded.checkpoint)
+          && (inspection.reason === 'signature' || inspection.reason === 'fingerprint')) {
+        return { ok: true, available: false };
+      }
+      return {
+        ok: true,
+        available: true,
+        blocked: true,
+        requiresReplan: inspection.reason === 'uncertain-write' || inspection.reason === 'fingerprint',
+        message: `${inspection.message}；请丢弃旧进度后重新规划`
+      };
+    }
+    return {
+      ok: true,
+      available: true,
+      blocked: false,
+      cursor: inspection.cursor,
+      steps: inspection.steps.map(({ index, tool, wrote, state }) => ({ index, tool, wrote, state })),
+      needsReconfirmation: inspection.needsReconfirmation
+    };
+  });
+
   // P7-C：计划执行。规划在渲染层离线完成；主进程只接受已注册工具并再次校验。
   ipcMain.handle('agent:plan:execute', async (event, payload: unknown) => {
     const tools = context.getTools();
@@ -941,13 +1450,16 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
     let startAt: number | undefined;
     let maxSteps: number | undefined;
     let resumeFrom: number | undefined;
+    let explicitResumeRequest = false;
     try {
       if (typeof payload !== 'object' || payload === null) throw new Error('计划参数必须是对象');
       const source = payload as Record<string, unknown>;
       const rawPlan = source.plan;
       if (typeof rawPlan !== 'object' || rawPlan === null) throw new Error('缺少计划');
       const planRecord = rawPlan as Record<string, unknown>;
-      if (!Array.isArray(planRecord.steps)) throw new Error('计划步骤必须是数组');
+      if (!Array.isArray(planRecord.steps) || planRecord.steps.length < 1 || planRecord.steps.length > 200) {
+        throw new Error('计划步骤数必须在 1–200 之间');
+      }
       const steps: PlanStep[] = planRecord.steps.map((entry, index) => {
         if (typeof entry !== 'object' || entry === null) throw new Error(`第 ${index + 1} 步不是对象`);
         const step = entry as Record<string, unknown>;
@@ -964,7 +1476,7 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
           tool,
           args,
           why: typeof step.why === 'string' ? step.why : '',
-          readOnly: step.readOnly === true,
+          readOnly: READ_ONLY_TOOLS.has(tool),
           ...(missing && missing.length > 0 ? { missing } : {})
         };
       });
@@ -994,11 +1506,10 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
       const rawResume = source.resumeFrom !== undefined
         ? source.resumeFrom
         : source.resume === true ? 0 : undefined;
+      explicitResumeRequest = source.resumeFrom !== undefined || source.resume === true;
       resumeFrom = typeof rawResume === 'number' && Number.isFinite(rawResume)
         ? Math.max(0, Math.trunc(rawResume))
         : undefined;
-      // UI 的「下一步」用 startAt 表达续跑；同样需要指纹校验与已完成步骤跳过。
-      if (resumeFrom === undefined && startAt !== undefined && startAt > 0) resumeFrom = startAt;
     } catch (error) {
       return {
         ok: false,
@@ -1014,7 +1525,6 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
     const audit = createAuditLog({ write: agentAuditWriter() });
     let confirmCount = 0;
     const controller = new AbortController();
-    activePlan = controller;
     const emitProgress = (progress: AgentProgressEvent): void => {
       if (!event.sender.isDestroyed()) event.sender.send('agent:progress', progress);
     };
@@ -1025,6 +1535,103 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
     } catch {
       currentContext = null;
     }
+    const requestedStartAt = resumeFrom ?? startAt ?? 0;
+    const resumeEnabledAtStart = canUsePlanResume();
+    if (explicitResumeRequest && !resumeEnabledAtStart) {
+      return planCheckpointRefusal(AGENT_RESUME_DISABLED_MESSAGE);
+    }
+    let checkpoint: PlanCheckpoint | null = null;
+    if (resumeEnabledAtStart && canUsePlanResume()) {
+      if (!currentContext) {
+        return planCheckpointRefusal('当前工程上下文不可用，不能安全校验计划恢复；请检查工程并重试');
+      }
+      const strongFingerprint = await currentProjectCheckpointFingerprint();
+      if (!canUsePlanResume()) {
+        if (explicitResumeRequest) return planCheckpointRefusal(AGENT_RESUME_DISABLED_MESSAGE);
+      } else {
+        if (!strongFingerprint) {
+          return planCheckpointRefusal('当前工程无法生成可靠上下文指纹，计划未执行；请重新规划并在工程状态可读取后重试');
+        }
+        if (startAt !== undefined && resumeFrom !== undefined && startAt !== resumeFrom) {
+          return planCheckpointRefusal('计划游标参数冲突，已拒绝跳过步骤');
+        }
+        const loadedCheckpoint = loadPlanCheckpoint(context.userDataDir);
+        if (loadedCheckpoint.error) {
+          return planCheckpointRefusal(`${loadedCheckpoint.error}；请丢弃损坏的恢复记录后重新规划`);
+        }
+        if (loadedCheckpoint.checkpoint) {
+          const inspection = inspectPlanCheckpoint(loadedCheckpoint.checkpoint, plan, strongFingerprint);
+          const mayReplaceCompleted = requestedStartAt === 0
+            && isPlanCheckpointFullyCompleted(loadedCheckpoint.checkpoint)
+            && !inspection.ok
+            && (inspection.reason === 'signature' || inspection.reason === 'fingerprint');
+          if (mayReplaceCompleted) {
+            try {
+              checkpoint = createPlanCheckpoint(plan, strongFingerprint);
+              savePlanCheckpoint(context.userDataDir, checkpoint);
+            } catch (error) {
+              return planCheckpointRefusal(`无法替换已完成计划 checkpoint：${error instanceof Error ? error.message : String(error)}`);
+            }
+          } else {
+            if (!inspection.ok) return planCheckpointRefusal(`${inspection.message}；请丢弃旧进度后重新规划`);
+            if (requestedStartAt !== inspection.cursor) {
+              return planCheckpointRefusal(
+                inspection.cursor > 0 && requestedStartAt === 0
+                  ? '检测到同一计划已有完成步骤；请先恢复并核对进度，不能从第一步重新执行'
+                  : `计划游标与已保存进度不一致（应为第 ${inspection.cursor + 1} 步），已拒绝执行`
+              );
+            }
+            checkpoint = {
+              ...loadedCheckpoint.checkpoint,
+              cursor: inspection.cursor,
+              steps: inspection.steps,
+              updatedAt: new Date().toISOString()
+            };
+            try {
+              // 只读中断可安全重试；将其运行中/失败状态归一为 pending 后再落盘。
+              savePlanCheckpoint(context.userDataDir, checkpoint);
+            } catch {
+              return planCheckpointRefusal('无法安全保存恢复进度，计划未执行；请检查应用数据目录后重新规划');
+            }
+            if (requestedStartAt > 0) {
+              const previous: ThreadState = {
+                turnId: (thread.read()?.turnId ?? 0) + 1,
+                projectFingerprint: projectFingerprint(currentContext),
+                intent: '计划跨重启恢复',
+                targets: [],
+                denials: [],
+                completedSteps: inspection.steps
+                  .filter((step) => step.state === 'completed')
+                  .map((step) => ({
+                    step: step.index + 1,
+                    index: step.index,
+                    tool: step.tool,
+                    ok: true,
+                    wrote: step.wrote
+                  })),
+                lastReplySummary: '已从安全 checkpoint 恢复完成步骤',
+                source: 'plan',
+                planSignature: planSignature(plan),
+                updatedAt: checkpoint.updatedAt
+              };
+              thread.write(previous);
+            }
+          }
+        } else {
+          if (requestedStartAt > 0) return planCheckpointRefusal('找不到匹配的恢复记录，已拒绝跳过步骤；请重新规划');
+          try {
+            checkpoint = createPlanCheckpoint(plan, strongFingerprint);
+            // 先持久化 pending 游标；后续每个工具调用还会在执行前再次原子落盘。
+            savePlanCheckpoint(context.userDataDir, checkpoint);
+          } catch (error) {
+            return planCheckpointRefusal(`无法初始化安全恢复记录：${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+      }
+    } else if (explicitResumeRequest) {
+      return planCheckpointRefusal(AGENT_RESUME_DISABLED_MESSAGE);
+    }
+    activePlan = controller;
     const result = await runPlan(plan, {
       ...(startAt !== undefined ? { startAt } : {}),
       ...(maxSteps !== undefined ? { maxSteps } : {}),
@@ -1054,26 +1661,89 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
         });
         return response.response === 0;
       },
-      execute: async (step, _index, signal) => {
+      execute: async (step, stepIndex, signal) => {
         const stepStarted = Date.now();
-        const outcome = await tools.call(step.tool, step.args, signal);
-        const record = typeof outcome === 'object' && outcome !== null
+        const recordOutcome = (value: unknown): void => {
+          const record = typeof value === 'object' && value !== null ? value as Record<string, unknown> : null;
+          const hasNestedError = Boolean(record && record.error !== undefined && record.error !== null);
+          const ok = record ? (record.ok === undefined ? !hasNestedError : record.ok === true) : value !== false;
+          const code = record && typeof record.code === 'string'
+            ? record.code
+            : record && typeof record.error === 'object' && record.error !== null && typeof (record.error as Record<string, unknown>).code === 'string'
+              ? String((record.error as Record<string, unknown>).code)
+              : undefined;
+          audit.record({
+            tool: step.tool,
+            ok,
+            source: 'plan',
+            args: step.args,
+            elapsedMs: Math.max(0, Date.now() - stepStarted),
+            ...(code ? { code } : {})
+          });
+        };
+        const checkpointStep = checkpoint && canUsePlanResume() ? checkpoint.steps[stepIndex] : undefined;
+        if (checkpointStep && checkpoint) {
+          if (checkpointStep.tool !== step.tool || checkpointStep.wrote === READ_ONLY_TOOLS.has(step.tool)) {
+            throw new Error('checkpoint 步骤与主进程执行计划不一致；已阻止工具调用');
+          }
+          // 先落盘 running；若进程在副作用后、完成回执前退出，恢复时按 uncertain 写步骤 fail-closed。
+          checkpoint = updatePlanCheckpoint(checkpoint, stepIndex, 'running');
+          savePlanCheckpoint(context.userDataDir, checkpoint);
+        }
+        let outcome: unknown;
+        try {
+          outcome = await tools.call(step.tool, step.args, signal);
+        } catch (error) {
+          if (checkpointStep && checkpoint && canUsePlanResume()) {
+            checkpoint = updatePlanCheckpoint(checkpoint, stepIndex, checkpointStep.wrote ? 'uncertain' : 'failed');
+            savePlanCheckpoint(context.userDataDir, checkpoint);
+          }
+          throw error;
+        }
+        if (!checkpointStep || !checkpoint || !canUsePlanResume()) {
+          recordOutcome(outcome);
+          return outcome;
+        }
+        const initialRecord = typeof outcome === 'object' && outcome !== null
           ? outcome as Record<string, unknown>
           : null;
-        const ok = record ? record.ok !== false : true;
-        const code = record && typeof record.code === 'string'
-          ? record.code
-          : record && typeof record.error === 'object' && record.error !== null && typeof (record.error as Record<string, unknown>).code === 'string'
-            ? String((record.error as Record<string, unknown>).code)
-            : undefined;
-        audit.record({
-          tool: step.tool,
-          ok,
-          source: 'plan',
-          args: step.args,
-          elapsedMs: Math.max(0, Date.now() - stepStarted),
-          ...(code ? { code } : {})
-        });
+        const initialHasError = Boolean(initialRecord && initialRecord.error !== undefined && initialRecord.error !== null);
+        const initialOk = initialRecord
+          ? (initialRecord.ok === undefined ? !initialHasError : initialRecord.ok === true)
+          : outcome !== false;
+        if (initialOk) {
+          const postFingerprint = await currentProjectCheckpointFingerprint();
+          if (!canUsePlanResume()) {
+            recordOutcome(outcome);
+            return outcome;
+          }
+          if (!postFingerprint) {
+            checkpoint = updatePlanCheckpoint(checkpoint, stepIndex, checkpointStep.wrote ? 'uncertain' : 'failed');
+            outcome = {
+              ok: false,
+              code: 'CHECKPOINT_FINGERPRINT_UNAVAILABLE',
+              message: '工具完成后无法验证工程摘要；计划已停止，需检查工程并重新规划'
+            };
+          } else if (checkpointStep.wrote) {
+            // 写步骤可能正常改变工程内容；把写后摘要与完成回执原子提交，供下次启动匹配。
+            checkpoint = updatePlanCheckpointFingerprint(checkpoint, postFingerprint);
+            checkpoint = updatePlanCheckpoint(checkpoint, stepIndex, 'completed');
+          } else if (postFingerprint !== checkpoint.projectFingerprint) {
+            checkpoint = updatePlanCheckpoint(checkpoint, stepIndex, 'failed');
+            outcome = {
+              ok: false,
+              code: 'PROJECT_CHANGED_DURING_PLAN',
+              message: '只读步骤期间工程状态发生变化；计划已停止，请重新规划'
+            };
+          } else {
+            checkpoint = updatePlanCheckpoint(checkpoint, stepIndex, 'completed');
+          }
+        } else {
+          checkpoint = updatePlanCheckpoint(checkpoint, stepIndex, checkpointStep.wrote ? 'uncertain' : 'failed');
+        }
+        // 持久化失败时，磁盘仍保留 running；写步骤恢复会要求重新规划而不是重放。
+        if (canUsePlanResume()) savePlanCheckpoint(context.userDataDir, checkpoint);
+        recordOutcome(outcome);
         return outcome;
       }
     });

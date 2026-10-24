@@ -14,6 +14,7 @@ import {
   type DrawerHandle
 } from '../ui/panels';
 import { recordDiagnosticError } from '../shared/diagnostics.ts';
+import { ModuleDisabledError, moduleDisabledResult } from '../modules/tool-gates.ts';
 import {
   describeCheck,
   runElectricalCheck,
@@ -29,6 +30,12 @@ const NO_SOURCE_HINT = '尚未接入电气数据源：请先打开含线号/负�
 let drawer: DrawerHandle | null = null;
 let lastResult: ElecCheckResult | null = null;
 let lastHtml = '';
+let moduleEnabled = true;
+let entryButton: HTMLButtonElement | null = null;
+
+export interface ElecCheckPanelHandle {
+  setEnabled(enabled: boolean): void;
+}
 
 interface PanelNodes {
   status: HTMLElement;
@@ -105,6 +112,7 @@ function render(result: ElecCheckResult): void {
 }
 
 async function runWith(doc: ElecDocument | null): Promise<ElecCheckResult | null> {
+  if (!moduleEnabled) return null;
   if (!doc) {
     notify(NO_SOURCE_HINT, true);
     return null;
@@ -124,18 +132,20 @@ async function runWith(doc: ElecDocument | null): Promise<ElecCheckResult | null
 }
 
 async function exportPdf(): Promise<{ path: string; htmlPath: string }> {
+  if (!moduleEnabled) throw new ModuleDisabledError('elec.validation');
   if (!lastResult) throw new Error('请先运行电气校验再导出 PDF');
   if (!window.desktop) throw new Error('导出 PDF 仅在桌面版可用');
   const html = lastHtml || renderElecCheckHtml(projectInfo(), lastResult);
   return await window.desktop.exportReport({ html, projectName: projectInfo().name });
 }
 
-export function initElecCheckPanel(): void {
+export function initElecCheckPanel(options: { enabled?: boolean } = {}): ElecCheckPanelHandle {
+  moduleEnabled = options.enabled !== false;
   ensurePanelStyles();
-  const entry = buildEntryButton('elecCheckEntryButton', '电气校验', CHECK_ICON, () => {
-    drawer?.open();
+  entryButton = buildEntryButton('elecCheckEntryButton', '电气校验', CHECK_ICON, () => {
+    if (moduleEnabled) drawer?.open();
   });
-  if (!entry) return;
+  if (!entryButton) return { setEnabled };
 
   drawer = createDrawer('elecCheckDrawer', '电气校验', '线号合规 · 功率统计 · 导线截面与断路器配合');
   drawer.body.innerHTML = `
@@ -173,12 +183,30 @@ export function initElecCheckPanel(): void {
   });
 
   window.__ElecCheckPanel = {
-    open: () => drawer?.open(),
+    open: () => { if (moduleEnabled) drawer?.open(); },
     close: () => drawer?.close(),
-    run: async (doc: ElecDocument) => await runWith(doc),
+    run: async (doc: ElecDocument) => moduleEnabled
+      ? await runWith(doc)
+      : moduleDisabledResult('elec.validation'),
     result: () => lastResult,
     html: () => lastHtml,
     exportPdf,
     status: () => status.textContent ?? ''
   };
+  setEnabled(moduleEnabled);
+  return { setEnabled };
+
+  function setEnabled(enabled: boolean): void {
+    moduleEnabled = enabled === true;
+    if (entryButton) {
+      entryButton.hidden = !moduleEnabled;
+      entryButton.disabled = !moduleEnabled;
+      entryButton.setAttribute('aria-disabled', String(!moduleEnabled));
+    }
+    if (nodes) {
+      nodes.run.disabled = !moduleEnabled;
+      nodes.pdf.disabled = !moduleEnabled || lastResult === null;
+    }
+    if (!moduleEnabled) drawer?.close();
+  }
 }

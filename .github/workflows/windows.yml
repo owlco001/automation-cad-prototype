@@ -1,9 +1,7 @@
 name: windows-build
-
 on:
   # 仅手动触发：gh workflow run windows-build --ref main
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: windows-latest
@@ -15,6 +13,8 @@ jobs:
         working-directory: desktop
     env:
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      CSC_LINK: ${{ secrets.CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -27,6 +27,11 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
+      - name: 发行签名与渠道前置检查
+        id: release-preflight
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/update-release-preflight.mjs --preflight
+
       - name: 类型检查与构建
         run: npm run build:ext
 
@@ -34,7 +39,32 @@ jobs:
         run: npm test
 
       - name: 打包 NSIS 安装程序
-        run: npx electron-builder --win nsis --x64 --publish never
+        shell: pwsh
+        env:
+          UPDATE_PUBLISH_CHANNEL: ${{ steps.release-preflight.outputs.publish_channel }}
+        run: |
+          $builderArgs = @('--win', 'nsis', '--x64', '--publish', 'never')
+          if ($env:UPDATE_PUBLISH_CHANNEL) {
+            $builderArgs += "-c.publish.channel=$env:UPDATE_PUBLISH_CHANNEL"
+            $builderArgs += '-c.win.forceCodeSigning=true'
+          }
+          npx electron-builder @builderArgs
+
+      - name: 校验生产更新产物
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node scripts/update-release-preflight.mjs --artifacts --channel ${{ steps.release-preflight.outputs.channel }}
+
+      - name: 验证 NSIS 安装器 Authenticode 签名
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem release\AutomationCAD-Setup-*.exe | Select-Object -First 1
+          if (-not $installer) { throw '未找到 NSIS 安装器。' }
+          $signature = Get-AuthenticodeSignature $installer.FullName
+          if ($signature.Status -ne 'Valid' -or -not $signature.SignerCertificate) {
+            throw "NSIS Authenticode 签名无效：$($signature.Status)"
+          }
+          Write-Host 'NSIS installer Authenticode signature: Valid'
 
       - name: 列出产物
         run: Get-ChildItem release | Format-Table Name,Length
@@ -45,6 +75,7 @@ jobs:
           path: |
             desktop/release/*.exe
             desktop/release/*.blockmap
+            desktop/release/*.yml
           if-no-files-found: error
           retention-days: 14
 
@@ -55,5 +86,8 @@ jobs:
           files: |
             desktop/release/*.exe
             desktop/release/*.blockmap
+            desktop/release/*.yml
           draft: false
+          prerelease: ${{ steps.release-preflight.outputs.prerelease == 'true' }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           generate_release_notes: false

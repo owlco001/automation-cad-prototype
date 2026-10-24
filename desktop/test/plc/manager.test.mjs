@@ -100,6 +100,19 @@ test('manager 统一超时返回中文错误', async () => {
   assert.match(result.message, /读取全部点位.*超时/);
 });
 
+test('manager 越界仿真初始值在适配器创建前作为 INVALID_CONFIG 拒绝', async () => {
+  const { manager, created } = makeManager();
+  const result = await manager.connect({
+    kind: 'sim',
+    points: [{ id: 'R0', name: '有符号寄存器', area: 'holding', address: 0, dataType: 'int16' }],
+    initialValues: { R0: 32768 }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'INVALID_CONFIG');
+  assert.match(result.message, /R0.*int16 范围/);
+  assert.equal(created.length, 0, '无效配置不得创建或连接适配器');
+});
+
 test('manager 读取 plc.json 时对坏 JSON 返回中文错误', async () => {
   const { manager, configFile } = makeManager();
   writeFileSync(configFile, '{bad json', 'utf8');

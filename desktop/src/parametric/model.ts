@@ -104,6 +104,20 @@ export const FEATURE_TYPES: readonly FeatureType[] = ['box', 'holes', 'slot', 'f
 
 const TYPE_SET = new Set<string>(FEATURE_TYPES);
 
+export const PARAMETRIC_HISTORY_LIMIT = 100;
+export const PARAMETRIC_HISTORY_MERGE_WINDOW_MS = 900;
+
+export interface UndoRedoHistory<T> {
+  push(state: T, options?: { mergeKey?: string; now?: number }): void;
+  undo(current: T): T | null;
+  redo(current: T): T | null;
+  clear(): void;
+  canUndo(): boolean;
+  canRedo(): boolean;
+  undoCount(): number;
+  redoCount(): number;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -114,6 +128,69 @@ function clone<T>(value: T): T {
     return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clone(item)])) as T;
   }
   return value;
+}
+
+/**
+ * JSON-safe in-memory history. A merge key coalesces rapid edits to the same
+ * control; every non-merged push starts a new undo point and drops redo.
+ */
+export function createUndoRedoHistory<T>(options: {
+  limit?: number;
+  mergeWindowMs?: number;
+} = {}): UndoRedoHistory<T> {
+  const limit = Math.max(1, Math.floor(options.limit ?? PARAMETRIC_HISTORY_LIMIT));
+  const mergeWindowMs = Math.max(0, options.mergeWindowMs ?? PARAMETRIC_HISTORY_MERGE_WINDOW_MS);
+  const past: T[] = [];
+  const future: T[] = [];
+  let lastMergeKey: string | null = null;
+  let lastMergeAt = Number.NEGATIVE_INFINITY;
+
+  const trimPast = (): void => {
+    if (past.length > limit) past.splice(0, past.length - limit);
+  };
+
+  return {
+    push(state, pushOptions = {}): void {
+      const now = pushOptions.now ?? Date.now();
+      const mergeKey = pushOptions.mergeKey ?? null;
+      const merge = mergeKey !== null && mergeKey === lastMergeKey &&
+        now >= lastMergeAt && now - lastMergeAt <= mergeWindowMs;
+      if (!merge) {
+        past.push(clone(state));
+        trimPast();
+      }
+      future.length = 0;
+      lastMergeKey = mergeKey;
+      lastMergeAt = mergeKey === null ? Number.NEGATIVE_INFINITY : now;
+    },
+    undo(current): T | null {
+      const state = past.pop();
+      if (state === undefined) return null;
+      future.push(clone(current));
+      lastMergeKey = null;
+      lastMergeAt = Number.NEGATIVE_INFINITY;
+      return clone(state);
+    },
+    redo(current): T | null {
+      const state = future.pop();
+      if (state === undefined) return null;
+      past.push(clone(current));
+      trimPast();
+      lastMergeKey = null;
+      lastMergeAt = Number.NEGATIVE_INFINITY;
+      return clone(state);
+    },
+    clear(): void {
+      past.length = 0;
+      future.length = 0;
+      lastMergeKey = null;
+      lastMergeAt = Number.NEGATIVE_INFINITY;
+    },
+    canUndo: () => past.length > 0,
+    canRedo: () => future.length > 0,
+    undoCount: () => past.length,
+    redoCount: () => future.length
+  };
 }
 
 function timestamp(now: number): string {

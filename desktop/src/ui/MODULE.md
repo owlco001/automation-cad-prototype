@@ -10,6 +10,10 @@ main.ts did-finish-load
        └─ init()
             ├─ injectStyles()      # cad.css + panels.css 插到 <head>
             ├─ buildEntryButton() # 顶栏追加「CAD 查看」「工厂」「数据包」「智慧工厂」「电气元件」「联调」「智能体」
+            ├─ initModuleSettingsUi() # 始终可见的内置模块状态/启停入口
+            ├─ moduleManager         # Core + 按需初始化的 plcgen + system.update 占位
+            │    ├─ plcgen enabled → 动态导入随应用打包的面板
+            │    └─ plcgen disabled → 不创建入口；状态变更时关闭并隐藏已加载面板
             ├─ buildOverlay()     # #automationCadOverlay
             └─ bindWindowEvents() # 拖放、Esc、菜单事件
 ```
@@ -27,6 +31,7 @@ main.ts did-finish-load
 | `window.__AUTOMATION_CAD_EXTENSION_READY__` | 注入完成标志，smoke 等待它 |
 
 工厂面板与数据包面板分别由 `initFactoryPanel()` / `initPackPanel()` 在 `src/extension.ts` 里初始化，样式在 `src/ui/panels.css`。
+模块设置由 `src/modules/registry.ts` / `src/modules/ui.ts` 实现；PLC 生成面板是首个可启停模块，默认启用。关闭只停用 UI 与命令入口，不删除 PLC 数据或做热卸载；其他面板尚未迁移。
 智慧工厂同步面板由 `initSyncPanel()` 初始化，导出物由 `buildSyncPayload()` 复用 `export/` 生成后交给主进程。
 智能体面板由 `src/agent/ui.ts` 的 `initAgentPanel()` 初始化，只展示服务地址/端口、工具数、token 文件路径、7 个工具与最近 5 条命令历史，不接 LLM。
 

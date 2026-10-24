@@ -20,6 +20,7 @@ import { estimateCost, readMachinePricing } from '../machine/cost-model.ts';
 import { validatePricebook, type Pricebook } from '../cost/pricebook.ts';
 import { buildClarify } from '../machine/clarify.ts';
 import { generateMachineGeometry, summarizeGeometry } from '../machine/geometry.ts';
+import { AGENT_TOOL_MODULES, moduleDisabledResult, moduleIsEnabled, type ModuleEnabledReader } from '../modules/tool-gates.ts';
 
 export interface AgentTool {
   name: string;
@@ -39,6 +40,8 @@ export interface AgentToolsOptions {
   userDataRoot?: string;
   /** 主进程注入的内置价格簿读取器。 */
   loadBuiltinPricebook?: () => unknown;
+  /** 主进程的可选模块状态镜像；未就绪或状态读取失败时 PLC 能力失败关闭。 */
+  isModuleEnabled?: ModuleEnabledReader;
 }
 
 export interface AgentCommandExecutor {
@@ -528,7 +531,7 @@ export class AgentTools {
   }
 
   list(): AgentTool[] {
-    return Array.from(this.tools.values());
+    return Array.from(this.tools.values()).filter((tool) => this.toolEnabled(tool.name));
   }
 
   summaries(): AgentToolSummary[] {
@@ -542,6 +545,10 @@ export class AgentTools {
   async call(name: string, args: Record<string, unknown> = {}, signal?: AbortSignal): Promise<unknown> {
     const tool = this.tools.get(name);
     if (!tool) throw new Error(`工具不存在：${name}`);
+    const moduleId = AGENT_TOOL_MODULES[name];
+    if (moduleId && !moduleIsEnabled(moduleId, this.options.isModuleEnabled)) {
+      return moduleDisabledResult(moduleId);
+    }
     const previous = this.signal;
     this.signal = signal;
     try {
@@ -554,6 +561,11 @@ export class AgentTools {
   private add(tool: AgentTool): void {
     if (this.tools.has(tool.name)) throw new Error(`重复注册工具：${tool.name}`);
     this.tools.set(tool.name, tool);
+  }
+
+  private toolEnabled(name: string): boolean {
+    const moduleId = AGENT_TOOL_MODULES[name];
+    return !moduleId || moduleIsEnabled(moduleId, this.options.isModuleEnabled);
   }
 
   private componentQuery(args: Record<string, unknown>): ComponentPart[] {

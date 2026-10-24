@@ -13,6 +13,7 @@ import {
   type RenderOps
 } from './render-batch.ts';
 import { assertBomRowCount } from '../shared/input-limits.ts';
+import { stageCadLoad, type LoadedPart } from './load-candidate.ts';
 
 export interface CadSelectionInfo {
   index: number;
@@ -43,6 +44,7 @@ export interface CadBomRow {
 export interface CadKinematicsMesh {
   id: number;
   name: string;
+  stableObjectId?: string;
   triangles: number;
   center: [number, number, number];
   size: [number, number, number];
@@ -51,6 +53,15 @@ export interface CadKinematicsMesh {
 export interface CadKinematicsGeometry extends CadKinematicsMesh {
   path?: string[];
   positions: Float32Array;
+}
+
+export interface CadPortableViewState {
+  schemaVersion: 1;
+  position: [number, number, number];
+  target: [number, number, number];
+  up: [number, number, number];
+  fovDeg: number;
+  wireframe: boolean;
 }
 
 export interface CadKinematicsPose {
@@ -65,15 +76,6 @@ export interface CadViewerOptions {
   detailElement: HTMLElement;
   onStats?: (text: string) => void;
   onSelect?: (info: CadSelectionInfo | null) => void;
-}
-
-interface LoadedPart {
-  data: CadMeshData;
-  mesh: THREE.Mesh;
-  triangleCount: number;
-  partId?: string;
-  qty?: number;
-  note?: string;
 }
 
 const DEFAULT_COLORS = [0x7f8b96, 0x9aa6b2, 0xb5a078, 0x6f9e9a, 0xa77e8d, 0x8e9b74];
@@ -94,6 +96,8 @@ export class CadViewer {
   private readonly batchGroup = new THREE.Group();
   /** 参数化重建前的旧模型，半透明叠加对比。不参与拾取。 */
   private readonly ghostGroup = new THREE.Group();
+  /** 参数化生成体独立显示；不进入原 CAD 的拾取、BOM、运动学或导出数据。 */
+  private readonly parametricOverlayGroup = new THREE.Group();
   private metas: PartMeta[] = [];
   private metaByIndex = new Map<number, PartMeta>();
   private renderOps: RenderOps | null = null;
@@ -132,6 +136,8 @@ export class CadViewer {
     this.scene.add(this.batchGroup);
     this.ghostGroup.name = 'parametric-ghost';
     this.scene.add(this.ghostGroup);
+    this.parametricOverlayGroup.name = 'parametric-overlay';
+    this.scene.add(this.parametricOverlayGroup);
     this.scene.add(new THREE.HemisphereLight(0xf1f5f9, 0x2a2d31, 1.35));
     const key = new THREE.DirectionalLight(0xffffff, 2.1);
     key.position.set(1, -1.4, 2);
@@ -221,60 +227,46 @@ export class CadViewer {
   load(result: CadImportResult, fileName: string, options: { ghost?: boolean } = {}): void {
     // 超过 5000 行的 BOM 会拖垮侧栏与导出，解析后立即拒绝并给出拆分建议。
     assertBomRowCount(result.meshes.length);
+    const modelParts = result.meshes.map((mesh) => ({
+      name: mesh.name,
+      bbox: boundsFromPositions(mesh.positions)
+    }));
+    if (!this.degraded) {
+      // Build all fallible mesh resources before clearing the active document.
+      const candidate = stageCadLoad(result, this.wireframe);
+      let installed = false;
+      try {
+        if (options.ghost === true) this.captureGhost();
+        else this.clearGhost();
+        this.clearModel({ notify: false });
+        this.parts = candidate.parts;
+        this.parts.forEach((part) => this.group.add(part.mesh));
+        this.importedResult = result;
+        this.modelParts = modelParts;
+        installed = true;
+
+        this.renderPartList();
+        this.fit();
+        this.rebuildPlanState(candidate.metas);
+        const bounds = this.totalBounds();
+        const size = bounds.getSize(new THREE.Vector3());
+        this.onStats?.(
+          `${fileName} · ${result.stats.meshCount} 个零件 · ${result.stats.triangleCount.toLocaleString('zh-CN')} 个三角面 · ` +
+          `${size.x.toFixed(3)} × ${size.y.toFixed(3)} × ${size.z.toFixed(3)} mm · ${result.stats.format}`
+        );
+        this.renderDetail(null);
+      } finally {
+        if (!installed) candidate.dispose();
+      }
+      return;
+    }
+
     if (options.ghost === true) this.captureGhost();
     else this.clearGhost();
     this.clearModel();
     this.importedResult = result;
-    this.modelParts = result.meshes.map((mesh) => ({
-      name: mesh.name,
-      bbox: boundsFromPositions(mesh.positions)
-    }));
-    if (this.degraded) {
-      this.loadDegraded(result, fileName);
-      return;
-    }
-    const materialCache = new Map<string, THREE.MeshStandardMaterial>();
-    result.meshes.forEach((data, index) => {
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
-      if (data.normals) geometry.setAttribute('normal', new THREE.BufferAttribute(data.normals, 3));
-      if (data.indices) geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
-      if (!data.normals) geometry.computeVertexNormals();
-      geometry.computeBoundingBox();
-      const colorKey = data.color ? data.color.map((v) => v.toFixed(3)).join(',') : 'default';
-      let material = materialCache.get(colorKey);
-      if (!material) {
-        const color = data.color ? new THREE.Color(data.color[0], data.color[1], data.color[2]) : new THREE.Color(DEFAULT_COLORS[index % DEFAULT_COLORS.length]!);
-        material = new THREE.MeshStandardMaterial({
-          color,
-          metalness: 0.2,
-          roughness: 0.62,
-          wireframe: this.wireframe,
-          side: THREE.DoubleSide
-        });
-        materialCache.set(colorKey, material);
-      }
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.name = data.name;
-      mesh.userData.partIndex = index;
-      mesh.userData.kinematicsBasePosition = mesh.position.clone();
-      mesh.userData.kinematicsBaseQuaternion = mesh.quaternion.clone();
-      this.group.add(mesh);
-      const triangleCount = data.indices
-        ? Math.floor(data.indices.length / 3)
-        : Math.floor(data.positions.length / 9);
-      this.parts.push({ data, mesh, triangleCount });
-    });
-    this.renderPartList();
-    this.fit();
-    this.rebuildPlanState();
-    const bounds = this.totalBounds();
-    const size = bounds.getSize(new THREE.Vector3());
-    this.onStats?.(
-      `${fileName} · ${result.stats.meshCount} 个零件 · ${result.stats.triangleCount.toLocaleString('zh-CN')} 个三角面 · ` +
-      `${size.x.toFixed(3)} × ${size.y.toFixed(3)} × ${size.z.toFixed(3)} mm · ${result.stats.format}`
-    );
-    this.renderDetail(null);
+    this.modelParts = modelParts;
+    this.loadDegraded(result, fileName);
   }
 
   /** 把当前模型复制为半透明幽灵层，用于参数化重建前后对比。 */
@@ -325,6 +317,75 @@ export class CadViewer {
 
   ghostVisible(): boolean {
     return this.ghostGroup.visible && this.ghostGroup.children.length > 0;
+  }
+
+  /**
+   * 显示参数化 sidecar 输出为独立只读叠加体；不清空当前导入 CAD，也不加入 parts。
+   * 原 STEP/B-rep 仍只是网格参考，叠加体不会被误认为已编辑的原始 CAD 特征。
+   */
+  setParametricOverlay(result: CadImportResult, options: { visible?: boolean } = {}): boolean {
+    assertBomRowCount(result.meshes.length);
+    this.clearParametricOverlay();
+    if (this.degraded) return false;
+
+    result.meshes.forEach((data, index) => {
+      if (data.positions.length < 9) return;
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(data.positions.slice(), 3));
+      if (data.normals) geometry.setAttribute('normal', new THREE.BufferAttribute(data.normals.slice(), 3));
+      if (data.indices) geometry.setIndex(new THREE.BufferAttribute(data.indices.slice(), 1));
+      if (!data.normals) geometry.computeVertexNormals();
+      geometry.computeBoundingBox();
+      const material = new THREE.MeshStandardMaterial({
+        color: 0xf0b64d,
+        metalness: 0.12,
+        roughness: 0.6,
+        transparent: true,
+        opacity: 0.58,
+        depthWrite: false,
+        wireframe: this.wireframe,
+        side: THREE.DoubleSide
+      });
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.name = `parametric-${data.name || `实体 ${index + 1}`}`;
+      mesh.userData.parametricOverlay = true;
+      mesh.renderOrder = 3;
+      this.parametricOverlayGroup.add(mesh);
+    });
+
+    this.parametricOverlayGroup.visible = options.visible !== false;
+    this.planDirty = true;
+    if (this.parametricOverlayGroup.children.length === 0) return false;
+    this.fit();
+    return true;
+  }
+
+  clearParametricOverlay(): void {
+    for (const child of [...this.parametricOverlayGroup.children]) {
+      this.parametricOverlayGroup.remove(child);
+      const mesh = child as THREE.Mesh;
+      mesh.geometry.dispose();
+      const material = mesh.material;
+      if (Array.isArray(material)) material.forEach((entry) => entry.dispose());
+      else material.dispose();
+    }
+    this.parametricOverlayGroup.visible = true;
+    this.planDirty = true;
+  }
+
+  setParametricOverlayVisible(visible: boolean): boolean {
+    if (this.parametricOverlayGroup.children.length === 0) return false;
+    this.parametricOverlayGroup.visible = visible;
+    this.planDirty = true;
+    return true;
+  }
+
+  hasParametricOverlay(): boolean {
+    return this.parametricOverlayGroup.children.length > 0;
+  }
+
+  parametricOverlayVisible(): boolean {
+    return this.parametricOverlayGroup.visible && this.hasParametricOverlay();
   }
 
   /** 高亮参数化特征的大致包围盒（无独立网格时的最小可用反馈）。 */
@@ -392,25 +453,26 @@ export class CadViewer {
     this.replan();
   }
 
-  private rebuildPlanState(): void {
-    this.metas = [];
+  private rebuildPlanState(precomputedMetas?: PartMeta[]): void {
+    this.metas = precomputedMetas ?? [];
     this.metaByIndex.clear();
-    this.parts.forEach((part, index) => {
-      const positions = part.data.positions;
-      if (!positions || positions.length < 9) return; // 占位件 / 空几何不参与规划
-      const meta = buildPartMeta(
-        {
-          name: part.data.name,
-          positions,
-          indices: part.data.indices ?? null,
-          ...(part.data.color ? { color: part.data.color } : {})
-        },
-        index
-      );
-      if (meta.triangleCount <= 0) return;
-      this.metas.push(meta);
-      this.metaByIndex.set(index, meta);
-    });
+    if (!precomputedMetas) {
+      this.parts.forEach((part, index) => {
+        const positions = part.data.positions;
+        if (!positions || positions.length < 9) return; // 占位件 / 空几何不参与规划
+        const meta = buildPartMeta(
+          {
+            name: part.data.name,
+            positions,
+            indices: part.data.indices ?? null,
+            ...(part.data.color ? { color: part.data.color } : {})
+          },
+          index
+        );
+        if (meta.triangleCount > 0) this.metas.push(meta);
+      });
+    }
+    this.metas.forEach((meta) => this.metaByIndex.set(meta.index, meta));
     this.replan();
   }
 
@@ -664,6 +726,42 @@ export class CadViewer {
     });
   }
 
+  /**
+   * 跨重启指纹专用的完整模型快照。调用方只在内存中计算哈希，禁止落盘原始 CAD/BOM 内容。
+   * 复制 typed arrays，避免异步摘要期间模型编辑造成快照漂移。
+   */
+  getCheckpointFingerprintMaterial(): unknown {
+    const loaded = this.parts.map((part) => {
+      part.mesh.updateMatrix();
+      return {
+        name: part.data.name,
+        positions: part.data.positions.slice(),
+        normals: part.data.normals?.slice() ?? null,
+        indices: part.data.indices?.slice() ?? null,
+        color: part.data.color ? [...part.data.color] : null,
+        path: part.data.path ? [...part.data.path] : null,
+        matrix: part.mesh.matrix.toArray(),
+        qty: part.qty ?? 1,
+        partId: part.partId ?? null,
+        note: part.note ?? null
+      };
+    });
+    if (loaded.length > 0 || !this.importedResult) return loaded;
+    // WebGL 降级模式仍保留了解析后的几何；没有可靠原始网格时由摘要器拒绝恢复。
+    return this.importedResult.meshes.map((mesh) => ({
+      name: mesh.name,
+      positions: mesh.positions.slice(),
+      normals: mesh.normals?.slice() ?? null,
+      indices: mesh.indices?.slice() ?? null,
+      color: mesh.color ? [...mesh.color] : null,
+      path: mesh.path ? [...mesh.path] : null,
+      matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+      qty: 1,
+      partId: null,
+      note: null
+    }));
+  }
+
   getSelectionSnapshot(): { name: string; bbox: number[] } | null {
     if (this.selected === null) return null;
     const part = this.parts[this.selected];
@@ -800,6 +898,22 @@ export class CadViewer {
     return true;
   }
 
+  /** 只读采集 CAD viewer 当前相机，不提供档案恢复/应用入口。 */
+  getPortableViewState(): CadPortableViewState | null {
+    if (!this.controls || this.degraded) return null;
+    const position = this.camera.position;
+    const target = this.controls.target;
+    const up = this.camera.up;
+    return {
+      schemaVersion: 1,
+      position: [position.x, position.y, position.z],
+      target: [target.x, target.y, target.z],
+      up: [up.x, up.y, up.z],
+      fovDeg: this.camera.fov,
+      wireframe: this.wireframe
+    };
+  }
+
   /** 运动学标注网格树的数据源；id 使用 parts 索引。 */
   getKinematicsMeshes(): CadKinematicsMesh[] {
     if (this.parts.length === 0 && this.importedResult) {
@@ -818,6 +932,7 @@ export class CadViewer {
         return {
           id: index,
           name: mesh.name,
+          ...(mesh.stableObjectId ? { stableObjectId: mesh.stableObjectId } : {}),
           triangles: mesh.indices ? Math.floor(mesh.indices.length / 3) : Math.floor(mesh.positions.length / 9),
           center,
           size
@@ -831,6 +946,7 @@ export class CadViewer {
       return {
         id: index,
         name: part.data.name,
+        ...(part.data.stableObjectId ? { stableObjectId: part.data.stableObjectId } : {}),
         triangles: part.triangleCount,
         center: [center.x, center.y, center.z],
         size: [size.x, size.y, size.z]
@@ -1121,10 +1237,18 @@ export class CadViewer {
 
   private totalBounds(): THREE.Box3 {
     const bounds = new THREE.Box3();
-    if (this.parts.length === 0) return bounds;
     for (const part of this.parts) {
       const partBox = this.partBounds(part);
       if (!partBox.isEmpty()) bounds.union(partBox);
+    }
+    if (this.parametricOverlayGroup.visible) {
+      this.parametricOverlayGroup.updateMatrixWorld(true);
+      for (const child of this.parametricOverlayGroup.children) {
+        const mesh = child as THREE.Mesh;
+        mesh.geometry.computeBoundingBox();
+        const box = mesh.geometry.boundingBox;
+        if (box) bounds.union(box.clone().applyMatrix4(mesh.matrixWorld));
+      }
     }
     return bounds;
   }
@@ -1256,10 +1380,11 @@ export class CadViewer {
     if (Number.isInteger(index)) this.selectPart(index);
   };
 
-  private clearModel(): void {
+  private clearModel(options: { notify?: boolean } = {}): void {
     this.selected = null;
     this.modelParts = [];
     this.importedResult = null;
+    this.clearParametricOverlay();
     if (this.selectionHelper) this.selectionHelper.visible = false;
     if (this.featureHelper) this.featureHelper.visible = false;
     this.parts.forEach((part, index) => {
@@ -1276,7 +1401,7 @@ export class CadViewer {
     this.parts = [];
     this.disposePlanCaches();
     this.partsElement.innerHTML = '';
-    this.renderDetail(null);
+    if (options.notify !== false) this.renderDetail(null);
   }
 
   private enterDegradedMode(reason: string, result: CadImportResult | null, fileName?: string): void {

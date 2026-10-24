@@ -61,6 +61,7 @@ import {
 import { unwrapToolResultData } from './guard.ts';
 import { parseFallbackCandidates } from './retry.ts';
 import { formatTokenCount } from './budget.ts';
+import { isAgentResumeEnabled } from '../modules/agent-resume-gate.ts';
 
 const AGENT_ICON = '<svg viewBox="0 0 16 16"><path d="M8 2.2a3.2 3.2 0 1 1 0 6.4 3.2 3.2 0 0 1 0-6.4z"/><path d="M3 13.8c.4-2.5 2.4-4 5-4s4.6 1.5 5 4"/><path d="M2 3.2h1.2M12.8 3.2H14M2 12.8h1.2M12.8 12.8H14"/></svg>';
 
@@ -136,11 +137,17 @@ interface MultiPlanState {
   feedback: string;
   tone: 'ok' | 'error' | '';
   dismissed: boolean;
+  restoring?: boolean;
+  restoredCheckpoint?: boolean;
+  restoreBlocked?: boolean;
+  requiresReplan?: boolean;
   /** 由建议卡片直接生成，单步也要显示计划确认卡片。 */
   fromSuggestion?: boolean;
 }
 
 let multiPlan: MultiPlanState | null = null;
+let agentResumeModuleEnabled = false;
+let planRestoreGeneration = 0;
 
 interface RecipeUiState {
   selectedId: string;
@@ -230,6 +237,7 @@ function renderShell(): void {
         <div class="acp-plan-actions" id="agentPlanActions">
           <button type="button" class="acp-btn acp-btn-primary" id="agentPlanRunAll">全部执行</button>
           <button type="button" class="acp-btn" id="agentPlanRunStep">逐步执行</button>
+          <button type="button" class="acp-btn" id="agentPlanReplan" hidden>丢弃旧进度并以当前计划重新开始</button>
           <button type="button" class="acp-btn" id="agentPlanCancel">取消</button>
         </div>
       </div>
@@ -1345,6 +1353,7 @@ function applyAdvisorSuggestion(id: string): void {
   };
   chatFeedback('');
   renderMultiPlan();
+  if (isAgentResumeEnabled(() => agentResumeModuleEnabled)) void restoreMultiPlanCheckpoint(multiPlan);
   body.querySelector<HTMLElement>('#agentPlanCard')?.scrollIntoView({ block: 'nearest' });
 }
 
@@ -1374,6 +1383,140 @@ function refreshMultiPlan(text: string, context: AgentContext): void {
       tone: '',
       dismissed: false
     };
+    if (isAgentResumeEnabled(() => agentResumeModuleEnabled)) void restoreMultiPlanCheckpoint(multiPlan);
+  }
+  renderMultiPlan();
+}
+
+/** 只恢复已验证的可见状态；绝不在页面启动或计划卡创建后自动调用任何工具。 */
+async function restoreMultiPlanCheckpoint(state: MultiPlanState | null): Promise<void> {
+  if (!state || !window.desktop || state.plan.refused || !isAgentResumeEnabled(() => agentResumeModuleEnabled)) return;
+  const generation = ++planRestoreGeneration;
+  state.restoring = true;
+  renderMultiPlan();
+  try {
+    const restored = await window.desktop.agent.plan.restore({ plan: state.plan });
+    if (multiPlan !== state || generation !== planRestoreGeneration
+        || !isAgentResumeEnabled(() => agentResumeModuleEnabled)) return;
+    if (!restored.ok) {
+      if (restored.available) {
+        state.restoreBlocked = true;
+        state.feedback = restored.message ?? '恢复记录无法验证；请丢弃旧进度后重新规划';
+        state.tone = 'error';
+      }
+      return;
+    }
+    if (!restored.available) return;
+    if (restored.blocked) {
+      state.restoreBlocked = true;
+      state.requiresReplan = restored.requiresReplan === true;
+      state.feedback = restored.message ?? '恢复记录无法安全续跑；请丢弃旧进度后重新规划';
+      state.tone = 'error';
+      return;
+    }
+    const steps = restored.steps;
+    if (!Array.isArray(steps) || !Number.isInteger(restored.cursor)
+        || restored.cursor! < 0 || restored.cursor! > state.plan.steps.length
+        || steps.length !== state.plan.steps.length
+        || steps.some((step, index) => step.index !== index || step.tool !== state.plan.steps[index]?.tool)) {
+      state.restoreBlocked = true;
+      state.requiresReplan = true;
+      state.feedback = '恢复步骤与当前计划不一致；请丢弃旧进度后重新规划';
+      state.tone = 'error';
+      return;
+    }
+    state.next = restored.cursor!;
+    state.results = steps
+      .filter((step) => step.state === 'completed')
+      .map((step) => ({
+        index: step.index,
+        step: step.index + 1,
+        tool: step.tool,
+        ok: true,
+        code: 'RESTORED_COMPLETED',
+        message: '重启前已完成，恢复时不会重复执行',
+        elapsedMs: 0
+      }));
+    state.restoredCheckpoint = true;
+    const completedCount = state.results.length;
+    state.feedback = state.next >= state.plan.steps.length
+      ? `已恢复：全部 ${state.plan.steps.length} 步均已完成，不会再次执行。`
+      : `已恢复进度：${completedCount} 步保持完成；后续步骤不会自动运行${restored.needsReconfirmation ? '，继续时写步骤仍需重新确认' : ''}。`;
+    state.tone = 'ok';
+  } catch (error) {
+    if (multiPlan === state && generation === planRestoreGeneration
+        && isAgentResumeEnabled(() => agentResumeModuleEnabled)) {
+      state.restoreBlocked = true;
+      state.requiresReplan = true;
+      state.feedback = `恢复状态校验失败：${errorMessage(error)}；请丢弃旧进度后重新规划`;
+      state.tone = 'error';
+    }
+  } finally {
+    if (multiPlan === state && generation === planRestoreGeneration
+        && isAgentResumeEnabled(() => agentResumeModuleEnabled)) {
+      state.restoring = false;
+      renderMultiPlan();
+    }
+  }
+}
+
+async function discardCheckpointAndReplan(): Promise<void> {
+  const state = multiPlan;
+  if (!isAgentResumeEnabled(() => agentResumeModuleEnabled)
+      || !state || state.running || state.restoring || !state.restoreBlocked || !window.desktop) return;
+  try {
+    const cleared = await window.desktop.agent.plan.clearCheckpoint();
+    if (!cleared.ok) throw new Error(cleared.message ?? '无法清除恢复记录');
+    if (state.requiresReplan) {
+      multiPlan = null;
+      renderMultiPlan();
+      chatFeedback('旧进度已清除。此前写操作结果无法确认；请检查当前工程并重新输入指令规划，不会续跑旧计划。', true);
+      fieldElement('agentChatInput')?.focus();
+      return;
+    }
+    if (!state.fromSuggestion) {
+      const toolNames = Array.isArray(infoState.tools) && infoState.tools.length > 0
+        ? infoState.tools.map((tool) => tool.name)
+        : undefined;
+      state.plan = buildAgentPlan(state.input, { ...(toolNames ? { tools: toolNames } : {}), context: currentAgentContext() });
+    }
+    state.results = [];
+    state.next = 0;
+    state.restoredCheckpoint = false;
+    state.restoreBlocked = false;
+    state.requiresReplan = false;
+    state.feedback = '旧进度已丢弃；计划已重新核对。工具尚未执行，请再次确认后运行。';
+    state.tone = '';
+    renderMultiPlan();
+  } catch (error) {
+    state.feedback = `无法重新规划：${errorMessage(error)}`;
+    state.tone = 'error';
+    renderMultiPlan();
+  }
+}
+
+export function setAgentResumeModuleEnabled(enabled: boolean): void {
+  const wasEnabled = agentResumeModuleEnabled;
+  agentResumeModuleEnabled = enabled === true;
+  if (!agentResumeModuleEnabled) {
+    planRestoreGeneration += 1;
+    const state = multiPlan;
+    if (state && (state.restoring || state.restoredCheckpoint || state.restoreBlocked)) {
+      if (state.running) {
+        state.restoring = false;
+        state.restoredCheckpoint = false;
+        state.restoreBlocked = false;
+        state.requiresReplan = false;
+        state.feedback = '跨重启恢复模块已关闭；磁盘中的旧 checkpoint 保留但不可使用。当前计划仍需逐步确认。';
+        state.tone = '';
+      } else {
+        multiPlan = null;
+        chatFeedback('跨重启恢复模块已关闭；旧 checkpoint 已保留但不可使用。请重新规划后再按常规确认执行。', true);
+      }
+    }
+  } else if (!wasEnabled && multiPlan && !multiPlan.running) {
+    // 仅校验并显示进度；工具仍须由用户显式点击执行，写步骤继续走原生确认。
+    void restoreMultiPlanCheckpoint(multiPlan);
   }
   renderMultiPlan();
 }
@@ -1410,10 +1553,15 @@ function renderMultiPlan(): void {
   const feedback = body?.querySelector<HTMLElement>('#agentPlanFeedback');
   const runAll = body?.querySelector<HTMLButtonElement>('#agentPlanRunAll');
   const runStep = body?.querySelector<HTMLButtonElement>('#agentPlanRunStep');
+  const replan = body?.querySelector<HTMLButtonElement>('#agentPlanReplan');
   const cancel = body?.querySelector<HTMLButtonElement>('#agentPlanCancel');
 
   if (title) {
-    title.textContent = state.plan.refused
+    title.textContent = state.restoring
+      ? '多步计划 · 正在校验恢复记录'
+      : state.restoreBlocked
+        ? '多步计划 · 需要重新规划'
+        : state.plan.refused
       ? '多步计划 · 未执行'
       : state.fromSuggestion
         ? `建议确认 · ${state.plan.steps.length} 步`
@@ -1466,13 +1614,17 @@ function renderMultiPlan(): void {
   const refused = state.plan.refused === true;
   const completed = !refused && state.next >= state.plan.steps.length;
   if (runAll) {
-    runAll.disabled = state.running || refused || completed;
-    runAll.hidden = refused;
+    runAll.disabled = state.running || state.restoring === true || state.restoreBlocked === true || refused || completed;
+    runAll.hidden = refused || state.restoreBlocked === true;
   }
   if (runStep) {
-    runStep.disabled = state.running || refused || completed;
-    runStep.hidden = refused;
+    runStep.disabled = state.running || state.restoring === true || state.restoreBlocked === true || refused || completed;
+    runStep.hidden = refused || state.restoreBlocked === true;
     runStep.textContent = state.next === 0 ? '逐步执行' : (completed ? '已完成' : `下一步（${state.next + 1}/${state.plan.steps.length}）`);
+  }
+  if (replan) {
+    replan.hidden = state.restoreBlocked !== true;
+    replan.disabled = state.running || state.restoring === true;
   }
   if (cancel) {
     cancel.disabled = false;
@@ -1482,7 +1634,7 @@ function renderMultiPlan(): void {
 
 async function runMultiPlan(mode: 'all' | 'step'): Promise<void> {
   const state = multiPlan;
-  if (!state || state.running || thinking || recipeUi.running || state.plan.refused || !window.desktop) return;
+  if (!state || state.running || state.restoring || state.restoreBlocked || thinking || recipeUi.running || state.plan.refused || !window.desktop) return;
   if (state.next >= state.plan.steps.length) return;
   state.running = true;
   state.feedback = '';
@@ -1500,6 +1652,9 @@ async function runMultiPlan(mode: 'all' | 'step'): Promise<void> {
     const merged = new Map(state.results.map((item) => [item.index, item]));
     for (const item of result.results ?? []) merged.set(item.index, item);
     state.results = [...merged.values()].sort((left, right) => left.index - right.index);
+    let completedPrefix = 0;
+    while (state.results.some((item) => item.index === completedPrefix && item.ok)) completedPrefix += 1;
+    state.next = completedPrefix;
 
     if (result.refused) {
       state.feedback = result.summary || '计划已拒绝';
@@ -1884,6 +2039,7 @@ function bindControls(): void {
   body?.querySelector<HTMLButtonElement>('#agentRecipeExport')?.addEventListener('click', () => { void exportRecipeRecord(); });
   body?.querySelector<HTMLButtonElement>('#agentPlanRunAll')?.addEventListener('click', () => { void runMultiPlan('all'); });
   body?.querySelector<HTMLButtonElement>('#agentPlanRunStep')?.addEventListener('click', () => { void runMultiPlan('step'); });
+  body?.querySelector<HTMLButtonElement>('#agentPlanReplan')?.addEventListener('click', () => { void discardCheckpointAndReplan(); });
   body?.querySelector<HTMLButtonElement>('#agentPlanCancel')?.addEventListener('click', () => { void cancelMultiPlan(); });
   body?.querySelector<HTMLButtonElement>('#agentChatCancel')?.addEventListener('click', () => { void cancelExecution(); });
   body?.querySelector<HTMLButtonElement>('#agentLlmSave')?.addEventListener('click', () => { void saveSettings(); });

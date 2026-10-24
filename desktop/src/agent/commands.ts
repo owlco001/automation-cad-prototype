@@ -58,6 +58,9 @@ import {
   type StoredMachineDesign
 } from '../machine/store.ts';
 import { buildMachineIoMap } from '../machine/io-map.ts';
+import { AGENT_COMMAND_MODULES, moduleDisabledResult, moduleIsEnabled, type ModuleEnabledReader } from '../modules/tool-gates.ts';
+import { COST_ESTIMATION_MODULE_ID } from '../modules/cost-estimation-gate.ts';
+import { PARAMETRIC_IMPORT_MODULE_ID, PARAMETRIC_MODULE_DISABLED_MESSAGE } from '../modules/parametric-gate.ts';
 import { generateMachineGeometry, summarizeGeometry } from '../machine/geometry.ts';
 import {
   buildMachineSolids,
@@ -94,6 +97,8 @@ export interface CommandHistoryEntry {
 export interface CommandContext {
   registry: PackRegistry;
   bridge: Bridge;
+  /** 主进程注入的可选模块状态；模块状态未就绪或读取失败时失败关闭。 */
+  isModuleEnabled?: ModuleEnabledReader;
   /** 读取内置价格簿（主进程注入）；返回原始 JSON 或已校验对象 */
   loadBuiltinPricebook?: () => unknown;
   /** HTML → PDF 字节（主进程注入，复用 A4 打印管线）；PDF 导出用。 */
@@ -111,6 +116,7 @@ export interface CommandContext {
 }
 
 export interface CommandBusOptions {
+  isModuleEnabled?: ModuleEnabledReader;
   loadBuiltinPricebook?: () => unknown;
   renderCostPdf?: (html: string) => Promise<Uint8Array>;
   exportsRoot?: string;
@@ -358,6 +364,11 @@ export class CommandBus {
     const command = this.commands.get(name);
     if (!command) {
       return failed('UNKNOWN_COMMAND', `未知命令：${name}`);
+    }
+    const moduleId = AGENT_COMMAND_MODULES[name];
+    if (moduleId && !moduleIsEnabled(moduleId, this.context.isModuleEnabled)) {
+      const disabled = moduleDisabledResult(moduleId);
+      return failed(disabled.code, disabled.message);
     }
     if (signal?.aborted) return failed('CANCELLED', '已取消，未执行该命令');
 
@@ -827,10 +838,16 @@ function registerCostCommand(bus: CommandBus): void {
   bus.register({
     name: 'run_cost_report',
     async run(args, ctx) {
+      if (!moduleIsEnabled(COST_ESTIMATION_MODULE_ID, ctx.isModuleEnabled)) {
+        throw new CommandFailure('MODULE_DISABLED', moduleDisabledResult(COST_ESTIMATION_MODULE_ID).message);
+      }
       // 未显式给 bom 时回落到当前场景 BOM；场景 BOM 没有物料号，引擎会如实记为「缺物料号」。
       let sceneBom: unknown;
       if (!(Array.isArray(args.bom) && args.bom.length > 0)) {
         const rows = await ctx.bridge.call<unknown>('getBom');
+        if (!moduleIsEnabled(COST_ESTIMATION_MODULE_ID, ctx.isModuleEnabled)) {
+          throw new CommandFailure('MODULE_DISABLED', moduleDisabledResult(COST_ESTIMATION_MODULE_ID).message);
+        }
         if (!Array.isArray(rows)) {
           throw new CommandFailure('RENDERER_ERROR', bridgeFailureMessage(rows, '读取当前 BOM 失败'));
         }
@@ -1253,6 +1270,9 @@ function registerMachineApplyCommand(bus: CommandBus): void {
       const withSolids = optionalBoolean(args, 'withSolids', 'withSolids') ?? false;
       if (withSolids && !withGeometry) {
         throw new CommandFailure('INVALID_ARGUMENT', 'withSolids 需要 withGeometry=true');
+      }
+      if (withSolids && !moduleIsEnabled(PARAMETRIC_IMPORT_MODULE_ID, ctx.isModuleEnabled)) {
+        throw new CommandFailure('MODULE_DISABLED', PARAMETRIC_MODULE_DISABLED_MESSAGE);
       }
       if (!ctx.userDataRoot) {
         throw new CommandFailure('WRITE_FAILED', '用户数据目录未配置，无法写入机型方案');
@@ -1711,6 +1731,9 @@ function registerCostExportCommand(bus: CommandBus): void {
   bus.register({
     name: 'export_cost_report',
     async run(args, ctx) {
+      if (!moduleIsEnabled(COST_ESTIMATION_MODULE_ID, ctx.isModuleEnabled)) {
+        throw new CommandFailure('MODULE_DISABLED', moduleDisabledResult(COST_ESTIMATION_MODULE_ID).message);
+      }
       if (args.format !== 'pdf' && args.format !== 'csv') {
         throw new CommandFailure('UNSUPPORTED_FORMAT', '导出格式仅支持 pdf 或 csv');
       }
@@ -1728,17 +1751,24 @@ function registerCostExportCommand(bus: CommandBus): void {
       let projectName: string | undefined;
       if (!(Array.isArray(args.bom) && args.bom.length > 0)) {
         const rows = await ctx.bridge.call<unknown>('getBom');
+        if (!moduleIsEnabled(COST_ESTIMATION_MODULE_ID, ctx.isModuleEnabled)) {
+          throw new CommandFailure('MODULE_DISABLED', moduleDisabledResult(COST_ESTIMATION_MODULE_ID).message);
+        }
         if (!Array.isArray(rows)) {
           throw new CommandFailure('RENDERER_ERROR', bridgeFailureMessage(rows, '读取当前 BOM 失败'));
         }
         sceneBom = rows;
         try {
           const scene = await ctx.bridge.call<{ source?: unknown } | null>('getScene');
+          if (!moduleIsEnabled(COST_ESTIMATION_MODULE_ID, ctx.isModuleEnabled)) {
+            throw new CommandFailure('MODULE_DISABLED', moduleDisabledResult(COST_ESTIMATION_MODULE_ID).message);
+          }
           const source = scene && typeof scene === 'object' ? scene.source : undefined;
           if (typeof source === 'string' && source.trim()) {
             projectName = basename(source.trim(), extname(source.trim()));
           }
         } catch (error) {
+          if (error instanceof CommandFailure) throw error;
           // 项目名只影响默认文件名，取不到时回落「机台」，不阻塞导出。
           console.debug(`[EXPORT_PROJECT_NAME_FALLBACK]`, { site: 'desktop/src/agent/commands.ts:1683' }, error);
         }
@@ -1751,6 +1781,9 @@ function registerCostExportCommand(bus: CommandBus): void {
           ...(projectName ? { projectName } : {}),
           ...(ctx.renderCostPdf ? { renderPdf: ctx.renderCostPdf } : {}),
           saveFile: async (payload) => {
+            if (!moduleIsEnabled(COST_ESTIMATION_MODULE_ID, ctx.isModuleEnabled)) {
+              return moduleDisabledResult(COST_ESTIMATION_MODULE_ID);
+            }
             const binary = typeof payload.data !== 'string';
             if (binary) {
               const bytes = payload.data as Uint8Array;
@@ -1775,6 +1808,9 @@ function registerCostExportCommand(bus: CommandBus): void {
             return result ?? { ok: false, code: 'WRITE_FAILED', message: '渲染层未返回落盘结果' };
           }
         });
+        if (!moduleIsEnabled(COST_ESTIMATION_MODULE_ID, ctx.isModuleEnabled)) {
+          throw new CommandFailure('MODULE_DISABLED', moduleDisabledResult(COST_ESTIMATION_MODULE_ID).message);
+        }
         return { ok: true, data };
       } catch (error) {
         if (error instanceof CostExportError) {
@@ -1792,6 +1828,7 @@ export function createAgentCommandBus(
   options: CommandBusOptions = {}
 ): CommandBus {
   const context: CommandContext = { registry, bridge };
+  if (options.isModuleEnabled) context.isModuleEnabled = options.isModuleEnabled;
   if (options.loadBuiltinPricebook) context.loadBuiltinPricebook = options.loadBuiltinPricebook;
   if (options.renderCostPdf) context.renderCostPdf = options.renderCostPdf;
   if (options.exportsRoot) context.exportsRoot = options.exportsRoot;

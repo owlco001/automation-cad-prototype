@@ -60,6 +60,14 @@ test('机型配置：点位重复抛出中文错误', () => {
   assert.throws(() => validateMachineConfig(value), /点位 Y0 重复/);
 });
 
+test('机型配置：Y 点与 Q 字节位别名重复时在 IO 收集前报错', () => {
+  const value = minimalConfig({
+    actuators: [{ id: 'a1', name: '气缸', kind: 'cylinder', station: '上料', extendPoint: 'Y0' }],
+    sensors: [{ point: 'Q0.0', station: '上料', part: '输出别名' }]
+  });
+  assert.throws(() => validateMachineConfig(value), /别名冲突/);
+});
+
 test('机型配置：执行机构引用未定义工位抛出中文错误', () => {
   const value = minimalConfig();
   value.actuators[0].station = '压装';

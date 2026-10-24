@@ -35,6 +35,7 @@
     "@modelcontextprotocol/sdk": "^1.20.2",
     "adm-zip": "^0.5.16",
     "dxf-writer": "^1.18.4",
+    "electron-updater": "6.8.11",
     "modbus-serial": "^8.0.25",
     "mqtt": "^5.14.1",
     "node-opcua": "2.186.15",
@@ -97,6 +98,12 @@
         "to": "parametric/app.py"
       }
     ],
+    "publish": {
+      "provider": "github",
+      "owner": "owlco001",
+      "repo": "automation-cad-prototype",
+      "channel": "latest"
+    },
     "win": {
       "icon": "build/icon.ico",
       "target": [
@@ -106,11 +113,13 @@
             "x64"
           ]
         }
-      ]
+      ],
+      "verifyUpdateCodeSignature": true
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
+      "differentialPackage": true,
       "artifactName": "AutomationCAD-Setup-${version}.${ext}"
     }
   }

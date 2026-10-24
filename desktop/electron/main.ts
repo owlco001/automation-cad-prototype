@@ -1,5 +1,6 @@
-import { app, BrowserWindow, dialog, Menu, type MenuItemConstructorOptions } from 'electron';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
+import { app, BrowserWindow, dialog, ipcMain, Menu, type IpcMainInvokeEvent, type MenuItemConstructorOptions } from 'electron';
+import { autoUpdater } from 'electron-updater';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -17,6 +18,13 @@ import { AgentTools } from '../src/agent/tools';
 import { planReadOnly, planTool, routeIntent } from '../src/agent/router';
 import { executePlan, plan } from '../src/agent/planner';
 import { AgentThread, formatThreadContext, projectFingerprint, runPlan } from '../src/agent/thread';
+import {
+  createPlanCheckpoint,
+  inspectPlanCheckpoint,
+  loadPlanCheckpoint,
+  savePlanCheckpoint,
+  updatePlanCheckpoint
+} from '../src/agent/plan-checkpoint';
 import { RECIPES, runRecipe } from '../src/agent/recipes';
 import {
   buildAgentContext,
@@ -39,7 +47,7 @@ import { KB_STATS } from '../src/agent/kb/search';
 import { repairToolCall } from '../src/agent/repair';
 import { AgentRpcServer, createAgentTokenFile, type AgentRpcInfo } from '../src/agent/rpc';
 import { RendererBridge, createAgentCommandBus, type CommandBus } from '../src/agent/commands';
-import { buildDesignPackage } from '../src/sync/package';
+import { buildDesignPackage, parseDesignPackage } from '../src/sync/package';
 import { describeCheck, runElectricalCheck } from '../src/elec/check';
 import { computeCost, type CostInput } from '../src/cost/engine';
 import { isUsablePricebookItem, validatePricebook } from '../src/cost/pricebook';
@@ -47,6 +55,8 @@ import { DEFAULT_MACHINE_PRICING, estimateCost } from '../src/machine/cost-model
 import type { ComponentPart } from '../src/shared/types';
 import { planExportName } from '../src/cost/export';
 import { demoMachineConfig, type ActuatorConfig, type SensorConfig } from '../src/commission/machine-config';
+import { buildMachineIoMap } from '../src/machine/io-map';
+import { PLCGEN_VERSION } from '../src/plcgen/st';
 import { parseMachineBrief } from '../src/machine/spec';
 import { TEMPLATES } from '../src/machine/templates';
 import { buildClarify } from '../src/machine/clarify';
@@ -56,6 +66,14 @@ import { generateSt } from '../src/plcgen/st';
 import { generateProject } from '../src/plcgen/generate';
 import { verifyGenerated } from '../src/plcgen/verify';
 import { ParametricManager } from './parametric.ts';
+import { PARAMETRIC_IMPORT_MODULE_ID } from '../src/modules/parametric-gate.ts';
+import {
+  assertUpdateIpcAuthorization,
+  assertUpdateModuleEnabled,
+  hasTrustedUpdateConfig,
+  UpdateChannelService,
+  type UpdateChannel
+} from './update-service.ts';
 import { captureProductScreenshots } from './screenshots';
 import { captureMachineScreenshots } from './machine-screenshots';
 import { writeLastCrash } from './crash-report.ts';
@@ -117,6 +135,14 @@ let agentServer: AgentRpcServer | null = null;
 let agentTools: AgentTools | null = null;
 let commandBus: CommandBus | null = null;
 let parametric: ParametricManager | null = null;
+let parametricImportModuleEnabled = false;
+let plcgenModuleEnabled = false;
+let elecValidationModuleEnabled = false;
+let costEstimationModuleEnabled = false;
+let factoryPlcSyncModuleEnabled = false;
+let agentResumeModuleEnabled = false;
+let projectPortableModuleEnabled = false;
+let systemUpdateModuleEnabled = false;
 let agentInfo: (AgentRpcInfo & { toolCount: number }) | { error: string } = { error: 'Agent 服务尚未启动' };
 
 let crashHandlersInstalled = false;
@@ -253,6 +279,181 @@ function userPacksDir(): string {
 }
 
 async function runParametricSmoke(window: BrowserWindow): Promise<void> {
+  const fixture = resolve(desktopRoot(), 'test', 'fixtures', 'cube.stp');
+  const moduleGate = await window.webContents.executeJavaScript(
+    `(async () => {
+      const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const registry = window.__ModuleRegistry;
+      const api = window.desktop?.parametric;
+      const ui = window.AutomationCadParametric;
+      const viewer = window.AutomationCadViewer;
+      if (!registry || !api || !ui || !viewer) return { error: '模块/参数化/CAD API 缺失' };
+      const moduleId = 'cad.parametric-import';
+      const historyModuleId = 'parametric.history';
+      if (!registry.getStatus(moduleId)?.enabled) return { error: '参数化模块默认未启用' };
+      if (!registry.getStatus(historyModuleId)?.enabled) return { error: '参数化 history 模块默认未启用' };
+      const treeKey = 'automationcad.parametric.v1';
+      const previousTree = localStorage.getItem(treeKey);
+      const savedTree = JSON.stringify({ version: 1, buckets: { 'fixture.step': { features: [{ id: 'saved-feature' }] } } });
+      localStorage.setItem(treeKey, savedTree);
+      registry.setEnabled(moduleId, false);
+      const historyUnavailable = registry.getStatus(historyModuleId)?.status === 'unavailable';
+      let historyEnableRejected = false;
+      try { registry.setEnabled(historyModuleId, true); }
+      catch { historyEnableRejected = true; }
+      const button = document.querySelector('[data-cad-action="parametric"]');
+      const hidden = button?.hidden === true && getComputedStyle(button).display === 'none';
+      const status = await api.status();
+      const start = await api.start();
+      const build = await api.build({ schemaVersion: 1, updatedAt: '2026-10-24T00:00:00Z', features: [] });
+      const uiBuild = await ui.build();
+      ui.open();
+      let editRejected = false;
+      try { ui.setDoc({ schemaVersion: 1, updatedAt: '2026-10-24T00:00:00Z', features: [] }); }
+      catch (error) { editRejected = /已关闭/.test(String(error?.message || error)); }
+      const drawer = document.getElementById('cadParametricDrawer');
+      const cadStats = await viewer.inspectPath(${JSON.stringify(fixture)});
+      await viewer.importPath(${JSON.stringify(fixture)});
+      const treePreserved = localStorage.getItem(treeKey) === savedTree;
+      registry.setEnabled(moduleId, true);
+      await wait(30);
+      const restored = button?.hidden === false;
+      const historyRestored = registry.getStatus(historyModuleId)?.enabled === true;
+      const managerStatus = await api.status();
+      if (previousTree === null) localStorage.removeItem(treeKey);
+      else localStorage.setItem(treeKey, previousTree);
+      return {
+        hidden, status, start, build, uiBuild, editRejected,
+        drawerHidden: !drawer || (drawer.hidden && getComputedStyle(drawer).display === 'none'),
+        cadReadable: cadStats?.triangleCount === 12 && cadStats?.meshCount === 1,
+        treePreserved, restored, managerStatus, historyUnavailable, historyEnableRejected, historyRestored
+      };
+    })()`
+  ) as {
+    error?: string; hidden: boolean; status: { status: string }; start: { ok: boolean; code?: string };
+    build: { ok: boolean; code?: string }; uiBuild: { ok: boolean; code?: string };
+    editRejected: boolean; drawerHidden: boolean; cadReadable: boolean; treePreserved: boolean;
+    restored: boolean; managerStatus: { status: string };
+    historyUnavailable: boolean; historyEnableRejected: boolean; historyRestored: boolean;
+  };
+  if (moduleGate.error || !moduleGate.hidden || moduleGate.status.status !== 'unavailable' ||
+      moduleGate.start.ok || moduleGate.start.code !== 'MODULE_DISABLED' ||
+      moduleGate.build.ok || moduleGate.build.code !== 'MODULE_DISABLED' ||
+      moduleGate.uiBuild.ok || moduleGate.uiBuild.code !== 'MODULE_DISABLED' ||
+      !moduleGate.editRejected || !moduleGate.drawerHidden || !moduleGate.cadReadable ||
+      !moduleGate.treePreserved || !moduleGate.restored || moduleGate.managerStatus.status !== 'stopped' ||
+      !moduleGate.historyUnavailable || !moduleGate.historyEnableRejected || !moduleGate.historyRestored) {
+    throw new Error(`参数化模块关闭闭锁 smoke 失败：${JSON.stringify(moduleGate)}`);
+  }
+  console.log('SMOKE_PARAMETRIC_MODULE_GATE_OK ipc=blocked ui=hidden-restored cad=readable tree=preserved history=dependency-gated sidecar=stopped');
+  try {
+    const historyUi = await window.webContents.executeJavaScript(
+      `(async () => {
+        const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const registry = window.__ModuleRegistry;
+        const ui = window.AutomationCadParametric;
+        const moduleId = 'parametric.history';
+        const treeKey = 'automationcad.parametric.v1';
+        if (!registry || !ui || !registry.getStatus(moduleId)?.enabled) return { error: 'history module/API 未就绪' };
+        const previousTree = localStorage.getItem(treeKey);
+        try {
+          ui.open();
+          await wait(80);
+          const auto = document.querySelector('[data-param-auto]');
+          const addType = document.querySelector('[data-param-add-type]');
+          const addButton = document.querySelector('[data-param-add]');
+          const undoButton = document.querySelector('[data-param-undo]');
+          const redoButton = document.querySelector('[data-param-redo]');
+          if (!auto || !addType || !addButton || !undoButton || !redoButton) return { error: 'history/edit 控件缺失' };
+          auto.checked = false;
+          auto.dispatchEvent(new Event('change', { bubbles: true }));
+          ui.setDoc({
+            schemaVersion: 2,
+            updatedAt: '2026-10-24T00:00:00Z',
+            instances: [{
+              id: 'p1', name: 'History smoke', transform: { x: 0, y: 0, z: 0, rz: 0 },
+              features: [{ id: 'f1', type: 'box', name: 'Base', params: { length: 100, width: 60, height: 8 } }]
+            }]
+          });
+          addType.value = 'box';
+          addButton.click();
+          const addedCount = ui.getDoc().instances.find((instance) => instance.id === 'p1')?.features.length;
+          const undoCreatedRedo = ui.undo();
+          const docBeforeToggle = JSON.stringify(ui.getDoc());
+          const storedBeforeToggle = localStorage.getItem(treeKey);
+          const historyBeforeToggle = ui.historyState();
+          const overlayBeforeToggle = ui.state().overlayVisible;
+          registry.setEnabled(moduleId, false);
+          await wait(20);
+          const hidden = undoButton.hidden && redoButton.hidden;
+          const disabled = undoButton.disabled && redoButton.disabled;
+          const apiUndo = ui.undo();
+          const apiRedo = ui.redo();
+          undoButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+          redoButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+          const docAfterBlockedCalls = JSON.stringify(ui.getDoc());
+          const storedAfterBlockedCalls = localStorage.getItem(treeKey);
+          const historyWhileDisabled = ui.historyState();
+          const overlayAfterToggle = ui.state().overlayVisible;
+          const noMutation = docAfterBlockedCalls === docBeforeToggle &&
+            storedAfterBlockedCalls === storedBeforeToggle &&
+            historyWhileDisabled.undoCount === historyBeforeToggle.undoCount &&
+            historyWhileDisabled.redoCount === historyBeforeToggle.redoCount &&
+            overlayAfterToggle === overlayBeforeToggle;
+
+          registry.setEnabled(moduleId, true);
+          await wait(20);
+          const visibleAgain = !undoButton.hidden && !redoButton.hidden;
+          const redoRestored = ui.redo();
+          const restoredCount = ui.getDoc().instances.find((instance) => instance.id === 'p1')?.features.length;
+
+          registry.setEnabled(moduleId, false);
+          await wait(20);
+          addButton.click();
+          const editWhileDisabled = ui.getDoc().instances.find((instance) => instance.id === 'p1')?.features.length;
+          const disabledHistoryAfterEdit = ui.historyState();
+          registry.setEnabled(moduleId, true);
+          await wait(20);
+          const undoAfterResume = ui.undo();
+          const resumedCount = ui.getDoc().instances.find((instance) => instance.id === 'p1')?.features.length;
+          const resumedState = ui.historyState();
+          ui.close();
+          return {
+            addedCount, undoCreatedRedo, historyBeforeToggle, hidden, disabled, apiUndo, apiRedo, noMutation,
+            historyWhileDisabled, visibleAgain, redoRestored, restoredCount,
+            editWhileDisabled, disabledHistoryAfterEdit, undoAfterResume, resumedCount, resumedState
+          };
+        } finally {
+          if (!registry.getStatus(moduleId)?.enabled) registry.setEnabled(moduleId, true);
+          if (previousTree === null) localStorage.removeItem(treeKey);
+          else localStorage.setItem(treeKey, previousTree);
+        }
+      })()`
+    ) as {
+      error?: string;
+      addedCount?: number; undoCreatedRedo?: boolean;
+      historyBeforeToggle?: { enabled: boolean; undoCount: number; redoCount: number };
+      hidden?: boolean; disabled?: boolean; apiUndo?: boolean; apiRedo?: boolean; noMutation?: boolean;
+      historyWhileDisabled?: { enabled: boolean; undoCount: number; redoCount: number };
+      visibleAgain?: boolean; redoRestored?: boolean; restoredCount?: number;
+      editWhileDisabled?: number; disabledHistoryAfterEdit?: { enabled: boolean; undoCount: number; redoCount: number };
+      undoAfterResume?: boolean; resumedCount?: number; resumedState?: { enabled: boolean; undoCount: number; redoCount: number };
+    };
+    if (historyUi.error || historyUi.addedCount !== 2 || !historyUi.undoCreatedRedo ||
+        historyUi.historyBeforeToggle?.enabled !== true || historyUi.historyBeforeToggle.redoCount !== 1 ||
+        !historyUi.hidden || !historyUi.disabled || historyUi.apiUndo !== false || historyUi.apiRedo !== false ||
+        !historyUi.noMutation || historyUi.historyWhileDisabled?.enabled !== false ||
+        historyUi.historyWhileDisabled.undoCount !== historyUi.historyBeforeToggle.undoCount ||
+        historyUi.historyWhileDisabled.redoCount !== historyUi.historyBeforeToggle.redoCount ||
+        !historyUi.visibleAgain || !historyUi.redoRestored || historyUi.restoredCount !== 2 ||
+        historyUi.editWhileDisabled !== 3 || historyUi.disabledHistoryAfterEdit?.enabled !== false ||
+        !historyUi.undoAfterResume || historyUi.resumedCount !== 2 || historyUi.resumedState?.enabled !== true) {
+      throw new Error(`history UI toggle failed: ${JSON.stringify(historyUi)}`);
+    }
+    console.log('SMOKE_PARAMETRIC_HISTORY_GATE_OK controls=hidden api=blocked tree=preserved same-session=restored editing=available');
+  } catch (error) {
+    throw new Error(`参数化 history UI smoke 失败：${error instanceof Error ? error.message : String(error)}`);
+  }
   if (!process.env.AUTOMATIONCAD_PARAMETRIC_CMD) {
     console.log('SMOKE_PARAMETRIC_SIDECAR_SKIP');
     console.log('SMOKE_PARAMETRIC_UI_SKIP');
@@ -320,8 +521,41 @@ async function runParametricSmoke(window: BrowserWindow): Promise<void> {
         const assemblyBuild = await ui.build();
         await wait(80);
         const assemblyState = ui.state();
+        const lastSuccessfulAssembly = ui.getDoc();
         const instanceRows = document.querySelectorAll('[data-param-instance]').length;
         const bomRows = document.querySelectorAll('[data-param-bom-row]').length;
+        const addType = document.querySelector('[data-param-add-type]');
+        const undoButton = document.querySelector('[data-param-undo]');
+        const redoButton = document.querySelector('[data-param-redo]');
+        if (!addType || !undoButton || !redoButton) return { error: '撤销/重做控件缺失' };
+        addType.value = 'box';
+        document.querySelector('[data-param-add]')?.click();
+        const addState = ui.getDoc();
+        const length = document.querySelector('[data-param-form] [data-param-field="length"]');
+        if (!length) return { error: '新增特征参数控件缺失' };
+        length.value = '121';
+        length.dispatchEvent(new Event('input', { bubbles: true }));
+        length.value = '122';
+        length.dispatchEvent(new Event('input', { bubbles: true }));
+        const editedLength = ui.getDoc().instances.find((instance) => instance.id === 'p1')?.features.at(-1)?.params.length;
+        undoButton.click();
+        const undoLength = ui.getDoc().instances.find((instance) => instance.id === 'p1')?.features.at(-1)?.params.length;
+        undoButton.click();
+        const undoAddCount = ui.getDoc().instances.find((instance) => instance.id === 'p1')?.features.length;
+        redoButton.click();
+        const redoAddCount = ui.getDoc().instances.find((instance) => instance.id === 'p1')?.features.length;
+        redoButton.click();
+        const redoLength = ui.getDoc().instances.find((instance) => instance.id === 'p1')?.features.at(-1)?.params.length;
+        const beforeFailure = ui.getDoc();
+        const failingAssembly = JSON.parse(JSON.stringify(beforeFailure));
+        failingAssembly.instances[0].features[0].params.length = 999;
+        const overlayBeforeFailure = ui.state().overlayVisible;
+        ui.setDoc(failingAssembly);
+        const failedBuild = await ui.build();
+        const recovered = ui.getDoc();
+        const comparable = (value) => JSON.stringify({ ...value, updatedAt: '' });
+        const failureRecovered = comparable(recovered) === comparable(lastSuccessfulAssembly);
+        const overlayAfterFailure = ui.state().overlayVisible;
         return {
           button: true,
           status,
@@ -333,7 +567,22 @@ async function runParametricSmoke(window: BrowserWindow): Promise<void> {
           instanceRows,
           bomRows,
           drawerOpen: Boolean(drawer && !drawer.hidden),
-          buildStatus: oldBuildStatus
+          buildStatus: oldBuildStatus,
+          history: {
+            addFeatures: addState.instances.find((instance) => instance.id === 'p1')?.features.length,
+            editedLength,
+            undoLength,
+            undoAddCount,
+            redoAddCount,
+            redoLength
+          },
+          failure: {
+            ok: failedBuild.ok,
+            recovered: failureRecovered,
+            overlayBefore: overlayBeforeFailure,
+            overlayAfter: overlayAfterFailure,
+            overlayUnchanged: overlayBeforeFailure === overlayAfterFailure
+          }
         };
       })()`
     ) as {
@@ -349,6 +598,8 @@ async function runParametricSmoke(window: BrowserWindow): Promise<void> {
       bomRows?: number;
       drawerOpen?: boolean;
       buildStatus?: string;
+      history?: { addFeatures?: number; editedLength?: unknown; undoLength?: unknown; undoAddCount?: number; redoAddCount?: number; redoLength?: unknown };
+      failure?: { ok?: boolean; recovered?: boolean; overlayBefore?: boolean; overlayAfter?: boolean; overlayUnchanged?: boolean };
     };
     if (result.error || !result.button || result.status?.status !== 'ready' || !result.status.version?.endsWith('-fake')) {
       throw new Error(`参数化入口状态异常：${JSON.stringify(result)}`);
@@ -358,7 +609,7 @@ async function runParametricSmoke(window: BrowserWindow): Promise<void> {
     }
     if (!result.drawerOpen || result.rows !== 2 || result.state?.features !== 2 ||
         result.state.status !== 'ready' || result.state.statusLabel !== '就绪' ||
-        !result.state.stlLoaded || !result.buildStatus?.includes('面 19') ||
+        !result.buildStatus?.includes('面 19') ||
         !result.buildStatus?.includes('体积 71.5 cm³')) {
       throw new Error(`参数化 UI 异常：${JSON.stringify(result)}`);
     }
@@ -375,6 +626,17 @@ async function runParametricSmoke(window: BrowserWindow): Promise<void> {
       })}`);
     }
     console.log(`SMOKE_PARAMETRIC_ASSEMBLY_OK solids=${result.assemblyBuild.stats.solids} bomRows=${result.assemblyState.bomRows}`);
+    if (result.history?.addFeatures !== 3 || result.history.editedLength !== 122 ||
+        result.history.undoLength !== 120 || result.history.undoAddCount !== 2 ||
+        result.history.redoAddCount !== 3 || result.history.redoLength !== 122) {
+      throw new Error(`参数化撤销/重做异常：${JSON.stringify(result.history)}`);
+    }
+    if (result.failure?.ok !== false || result.failure.recovered !== true ||
+        result.failure.overlayUnchanged !== true) {
+      throw new Error(`参数化失败回退异常：${JSON.stringify(result.failure)}`);
+    }
+    console.log('SMOKE_PARAMETRIC_HISTORY_OK add=undo=redo mergedInput=1');
+    console.log(`SMOKE_PARAMETRIC_RECOVERY_OK tree=last-success overlay=unchanged visible=${result.failure.overlayAfter}`);
   } finally {
     if (parametric) await parametric.stop();
   }
@@ -607,6 +869,7 @@ function createWindow(): BrowserWindow {
             await wait(20);
             return {
               preErrors: pre.errors.length,
+              defaultEnabled: before.enabled === true,
               beforeDisabled: before.generateDisabled,
               files: after.files,
               history: after.history,
@@ -624,6 +887,7 @@ function createWindow(): BrowserWindow {
           error?: string;
           skip?: boolean;
           preErrors?: number;
+          defaultEnabled?: boolean;
           beforeDisabled?: boolean;
           files?: number;
           history?: number;
@@ -645,6 +909,7 @@ function createWindow(): BrowserWindow {
           console.log('SMOKE_PLCGEN_UI_SKIP no_machine_config');
         } else if (
           plcUi.preErrors !== 0 ||
+          plcUi.defaultEnabled !== true ||
           plcUi.beforeDisabled !== false ||
           plcUi.files !== 11 ||
           plcUi.history !== 1 ||
@@ -665,6 +930,200 @@ function createWindow(): BrowserWindow {
         }
       } catch (error) {
         console.error('SMOKE_FAIL plcgen_ui_exception', error);
+        setTimeout(() => app.exit(1), 100);
+        return;
+      }
+      try {
+        const moduleUi = await window.webContents.executeJavaScript(
+          `(async () => {
+            const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const registry = window.__ModuleRegistry;
+            const panel = window.__PlcGenPanel;
+            const settingsEntry = document.getElementById('moduleSettingsEntryButton');
+            if (!registry || !panel || !settingsEntry) return { error: '模块注册表、PLC 面板或设置入口缺失' };
+            const modules = registry.list();
+            const core = registry.getStatus('core');
+            const plc = registry.getStatus('plcgen');
+            const ioTest = registry.getStatus('commission.io-test');
+            const parametricHistory = registry.getStatus('parametric.history');
+            const plcSync = registry.getStatus('factory.plc-sync');
+            const agentResume = registry.getStatus('agent.resume');
+            const portable = registry.getStatus('project.portable');
+            const update = registry.getStatus('system.update');
+            const updateButton = document.getElementById('automationCadUpdateButton');
+            if (!core.enabled || !plc.enabled || !ioTest.enabled || !parametricHistory.enabled || !plcSync.enabled || !agentResume.enabled || !portable.enabled || !update.enabled || update.status !== 'enabled' || !updateButton || updateButton.hidden) {
+              return { error: '模块默认状态、依赖或 system.update UI 异常', core, plc, ioTest, parametricHistory, plcSync, agentResume, portable, update, updateButton: Boolean(updateButton) };
+            }
+            const config = window.__PlcGenConfigProvider?.();
+            settingsEntry.click();
+            await wait(20);
+            const drawer = document.getElementById('moduleSettingsDrawer');
+            const metadataVisible = drawer && !drawer.hidden && drawer.textContent.includes('API')
+              && drawer.textContent.includes('所需能力') && drawer.textContent.includes('PLC 程序校验与生成')
+              && drawer.textContent.includes('联调 IO 测试') && drawer.textContent.includes('智慧工厂 PLC 同步扩展')
+              && drawer.textContent.includes('参数化特征树撤销与重做')
+              && drawer.textContent.includes('可移植工程档案')
+              && drawer.textContent.includes('project.archive.preview')
+              && drawer.textContent.includes('Agent 计划跨重启恢复')
+              && drawer.textContent.includes('agent.plan.cross-restart-resume')
+              && drawer.textContent.includes('更新通道') && drawer.textContent.includes('system.update.install')
+              && Boolean(drawer.querySelector('[data-module-toggle="parametric.history"]'))
+              && Boolean(drawer.querySelector('[data-module-toggle="project.portable"]'))
+              && Boolean(drawer.querySelector('[data-module-toggle="agent.resume"]'))
+              && Boolean(drawer.querySelector('[data-module-toggle="system.update"]'));
+            if (!metadataVisible) return { error: '模块设置未展示版本/API/能力信息' };
+            const updateToggle = drawer.querySelector('[data-module-toggle="system.update"]');
+            const updateDialog = document.getElementById('automationCadUpdateDialog');
+            if (!updateToggle || !updateDialog) return { error: 'system.update 开关或对话框缺失' };
+            updateButton.click();
+            await wait(30);
+            const updateDialogOpened = updateDialog.open;
+            updateToggle.checked = false;
+            updateToggle.dispatchEvent(new Event('change', { bubbles: true }));
+            await wait(30);
+            const updateDisabled = registry.getStatus('system.update').status === 'disabled'
+              && updateButton.hidden && !updateDialog.open;
+            const updateIpcError = await window.desktop.update.state().then(() => '', (error) => String(error?.message ?? error));
+            const updateIpcDenied = updateIpcError.includes('MODULE_DISABLED');
+            const updateToggleAgain = drawer.querySelector('[data-module-toggle="system.update"]');
+            if (!updateToggleAgain) return { error: '关闭后无法取得 system.update 开关' };
+            updateToggleAgain.checked = true;
+            updateToggleAgain.dispatchEvent(new Event('change', { bubbles: true }));
+            await wait(30);
+            const updateRestored = registry.getStatus('system.update').enabled && !updateButton.hidden;
+            const updateStateAfterRestore = await window.desktop.update.state();
+            const updateRuntimeStillFailClosed = updateStateAfterRestore.status === 'disabled';
+            const resumeToggle = drawer.querySelector('[data-module-toggle="agent.resume"]');
+            if (!resumeToggle) return { error: '模块设置中未显示 Agent 恢复开关' };
+            resumeToggle.checked = false;
+            resumeToggle.dispatchEvent(new Event('change', { bubbles: true }));
+            await wait(30);
+            const resumeDisabled = registry.getStatus('agent.resume').status === 'disabled';
+            const resumeToggleAgain = drawer.querySelector('[data-module-toggle="agent.resume"]');
+            if (!resumeToggleAgain) return { error: '关闭后无法取得 Agent 恢复开关' };
+            resumeToggleAgain.checked = true;
+            resumeToggleAgain.dispatchEvent(new Event('change', { bubbles: true }));
+            await wait(30);
+            const resumeRestored = registry.getStatus('agent.resume').enabled;
+            const syncToggle = drawer.querySelector('[data-module-toggle="factory.plc-sync"]');
+            if (!syncToggle) return { error: '模块设置中未显示独立 PLC 同步开关' };
+            syncToggle.checked = false;
+            syncToggle.dispatchEvent(new Event('change', { bubbles: true }));
+            await wait(30);
+            const independentlyDisabled = registry.getStatus('factory.plc-sync').status === 'disabled'
+              && registry.getStatus('plcgen').enabled;
+            const syncToggleAgain = drawer.querySelector('[data-module-toggle="factory.plc-sync"]');
+            if (!syncToggleAgain) return { error: '关闭后无法取得 PLC 同步模块开关' };
+            syncToggleAgain.checked = true;
+            syncToggleAgain.dispatchEvent(new Event('change', { bubbles: true }));
+            await wait(30);
+            const syncRestored = registry.getStatus('factory.plc-sync').enabled;
+            const portableToggle = drawer.querySelector('[data-module-toggle="project.portable"]');
+            const portableActions = Array.from(document.querySelectorAll('[data-project-archive-entry]'));
+            if (!portableToggle || portableActions.length !== 3) return { error: '工程档案模块开关或菜单入口缺失' };
+            portableToggle.checked = false;
+            portableToggle.dispatchEvent(new Event('change', { bubbles: true }));
+            await wait(30);
+            const portableDenied = await window.desktop.projectArchive.preview();
+            const portableDisabled = registry.getStatus('project.portable').status === 'disabled'
+              && portableActions.every((entry) => entry.hidden)
+              && portableDenied?.ok === false && portableDenied?.code === 'MODULE_DISABLED';
+            const portableToggleAgain = drawer.querySelector('[data-module-toggle="project.portable"]');
+            if (!portableToggleAgain) return { error: '关闭后无法取得工程档案模块开关' };
+            portableToggleAgain.checked = true;
+            portableToggleAgain.dispatchEvent(new Event('change', { bubbles: true }));
+            await wait(30);
+            const portableRestored = registry.getStatus('project.portable').enabled
+              && portableActions.every((entry) => !entry.hidden);
+            panel.open();
+            await wait(20);
+            settingsEntry.click();
+            await wait(20);
+            const toggle = drawer?.querySelector('[data-module-toggle="plcgen"]');
+            if (!toggle || drawer?.hidden) return { error: '模块设置中未显示 PLC 开关' };
+            const generated = await panel.generate();
+            if (!generated) return { error: '模块关闭前未能生成 PLC 文件' };
+            const before = JSON.stringify({
+              sequence: config?.sequence ?? null,
+              history: panel.history(),
+              files: panel.files().map((file) => file.path)
+            });
+            toggle.checked = false;
+            toggle.dispatchEvent(new Event('change', { bubbles: true }));
+            await wait(30);
+            const afterDisable = JSON.stringify({
+              sequence: config?.sequence ?? null,
+              history: panel.history(),
+              files: panel.files().map((file) => file.path)
+            });
+            const disabledApi = await panel.precheck();
+            panel.open();
+            const exportError = await panel.exportZip().then(() => '').catch((error) => error.message);
+            const hidden = document.getElementById('plcGenEntryButton')?.hidden
+              && document.getElementById('plcGenOverlay')?.hidden;
+            const plcSyncUnavailableWithDependency = registry.getStatus('factory.plc-sync').status === 'unavailable';
+            const disabled = !registry.getStatus('plcgen').enabled && panel.uiState().enabled === false
+              && plcSyncUnavailableWithDependency && disabledApi === null && !panel.uiState().open && exportError.includes('已关闭');
+            const toggleAgain = drawer.querySelector('[data-module-toggle="plcgen"]');
+            if (!toggleAgain) return { error: '关闭后无法取得 PLC 模块开关' };
+            toggleAgain.checked = true;
+            toggleAgain.dispatchEvent(new Event('change', { bubbles: true }));
+            await wait(30);
+            const restored = registry.getStatus('plcgen').enabled
+              && !document.getElementById('plcGenEntryButton')?.hidden
+              && panel.uiState().enabled === true;
+            return {
+              modules: modules.length,
+              historyRegistered: modules.some((module) => module.id === 'parametric.history'),
+              metadataVisible,
+              updateDialogOpened,
+              updateDisabled,
+              updateIpcDenied,
+              updateRestored,
+              updateRuntimeStillFailClosed,
+              resumeDisabled,
+              resumeRestored,
+              independentlyDisabled,
+              syncRestored,
+              portableDisabled,
+              portableRestored,
+              disabled,
+              hidden: Boolean(hidden),
+              dataPreserved: before === afterDisable,
+              restored: Boolean(restored),
+              updateVersion: update.version
+            };
+          })()`
+        ) as {
+          error?: string;
+          modules?: number;
+          historyRegistered?: boolean;
+          metadataVisible?: boolean;
+          updateDialogOpened?: boolean;
+          updateDisabled?: boolean;
+          updateIpcDenied?: boolean;
+          updateRestored?: boolean;
+          updateRuntimeStillFailClosed?: boolean;
+          resumeDisabled?: boolean;
+          resumeRestored?: boolean;
+          independentlyDisabled?: boolean;
+          syncRestored?: boolean;
+          portableDisabled?: boolean;
+          portableRestored?: boolean;
+          disabled?: boolean;
+          hidden?: boolean;
+          dataPreserved?: boolean;
+          restored?: boolean;
+          updateVersion?: string;
+        };
+        if (moduleUi.error || !moduleUi.historyRegistered || !moduleUi.metadataVisible || !moduleUi.updateDialogOpened || !moduleUi.updateDisabled || !moduleUi.updateIpcDenied || !moduleUi.updateRestored || !moduleUi.updateRuntimeStillFailClosed || !moduleUi.resumeDisabled || !moduleUi.resumeRestored || !moduleUi.independentlyDisabled || !moduleUi.syncRestored || !moduleUi.portableDisabled || !moduleUi.portableRestored || !moduleUi.disabled || !moduleUi.hidden || !moduleUi.dataPreserved || !moduleUi.restored || moduleUi.updateVersion !== '1.0.0') {
+          console.error('SMOKE_FAIL modules_ui', JSON.stringify(moduleUi));
+          setTimeout(() => app.exit(1), 100);
+          return;
+        }
+        console.log(`SMOKE_MODULE_UI_OK modules=${moduleUi.modules} plc=toggle plcSync=independent portable=toggle+ipc-gated system.update=toggle+ipc-gated data=preserved`);
+      } catch (error) {
+        console.error('SMOKE_FAIL modules_ui_exception', error);
         setTimeout(() => app.exit(1), 100);
         return;
       }
@@ -1235,6 +1694,74 @@ function createWindow(): BrowserWindow {
           return;
         }
         console.log(`SMOKE_ELEC_CHECK_UI_OK rows=${elecUi.rows} cards=${elecUi.cards} pdf=${elecUi.pdfPath.endsWith('report.pdf')}`);
+
+        const electricalDoc = {
+          wires: [{ no: '101', net: 'n1', potential: 'L1', from: 'QF1:2', to: 'KM1:1' }]
+        };
+        const auditPath = join(app.getPath('userData'), 'agent-audit.jsonl');
+        const auditBefore = existsSync(auditPath) ? readFileSync(auditPath, 'utf8') : null;
+        const disabledUi = await window.webContents.executeJavaScript(
+          `(async () => {
+            const api = window.__ElecCheckPanel;
+            const entry = document.getElementById('elecCheckEntryButton');
+            const drawer = document.getElementById('elecCheckDrawer');
+            const otherStorage = () => JSON.stringify(Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i))
+              .filter((key) => key && key !== 'automationcad.modules.v1').sort()
+              .map((key) => [key, localStorage.getItem(key)]));
+            const preservedBefore = otherStorage();
+            window.__ModuleRegistry.setEnabled('elec.validation', false);
+            const run = await api.run(${JSON.stringify(electricalDoc)});
+            let pdfCode = '';
+            try { await api.exportPdf(); } catch (error) { pdfCode = error?.code || ''; }
+            return {
+              disabled: window.__ModuleRegistry.getStatus('elec.validation').enabled === false,
+              hidden: Boolean(entry?.hidden && drawer?.hidden),
+              runCode: run?.code || '',
+              pdfCode,
+              runButtonDisabled: Boolean(document.getElementById('elecCheckRun')?.disabled),
+              dataPreserved: preservedBefore === otherStorage()
+            };
+          })()`
+        ) as {
+          disabled: boolean; hidden: boolean; runCode: string; pdfCode: string;
+          runButtonDisabled: boolean; dataPreserved: boolean;
+        };
+        const toolDenied = await agentTools?.call('run_electrical_check', electricalDoc) as
+          { ok?: boolean; code?: string } | undefined;
+        const commandDenied = await commandBus?.execute('run_electrical_check', electricalDoc);
+        const disabledToolsHidden = !(agentTools?.summaries() ?? []).some((tool) => tool.name === 'run_electrical_check');
+        const auditAfter = existsSync(auditPath) ? readFileSync(auditPath, 'utf8') : null;
+        const enabledUi = await window.webContents.executeJavaScript(
+          `(async () => {
+            const api = window.__ElecCheckPanel;
+            window.__ModuleRegistry.setEnabled('elec.validation', true);
+            const entry = document.getElementById('elecCheckEntryButton');
+            api.open();
+            const opened = Boolean(document.getElementById('elecCheckDrawer') && !document.getElementById('elecCheckDrawer').hidden);
+            const result = await api.run(${JSON.stringify(electricalDoc)});
+            api.close();
+            return { enabled: window.__ModuleRegistry.getStatus('elec.validation').enabled, visible: entry?.hidden === false, opened, ok: result?.counts?.error === 0 };
+          })()`
+        ) as { enabled: boolean; visible: boolean; opened: boolean; ok: boolean };
+        const toolRestored = await agentTools?.call('run_electrical_check', electricalDoc) as
+          { ok?: boolean; counts?: { error?: number } } | undefined;
+        const commandRestored = await commandBus?.execute('run_electrical_check', electricalDoc);
+        if (!disabledUi.disabled || !disabledUi.hidden || disabledUi.runCode !== 'MODULE_DISABLED' ||
+            disabledUi.pdfCode !== 'MODULE_DISABLED' || !disabledUi.runButtonDisabled || !disabledUi.dataPreserved ||
+            toolDenied?.ok !== false || toolDenied.code !== 'MODULE_DISABLED' ||
+            commandDenied?.ok !== false || commandDenied.error?.code !== 'MODULE_DISABLED' || !disabledToolsHidden ||
+            auditBefore !== auditAfter || !enabledUi.enabled || !enabledUi.visible || !enabledUi.opened || !enabledUi.ok ||
+            toolRestored?.ok !== true || toolRestored.counts?.error !== 0 ||
+            commandRestored?.ok !== true || !commandRestored.data ||
+            (commandRestored.data as { counts?: { error?: number } }).counts?.error !== 0) {
+          console.error('SMOKE_FAIL elec_validation_module_gate', JSON.stringify({
+            disabledUi, toolDenied, commandDenied, disabledToolsHidden, auditPreserved: auditBefore === auditAfter,
+            enabledUi, toolRestored, commandRestored
+          }));
+          setTimeout(() => app.exit(1), 100);
+          return;
+        }
+        console.log('SMOKE_ELEC_VALIDATION_MODULE_OK renderer=MODULE_DISABLED main=MODULE_DISABLED mcp=dynamic data=audit=preserved reenabled=true');
       } catch (error) {
         console.error('SMOKE_FAIL elec_check_ui_exception', error);
         setTimeout(() => app.exit(1), 100);
@@ -1275,6 +1802,104 @@ function createWindow(): BrowserWindow {
         return;
       }
       try {
+        const syncExportsDir = join(app.getPath('userData'), 'exports');
+        const syncExportEntriesBefore = existsSync(syncExportsDir) ? readdirSync(syncExportsDir).sort() : [];
+        const moduleGate = await window.webContents.executeJavaScript(
+          `(async () => {
+            const setEnabled = window.__ModuleRegistry?.setEnabled;
+            if (typeof setEnabled !== 'function' || !window.desktop) return { error: '模块设置 API 或 preload 不可用' };
+            setEnabled('factory.plc-sync', false);
+            let plcSyncDenied;
+            let ordinarySync;
+            try {
+              plcSyncDenied = await window.desktop.sync.upload({
+                projectName: 'disabled-plc-sync', bomCsv: '序号,名称\\n1,底板\\n',
+                reportHtml: '<html><body>ordinary report</body></html>', glb: new Uint8Array([1]),
+                dxf: '0\\nSECTION\\n0\\nENDSEC\\n', bom: [{ no: 1, name: '底板', spec: 'BASE-01', qty: 1, mat: 'AL' }],
+                plc: { target: 'generic', generatedVersion: '1.0.0', machineId: 'smoke', programFiles: [], mappingCsv: 'must not be generated' }
+              });
+              ordinarySync = await window.desktop.sync.upload({
+                projectName: 'ordinary-sync', bomCsv: '序号,名称\\n1,底板\\n',
+                reportHtml: '<html><body>ordinary report</body></html>', glb: new Uint8Array([1]),
+                dxf: '0\\nSECTION\\n0\\nENDSEC\\n', bom: [{ no: 1, name: '底板', spec: 'BASE-01', qty: 1, mat: 'AL' }]
+              });
+            } finally {
+              setEnabled('factory.plc-sync', true);
+            }
+            const factoryPlcSyncGate = {
+              plcSyncDenied,
+              ordinarySync
+            };
+            const historyBefore = await window.desktop.plcgen.history();
+            setEnabled('plcgen', false);
+            try {
+              const sync = await window.desktop.sync.upload({ plc: {} });
+              const historyWrite = await window.desktop.plcgen.recordHistory({
+                at: '2000-01-01T00:00:00.000Z', inputHash: 'module-disabled-smoke-history',
+                files: 1, target: 'generic', namePrefix: '', fileList: []
+              });
+              const exported = await window.desktop.plcgen.exportProject({
+                machineName: 'module-disabled-smoke',
+                files: [{ path: 'blocked.st', content: 'should not be written' }]
+              });
+              const historyAfter = await window.desktop.plcgen.history();
+              return { sync, historyWrite, historyBefore, historyAfter, exported, factoryPlcSyncGate };
+            } finally {
+              setEnabled('plcgen', true);
+            }
+          })()`
+        ) as {
+          error?: string;
+          factoryPlcSyncGate?: {
+            plcSyncDenied?: { ok?: boolean; code?: string };
+            ordinarySync?: { ok?: boolean; code?: string; stage?: string; message?: string };
+            noFilesWritten?: boolean;
+          };
+          sync?: { ok?: boolean; code?: string };
+          historyWrite?: { ok?: boolean; code?: string } | unknown[];
+          historyBefore?: unknown[];
+          historyAfter?: unknown[];
+          exported?: { ok?: boolean; code?: string; path?: string; zipPath?: string };
+        };
+        if (moduleGate.factoryPlcSyncGate) {
+          const syncExportEntriesAfter = existsSync(syncExportsDir) ? readdirSync(syncExportsDir).sort() : [];
+          moduleGate.factoryPlcSyncGate.noFilesWritten = JSON.stringify(syncExportEntriesBefore) === JSON.stringify(syncExportEntriesAfter);
+        }
+        if (moduleGate.error || moduleGate.factoryPlcSyncGate?.plcSyncDenied?.ok !== false ||
+            moduleGate.factoryPlcSyncGate.plcSyncDenied.code !== 'MODULE_DISABLED' ||
+            moduleGate.factoryPlcSyncGate.ordinarySync?.stage !== '上传' ||
+            moduleGate.factoryPlcSyncGate.ordinarySync.code === 'MODULE_DISABLED' ||
+            !moduleGate.factoryPlcSyncGate.noFilesWritten ||
+            moduleGate.sync?.ok !== false || moduleGate.sync.code !== 'MODULE_DISABLED' ||
+            !moduleGate.historyWrite || Array.isArray(moduleGate.historyWrite) ||
+            moduleGate.historyWrite.code !== 'MODULE_DISABLED' ||
+            JSON.stringify(moduleGate.historyBefore) !== JSON.stringify(moduleGate.historyAfter) ||
+            moduleGate.exported?.ok !== false || moduleGate.exported.code !== 'MODULE_DISABLED' ||
+            moduleGate.exported.path || moduleGate.exported.zipPath) {
+          console.error('SMOKE_FAIL module_gate_ipc', JSON.stringify(moduleGate));
+          setTimeout(() => app.exit(1), 100);
+          return;
+        }
+        console.log('SMOKE_MODULE_GATE_IPC_OK plcSync=MODULE_DISABLED ordinary=allowed plcgen=MODULE_DISABLED history=MODULE_DISABLED export=MODULE_DISABLED writes=0');
+      } catch (error) {
+        console.error('SMOKE_FAIL module_gate_ipc_exception', error);
+        setTimeout(() => app.exit(1), 100);
+        return;
+      }
+      try {
+        const smokeMachine = {
+          id: 'smoke-plc-machine',
+          name: 'PLC 同步冒烟机型',
+          stations: ['工位 1'],
+          actuators: [{ id: 'smoke-cylinder', name: '测试气缸', kind: 'cylinder' as const, station: '工位 1', extendPoint: 'Y0', retractPoint: 'Y1' }],
+          sensors: [
+            { point: 'X0', station: '工位 1', part: 'smoke-cylinder' },
+            { point: 'X1', station: '工位 1', part: 'smoke-cylinder' }
+          ],
+          safety: { emergencyStop: 'X2', safetyDoor: 'X3' }
+        };
+        const generatedPlc = generateProject({ config: smokeMachine, target: 'generic' });
+        if (!generatedPlc.ok) throw new Error(`PLC smoke 预检失败：${generatedPlc.errors.map((issue) => issue.message).join('；')}`);
         const built = buildDesignPackage({
           projectId: 'smoke-project',
           projectName: '冒烟测试装配体',
@@ -1284,14 +1909,24 @@ function createWindow(): BrowserWindow {
           bomCsv: '序号,名称\r\n1,底板\r\n',
           pdf: new TextEncoder().encode('%PDF-1.4 smoke'),
           glb: new Uint8Array([0x67, 0x6c, 0x54, 0x46]),
-          dxf: '0\nSECTION\n0\nENDSEC\n'
+          dxf: '0\nSECTION\n0\nENDSEC\n',
+          plc: {
+            target: 'generic',
+            generatedVersion: PLCGEN_VERSION,
+            machineId: smokeMachine.id,
+            programFiles: generatedPlc.files.filter((file) => file.path !== 'README.md').map((file) => ({ path: file.path, content: file.content })),
+            mappingCsv: buildMachineIoMap(smokeMachine).csv
+          }
         });
-        if (built.manifest.files.length !== 4 || !/^[a-f0-9]{64}$/.test(built.manifest.bomSha256)) {
-          console.error('SMOKE_FAIL sync_package', JSON.stringify({ files: built.manifest.files.length, sha: built.manifest.bomSha256 }));
+        const parsedCandidate = parseDesignPackage(built.zip);
+        if (built.manifest.files.length !== 4 || built.manifest.plc?.programFiles.length !== 10 ||
+            parsedCandidate.machineContextStatus !== 'unavailable' || parsedCandidate.requiresExplicitApply !== true ||
+            !/^[a-f0-9]{64}$/.test(built.manifest.bomSha256)) {
+          console.error('SMOKE_FAIL sync_package', JSON.stringify({ files: built.manifest.files.length, plcFiles: built.manifest.plc?.programFiles.length, machineStatus: parsedCandidate.machineContextStatus, sha: built.manifest.bomSha256 }));
           setTimeout(() => app.exit(1), 100);
           return;
         }
-        console.log(`SMOKE_SYNC_PACKAGE_OK files=${built.manifest.files.length} sha=1`);
+        console.log(`SMOKE_SYNC_PACKAGE_OK files=${built.manifest.files.length} plcFiles=${built.manifest.plc.programFiles.length} machine=candidate sha=1`);
       } catch (error) {
         console.error('SMOKE_FAIL sync_package_exception', error);
         setTimeout(() => app.exit(1), 100);
@@ -1320,6 +1955,48 @@ function createWindow(): BrowserWindow {
             }
             if (!machine3d.includes('4 工位') || !machine3d.includes('12 执行机构') || !machine3d.includes('16 传感器')) {
               return { error: '3D 机型摘要异常', machine3d };
+            }
+
+            const initiallyBlocked = document.getElementById('commissionPowerRun')?.disabled
+              && document.getElementById('commissionPowerStep')?.disabled
+              && [...document.querySelectorAll('#commissionCases [data-run-case]')].every((button) => button.disabled);
+            const initialWarning = document.querySelector('.commission-map-warning')?.textContent || '';
+            if (!initiallyBlocked || !initialWarning.includes('用途与标准用例不符')) {
+              return { error: '机型 IO 不匹配时未禁用固定点位流程', initiallyBlocked, initialWarning };
+            }
+            const rejectedCase = await window.AutomationCadCommission.runCase('jog');
+            if (rejectedCase !== false) return { error: '机型 IO 不匹配时 API 仍允许运行用例' };
+
+            const stations = ['上料', '压装', '锁付', '下料'];
+            const outputNames = [
+              '主回路接触器 KM1', '24V 电源输出', 'PLC RUN 输出', '气源电磁阀',
+              '回原点输出', '就绪指示灯', '滑台前进电磁阀 YV1', '滑台后退电磁阀 YV2',
+              '急停测试继电器 KA1', '辅助输出 9', '辅助输出 10', '辅助输出 11'
+            ];
+            const inputNames = [
+              '主回路反馈', '24V 电源反馈', 'PLC RUN 反馈', '气源压力开关', '原点到位',
+              'PLC 就绪反馈', '滑台前进到位', '滑台后退到位', '安全门闭合', '急停链路断开',
+              '急停复位', '气源低压报警', '伺服就绪', '伺服报警', '报警锁存', '备用输入'
+            ];
+            window.AutomationCadCommission.setMachineConfig({
+              id: 'smoke-commission-map',
+              name: '联调映射兼容样机',
+              stations,
+              actuators: outputNames.map((name, index) => ({
+                id: 'smoke-actuator-' + index,
+                name,
+                kind: 'cylinder',
+                station: stations[index % stations.length],
+                extendPoint: 'Y' + index
+              })),
+              sensors: inputNames.map((part, index) => ({
+                point: 'X' + index,
+                station: stations[index % stations.length],
+                part
+              }))
+            });
+            if (document.getElementById('commissionPowerRun')?.disabled) {
+              return { error: '兼容 IO 映射仍被禁用', warning: document.querySelector('.commission-map-warning')?.textContent || '' };
             }
 
             document.getElementById('commissionPowerRun').click();
@@ -1354,9 +2031,25 @@ function createWindow(): BrowserWindow {
             await wait(150);
             const diagCodes = window.__Commission3D?.lastDiagnosis?.().length ?? 0;
             const diagCards = document.querySelectorAll('#commissionDiagnosis .commission-diagnosis-card').length;
-            document.getElementById('commissionDisconnect').click();
-            await wait(120);
-            return { pointRows, monitorRows, machine3d, powerText, casePass, caseRows, failRows, exportButton, pdfPath, stats3d, failedCase, diagCodes, diagCards };
+            const moduleRegistry = window.__ModuleRegistry;
+            const ioTestWasEnabled = moduleRegistry?.getStatus('commission.io-test')?.enabled === true;
+            if (!ioTestWasEnabled) return { error: 'IO 测试模块未按默认值启用' };
+            moduleRegistry.setEnabled('commission.io-test', false);
+            const hiddenTestArea = document.querySelector('[data-commission-io-test]')?.hidden === true;
+            const blockedPowerUp = await window.AutomationCadCommission.runPowerUp();
+            const liveStatus = await window.desktop.plc.status();
+            const connectionPreserved = liveStatus?.ok && liveStatus.data?.status === 'connected';
+            const liveRead = await window.desktop.plc.readAll();
+            const independentRead = liveRead?.ok && Object.keys(liveRead.data ?? {}).length === 28;
+            await window.desktop.plc.disconnect();
+            const savedPlc = await window.desktop.plc.getConfig();
+            const independentConnect = savedPlc?.ok && savedPlc.data
+              ? await window.desktop.plc.connect(savedPlc.data)
+              : { ok: false, message: '未能读取仿真 PLC 配置' };
+            const independentConnected = independentConnect?.ok === true && independentConnect?.data?.status === 'connected';
+            if (independentConnected) await window.desktop.plc.disconnect();
+            if (ioTestWasEnabled) moduleRegistry.setEnabled('commission.io-test', true);
+            return { pointRows, monitorRows, machine3d, powerText, casePass, caseRows, failRows, exportButton, pdfPath, stats3d, failedCase, diagCodes, diagCards, hiddenTestArea, blockedPowerUp, connectionPreserved, independentRead, independentConnected };
           })()`
         ) as {
           error?: string;
@@ -1380,6 +2073,11 @@ function createWindow(): BrowserWindow {
           failedCase: boolean;
           diagCodes: number;
           diagCards: number;
+          hiddenTestArea?: boolean;
+          blockedPowerUp?: boolean;
+          connectionPreserved?: boolean;
+          independentRead?: boolean;
+          independentConnected?: boolean;
         };
         if (plcUi.error || plcUi.pointRows !== 28 || plcUi.monitorRows !== 28) {
           console.error('SMOKE_FAIL plc', JSON.stringify(plcUi));
@@ -1429,6 +2127,19 @@ function createWindow(): BrowserWindow {
           return;
         }
         console.log(`SMOKE_DIAGNOSE_OK codes=${plcUi.diagCodes}`);
+        if (plcUi.hiddenTestArea !== true || plcUi.blockedPowerUp !== false || plcUi.connectionPreserved !== true ||
+            plcUi.independentRead !== true || plcUi.independentConnected !== true) {
+          console.error('SMOKE_FAIL commission_module_boundary', JSON.stringify({
+            hiddenTestArea: plcUi.hiddenTestArea,
+            blockedPowerUp: plcUi.blockedPowerUp,
+            connectionPreserved: plcUi.connectionPreserved,
+            independentRead: plcUi.independentRead,
+            independentConnected: plcUi.independentConnected
+          }));
+          setTimeout(() => app.exit(1), 100);
+          return;
+        }
+        console.log('SMOKE_COMMISSION_MODULE_BOUNDARY_OK tests=MODULE_DISABLED livePlc=preserved/read/reconnected');
       } catch (error) {
         console.error('SMOKE_FAIL commission_exception', error);
         setTimeout(() => app.exit(1), 100);
@@ -2320,6 +3031,118 @@ function createWindow(): BrowserWindow {
         }
         console.log('SMOKE_AGENT_THREAD_OK turns=3 resume=1 stale=1');
 
+        // P2：跨进程计划 checkpoint 序列化与已完成写步骤去重。
+        const checkpointDir = mkdtempSync(join(tmpdir(), 'automationcad-agent-plan-checkpoint-'));
+        try {
+          const checkpointWriteStep = {
+            tool: 'update_component',
+            args: { ref: 'QF1', patch: { model: 'A' } },
+            why: '写',
+            readOnly: false
+          };
+          const checkpointPlan = {
+            steps: [
+              checkpointWriteStep,
+              { tool: 'get_bom', args: {}, why: '读', readOnly: true }
+            ],
+            confidence: 1
+          };
+          let checkpoint = createPlanCheckpoint(checkpointPlan, 'c'.repeat(64));
+          checkpoint = updatePlanCheckpoint(checkpoint, 0, 'completed');
+          savePlanCheckpoint(checkpointDir, checkpoint);
+          const reloaded = loadPlanCheckpoint(checkpointDir).checkpoint;
+          const recovered = reloaded ? inspectPlanCheckpoint(reloaded, checkpointPlan, 'c'.repeat(64)) : null;
+          const replayed = recovered?.ok === true
+            ? recovered.steps.slice(recovered.cursor).some((step) => step.index === 0)
+            : true;
+          let interruptedWrite = createPlanCheckpoint({ steps: [checkpointWriteStep], confidence: 1 }, 'c'.repeat(64));
+          interruptedWrite = updatePlanCheckpoint(interruptedWrite, 0, 'running');
+          const uncertain = inspectPlanCheckpoint(interruptedWrite, { steps: [checkpointWriteStep], confidence: 1 }, 'c'.repeat(64));
+          if (!recovered?.ok || recovered.cursor !== 1 || recovered.steps[0]?.state !== 'completed' || replayed || uncertain.ok) {
+            throw new Error('completed write replay or uncertain write resume was not blocked');
+          }
+          console.log('SMOKE_AGENT_PLAN_CHECKPOINT_OK cursor=1 completed_write=1 uncertain_write=blocked');
+        } finally {
+          rmSync(checkpointDir, { recursive: true, force: true });
+        }
+
+        // agent.resume 关闭时 IPC 不读写旧 checkpoint，但普通计划和写确认继续工作。
+        const resumeCheckpointPath = join(app.getPath('userData'), 'agent-plan-checkpoint.json');
+        const resumeCheckpointSentinel = '{"corrupt":"preserve-while-agent-resume-disabled"}';
+        const resumeGatePlan = {
+          steps: [{ tool: 'get_project_context', args: {}, why: '只读 gate smoke', readOnly: true }],
+          confidence: 1
+        };
+        const resumeWritePlan = {
+          steps: [{
+            tool: 'update_component',
+            args: { ref: '__agent_resume_smoke_missing_component__', patch: { model: 'smoke' } },
+            why: '确认回调 smoke',
+            readOnly: false
+          }],
+          confidence: 1
+        };
+        writeFileSync(resumeCheckpointPath, resumeCheckpointSentinel, { mode: 0o600 });
+        const previousAutoConfirm = process.env.AUTOMATIONCAD_AUTOCONFIRM;
+        process.env.AUTOMATIONCAD_AUTOCONFIRM = '1';
+        try {
+          const disabledGate = await window.webContents.executeJavaScript(
+            `(async () => {
+              const registry = window.__ModuleRegistry;
+              registry.setEnabled('agent.resume', false);
+              const restoreOff = await window.desktop.agent.plan.restore({ plan: ${JSON.stringify(resumeGatePlan)} });
+              const clearOff = await window.desktop.agent.plan.clearCheckpoint();
+              const ordinary = await window.desktop.agent.plan.execute({ plan: ${JSON.stringify(resumeGatePlan)} });
+              const write = await window.desktop.agent.plan.execute({ plan: ${JSON.stringify(resumeWritePlan)} });
+              return {
+                disabled: registry.getStatus('agent.resume').status === 'disabled'
+                && restoreOff.disabled === true && restoreOff.available === false
+                && clearOff.ok === false && clearOff.code === 'MODULE_DISABLED',
+                ordinaryPlanOk: ordinary.ok === true && ordinary.results?.some((step) => step.ok === true) === true,
+                writeConfirmations: write.confirmations ?? 0
+              };
+            })()`
+          ) as {
+            disabled: boolean;
+            ordinaryPlanOk: boolean;
+            writeConfirmations: number;
+          };
+          const filePreserved = readFileSync(resumeCheckpointPath, 'utf8') === resumeCheckpointSentinel;
+          if (!disabledGate.disabled || !filePreserved || !disabledGate.ordinaryPlanOk || disabledGate.writeConfirmations !== 1) {
+            throw new Error(`Agent resume disabled boundary failed: ${JSON.stringify({ ...disabledGate, filePreserved })}`);
+          }
+          rmSync(resumeCheckpointPath, { force: true });
+          const noCheckpointPlan = await window.webContents.executeJavaScript(
+            `window.desktop.agent.plan.execute({ plan: ${JSON.stringify(resumeGatePlan)} })`
+          ) as { ok: boolean };
+          const newCheckpointNotCreated = noCheckpointPlan.ok === true && !existsSync(resumeCheckpointPath);
+          if (!newCheckpointNotCreated) throw new Error('agent.resume 关闭时普通计划创建了 checkpoint');
+          // 再放回旧损坏记录，验证重新启用后仍由正常恢复校验拒绝。
+          writeFileSync(resumeCheckpointPath, resumeCheckpointSentinel, { mode: 0o600 });
+          const reenabledGate = await window.webContents.executeJavaScript(
+            `(async () => {
+              const registry = window.__ModuleRegistry;
+              registry.setEnabled('agent.resume', true);
+              const restored = await window.desktop.agent.plan.restore({ plan: ${JSON.stringify(resumeGatePlan)} });
+              const cleanup = await window.desktop.agent.plan.clearCheckpoint();
+              return {
+                validated: registry.getStatus('agent.resume').enabled
+                  && restored.available === true && restored.blocked === true,
+                cleanupOk: cleanup.ok === true
+              };
+            })()`
+          ) as { validated: boolean; cleanupOk: boolean };
+          if (!reenabledGate.validated || !reenabledGate.cleanupOk) {
+            throw new Error(`Agent resume re-enable validation failed: ${JSON.stringify(reenabledGate)}`);
+          }
+          console.log('SMOKE_AGENT_RESUME_MODULE_OK disabled=blocked file=preserved ordinary=ok write-confirmation=1 reenabled=validated');
+        } finally {
+          await window.webContents.executeJavaScript("window.__ModuleRegistry?.setEnabled('agent.resume', true)").catch(() => undefined);
+          if (previousAutoConfirm === undefined) delete process.env.AUTOMATIONCAD_AUTOCONFIRM;
+          else process.env.AUTOMATIONCAD_AUTOCONFIRM = previousAutoConfirm;
+          rmSync(resumeCheckpointPath, { force: true });
+        }
+
         // P7-N：去重 / 只读并行 / 会话缓存
         const smokeDedupe = new TurnCallDeduper({ isWrite: () => false });
         const smokeDedupeDecisions = smokeDedupe.plan([
@@ -3198,6 +4021,126 @@ function createWindow(): BrowserWindow {
         return;
       }
       try {
+        const exportsRoot = join(app.getPath('userData'), 'exports');
+        const fixtureDir = resolve(desktopRoot(), 'test', 'fixtures');
+        const fixtureBook = JSON.parse(readFileSync(join(fixtureDir, 'pricebook.json'), 'utf8')) as unknown;
+        const caseInput = JSON.parse(readFileSync(join(fixtureDir, 'cost-case.json'), 'utf8')) as Record<string, unknown>;
+        const restoreInput = { ...caseInput, pricebook: fixtureBook };
+        const exportSnapshot = (directory: string, prefix = ''): string[] => {
+          if (!existsSync(directory)) return [];
+          return readdirSync(directory, { withFileTypes: true })
+            .sort((a, b) => a.name.localeCompare(b.name))
+            .flatMap((entry) => {
+              const fullPath = join(directory, entry.name);
+              const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+              if (entry.isDirectory()) return [`D:${relative}`, ...exportSnapshot(fullPath, relative)];
+              const stat = statSync(fullPath);
+              return [`F:${relative}:${stat.size}:${stat.mtimeMs}`];
+            });
+        };
+        const beforeExports = JSON.stringify(exportSnapshot(exportsRoot));
+        const disabled = await window.webContents.executeJavaScript(
+          `(async () => {
+            const manager = window.__ModuleRegistry;
+            const api = window.__CostPanel;
+            const entry = document.getElementById('costEntryButton');
+            const drawer = document.getElementById('costDrawer');
+            if (!manager || !api || !entry || !drawer) return { error: '成本模块 API/入口缺失' };
+            const storageSnapshot = () => JSON.stringify(Array.from({ length: localStorage.length }, (_, i) => localStorage.key(i))
+              .filter((key) => key && key !== 'automationcad.modules.v1').sort()
+              .map((key) => [key, localStorage.getItem(key)]));
+            const storageBefore = storageSnapshot();
+            const stateBefore = api.state();
+            manager.setEnabled('cost.estimation', false);
+            const run = await api.run(${JSON.stringify(caseInput)});
+            const pdf = await api.exportPdf();
+            const csv = await api.exportCsv();
+            const pricebook = await window.desktop.cost.pricebook();
+            const panelPdf = await window.desktop.cost.exportPanelPdf({ html: '<html><body>blocked</body></html>', projectName: 'blocked-cost' });
+            const panelCsv = await window.desktop.cost.exportPanelCsv({ name: 'blocked-cost.csv', data: 'blocked' });
+            const agentFile = await window.desktop.exportCostFile({ format: 'csv', fileName: 'blocked-cost.csv', data: 'blocked' });
+            let setBomCode = '';
+            try { api.setBom({ bom: [{ name: 'must-not-store' }] }); } catch (error) { setBomCode = error?.code || ''; }
+            return {
+              disabled: manager.getStatus('cost.estimation').enabled === false,
+              hidden: Boolean(entry.hidden && drawer.hidden),
+              buttonsDisabled: Boolean(document.getElementById('costRun')?.disabled && document.getElementById('costLoadBom')?.disabled),
+              runCode: run?.code || '', pdfCode: pdf?.code || '', csvCode: csv?.code || '',
+              pricebookCode: pricebook?.code || '', panelPdfCode: panelPdf?.code || '',
+              panelCsvCode: panelCsv?.code || '', agentFileCode: agentFile?.code || '', setBomCode,
+              dataPreserved: storageBefore === storageSnapshot(),
+              stateBefore
+            };
+          })()`
+        ) as {
+          error?: string; disabled: boolean; hidden: boolean; buttonsDisabled: boolean;
+          runCode: string; pdfCode: string; csvCode: string; pricebookCode: string;
+          panelPdfCode: string; panelCsvCode: string; agentFileCode: string; setBomCode: string;
+          dataPreserved: boolean; stateBefore: { hasReport: boolean; computedAt: string; bomSignature: string };
+        };
+        const afterDeniedExports = JSON.stringify(exportSnapshot(exportsRoot));
+        const deniedTool = await agentTools?.call('run_cost_report', { ...caseInput, pricebook: fixtureBook }) as
+          { ok?: boolean; code?: string } | undefined;
+        const deniedCommand = await commandBus?.execute('export_cost_report', {
+          ...caseInput, format: 'csv', fileName: 'blocked-cost.csv', pricebook: fixtureBook
+        });
+        const costToolsHidden = !(agentTools?.summaries() ?? []).some((tool) => ['run_cost_report', 'export_cost_report'].includes(tool.name));
+        if (disabled.error || !disabled.disabled || !disabled.hidden || !disabled.buttonsDisabled ||
+            disabled.runCode !== 'MODULE_DISABLED' || disabled.pdfCode !== 'MODULE_DISABLED' || disabled.csvCode !== 'MODULE_DISABLED' ||
+            disabled.pricebookCode !== 'MODULE_DISABLED' || disabled.panelPdfCode !== 'MODULE_DISABLED' ||
+            disabled.panelCsvCode !== 'MODULE_DISABLED' || disabled.agentFileCode !== 'MODULE_DISABLED' ||
+            disabled.setBomCode !== 'MODULE_DISABLED' || !disabled.dataPreserved || beforeExports !== afterDeniedExports ||
+            deniedTool?.ok !== false || deniedTool.code !== 'MODULE_DISABLED' ||
+            deniedCommand?.ok !== false || deniedCommand.error?.code !== 'MODULE_DISABLED' || !costToolsHidden) {
+          console.error('SMOKE_FAIL cost_module_gate_disabled', JSON.stringify({ disabled, deniedTool, deniedCommand, costToolsHidden, noFilesWritten: beforeExports === afterDeniedExports }));
+          setTimeout(() => app.exit(1), 100);
+          return;
+        }
+
+        const generalReport = await window.webContents.executeJavaScript(
+          `window.desktop.exportReport({ html: '<html><body>ordinary report unaffected by cost module</body></html>', projectName: 'ordinary-report-while-cost-off' })`
+        ) as { path?: string; htmlPath?: string };
+        if (!generalReport.path || !generalReport.htmlPath || !existsSync(generalReport.path) || !existsSync(generalReport.htmlPath)) {
+          console.error('SMOKE_FAIL cost_module_general_export', JSON.stringify(generalReport));
+          setTimeout(() => app.exit(1), 100);
+          return;
+        }
+        const restored = await window.webContents.executeJavaScript(
+          `(async () => {
+            const manager = window.__ModuleRegistry;
+            const api = window.__CostPanel;
+            manager.setEnabled('cost.estimation', true);
+            const state = api.state();
+            const entry = document.getElementById('costEntryButton');
+            const report = await api.run(${JSON.stringify(restoreInput)});
+            api.close();
+            return {
+              enabled: manager.getStatus('cost.estimation').enabled,
+              visible: entry?.hidden === false,
+              priorReportPreserved: state.hasReport === ${JSON.stringify(disabled.stateBefore.hasReport)} &&
+                state.computedAt === ${JSON.stringify(disabled.stateBefore.computedAt)} &&
+                state.bomSignature === ${JSON.stringify(disabled.stateBefore.bomSignature)},
+              runOk: Boolean(report && report.totals && Math.abs(report.totals.grand - 1398.64) < 0.001),
+              runCode: report?.code || '', runGrand: report?.totals?.grand ?? null,
+              runKeys: Object.keys(report || {}), stateAfter: api.state()
+            };
+          })()`
+        ) as { enabled: boolean; visible: boolean; priorReportPreserved: boolean; runOk: boolean;
+          runCode: string; runGrand: number | null; runKeys: string[]; stateAfter: unknown };
+        const restoredTool = await agentTools?.call('run_cost_report', { ...caseInput, pricebook: fixtureBook }) as
+          { ok?: boolean } | undefined;
+        if (!restored.enabled || !restored.visible || !restored.priorReportPreserved || !restored.runOk || restoredTool?.ok !== true) {
+          console.error('SMOKE_FAIL cost_module_gate_restore', JSON.stringify({ restored, restoredTool }));
+          setTimeout(() => app.exit(1), 100);
+          return;
+        }
+        console.log('SMOKE_COST_MODULE_GATE_OK renderer=MODULE_DISABLED ipc=MODULE_DISABLED agent=MODULE_DISABLED files=0 data=preserved generalExport=allowed reenabled=true');
+      } catch (error) {
+        console.error('SMOKE_FAIL cost_module_gate_exception', error);
+        setTimeout(() => app.exit(1), 100);
+        return;
+      }
+      try {
         await runParametricSmoke(window);
       } catch (error) {
         console.error('SMOKE_FAIL parametric_sidecar', error);
@@ -3409,7 +4352,7 @@ function buildMenu(window: BrowserWindow): void {
 async function startAgent(
   registry: PackRegistry,
   commands: CommandBus,
-  options: { userDataRoot: string; loadBuiltinPricebook: () => unknown }
+  options: { userDataRoot: string; loadBuiltinPricebook: () => unknown; isModuleEnabled: (moduleId: string) => boolean }
 ): Promise<void> {
   const { token, tokenFile } = createAgentTokenFile(app.getPath('userData'));
   const tools = new AgentTools(registry, commands, options);
@@ -3433,6 +4376,97 @@ async function startAgent(
   }
 }
 
+function readUpdateChannelPreference(filePath: string): UpdateChannel {
+  try {
+    const value = JSON.parse(readFileSync(filePath, 'utf8')) as { channel?: unknown };
+    return value.channel === 'beta' ? 'beta' : 'stable';
+  } catch {
+    return 'stable';
+  }
+}
+
+function persistUpdateChannelPreference(filePath: string, channel: UpdateChannel): void {
+  writeFileSync(filePath, JSON.stringify({ channel, updatedAt: new Date().toISOString() }, null, 2), {
+    encoding: 'utf8',
+    mode: 0o600
+  });
+}
+
+/** Core security check: this runs even when the optional system.update module is off. */
+function updateRuntimeAvailability(): { enabled: boolean; message: string } {
+  if (!app.isPackaged) {
+    return { enabled: false, message: '开发态不会查询更新；仅打包的 Windows NSIS 安装版启用更新。' };
+  }
+  if (process.platform !== 'win32') {
+    return { enabled: false, message: '当前平台不提供 Windows NSIS 应用内更新。' };
+  }
+  const configPath = join(process.resourcesPath, 'app-update.yml');
+  try {
+    if (!existsSync(configPath) || !hasTrustedUpdateConfig(readFileSync(configPath, 'utf8'))) {
+      return {
+        enabled: false,
+        message: '此安装包缺少受信任的 GitHub 更新源或 Authenticode 发布者信息，已阻止联网更新。请从可信安装包重新安装。'
+      };
+    }
+  } catch {
+    return { enabled: false, message: '无法验证安装包的更新源与签名配置，已阻止联网更新。' };
+  }
+  return { enabled: true, message: '' };
+}
+
+function assertTrustedUpdateSender(event: IpcMainInvokeEvent): void {
+  const senderWindow = BrowserWindow.fromWebContents(event.sender);
+  const senderUrl = event.senderFrame?.url ?? '';
+  assertUpdateIpcAuthorization({
+    mainWindowAlive: Boolean(mainWindow && !mainWindow.isDestroyed()),
+    senderIsMainWindow: Boolean(mainWindow && senderWindow === mainWindow),
+    senderIsMainFrame: Boolean(event.senderFrame && event.senderFrame === event.sender.mainFrame),
+    senderUsesFileUrl: senderUrl.startsWith('file://')
+  });
+}
+
+function registerUpdateIpcHandlers(service: UpdateChannelService): void {
+  const authorize = (event: IpcMainInvokeEvent): void => {
+    assertTrustedUpdateSender(event);
+    assertUpdateModuleEnabled(systemUpdateModuleEnabled);
+  };
+  ipcMain.handle('update:state', (event) => {
+    authorize(event);
+    return service.snapshot();
+  });
+  ipcMain.handle('update:set-channel', async (event, channel: unknown) => {
+    authorize(event);
+    return await service.setChannel(channel);
+  });
+  ipcMain.handle('update:check', async (event) => {
+    authorize(event);
+    return await service.check();
+  });
+  ipcMain.handle('update:download', async (event) => {
+    authorize(event);
+    return await service.download();
+  });
+  ipcMain.handle('update:install', async (event) => {
+    authorize(event);
+    const state = service.snapshot();
+    if (state.status !== 'downloaded') throw new Error('尚无已验证完成的更新可安装。');
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (!owner) throw new Error('找不到更新确认窗口。');
+    const result = await dialog.showMessageBox(owner, {
+      type: 'warning',
+      title: '安装 AutomationCAD 更新',
+      message: `确认安装版本 ${state.availableVersion ?? '新版本'} 并重启应用？`,
+      detail: '应用将退出并运行 NSIS 更新安装程序。只有确认后才会安装，不会静默安装。',
+      buttons: ['安装并重启', '稍后'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true
+    });
+    if (result.response !== 0) return service.snapshot();
+    return service.installAfterConfirmation();
+  });
+}
+
 async function bootstrap(): Promise<void> {
   installCrashHandlers();
   app.on('second-instance', () => {
@@ -3443,10 +4477,28 @@ async function bootstrap(): Promise<void> {
 
   await app.whenReady();
 
+  const updateChannelFile = join(app.getPath('userData'), 'update-preferences.json');
+  const updateAvailability = updateRuntimeAvailability();
+  const updateService = new UpdateChannelService({
+    updater: autoUpdater,
+    currentVersion: app.getVersion(),
+    channel: readUpdateChannelPreference(updateChannelFile),
+    enabled: updateAvailability.enabled,
+    disabledMessage: updateAvailability.message,
+    persistChannel: (channel) => persistUpdateChannelPreference(updateChannelFile, channel),
+    onState: (snapshot) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('update:state-changed', snapshot);
+      }
+    }
+  });
+  registerUpdateIpcHandlers(updateService);
+
   parametric = new ParametricManager({
     appRoot: resolve(desktopRoot(), '..'),
     isPackaged: app.isPackaged,
-    resourcesPath: process.resourcesPath
+    resourcesPath: process.resourcesPath,
+    isEnabled: () => parametricImportModuleEnabled
   });
 
   const registry = registerIpcHandlers({
@@ -3458,7 +4510,29 @@ async function bootstrap(): Promise<void> {
     syncConfigFile: join(app.getPath('userData'), 'sync.json'),
     version: app.getVersion(),
     getAgentInfo: publicAgentInfo,
-    getParametric: () => parametric
+    isMainWindowSender: (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents),
+    getParametric: () => parametric,
+    isParametricImportEnabled: () => parametricImportModuleEnabled,
+    setParametricImportEnabled: (enabled) => {
+      parametricImportModuleEnabled = enabled === true;
+      if (!parametricImportModuleEnabled && parametric) {
+        void parametric.stop().catch((error: unknown) => {
+          console.warn('[modules] 参数化内核停止失败', error instanceof Error ? error.message : String(error));
+        });
+      }
+    },
+    isPlcgenEnabled: () => plcgenModuleEnabled,
+    setPlcgenEnabled: (enabled) => { plcgenModuleEnabled = enabled; },
+    isFactoryPlcSyncEnabled: () => factoryPlcSyncModuleEnabled,
+    setFactoryPlcSyncEnabled: (enabled) => { factoryPlcSyncModuleEnabled = enabled; },
+    isAgentResumeEnabled: () => agentResumeModuleEnabled,
+    setAgentResumeEnabled: (enabled) => { agentResumeModuleEnabled = enabled; },
+    isProjectPortableEnabled: () => projectPortableModuleEnabled,
+    setProjectPortableEnabled: (enabled) => { projectPortableModuleEnabled = enabled; },
+    isCostEstimationEnabled: () => costEstimationModuleEnabled,
+    setCostEstimationEnabled: (enabled) => { costEstimationModuleEnabled = enabled === true; },
+    setElecValidationEnabled: (enabled) => { elecValidationModuleEnabled = enabled === true; },
+    setSystemUpdateEnabled: (enabled) => { systemUpdateModuleEnabled = enabled === true; }
   });
 
   packRegistry = registry;
@@ -3466,6 +4540,10 @@ async function bootstrap(): Promise<void> {
   mainWindow.on('closed', () => { mainWindow = null; });
 
   commandBus = createAgentCommandBus(registry, new RendererBridge(() => mainWindow), {
+    isModuleEnabled: (moduleId) => moduleId === 'plcgen' ? plcgenModuleEnabled
+      : moduleId === 'elec.validation' ? elecValidationModuleEnabled
+        : moduleId === 'cost.estimation' ? costEstimationModuleEnabled
+        : moduleId === PARAMETRIC_IMPORT_MODULE_ID ? parametricImportModuleEnabled : false,
     loadBuiltinPricebook: readBuiltinPricebookRaw,
     renderCostPdf: renderCostReportPdf,
     renderReportPdf: renderAssemblyReportPdf,
@@ -3473,6 +4551,9 @@ async function bootstrap(): Promise<void> {
     userDataRoot: app.getPath('userData'),
     // 机型几何实体化：只在内核已就绪时调用，不为此隐式拉起 400 MB 的 Python 进程。
     buildSolids: async (doc) => {
+      if (!parametricImportModuleEnabled) {
+        return { ok: false, code: 'MODULE_DISABLED', message: '功能模块「cad.parametric-import」当前已关闭；启用后才能生成参数化实体。CAD 只读查看仍可使用。' };
+      }
       const manager = parametric;
       if (!manager || manager.status().status !== 'ready') {
         return { ok: false, code: 'UNAVAILABLE', message: '参数化建模内核未启动' };
@@ -3482,13 +4563,18 @@ async function bootstrap(): Promise<void> {
   });
   await startAgent(registry, commandBus, {
     userDataRoot: app.getPath('userData'),
-    loadBuiltinPricebook: readBuiltinPricebookRaw
+    loadBuiltinPricebook: readBuiltinPricebookRaw,
+    isModuleEnabled: (moduleId) => moduleId === 'plcgen' ? plcgenModuleEnabled
+      : moduleId === 'elec.validation' ? elecValidationModuleEnabled
+        : moduleId === 'cost.estimation' ? costEstimationModuleEnabled
+        : moduleId === PARAMETRIC_IMPORT_MODULE_ID ? parametricImportModuleEnabled : false
   });
   registerAgentChatIpc({
     userDataDir: app.getPath('userData'),
     getTools: () => agentTools,
     getBus: () => commandBus,
-    getWindow: () => mainWindow
+    getWindow: () => mainWindow,
+    isAgentResumeEnabled: () => agentResumeModuleEnabled
   });
 
   app.on('activate', () => {

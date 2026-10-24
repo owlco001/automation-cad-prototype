@@ -84,6 +84,34 @@ test('LLM 客户端发送工具表并解析 tool_calls', async () => {
   }
 });
 
+test('LLM 客户端在同一会话中动态读取工具清单，不需重建或重载', async () => {
+  const server = await startServer((_captured, response) => {
+    jsonResponse(response, 200, { choices: [{ message: { content: '收到' } }] });
+  });
+  try {
+    const plcTool = { name: 'verify_plc_program', description: '验证 PLC 程序', inputSchema: { type: 'object' } };
+    let enabled = true;
+    const client = new OpenAiCompatibleClient({
+      baseUrl: server.baseUrl,
+      apiKey: '',
+      model: 'gpt-test',
+      tools: () => enabled ? [plcTool] : []
+    });
+    await client.chat([{ role: 'user', content: '验证程序' }]);
+    assert.deepEqual(server.bodies[0].tools.map((tool) => tool.function.name), ['verify_plc_program']);
+
+    enabled = false;
+    await client.chat([{ role: 'user', content: '再检查一次' }]);
+    assert.equal('tools' in server.bodies[1], false);
+
+    enabled = true;
+    await client.chat([{ role: 'user', content: '重新启用后检查' }]);
+    assert.deepEqual(server.bodies[2].tools.map((tool) => tool.function.name), ['verify_plc_program']);
+  } finally {
+    await server.close();
+  }
+});
+
 test('LLM 客户端解析最终文本响应', async () => {
   const server = await startServer((_captured, response) => {
     jsonResponse(response, 200, {

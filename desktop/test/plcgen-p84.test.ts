@@ -202,16 +202,63 @@ test('P8-4 timeScale：非法值回落到默认 1', () => {
   assert.equal(result.elapsedMs, 2040);
 });
 
-test('P8-4 空序列：生成成功但模拟 0 步，所有输出保持复位', () => {
+test('P8-4 空序列：模拟与验证显式失败，摘要不显示通过', () => {
   const config = makeConfig({ sequence: [] });
   const project = generated(config);
   assert.equal(project.stats.sequenceEmpty, true);
-  const result = simulate({ project, config });
-  assert.equal(result.ok, true);
-  assert.deepEqual(result.steps, []);
-  assert.deepEqual(result.alarms, []);
-  assert.equal(result.elapsedMs, 0);
-  assert.ok(Object.values(result.finalOutputs).every((value) => value === false));
+  const simulation = simulate({ project, config });
+  assert.equal(simulation.ok, false);
+  assert.deepEqual(simulation.steps, []);
+  assert.deepEqual(simulation.alarms, ['EMPTY_SEQUENCE:联调步序为空，无法进行模拟验证']);
+  assert.equal(simulation.elapsedMs, 0);
+  assert.ok(Object.values(simulation.finalOutputs).every((value) => value === false));
+
+  const result = verifyGenerated(config);
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, 'precheck');
+  assert.equal(result.simulation, undefined);
+  assert.ok(result.precheck.errors.some((error) => error.code === 'SEQUENCE_EMPTY'));
+  assert.ok(result.errors.some((error) => error.code === 'SEQUENCE_EMPTY'));
+  const summary = summarizeVerification(result);
+  assert.equal(summary.ok, false);
+  assert.equal(summary.steps, 0);
+  assert.equal(summary.passed, 0);
+  assert.equal(summary.failure, undefined);
+  assert.equal(summary.precheckErrors, 1);
+
+  const providedProjectResult = verifyGenerated(project, makeConfig());
+  assert.equal(providedProjectResult.ok, false);
+  assert.equal(providedProjectResult.stage, 'simulate');
+  assert.ok(providedProjectResult.errors.some((error) => error.code === 'SEQUENCE_EMPTY'));
+
+  const emptyConfigWithOldProject = verifyGenerated(generated(makeConfig()), config);
+  assert.equal(emptyConfigWithOldProject.ok, false);
+  assert.equal(emptyConfigWithOldProject.stage, 'precheck');
+  assert.ok(emptyConfigWithOldProject.errors.some((error) => error.code === 'SEQUENCE_EMPTY'));
+});
+
+test('P8-4 校验：mapping.json 缺失 sequence 时明确失败', () => {
+  const config = makeConfig();
+  const project = generated(config);
+  const mappingFile = project.files.find((file) => file.path === 'mapping.json');
+  assert.ok(mappingFile);
+  const mapping = JSON.parse(mappingFile.content) as Record<string, unknown>;
+  delete mapping.sequence;
+  const malformedProject = {
+    files: project.files.map((file) => file.path === 'mapping.json'
+      ? { ...file, content: JSON.stringify(mapping) }
+      : file)
+  };
+
+  const result = verifyGenerated(malformedProject, config);
+  assert.equal(result.ok, false);
+  assert.equal(result.stage, 'simulate');
+  assert.ok(result.simulation?.alarms.some((alarm) => alarm.includes('mapping.json.sequence')));
+  assert.ok(result.errors.some((error) => error.code === 'SEQUENCE_MISSING'));
+  const summary = summarizeVerification(result);
+  assert.equal(summary.ok, false);
+  assert.equal(summary.steps, 0);
+  assert.equal(summary.passed, 0);
 });
 
 test('P8-4 确定性：同一输入重复模拟结果完全一致', () => {

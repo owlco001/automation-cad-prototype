@@ -9,11 +9,37 @@ interface OpenCadPayload {
 
 const desktopApi = {
   version: () => ipcRenderer.invoke('app:version'),
+  modules: {
+    syncPlcgenEnabled: (enabled: boolean) => ipcRenderer.sendSync('modules:sync-plcgen-enabled', enabled) === true,
+    syncElecValidationEnabled: (enabled: boolean) => ipcRenderer.sendSync('modules:sync-elec-validation-enabled', enabled) === true,
+    syncCostEstimationEnabled: (enabled: boolean) => ipcRenderer.sendSync('modules:sync-cost-estimation-enabled', enabled) === true,
+    syncFactoryPlcSyncEnabled: (enabled: boolean) => ipcRenderer.sendSync('modules:sync-factory-plc-sync-enabled', enabled) === true,
+    syncParametricImportEnabled: (enabled: boolean) => ipcRenderer.sendSync('modules:sync-cad-parametric-import-enabled', enabled) === true,
+    syncAgentResumeEnabled: (enabled: boolean) => ipcRenderer.sendSync('modules:sync-agent-resume-enabled', enabled) === true,
+    syncProjectPortableEnabled: (enabled: boolean) => ipcRenderer.sendSync('modules:sync-project-portable-enabled', enabled) === true,
+    syncSystemUpdateEnabled: (enabled: boolean) => ipcRenderer.sendSync('modules:sync-system-update-enabled', enabled) === true
+  },
+  update: {
+    state: () => ipcRenderer.invoke('update:state'),
+    setChannel: (channel: 'stable' | 'beta') => ipcRenderer.invoke('update:set-channel', channel),
+    check: () => ipcRenderer.invoke('update:check'),
+    download: () => ipcRenderer.invoke('update:download'),
+    install: () => ipcRenderer.invoke('update:install'),
+    onState: (callback: (state: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, state: unknown) => callback(state);
+      ipcRenderer.on('update:state-changed', listener);
+      return () => ipcRenderer.removeListener('update:state-changed', listener);
+    }
+  },
   extensionBaseUrl: pathToFileURL(join(__dirname, '..', 'dist') + '/').href,
   openCadDialog: () => ipcRenderer.invoke('cad:open-dialog'),
   readFileBuffer: (filePath: string) => ipcRenderer.invoke('cad:read-file', filePath),
   getPathForFile: (file: File) => webUtils.getPathForFile(file),
   exportFile: (name: string, data: Uint8Array | string) => ipcRenderer.invoke('export:saveFile', name, data),
+  projectArchive: {
+    exportProject: (snapshot: unknown) => ipcRenderer.invoke('project-archive:export', snapshot),
+    preview: () => ipcRenderer.invoke('project-archive:preview')
+  },
   exportReport: (payload: { html: string; projectName?: string; page?: { size?: 'A3' | 'A4'; landscape?: boolean } }) => ipcRenderer.invoke('export:report', payload),
   exportCostFile: (payload: {
     format: 'pdf' | 'csv';
@@ -23,7 +49,10 @@ const desktopApi = {
     suggestedName?: string;
   }) => ipcRenderer.invoke('export:costFile', payload),
   cost: {
-    pricebook: () => ipcRenderer.invoke('cost:pricebook')
+    pricebook: () => ipcRenderer.invoke('cost:pricebook'),
+    exportPanelPdf: (payload: { html: string; projectName?: string; page?: { size?: 'A3' | 'A4'; landscape?: boolean } }) =>
+      ipcRenderer.invoke('cost:exportPanelPdf', payload),
+    exportPanelCsv: (payload: { name: string; data: string }) => ipcRenderer.invoke('cost:exportPanelCsv', payload)
   },
   machine: {
     active: () => ipcRenderer.invoke('machine:active'),
@@ -50,6 +79,8 @@ const desktopApi = {
     },
     plan: {
       execute: (payload: unknown) => ipcRenderer.invoke('agent:plan:execute', payload),
+      restore: (payload: unknown) => ipcRenderer.invoke('agent:plan:checkpoint:restore', payload),
+      clearCheckpoint: () => ipcRenderer.invoke('agent:plan:checkpoint:clear'),
       cancel: () => ipcRenderer.invoke('agent:plan:cancel')
     },
     recipe: {
@@ -137,7 +168,9 @@ const desktopApi = {
     test: () => ipcRenderer.invoke('sync:test'),
     upload: (payload: unknown) => ipcRenderer.invoke('sync:upload', payload),
     list: () => ipcRenderer.invoke('sync:list'),
-    diff: (packageId: string) => ipcRenderer.invoke('sync:diff', packageId)
+    diff: (packageId: string) => ipcRenderer.invoke('sync:diff', packageId),
+    downloadCandidate: (packageId: string, machineContext?: unknown) =>
+      ipcRenderer.invoke('sync:downloadCandidate', packageId, machineContext)
   },
   onOpenCad: (callback: (payload: OpenCadPayload) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: OpenCadPayload) => callback(payload);

@@ -9,9 +9,11 @@ import {
 } from '../ui/panels';
 import { createSimulatorConfig, COMMISSION_CASES, COMMISSION_POINTS, POWER_UP_STEPS } from './standard.ts';
 import { runSequence, type SequenceIo, type SequenceResult, type Step, type StepResult } from './sequence.ts';
+import { describeCommissionCompatibility, validateCommissionSteps } from './compatibility.ts';
 import { diagnose, type Diagnosis } from './diagnose.ts';
 import { recordDiagnosticError } from '../shared/diagnostics.ts';
 import { demoMachineConfig, validateMachineConfig, type MachineConfig } from './machine-config.ts';
+import { buildMachineIoMap, type MachineIoMapRow } from '../machine/io-map.ts';
 import { createScene3D, type Commission3DStats, type CommissionKinematicsMode, type CommissionScene3D } from './scene3d.ts';
 import type { GeomLayout } from '../machine/geometry.ts';
 import type { KinematicsAnnotation } from '../cad/kinematics-ui.ts';
@@ -20,6 +22,7 @@ import commissionStyles from './commission.css?inline';
 
 const COMMISSION_ICON = '<svg viewBox="0 0 16 16"><path d="M2.5 13.5h11M4 13.5V8h2.5v5.5M8 13.5V4.5h2.5v9M11.5 13.5V6.5H14v7"/><path d="M3.5 5.5l2.5-2 2 1.2 3.5-2.5"/></svg>';
 let machineConfig = demoMachineConfig();
+let machineIoRows: MachineIoMapRow[] = buildMachineIoMap(machineConfig).rows;
 let machineLayout: GeomLayout | null = null;
 
 function machineSummary(): string {
@@ -84,6 +87,9 @@ export interface CommissionPanelHandle {
   runPowerUp(): Promise<boolean>;
   runCase(id: string): Promise<boolean>;
   runAllCases(): Promise<boolean>;
+  /** 仅控制测试执行，不改变实时 PLC 连接或点位权限。 */
+  setIoTestsEnabled(enabled: boolean): void;
+  ioTestsEnabled(): boolean;
   /** 页面关闭时释放 3D 场景、ResizeObserver 与动画循环；可重复调用。 */
   dispose(): void;
 }
@@ -102,6 +108,7 @@ let powerResults: (StepResult | undefined)[] = POWER_UP_STEPS.map(() => undefine
 let powerCursor = 0;
 let caseReports = new Map<string, SequenceResult>();
 let running = false;
+let ioTestsEnabled = true;
 let listening = false;
 let loaded = false;
 let scene3d: CommissionScene3D | null = null;
@@ -205,6 +212,17 @@ function currentConfig(kind: PlcKind): PlcConfig {
   return config;
 }
 
+function sequenceCompatibility(steps: readonly Step[]) {
+  return validateCommissionSteps(steps, machineIoRows, points);
+}
+
+function guardSequenceCompatibility(steps: readonly Step[]): boolean {
+  const result = sequenceCompatibility(steps);
+  if (result.compatible) return true;
+  setMessage(describeCommissionCompatibility(result), true);
+  return false;
+}
+
 function updateKindFields(): void {
   if (!elements) return;
   const modbus = elements.kind.value === 'modbus';
@@ -280,6 +298,7 @@ function stepState(index: number): { state: string; glyph: string; time: string;
 
 function renderPowerSteps(): void {
   if (!elements) return;
+  const compatibility = sequenceCompatibility(POWER_UP_STEPS);
   elements.powerList.innerHTML = POWER_UP_STEPS.map((step, index) => {
     const state = stepState(index);
     return `<div class="commission-step" data-power-step="${escapeHtml(step.id)}" data-state="${state.state}">
@@ -288,28 +307,50 @@ function renderPowerSteps(): void {
       <em>${escapeHtml(state.time)}</em>
       ${state.message ? `<div class="commission-step-msg">${escapeHtml(state.message)}</div>` : ''}
     </div>`;
-  }).join('');
+  }).join('') + (compatibility.compatible ? '' : `<div class="commission-map-warning" role="note">${escapeHtml(describeCommissionCompatibility(compatibility))}</div>`);
   const passed = powerResults.filter((result) => result?.pass === true).length;
   elements.powerSummary.innerHTML = `<span class="acp-pill ${passed === POWER_UP_STEPS.length ? 'is-ok' : ''}">${passed}/${POWER_UP_STEPS.length} 通过</span><span class="acp-pill">逐步执行 ${Math.min(powerCursor + 1, POWER_UP_STEPS.length)}/${POWER_UP_STEPS.length}</span>`;
   elements.powerStep.textContent = powerCursor >= POWER_UP_STEPS.length ? '重新逐步执行' : `执行第 ${powerCursor + 1} 步`;
-  elements.powerStep.disabled = running;
-  elements.powerRun.disabled = running;
+  elements.powerStep.disabled = !ioTestsEnabled || running || !compatibility.compatible;
+  elements.powerRun.disabled = !ioTestsEnabled || running || !compatibility.compatible;
 }
 
 function renderCases(): void {
   if (!elements) return;
   elements.cases.innerHTML = COMMISSION_CASES.map((testCase) => {
     const report = caseReports.get(testCase.id);
+    const compatibility = sequenceCompatibility(testCase.steps);
     const badge = report
       ? `<span class="commission-badge ${report.pass ? 'pass' : 'fail'}">${report.pass ? '通过' : '失败'}</span>`
-      : '<span class="commission-badge">未执行</span>';
+      : compatibility.compatible
+        ? '<span class="commission-badge">未执行</span>'
+        : '<span class="commission-badge fail">已禁用</span>';
     return `<article class="commission-case" data-commission-case="${escapeHtml(testCase.id)}">
       <div class="commission-case-head"><b>${escapeHtml(testCase.name)}</b>${badge}<span>${testCase.steps.length} 步</span></div>
       <p>${escapeHtml(testCase.description)}</p>
-      <div class="commission-case-actions"><button type="button" class="acp-btn" data-run-case="${escapeHtml(testCase.id)}" ${running ? 'disabled' : ''}>单跑</button></div>
+      ${compatibility.compatible ? '' : `<div class="commission-map-warning" role="note">${escapeHtml(describeCommissionCompatibility(compatibility))}</div>`}
+      <div class="commission-case-actions"><button type="button" class="acp-btn" data-run-case="${escapeHtml(testCase.id)}" ${!ioTestsEnabled || running || !compatibility.compatible ? 'disabled' : ''}>单跑</button></div>
     </article>`;
   }).join('');
-  elements.casesRun.disabled = running;
+  elements.casesRun.disabled = !ioTestsEnabled || running || COMMISSION_CASES.some((testCase) => !sequenceCompatibility(testCase.steps).compatible);
+}
+
+function applyIoTestModuleState(): void {
+  const drawer = drawerHandle?.body;
+  if (!drawer) return;
+  drawer.querySelectorAll<HTMLElement>('[data-commission-io-test]').forEach((node) => {
+    node.hidden = !ioTestsEnabled;
+  });
+  const notice = drawer.querySelector<HTMLElement>('[data-commission-io-test-disabled]');
+  if (notice) notice.hidden = ioTestsEnabled;
+  renderPowerSteps();
+  renderCases();
+}
+
+function requireIoTestsEnabled(): boolean {
+  if (ioTestsEnabled) return true;
+  setMessage('联调 IO 测试模块当前已关闭；启用后才能执行上电流程或联调用例。', true);
+  return false;
 }
 
 function renderCaseResults(): void {
@@ -386,16 +427,19 @@ function makeIo(): SequenceIo {
   return {
     pollMs: 50,
     async read(id) {
+      if (!ioTestsEnabled) throw new Error('联调 IO 测试模块已关闭，已停止后续测试点位读取');
       const result = await api.plc.read(id);
       if (!result.ok || result.data === undefined) throw new Error(result.message ?? `读取点位「${id}」失败`);
       updateMonitorValue(id, result.data);
       return result.data;
     },
     async write(id, value) {
+      if (!ioTestsEnabled) throw new Error('联调 IO 测试模块已关闭，已停止后续测试点位写入');
       const result = await api.plc.write(id, value);
       if (!result.ok) throw new Error(result.message ?? `写入点位「${id}」失败`);
     },
     async readAll() {
+      if (!ioTestsEnabled) throw new Error('联调 IO 测试模块已关闭，已停止后续测试点位读取');
       const result = await api.plc.readAll();
       if (!result.ok || !result.data) throw new Error(result.message ?? '读取全部点位失败');
       for (const [id, value] of Object.entries(result.data)) updateMonitorValue(id, value);
@@ -484,7 +528,9 @@ async function disconnect(): Promise<void> {
 }
 
 async function runPowerUp(): Promise<boolean> {
+  if (!requireIoTestsEnabled()) return false;
   if (running) return false;
+  if (!guardSequenceCompatibility(POWER_UP_STEPS)) return false;
   const api = desktop();
   if (!api || lastStatus.status !== 'connected') {
     setMessage('请先连接 PLC，再执行上电流程。', true);
@@ -517,7 +563,9 @@ async function runPowerUp(): Promise<boolean> {
 }
 
 async function runPowerStep(): Promise<boolean> {
+  if (!requireIoTestsEnabled()) return false;
   if (running) return false;
+  if (!guardSequenceCompatibility(POWER_UP_STEPS)) return false;
   const api = desktop();
   if (!api || lastStatus.status !== 'connected') {
     setMessage('请先连接 PLC，再执行上电流程。', true);
@@ -560,13 +608,16 @@ async function ensureReady(): Promise<boolean> {
 }
 
 async function runCaseById(id: string): Promise<boolean> {
+  if (!requireIoTestsEnabled()) return false;
   if (running) return false;
-  if (!(await ensureReady())) return false;
   const testCase = COMMISSION_CASES.find((entry) => entry.id === id);
   if (!testCase) {
     setMessage(`用例不存在：${id}`, true);
     return false;
   }
+  if (!guardSequenceCompatibility(testCase.steps)) return false;
+  if (!(await ensureReady())) return false;
+  if (!requireIoTestsEnabled()) return false;
   running = true;
   resetDiagnosis();
   renderCases();
@@ -589,8 +640,15 @@ async function runCaseById(id: string): Promise<boolean> {
 }
 
 async function runAllCases(): Promise<boolean> {
+  if (!requireIoTestsEnabled()) return false;
   if (running) return false;
+  const incompatibleCase = COMMISSION_CASES.find((testCase) => !sequenceCompatibility(testCase.steps).compatible);
+  if (incompatibleCase) {
+    guardSequenceCompatibility(incompatibleCase.steps);
+    return false;
+  }
   if (!(await ensureReady())) return false;
+  if (!requireIoTestsEnabled()) return false;
   running = true;
   resetDiagnosis();
   caseReports = new Map();
@@ -719,7 +777,7 @@ async function loadSavedConfig(): Promise<void> {
     const result = await api.plc.getConfig();
     if (result.ok && result.data) {
       const config = result.data as unknown as PlcConfig;
-      if (config.points.length === COMMISSION_POINTS.length) points = config.points.map((point) => ({ ...point }));
+      if (Array.isArray(config.points) && config.points.length > 0) points = config.points.map((point) => ({ ...point }));
       if (config.kind === 'sim') simConfig = config;
       elements.kind.value = config.kind;
       if (config.host) elements.host.value = config.host;
@@ -730,6 +788,8 @@ async function loadSavedConfig(): Promise<void> {
     setMessage(`读取 PLC 配置失败：${errorMessage(error)}`, true);
   }
   renderPoints();
+  renderPowerSteps();
+  renderCases();
   updateKindFields();
   try {
     const status = await api.plc.status();
@@ -843,6 +903,8 @@ function buildPanel(): void {
         <tbody id="commissionPoints"></tbody>
       </table></div>
 
+      <div class="acp-note" data-commission-io-test-disabled hidden>联调 IO 测试模块已关闭；PLC 连接、点位读写与实时监视仍可使用。</div>
+      <div data-commission-io-test>
       <div class="acp-section-title"><span>上电流程</span><b>6 步</b></div>
       <div id="commissionPowerSteps"></div>
       <div class="commission-actions">
@@ -861,6 +923,7 @@ function buildPanel(): void {
 
       <div class="acp-section-title"><span>故障诊断</span><b id="commissionDiagnosisSummary">待运行</b></div>
       <div class="commission-diagnosis" id="commissionDiagnosis"></div>
+      </div>
 
       <div class="acp-section-title"><span>点位监视</span><b>实时 · 强制写入</b></div>
       <div class="commission-table-scroll"><table class="commission-table">
@@ -933,8 +996,23 @@ export function initCommissionPanel(options: PanelOptions): CommissionPanelHandl
   optionsRef = options;
   buildPanel();
   const applyMachineConfig = (config: MachineConfig | null, layout?: GeomLayout | null): void => {
-    machineConfig = config ? validateMachineConfig(config) : demoMachineConfig();
+    let nextConfig: MachineConfig;
+    let nextIoRows: MachineIoMapRow[];
+    try {
+      nextConfig = config ? validateMachineConfig(config) : demoMachineConfig();
+      nextIoRows = buildMachineIoMap(nextConfig).rows;
+    } catch (error) {
+      const message = `机型 IO 映射无效：${errorMessage(error)}。请修正缺失或重复点位后再联调。`;
+      setMessage(message, true);
+      throw new Error(message);
+    }
+    machineConfig = nextConfig;
+    machineIoRows = nextIoRows;
     machineLayout = config ? (layout ?? null) : null;
+    powerResults = POWER_UP_STEPS.map(() => undefined);
+    powerCursor = 0;
+    caseReports = new Map();
+    resetDiagnosis();
     if (!elements) return;
     scene3d?.dispose();
     elements.scene3dHost.innerHTML = '';
@@ -944,6 +1022,9 @@ export function initCommissionPanel(options: PanelOptions): CommissionPanelHandl
     scene3d.setEnabled(elements.scene3dToggle.checked);
     scene3d.setActive(drawerHandle?.isOpen() ?? false);
     renderSceneMode();
+    renderPowerSteps();
+    renderCases();
+    renderCaseResults();
   };
   const handle: CommissionPanelHandle = {
     open(): void {
@@ -958,6 +1039,11 @@ export function initCommissionPanel(options: PanelOptions): CommissionPanelHandl
     runPowerUp,
     runCase: runCaseById,
     runAllCases,
+    setIoTestsEnabled(enabled: boolean): void {
+      ioTestsEnabled = enabled === true;
+      applyIoTestModuleState();
+    },
+    ioTestsEnabled: (): boolean => ioTestsEnabled,
     dispose(): void {
       scene3dObserver?.disconnect();
       scene3dObserver = null;

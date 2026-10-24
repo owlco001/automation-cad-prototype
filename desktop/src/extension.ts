@@ -8,9 +8,11 @@ import { describeSuggestions } from './cad/kinematics-auto';
 import {
   initKinematicsUi,
   pointOptionsFromMachineConfig,
+  serializeAnnotation,
   type KinematicsUiHandle
 } from './cad/kinematics-ui';
 import { initParametricUi, type ParametricUiHandle } from './parametric/ui';
+import { serializeDoc } from './parametric/model';
 import type { CadImportResult } from './shared/types';
 import { initFactoryPanel } from './factory/ui';
 import { initPackPanel } from './packs/ui';
@@ -27,11 +29,19 @@ import {
 } from './enclosure/canvas';
 import { initElecCheckPanel } from './elec/ui';
 import { initCostPanel } from './cost/ui';
-import { initPlcGenUi } from './plcgen/ui';
+import type { PlcGenUiHandle } from './plcgen/ui';
+import { createModuleManager, type KeyValueStorage, type ModuleStatus } from './modules/registry';
+import {
+  PARAMETRIC_MODULE_DISABLED_MESSAGE,
+  parametricModuleDisabledBuildResult
+} from './modules/parametric-gate';
+import { initModuleSettingsUi } from './modules/ui';
+import { initUpdatePanel } from './update/ui';
 import { initCommissionPanel, type CommissionPanelHandle } from './commission/ui';
 import type { MachineConfig } from './commission/machine-config';
+import { buildOptionalSyncPlcPayload } from './sync/plc.ts';
 import { initSyncPanel } from './sync/ui';
-import { initAgentPanel } from './agent/ui';
+import { initAgentPanel, setAgentResumeModuleEnabled } from './agent/ui';
 import { bomSignatureFromRows } from './agent/advisor';
 import type { SyncUploadPayload } from './sync/types';
 import type { InterferenceHit, InterferencePart } from './mech/interference';
@@ -44,6 +54,8 @@ import { renderReportHtml } from './export/report';
 import { initOrbitView } from './orbit/ui';
 import { assertCadFileSize } from './shared/input-limits';
 import { recordDiagnosticError, setDiagnosticOperation } from './shared/diagnostics';
+import { identifyCadModelObjects, type CadModelObjectIdentity, type CadProjectIdentity } from './project-archive/identity';
+import { cadImportFailureView, parseCadImportTransaction } from './cad/import-transaction';
 
 const ICONS = {
   cube: '<svg viewBox="0 0 16 16"><path d="M8 1.9l5.4 3.1v6L8 14.1 2.6 11V5z"/><path d="M8 8.1l5.4-3.1M8 8.1L2.6 5M8 8.1V14"/></svg>',
@@ -58,6 +70,10 @@ const ICONS = {
 
 const CAD_ENTRY = 'cadEntryButton';
 let viewer: CadViewer | null = null;
+let plcSyncModulesEnabled = (): { plcgen: boolean; plcSync: boolean } => ({ plcgen: false, plcSync: false });
+let parametricImportModuleEnabled = false;
+let parametricHistoryModuleEnabled = false;
+let projectPortableModuleEnabled = false;
 let root: HTMLElement | null = null;
 let overlayOpen = false;
 let busy = false;
@@ -66,11 +82,16 @@ let noticeTimer = 0;
 let worker: Worker | null = null;
 let workerSequence = 0;
 let currentFileName = '';
+let currentProjectIdentity: CadProjectIdentity | null = null;
+let currentProjectStorageKey = `session:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+let currentModelObjectIdentities: CadModelObjectIdentity[] = [];
 let stressConclusions: StressConclusion[] = [];
 let interference: InterferencePanelHandle | null = null;
 let commission: CommissionPanelHandle | null = null;
 let kinematics: KinematicsUiHandle | null = null;
 let parametric: ParametricUiHandle | null = null;
+let plcGenUi: PlcGenUiHandle | null = null;
+let plcGenUiLoad: Promise<PlcGenUiHandle> | null = null;
 let mechUiReady = false;
 let stressTabObserver: MutationObserver | null = null;
 type ExportFormat = 'pdf' | 'dxf' | 'glb' | 'obj' | 'csv' | 'xlsx';
@@ -81,6 +102,29 @@ type RemovedComponentSnapshot =
 const removedComponentSnapshots = new Map<string, RemovedComponentSnapshot>();
 let removedComponentSequence = 0;
 let lastPlcGeneratedAt = '';
+
+function activatePlcGenUi(manager: ReturnType<typeof createModuleManager>): Promise<PlcGenUiHandle> {
+  if (plcGenUi) {
+    plcGenUi.setEnabled(manager.getStatus('plcgen').enabled);
+    return Promise.resolve(plcGenUi);
+  }
+  if (!plcGenUiLoad) {
+    plcGenUiLoad = import('./plcgen/ui').then(({ initPlcGenUi }) => {
+      plcGenUi = initPlcGenUi({
+        getConfig: () => commission?.getMachineConfig() ?? null,
+        enabled: manager.getStatus('plcgen').enabled
+      });
+      return plcGenUi;
+    }).catch((error: unknown) => {
+      plcGenUiLoad = null;
+      throw error;
+    });
+  }
+  return plcGenUiLoad.then((handle) => {
+    handle.setEnabled(manager.getStatus('plcgen').enabled);
+    return handle;
+  });
+}
 
 function injectStyles(): void {
   if (document.getElementById('automation-cad-styles')) return;
@@ -128,7 +172,7 @@ function buildOverlay(): void {
         <button type="button" class="cad-btn" data-cad-action="fit">${ICONS.fit}<span>缩放到适合</span></button>
         <button type="button" class="cad-btn" data-cad-action="wire">${ICONS.wire}<span>线框</span></button>
         <button type="button" class="cad-btn" data-cad-action="kinematics" id="cadKinematicsToggle">${ICONS.kinematics}<span>运动学</span></button>
-        <button type="button" class="cad-btn" data-cad-action="parametric" id="cadParametricToggle">${ICONS.parametric}<span>参数化</span></button>
+        <button type="button" class="cad-btn" data-cad-action="parametric" id="cadParametricToggle"${parametricImportModuleEnabled ? '' : ' hidden'}>${ICONS.parametric}<span>参数化</span></button>
         <span class="cad-parametric-status" id="cadParametricStatus" hidden></span>
         <div class="cad-export-wrap">
           <button type="button" class="cad-btn" data-cad-action="export-menu">${ICONS.export}<span>导出</span><span class="cad-export-caret">▾</span></button>
@@ -140,6 +184,9 @@ function buildOverlay(): void {
             <span class="cad-export-sep"></span>
             <button type="button" data-export="csv"><span>BOM (CSV)</span><em>表格</em></button>
             <button type="button" data-export="xlsx"><span>BOM (XLSX)</span><em>Excel</em></button>
+            <span class="cad-export-sep" data-project-archive-entry${projectPortableModuleEnabled && window.desktop?.projectArchive ? '' : ' hidden'}></span>
+            <button type="button" data-project-archive="export-cad" data-project-archive-entry${projectPortableModuleEnabled && window.desktop?.projectArchive ? '' : ' hidden'}><span>导出可支持工程状态</span><em>.acproj</em></button>
+            <button type="button" data-project-archive="preview" data-project-archive-entry${projectPortableModuleEnabled && window.desktop?.projectArchive ? '' : ' hidden'}><span>校验/预览工程档案</span><em>只读</em></button>
           </div>
         </div>
         <button type="button" class="cad-btn" data-cad-action="close">${ICONS.close}<span>关闭</span></button>
@@ -199,6 +246,13 @@ function buildOverlay(): void {
       <aside class="cad-kinematics-drawer" id="cadKinematicsDrawer" hidden></aside>
       <aside class="cad-parametric-drawer" id="cadParametricDrawer" hidden></aside>
     </main>
+    <dialog id="cadProjectArchivePreview" class="cad-project-archive-dialog" aria-labelledby="cadProjectArchivePreviewTitle">
+      <div class="cad-project-archive-dialog-head">
+        <div><h2 id="cadProjectArchivePreviewTitle">工程档案只读预览</h2><p>内容已通过结构、依赖与 SHA-256 校验；本操作不会应用或覆盖当前工程。</p></div>
+        <button type="button" class="cad-project-archive-close" data-project-archive-close aria-label="关闭预览">×</button>
+      </div>
+      <pre id="cadProjectArchivePreviewBody"></pre>
+    </dialog>
     <footer class="cad-footer">
       <span id="cadStats">就绪 · <strong>0</strong> 个零件</span>
       <span class="cad-footer-flex"></span>
@@ -208,6 +262,18 @@ function buildOverlay(): void {
 
   root.addEventListener('click', (event) => {
     event.stopPropagation();
+    if ((event.target as HTMLElement).closest('[data-project-archive-close]')) {
+      const preview = document.getElementById('cadProjectArchivePreview') as HTMLDialogElement | null;
+      preview?.close();
+      return;
+    }
+    const archiveAction = (event.target as HTMLElement).closest<HTMLElement>('[data-project-archive]');
+    if (archiveAction) {
+      toggleExportMenu(false);
+      if (archiveAction.dataset.projectArchive === 'export-cad') void exportPortableProjectArchive();
+      else if (archiveAction.dataset.projectArchive === 'preview') void chooseAndPreviewPortableArchive();
+      return;
+    }
     const sideTab = (event.target as HTMLElement).closest<HTMLElement>('[data-cad-side]');
     if (sideTab) {
       const value = sideTab.dataset.cadSide;
@@ -239,6 +305,10 @@ function buildOverlay(): void {
         handle.open();
       }
     } else if (action === 'parametric') {
+      if (!parametricImportModuleEnabled) {
+        showNotice(PARAMETRIC_MODULE_DISABLED_MESSAGE, true);
+        return;
+      }
       const handle = ensureParametricUi();
       if (handle.isOpen()) handle.close();
       else {
@@ -463,6 +533,12 @@ async function buildSyncPayload(): Promise<SyncUploadPayload> {
   const dxf = toDxf(currentDxfShapes());
   const glbBlob = await toMeshBlob(viewer.getExportRoot(), 'glb');
   const glb = new Uint8Array(await glbBlob.arrayBuffer());
+  const modules = plcSyncModulesEnabled();
+  const plc = buildOptionalSyncPlcPayload(
+    commission?.getMachineConfig() ?? null,
+    modules.plcgen,
+    modules.plcSync
+  );
   return {
     projectName: exportBaseName(),
     bomCsv: csv,
@@ -478,7 +554,8 @@ async function buildSyncPayload(): Promise<SyncUploadPayload> {
         mat: row.material
       };
       return row.note ? { ...bom, remark: row.note } : bom;
-    })
+    }),
+    ...(plc ? { plc } : {})
   };
 }
 
@@ -582,11 +659,15 @@ function ensureParametricUi(): ParametricUiHandle {
     container,
     viewer: ensureViewer(),
     getSourceFile: () => currentFileName,
+    getProjectId: () => currentProjectIdentity?.projectId ?? '',
+    getProjectStorageKey: () => currentProjectStorageKey,
     loadStl: async (filePath: string): Promise<CadImportResult> => {
       if (!window.desktop) throw new Error('桌面文件接口不可用');
       const bytes = await window.desktop.readFileBuffer(filePath);
       return await parseBuffer(toArrayBuffer(bytes), 'parametric.stl');
     },
+    isEnabled: () => parametricImportModuleEnabled,
+    isHistoryEnabled: () => parametricHistoryModuleEnabled,
     notify: showNotice,
     onOpenChange: (open) => {
       document.getElementById('cadParametricToggle')?.classList.toggle('is-active', open);
@@ -693,7 +774,13 @@ function setEmptyVisible(visible: boolean): void {
   const empty = document.getElementById('cadEmpty');
   if (empty) empty.hidden = !visible;
 }
-
+function showCadImportFailure(prefix: string, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  const view = cadImportFailureView(Boolean(currentFileName));
+  busy = false;
+  updateLoading(view.loadingErrorVisible, `${prefix}：${message}`, true);
+  setEmptyVisible(view.emptyStateVisible);
+}
 function resolveWasmUrl(): string {
   if (/^(data:|blob:|https?:|file:)/i.test(wasmAssetUrl)) return wasmAssetUrl;
   const base = window.desktop?.extensionBaseUrl || new URL('./', window.location.href).href;
@@ -767,24 +854,60 @@ async function loadCadBuffer(buffer: ArrayBuffer, name: string): Promise<CadImpo
   setBusy(true, `正在解析 ${name}…`);
   setEmptyVisible(false);
   try {
-    const result = await parseBuffer(buffer, name);
+    let nextModelObjectIdentities: CadModelObjectIdentity[] = [];
+    const transaction = await parseCadImportTransaction({
+      sourceName: name,
+      sourceBytes: new Uint8Array(buffer),
+      storage: {
+        getItem: (key) => window.localStorage.getItem(key),
+        setItem: (key, value) => window.localStorage.setItem(key, value)
+      },
+      parse: () => parseBuffer(buffer, name),
+      apply: async (result, candidateIdentity) => {
+        if (candidateIdentity) {
+          try {
+            nextModelObjectIdentities = await identifyCadModelObjects(candidateIdentity.projectId, candidateIdentity.sourceSha256, result.meshes);
+          } catch (identityError) {
+            console.warn('[project-identity] CAD 网格无法建立稳定对象映射；运动学跨导入恢复将保持关闭', identityError);
+          }
+        }
+        ensureViewer().load(result, name);
+      },
+      onIdentityError: (identityError) => {
+        console.warn('[project-identity] 无法建立持久工程身份；本次使用临时隔离状态桶', identityError);
+      }
+    });
+    const result = transaction.result;
+    const nextIdentity = transaction.identity;
+    const nextStorageKey = nextIdentity?.projectId ?? `session:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    if (nextIdentity) {
+      result.meshes.forEach((mesh, index) => {
+        const objectId = nextModelObjectIdentities[index]?.objectId;
+        if (objectId) mesh.stableObjectId = objectId;
+      });
+    } else {
+      nextModelObjectIdentities = [];
+    }
     currentFileName = name;
-    ensureViewer().load(result, name);
-    ensureKinematicsUi().setSource(name, ensureViewer().getKinematicsMeshes());
-    parametric?.setSource(name);
+    currentProjectIdentity = nextIdentity;
+    currentProjectStorageKey = nextStorageKey;
+    currentModelObjectIdentities = nextModelObjectIdentities;
+    refreshProjectArchiveControls();
+    const kinematicsMeshes = ensureViewer().getKinematicsMeshes();
+    ensureKinematicsUi().setSource(name, kinematicsMeshes, nextIdentity?.projectId, nextStorageKey);
+    parametric?.setSource(name, nextIdentity?.projectId, nextStorageKey);
     interference?.run([]);
     displayFileInfo(name);
     const partCount = document.getElementById('cadPartCount');
     if (partCount) partCount.textContent = String(result.stats.meshCount);
     setBusy(false);
     setEmptyVisible(false);
-    showNotice(`${name} 已加载 · ${result.stats.triangleCount} 个三角面`);
+    showNotice(nextIdentity
+      ? `${name} 已加载 · ${result.stats.triangleCount} 个三角面 · 工程 ${nextIdentity.projectId}`
+      : `${name} 已加载 · ${result.stats.triangleCount} 个三角面 · 未能建立持久身份，旧状态未恢复`, !nextIdentity);
     return result;
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    busy = false;
-    updateLoading(true, `打开失败：${message}`, true);
-    setEmptyVisible(true);
+    showCadImportFailure('打开失败', error);
     console.error('[cad] 导入失败', error);
     throw error;
   }
@@ -808,9 +931,8 @@ async function loadCadPath(path: string): Promise<CadImportResult> {
     const bytes = await window.desktop.readFileBuffer(path);
     return await loadCadBuffer(toArrayBuffer(bytes), name);
   } catch (error) {
-    busy = false;
-    updateLoading(true, `读取失败：${error instanceof Error ? error.message : String(error)}`, true);
-    setEmptyVisible(true);
+    // A second concurrent open must not clear the first import's busy state.
+    if (!busy) showCadImportFailure('读取失败', error);
     throw error;
   }
 }
@@ -821,9 +943,6 @@ async function importPath(path: string): Promise<void> {
     await loadCadPath(path);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    busy = false;
-    updateLoading(true, `读取失败：${message}`, true);
-    setEmptyVisible(true);
     showNotice(message, true);
   }
 }
@@ -868,6 +987,171 @@ async function chooseAndImport(): Promise<void> {
   } catch (error) {
     showNotice(error instanceof Error ? error.message : String(error), true);
   }
+}
+
+function createPortableProjectExportSnapshot(): DesktopProjectExportSnapshot | null {
+  const identity = currentProjectIdentity;
+  if (!identity) return null;
+  const excludedState: string[] = [];
+  let featureTreeJson: string | null = null;
+  if (!parametricImportModuleEnabled) {
+    excludedState.push('feature-tree-module-disabled');
+  } else if (!parametric) {
+    excludedState.push('feature-tree-not-loaded');
+  } else {
+    const doc = parametric.getDoc();
+    if (typeof doc.sourceFile !== 'string' || doc.sourceFile.trim() !== identity.sourceName) excludedState.push('feature-tree-source-mismatch');
+    else featureTreeJson = serializeDoc(doc);
+  }
+
+  let kinematicsJson: string | null = null;
+  const annotation = kinematics?.getAnnotation();
+  if (annotation?.version === 2 && annotation.projectId === identity.projectId) {
+    kinematicsJson = serializeAnnotation(annotation);
+  } else if (annotation?.parts.length) {
+    excludedState.push('kinematics-stable-object-binding-unavailable');
+  } else {
+    excludedState.push('kinematics-not-loaded');
+  }
+
+  const viewState = viewer?.getPortableViewState() ?? null;
+  const viewStateJson = viewState ? JSON.stringify(viewState) : null;
+  if (!viewStateJson) excludedState.push('cad-view-state-unavailable');
+  return {
+    projectId: identity.projectId,
+    sourceName: identity.sourceName,
+    sourceSha256: identity.sourceSha256,
+    sourceSize: identity.sourceSize,
+    modelObjects: currentModelObjectIdentities
+      .filter((entry): entry is typeof entry & { objectId: string } => entry.objectId !== null)
+      .map(({ objectId, name, path, geometrySha256 }) => ({ objectId, name, path, geometrySha256 })),
+    featureTreeJson,
+    kinematicsJson,
+    viewStateJson,
+    excludedState
+  };
+}
+
+function describePortableStateExclusions(codes: readonly string[]): string[] {
+  const labels: Record<string, string> = {
+    'feature-tree-module-disabled': '参数化模块关闭，未收录特征树',
+    'feature-tree-not-loaded': '特征树状态未加载',
+    'feature-tree-source-mismatch': '特征树来源与当前 CAD 不匹配',
+    'kinematics-stable-object-binding-unavailable': '运动学缺少无歧义 stable objectId 映射',
+    'kinematics-not-loaded': '运动学标注未加载',
+    'cad-view-state-unavailable': '无法安全采集 CAD 视角状态'
+  };
+  return codes.map((code) => labels[code] ?? code);
+}
+
+async function exportPortableProjectArchive(): Promise<void> {
+  if (!projectPortableModuleEnabled) {
+    showNotice('功能模块「project.portable」当前已关闭。', true);
+    return;
+  }
+  const api = window.desktop?.projectArchive;
+  if (!api) {
+    showNotice('工程档案文件操作仅在桌面版可用。', true);
+    return;
+  }
+  const snapshot = createPortableProjectExportSnapshot();
+  if (!snapshot) {
+    showNotice('无法安全导出：当前 CAD 尚无持久工程身份，已禁用导出；请重新导入 CAD 后重试。', true);
+    return;
+  }
+  try {
+    const result = await api.exportProject(snapshot);
+    if (!result.ok) {
+      if (result.code !== 'CANCELED') showNotice(result.message, true);
+      return;
+    }
+    const value = result.value;
+    const included = Object.entries(value.includedState).filter(([, includedState]) => includedState).map(([key]) => key).join('、') || '无状态';
+    const excluded = value.excludedState.length ? `；未收录：${describePortableStateExclusions(value.excludedState).join('；')}` : '';
+    showNotice(`已创建 ${value.path}（含 CAD 原件与候选状态：${included}；schema v2，导入仍为只读预览${excluded}）`);
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : String(error), true);
+  }
+}
+
+function openPortableArchivePreview(preview: DesktopProjectArchivePreview): void {
+  const dialog = document.getElementById('cadProjectArchivePreview') as HTMLDialogElement | null;
+  const body = document.getElementById('cadProjectArchivePreviewBody');
+  if (!dialog || !body) {
+    showNotice('档案预览界面不可用。', true);
+    return;
+  }
+  const stateLines = [
+    `参数化特征树：${preview.state.featureTree ? '档案中有候选数据；尚未应用' : '不包含'}`,
+    `运动学标注：${preview.state.kinematics ? '档案中有候选数据；stable objectId 已校验，但尚未针对本机 CAD 重导入验证' : '不包含'}`,
+    `视角状态：${preview.state.viewState ? '档案中有候选数据；当前视口未应用' : '不包含'}`
+  ];
+  const dependencyLines = preview.dependencies.length > 0
+    ? preview.dependencies.map((item) => `- ${item.originalName} (${item.format}, ${item.size} bytes, SHA-256 ${item.sha256})`)
+    : ['- 无'];
+  const omittedStateLines = preview.omittedState.length
+    ? describePortableStateExclusions(preview.omittedState).map((reason) => `- ${reason}`)
+    : ['- 无'];
+  const identityLines = preview.project.identity
+    ? [
+        `来源身份：${preview.project.identity.sourceName} · ${preview.project.identity.sourceSize} bytes`,
+        `源 SHA-256：${preview.project.identity.sourceSha256}`,
+        `稳定模型对象：${preview.project.identity.modelObjects.length} 个（相同几何重复对象不分配 ID）`
+      ]
+    : ['来源身份：旧版 schema 无稳定 source identity'];
+  body.textContent = [
+    `项目名称：${preview.project.name}`,
+    `档案 ID：${preview.project.id}`,
+    `档案/Core schema：${preview.schemaVersion}/${preview.coreSchemaVersion}`,
+    `创建版本/时间：${preview.appVersion} · ${preview.createdAt}`,
+    ...identityLines,
+    '',
+    '状态候选：',
+    ...stateLines,
+    '',
+    '未收录状态：',
+    ...omittedStateLines,
+    '',
+    'CAD 依赖：',
+    ...dependencyLines,
+    '',
+    `完整性：${preview.integrity.algorithm} (${preview.integrity.authenticity})，仅校验条目与 manifest 一致性。`,
+    `尚不支持：${preview.unsupported.join('、')}`,
+    '',
+    '此处只显示经过校验的候选清单，不会导入、重建或覆盖当前工程。'
+  ].join('\n');
+  if (!dialog.open) dialog.showModal();
+}
+
+async function chooseAndPreviewPortableArchive(): Promise<void> {
+  if (!projectPortableModuleEnabled) {
+    showNotice('功能模块「project.portable」当前已关闭。', true);
+    return;
+  }
+  const api = window.desktop?.projectArchive;
+  if (!api) {
+    showNotice('工程档案文件操作仅在桌面版可用。', true);
+    return;
+  }
+  try {
+    const result = await api.preview();
+    if (!result.ok) {
+      if (result.code !== 'CANCELED') showNotice(result.message, true);
+      return;
+    }
+    openPortableArchivePreview(result.value);
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : String(error), true);
+  }
+}
+
+function refreshProjectArchiveControls(): void {
+  const button = root?.querySelector<HTMLButtonElement>('[data-project-archive="export-cad"]');
+  if (!button) return;
+  button.disabled = !projectPortableModuleEnabled || !window.desktop?.projectArchive || !currentProjectIdentity;
+  button.title = currentProjectIdentity
+    ? '导出当前持久身份对应的可支持状态与 CAD 原件'
+    : '尚未加载可建立持久身份的 CAD；请重新导入后再导出';
 }
 
 async function importPack(path: string): Promise<void> {
@@ -959,6 +1243,84 @@ function base64FromBytes(bytes: Uint8Array): string {
     binary += String.fromCharCode(...bytes.subarray(index, index + chunk));
   }
   return btoa(binary);
+}
+
+/** 以 SHA-256 替换二进制数组内容，绝不把 CAD 网格或工程明细传入磁盘存储。 */
+async function fingerprintMaterial(value: unknown, ancestors = new Set<object>()): Promise<unknown> {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) throw new Error('工程摘要包含非有限数');
+    return value;
+  }
+  if (value === undefined) return null;
+  if (typeof value !== 'object') throw new Error('工程摘要包含不支持的数据');
+  if (ancestors.has(value)) throw new Error('工程摘要包含循环引用');
+  const nextAncestors = new Set(ancestors);
+  nextAncestors.add(value);
+  if (ArrayBuffer.isView(value)) {
+    const view = value as ArrayBufferView;
+    const bytes = new Uint8Array(view.buffer, view.byteOffset, view.byteLength).slice();
+    const digest = await crypto.subtle.digest('SHA-256', bytes.buffer);
+    return {
+      binaryType: Object.getPrototypeOf(value)?.constructor?.name ?? 'TypedArray',
+      byteLength: bytes.byteLength,
+      sha256: Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+    };
+  }
+  if (value instanceof ArrayBuffer) {
+    const bytes = new Uint8Array(value.slice(0));
+    const digest = await crypto.subtle.digest('SHA-256', bytes.buffer);
+    return {
+      binaryType: 'ArrayBuffer',
+      byteLength: bytes.byteLength,
+      sha256: Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+    };
+  }
+  if (Array.isArray(value)) {
+    const output: unknown[] = [];
+    for (const entry of value) output.push(await fingerprintMaterial(entry, nextAncestors));
+    return output;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) throw new Error('工程摘要包含非普通对象');
+  const source = value as Record<string, unknown>;
+  const output: Record<string, unknown> = {};
+  for (const key of Object.keys(source).sort()) output[key] = await fingerprintMaterial(source[key], nextAncestors);
+  return output;
+}
+
+async function projectCheckpointFingerprint(): Promise<string | null> {
+  if (!agentBridgeReady() || !viewer || !commission || !globalThis.crypto?.subtle) return null;
+  try {
+    let persistedEnclosure: { plate: unknown; placements: unknown } | null = null;
+    const saved = window.localStorage.getItem('automationcad.enclosure.v1');
+    if (saved !== null) {
+      const parsed = JSON.parse(saved) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      const source = parsed as Record<string, unknown>;
+      const plate = source.plate;
+      if (!plate || typeof plate !== 'object' || Array.isArray(plate) || !Array.isArray(source.placements)) return null;
+      persistedEnclosure = { plate, placements: source.placements };
+    }
+    const liveEnclosure = enclosureState();
+    const enclosureSnapshot = liveEnclosure
+      ? { plate: liveEnclosure.plate, placements: liveEnclosure.placements }
+      : persistedEnclosure;
+    const material = {
+      schema: 1,
+      machine: commission.getMachineConfig(),
+      cad: viewer.getCheckpointFingerprintMaterial(),
+      bom: viewer.getBomRows(),
+      enclosure: enclosureSnapshot
+    };
+    const normalized = await fingerprintMaterial(material);
+    const serialized = JSON.stringify(normalized);
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(serialized));
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  } catch {
+    // 无法完整读取或哈希当前工程时，调用方必须拒绝恢复。
+    return null;
+  }
 }
 
 function agentBridgeReady(): boolean {
@@ -1180,6 +1542,7 @@ function initAgentBridge(): void {
         return { ok: false, message: error instanceof Error ? error.message : String(error) };
       }
     },
+    getProjectCheckpointFingerprint: () => projectCheckpointFingerprint(),
     getAdvisorState: () => {
       if (!agentBridgeReady()) return agentBridgeUnavailable();
       try {
@@ -1202,7 +1565,9 @@ function initAgentBridge(): void {
         const elec = window.__ElecCheckPanel?.result?.() ?? null;
         const costState = window.__CostPanel?.state?.();
         const currentSignature = bomSignatureFromRows(bomRows);
-        const lastSignature = typeof costState?.bomSignature === 'string' ? costState.bomSignature : '';
+        const lastSignature = costState && 'bomSignature' in costState && typeof costState.bomSignature === 'string'
+          ? costState.bomSignature
+          : '';
         const hasCadModel = scene.length > 0;
         const conflicts = hasCadModel && interference ? (interference.hasRun() ? interference.getHits().length : null) : null;
         const plcPanelGenerated = window.__PlcGenPanel?.uiState?.().generated === true;
@@ -1647,13 +2012,188 @@ function init(): void {
   });
   initPackPanel();
   initElecLibraryPanel();
-  initElecCheckPanel();
-  initCostPanel();
-  initPlcGenUi({ getConfig: () => commission?.getMachineConfig() ?? null });
+  const moduleStorage: KeyValueStorage = {
+    getItem: (key) => window.localStorage.getItem(key),
+    setItem: (key, value) => window.localStorage.setItem(key, value)
+  };
+  const moduleManager = createModuleManager(moduleStorage);
+  const elecCheckPanel = initElecCheckPanel({ enabled: moduleManager.getStatus('elec.validation').enabled });
+  const initialCostEnabled = moduleManager.getStatus('cost.estimation').enabled;
+  const costPanel = initCostPanel({ enabled: !window.desktop && initialCostEnabled });
+  const updatePanel = initUpdatePanel();
+  const publishCostEstimationState = (states: ModuleStatus[]): void => {
+    const desiredEnabled = states.find((module) => module.id === 'cost.estimation')?.enabled === true;
+    try {
+      const accepted = window.desktop?.modules.syncCostEstimationEnabled(desiredEnabled);
+      const enabled = desiredEnabled && (!window.desktop || accepted === true);
+      costPanel.setEnabled(enabled);
+      if (window.desktop && accepted !== true) {
+        console.error('[modules] 主进程未接受 cost.estimation 状态；成本计算与报告保持关闭');
+      }
+    } catch (error) {
+      costPanel.setEnabled(false);
+      console.error('[modules] cost.estimation 状态同步失败；成本计算与报告保持关闭', error);
+    }
+  };
+  plcSyncModulesEnabled = () => ({
+    plcgen: moduleManager.getStatus('plcgen').enabled,
+    plcSync: moduleManager.getStatus('factory.plc-sync').enabled
+  });
+  commission?.setIoTestsEnabled(moduleManager.getStatus('commission.io-test').enabled);
+  const publishSystemUpdateState = (states: ModuleStatus[]): void => {
+    const desiredEnabled = states.find((module) => module.id === 'system.update')?.enabled === true;
+    try {
+      const accepted = window.desktop?.modules.syncSystemUpdateEnabled(desiredEnabled);
+      const enabled = Boolean(window.desktop && accepted === true && desiredEnabled);
+      updatePanel.setEnabled(enabled);
+      if (window.desktop && accepted !== true) {
+        console.error('[modules] 主进程未接受 system.update 状态；更新界面与 IPC 保持关闭');
+      }
+    } catch (error) {
+      updatePanel.setEnabled(false);
+      console.error('[modules] system.update 状态同步失败；更新界面与 IPC 保持关闭', error);
+    }
+  };
+  const publishPlcgenState = (states: ModuleStatus[]): void => {
+    const enabled = states.find((module) => module.id === 'plcgen')?.enabled === true;
+    try {
+      const accepted = window.desktop?.modules.syncPlcgenEnabled(enabled);
+      if (window.desktop && !accepted) {
+        console.error('[modules] 主进程未接受 PLC 模块状态；Agent 工具将保持关闭');
+      }
+    } catch (error) {
+      console.error('[modules] PLC 模块状态同步失败；Agent 工具将保持关闭', error);
+    }
+  };
+  const publishElecValidationState = (states: ModuleStatus[]): void => {
+    const desiredEnabled = states.find((module) => module.id === 'elec.validation')?.enabled === true;
+    try {
+      const accepted = window.desktop?.modules.syncElecValidationEnabled(desiredEnabled);
+      const enabled = desiredEnabled && (!window.desktop || accepted === true);
+      elecCheckPanel.setEnabled(enabled);
+      if (window.desktop && accepted !== true) {
+        console.error('[modules] 主进程未接受 elec.validation 状态；电气校验保持关闭');
+      }
+    } catch (error) {
+      elecCheckPanel.setEnabled(false);
+      console.error('[modules] elec.validation 状态同步失败；电气校验保持关闭', error);
+    }
+  };
+  const publishPlcSyncState = (states: ModuleStatus[]): void => {
+    const enabled = states.find((module) => module.id === 'factory.plc-sync')?.enabled === true;
+    try {
+      const accepted = window.desktop?.modules.syncFactoryPlcSyncEnabled(enabled);
+      if (window.desktop && !accepted) {
+        console.error('[modules] 主进程未接受智慧工厂 PLC 同步模块状态；PLC 同步将保持关闭');
+      }
+    } catch (error) {
+      console.error('[modules] 智慧工厂 PLC 同步模块状态同步失败；PLC 同步将保持关闭', error);
+    }
+  };
+  const publishParametricImportState = (states: ModuleStatus[]): void => {
+    parametricImportModuleEnabled = states.find((module) => module.id === 'cad.parametric-import')?.enabled === true;
+    const toggle = document.getElementById('cadParametricToggle');
+    const badge = document.getElementById('cadParametricStatus');
+    if (toggle) toggle.hidden = !parametricImportModuleEnabled;
+    if (badge && !parametricImportModuleEnabled) badge.hidden = true;
+    if (!parametricImportModuleEnabled) parametric?.close();
+    try {
+      const accepted = window.desktop?.modules.syncParametricImportEnabled(parametricImportModuleEnabled);
+      if (window.desktop && !accepted) {
+        parametricImportModuleEnabled = false;
+        if (toggle) toggle.hidden = true;
+        parametric?.close();
+        console.error('[modules] 主进程未接受参数化模块状态；参数化功能保持关闭');
+      }
+    } catch (error) {
+      parametricImportModuleEnabled = false;
+      if (toggle) toggle.hidden = true;
+      parametric?.close();
+      console.error('[modules] 参数化模块状态同步失败；参数化功能保持关闭', error);
+    }
+  };
+  const publishParametricHistoryState = (states: ModuleStatus[]): void => {
+    parametricHistoryModuleEnabled =
+      parametricImportModuleEnabled && states.find((module) => module.id === 'parametric.history')?.enabled === true;
+    parametric?.refreshHistoryState();
+  };
+  const publishAgentResumeState = (states: ModuleStatus[]): void => {
+    const enabled = states.find((module) => module.id === 'agent.resume')?.enabled === true;
+    try {
+      const accepted = window.desktop?.modules.syncAgentResumeEnabled(enabled);
+      if (!accepted) throw new Error('主进程未接受模块状态');
+      setAgentResumeModuleEnabled(enabled);
+    } catch (error) {
+      setAgentResumeModuleEnabled(false);
+      console.error('[modules] Agent 跨重启恢复状态同步失败；checkpoint 与恢复功能保持关闭', error);
+    }
+  };
+  const publishProjectPortableState = (states: ModuleStatus[]): void => {
+    projectPortableModuleEnabled = states.find((module) => module.id === 'project.portable')?.enabled === true;
+    try {
+      const accepted = window.desktop?.modules.syncProjectPortableEnabled(projectPortableModuleEnabled);
+      if (window.desktop && !accepted) {
+        projectPortableModuleEnabled = false;
+        console.error('[modules] 主进程未接受 project.portable 状态；工程档案操作保持关闭');
+      }
+    } catch (error) {
+      projectPortableModuleEnabled = false;
+      console.error('[modules] project.portable 状态同步失败；工程档案操作保持关闭', error);
+    }
+    root?.querySelectorAll<HTMLElement>('[data-project-archive-entry]').forEach((entry) => {
+      entry.hidden = !projectPortableModuleEnabled || !window.desktop?.projectArchive;
+    });
+    refreshProjectArchiveControls();
+    if (!projectPortableModuleEnabled) {
+      const preview = document.getElementById('cadProjectArchivePreview') as HTMLDialogElement | null;
+      if (preview?.open) preview.close();
+    }
+  };
+  publishPlcgenState(moduleManager.list());
+  publishElecValidationState(moduleManager.list());
+  publishCostEstimationState(moduleManager.list());
+  publishPlcSyncState(moduleManager.list());
+  publishParametricImportState(moduleManager.list());
+  publishParametricHistoryState(moduleManager.list());
+  publishAgentResumeState(moduleManager.list());
+  publishProjectPortableState(moduleManager.list());
+  publishSystemUpdateState(moduleManager.list());
+  moduleManager.subscribe((states: ModuleStatus[]) => {
+    const enabled = states.find((module) => module.id === 'plcgen')?.enabled === true;
+    commission?.setIoTestsEnabled(states.find((module) => module.id === 'commission.io-test')?.enabled === true);
+    publishPlcgenState(states);
+    publishElecValidationState(states);
+    publishCostEstimationState(states);
+    publishPlcSyncState(states);
+    publishParametricImportState(states);
+    publishParametricHistoryState(states);
+    publishAgentResumeState(states);
+    publishProjectPortableState(states);
+    publishSystemUpdateState(states);
+    if (enabled) {
+      void activatePlcGenUi(moduleManager).catch((error: unknown) => {
+        console.error('[modules] PLC 程序模块加载失败', error);
+      });
+    } else {
+      plcGenUi?.setEnabled(false);
+    }
+  });
+  initModuleSettingsUi({ manager: moduleManager });
+  Object.defineProperty(window, '__ModuleRegistry', {
+    value: Object.freeze({
+      list: () => moduleManager.list(),
+      getStatus: (id: string) => moduleManager.getStatus(id),
+      setEnabled: (id: string, enabled: boolean) => moduleManager.setEnabled(id, enabled)
+    }),
+    writable: false,
+    configurable: false,
+    enumerable: false
+  });
   initEnclosureUi();
   initSyncPanel({ buildPayload: buildSyncPayload });
   initAgentPanel();
   buildOverlay();
+  refreshProjectArchiveControls();
   initMechUi();
   injectStressTab();
   try {
@@ -1691,16 +2231,40 @@ function init(): void {
   Object.defineProperty(window, 'AutomationCadParametric', {
     value: Object.freeze({
       open: (): void => {
+        if (!parametricImportModuleEnabled) {
+          showNotice(PARAMETRIC_MODULE_DISABLED_MESSAGE, true);
+          return;
+        }
         if (!overlayOpen) openOverlay();
         kinematics?.close();
         ensureParametricUi().open();
       },
-      close: (): void => ensureParametricUi().close(),
+      close: (): void => parametric?.close(),
       state: () => ensureParametricUi().state(),
-      setSource: (sourceFile: string): void => ensureParametricUi().setSource(sourceFile),
-      setDoc: (doc: Parameters<ParametricUiHandle['setDoc']>[0]): void => ensureParametricUi().setDoc(doc),
+      historyState: () => parametric?.historyState() ?? {
+        enabled: parametricHistoryModuleEnabled,
+        undoCount: 0,
+        redoCount: 0
+      },
+      undo: (): boolean => parametricHistoryModuleEnabled && (parametric?.undo() ?? false),
+      redo: (): boolean => parametricHistoryModuleEnabled && (parametric?.redo() ?? false),
+      setSource: (sourceFile: string): void => {
+        if (!parametricImportModuleEnabled) throw new Error(PARAMETRIC_MODULE_DISABLED_MESSAGE);
+        const sameLoadedSource = sourceFile.trim() === currentFileName;
+        ensureParametricUi().setSource(
+          sourceFile,
+          sameLoadedSource ? currentProjectIdentity?.projectId : undefined,
+          sameLoadedSource ? currentProjectStorageKey : `session:${Date.now()}:${Math.random().toString(36).slice(2)}`
+        );
+      },
+      setDoc: (doc: Parameters<ParametricUiHandle['setDoc']>[0]): void => {
+        if (!parametricImportModuleEnabled) throw new Error(PARAMETRIC_MODULE_DISABLED_MESSAGE);
+        ensureParametricUi().setDoc(doc);
+      },
       getDoc: () => ensureParametricUi().getDoc(),
-      build: () => ensureParametricUi().build()
+      build: () => parametricImportModuleEnabled
+        ? ensureParametricUi().build()
+        : Promise.resolve(parametricModuleDisabledBuildResult())
     }),
     writable: false,
     configurable: false,
@@ -1751,7 +2315,16 @@ function init(): void {
   }).catch(() => {
     // active 指针缺失或损坏时保持内置样机，不影响启动。
   });
-  window.__AUTOMATION_CAD_EXTENSION_READY__ = true;
+  if (moduleManager.getStatus('plcgen').enabled) {
+    void activatePlcGenUi(moduleManager).then(() => {
+      window.__AUTOMATION_CAD_EXTENSION_READY__ = true;
+    }).catch((error: unknown) => {
+      console.error('[modules] PLC 程序模块加载失败，面板保持不可用', error);
+      window.__AUTOMATION_CAD_EXTENSION_READY__ = true;
+    });
+  } else {
+    window.__AUTOMATION_CAD_EXTENSION_READY__ = true;
+  }
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);

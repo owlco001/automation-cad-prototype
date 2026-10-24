@@ -53,6 +53,10 @@ manifest：
   "bom": [{ "no": 1, "name": "底板", "spec": "BASE-01", "qty": 1, "mat": "AL6061" }]
 }
 ```
+客户端 P2 PLC 扩展仍保持顶层 `schemaVersion: 1`，原 `files[]` 和 BOM/PDF/GLB/DXF 路径不变，额外附带可选 `plc: { schemaVersion: 1, target, generatedVersion, machineId, programFiles, mapping }`；扩展内每项均有 `path/size/sha256`，ZIP 文件位于 `plc/`。**当前只完成本地客户端构建与解析校验，未向外部服务上传验证**；服务端若对 manifest 字段严格校验，或要求 ZIP 只能含 `files[]` 声明的路径，需先更新服务端以接受 `plc` 子清单及其声明的条目，再启用生产上传。旧包不带 `plc` 时仍按原 v1 解析。
+
+PLC 文件仅限 8 个 ST、`io-tags.csv`、`mapping.json` 和机型 `machine-io-map.csv`，每项不超过 1 MiB、PLC 部分总量不超过 8 MiB；客户端会校验目标、生成器版本、路径、长度、SHA-256、密钥/凭据特征和（若提供）当前机型 IO mapping。下载候选不会自动覆盖本地工程，缺少机型上下文时仅返回待后续显式应用的数据。当前 `MachineConfig` 不持久化 PLC safety 扩展；急停/安全门预检未满足时会中止整个包生成，不猜测绑定。
+
 返回 `201 {"packageId","version","uploadedAt","duplicated":false}`；指纹重复返回 `200 {..., "duplicated": true}`。
 
 ### 2) 列表与版本

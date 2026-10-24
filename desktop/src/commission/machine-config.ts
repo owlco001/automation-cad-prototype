@@ -1,3 +1,5 @@
+import { normalizePointKey } from '../plcgen/io.ts';
+
 // 边界说明：STEP 导入结果只包含几何/装配信息，不包含执行机构定义与运动学。
 // 本文件描述的是联调原型的“点位 → 执行机构/工位”配置映射，不代表可从任意 STEP
 // 自动推导机构类型、行程或轴关系。后续若接入机器人/伺服模型，需要额外的运动学数据源。
@@ -95,8 +97,8 @@ export function validateMachineConfig(value: unknown): MachineConfig {
   const pointSet = new Set<string>();
   const claimPoint = (point: string | undefined, source: string): void => {
     if (point === undefined) return;
-    const key = point.toUpperCase();
-    if (pointSet.has(key)) throw new Error(`机型配置点位 ${point} 重复（${source}）`);
+    const key = normalizePointKey(point);
+    if (pointSet.has(key)) throw new Error(`机型配置点位 ${point} 重复或与已有点位地址别名冲突（${source}）`);
     pointSet.add(key);
   };
 

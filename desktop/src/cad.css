@@ -27,6 +27,7 @@
   display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 10px;border:1px solid #414850;border-radius:3px;
   background:#262a2e;color:#cbd2d8;font:inherit;font-size:12px;cursor:pointer;
 }
+.cad-btn[hidden]{display:none !important}
 .cad-btn:hover{background:#2d3237;border-color:#566069;color:#fff}
 .cad-btn.is-active{border-color:#1f9c8d;color:#b9f2e9;background:#243a37}
 .cad-btn-primary{border-color:#1b8f82;background:#1d5c54;color:#eafffb}
@@ -151,6 +152,13 @@
 .cad-export-menu button:hover{background:#2b3035;color:#fff}
 .cad-export-menu em{font:9px/1 var(--font-mono,monospace);color:#6f7b84;font-style:normal}
 .cad-export-sep{display:block;height:1px;margin:4px 3px;background:#343a40}
+.cad-project-archive-dialog{width:min(680px,calc(100vw - 36px));max-height:min(78vh,720px);padding:18px 20px;border:1px solid #49535c;border-radius:8px;background:#202428;color:#dce3e8;box-shadow:0 24px 80px rgba(0,0,0,.62)}
+.cad-project-archive-dialog::backdrop{background:rgba(0,0,0,.68)}
+.cad-project-archive-dialog-head{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;border-bottom:1px solid #353d44;padding-bottom:12px}
+.cad-project-archive-dialog h2{margin:0 0 5px;font-size:16px;font-weight:600;color:#f0f4f6}
+.cad-project-archive-dialog p{margin:0;color:#9ca8b0;font-size:11px;line-height:1.55}
+.cad-project-archive-close{width:30px;height:30px;border:1px solid #414a51;border-radius:4px;background:#292e33;color:#c8d0d6;font-size:20px;cursor:pointer}
+.cad-project-archive-dialog pre{margin:14px 0 0;max-height:55vh;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;color:#cbd4da;font:11px/1.7 var(--font-mono,monospace)}
 .cad-side-tabs{height:34px;flex:0 0 34px;display:flex;align-items:stretch;border-bottom:1px solid #33383d;background:#1a1d20}
 .cad-side-tab{
   min-width:72px;padding:0 14px;border:0;border-right:1px solid #2e3439;background:transparent;
@@ -301,6 +309,7 @@
 .cad-param-dot{width:7px;height:7px;flex:0 0 auto;border-radius:50%;background:#6b747c}
 .cad-param-dot[data-state="ready"]{background:#2dd4bf;box-shadow:0 0 5px rgba(45,212,191,.65)}
 .cad-param-dot[data-state="starting"]{background:#60a5fa}
+.cad-param-reference-note{flex:0 0 auto;padding:7px 11px;border-bottom:1px solid #3d3528;background:#29251d;color:#d9bd83;font-size:9px;line-height:1.55}
 .cad-param-dot[data-state="unavailable"],.cad-param-dot[data-state="crashed"]{background:#f87171}
 .cad-param-body{flex:1;min-height:0;overflow:auto;padding:9px 10px 12px}
 .cad-param-section{margin-bottom:11px}

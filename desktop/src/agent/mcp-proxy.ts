@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import type { AgentToolSummary } from './tools.ts';
 
 export interface DesktopRpcProxyOptions {
   userDataDir?: string;
@@ -112,7 +113,7 @@ export class DesktopRpcProxy {
     return token;
   }
 
-  async callTool(name: string, args: Record<string, unknown> = {}): Promise<DesktopToolResult> {
+  private async requestPayload(method: string, params: Record<string, unknown>): Promise<unknown> {
     const token = this.readToken();
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -123,7 +124,7 @@ export class DesktopRpcProxy {
           reject(new DesktopRpcUnavailableError('连接 AutomationCAD 桌面应用超时'));
         }, this.timeoutMs);
       });
-      const operation = (async (): Promise<DesktopToolResult> => {
+      const operation = (async (): Promise<unknown> => {
         const response = await this.fetchImpl(`http://${this.host}:${this.port}/rpc`, {
           method: 'POST',
           headers: {
@@ -133,8 +134,8 @@ export class DesktopRpcProxy {
           body: JSON.stringify({
             jsonrpc: '2.0',
             id: randomUUID(),
-            method: 'tools/call',
-            params: { name, arguments: args }
+            method,
+            params
           }),
           signal: controller.signal
         });
@@ -152,7 +153,16 @@ export class DesktopRpcProxy {
         } catch {
           throw new DesktopRpcError('DESKTOP_RPC_ERROR', '桌面 RPC 返回的不是合法 JSON');
         }
-        return resultFromPayload(payload);
+        if (isRecord(payload) && isRecord(payload.error)) {
+          throw new DesktopRpcError(
+            String(payload.error.code ?? 'DESKTOP_RPC_ERROR'),
+            typeof payload.error.message === 'string' ? payload.error.message : '桌面 RPC 调用失败'
+          );
+        }
+        if (!isRecord(payload) || !isRecord(payload.result)) {
+          throw new DesktopRpcError('DESKTOP_RPC_ERROR', '桌面 RPC 返回格式不合法');
+        }
+        return payload;
       })();
       return await Promise.race([operation, timeout]);
     } catch (error) {
@@ -165,5 +175,22 @@ export class DesktopRpcProxy {
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
+  }
+
+  async listTools(): Promise<AgentToolSummary[]> {
+    const payload = await this.requestPayload('tools/list', {});
+    if (!isRecord(payload) || !isRecord(payload.result) || !Array.isArray(payload.result.tools)) {
+      throw new DesktopRpcError('DESKTOP_RPC_ERROR', '桌面 RPC 工具清单格式不合法');
+    }
+    return payload.result.tools.flatMap((entry): AgentToolSummary[] => {
+      if (!isRecord(entry) || typeof entry.name !== 'string' || typeof entry.description !== 'string' || !isRecord(entry.inputSchema)) {
+        return [];
+      }
+      return [{ name: entry.name, description: entry.description, inputSchema: entry.inputSchema }];
+    });
+  }
+
+  async callTool(name: string, args: Record<string, unknown> = {}): Promise<DesktopToolResult> {
+    return resultFromPayload(await this.requestPayload('tools/call', { name, arguments: args }));
   }
 }

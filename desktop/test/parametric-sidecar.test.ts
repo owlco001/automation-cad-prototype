@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import {
   ParametricManager,
@@ -189,6 +191,26 @@ test('sidecar：未启动时 build 返回 UNAVAILABLE', async () => {
   assert.equal(result.ok, false);
   assert.equal(result.code, 'UNAVAILABLE');
   assert.match(result.message ?? '', /不可用/);
+});
+
+test('sidecar：参数化模块关闭时直接 start/build 均拒绝，sidecar 不运行且无文件落盘', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'cad-parametric-module-gate-'));
+  const marker = join(root, 'sidecar-was-started.txt');
+  const command = `${process.execPath} -e "require('node:fs').writeFileSync('${marker}', 'started')"`;
+  const instance = manager({ command, isEnabled: () => false });
+
+  const started = await instance.start();
+  const built = await instance.build(validDoc());
+
+  assert.equal(started.ok, false);
+  assert.equal(started.code, 'MODULE_DISABLED');
+  assert.equal(built.ok, false);
+  assert.equal(built.code, 'MODULE_DISABLED');
+  assert.equal(instance.status().status, 'stopped');
+  assert.equal(childPid(instance), null);
+  assert.equal(existsSync(marker), false, '关闭时不启动副进程，也不产生其副作用文件');
+  await instance.stop();
+  rmSync(root, { recursive: true, force: true });
 });
 
 test('sidecar：显式 Python 路径不存在时 start 返回 unavailable', async () => {

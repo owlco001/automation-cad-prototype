@@ -3,12 +3,14 @@ import { test } from 'node:test';
 import { demoMachineConfig } from '../../src/commission/machine-config.ts';
 import {
   applySlide,
+  annotationFromParts,
   createKinematicsStore,
   deserializeAnnotation,
   draftFromMesh,
   draftFromMeshes,
   KINEMATICS_STORAGE_KEY,
   pointOptionsFromMachineConfig,
+  remapKinematicsAnnotation,
   roleForPoint,
   serializeAnnotation,
   validateDraft
@@ -155,12 +157,12 @@ test('运动学 UI：非法 JSON 与错误 version 给出中文错误', () => {
   assert.equal(broken.ok, false);
   assert.match(broken.issues[0]?.message ?? '', /不是合法 JSON/);
 
-  const wrong = deserializeAnnotation(JSON.stringify({ version: 2, sourceFile: 'a.stp', parts: [] }));
+  const wrong = deserializeAnnotation(JSON.stringify({ version: 3, sourceFile: 'a.stp', parts: [] }));
   assert.equal(wrong.ok, false);
   assert.ok(wrong.issues.some((issue) => issue.code === 'json.version'));
 });
 
-test('运动学 UI：store 按文件名分桶且互不覆盖', () => {
+test('运动学 UI：store 按传入项目键分桶且互不覆盖', () => {
   const memory = new Map();
   const storage = {
     getItem: (key) => (memory.has(key) ? memory.get(key) : null),
@@ -192,4 +194,63 @@ test('运动学 UI：store 遇到损坏数据时按空桶处理', () => {
   const store = createKinematicsStore(storage);
   assert.equal(store.get('cube.stp'), null);
   assert.deepEqual(store.files(), []);
+});
+
+test('运动学 v2：stable object IDs round-trip 并在导入顺序改变后重映射', () => {
+  const projectId = 'acproj-00000000-0000-4000-8000-000000000001';
+  const objectA = `cadobj-${'a'.repeat(64)}`;
+  const objectB = `cadobj-${'b'.repeat(64)}`;
+  const sourceMeshes = [
+    { ...MESH_A, stableObjectId: objectA },
+    { ...MESH_B, id: 1, stableObjectId: objectB }
+  ];
+  const part = draftFromMeshes(sourceMeshes, { name: '装配动件' });
+  part.point = 'Y0';
+  part.role = 'extend';
+  part.travelMm = 30;
+  const annotation = annotationFromParts('fixture.step', [part], projectId);
+  assert.equal(annotation.version, 2);
+  const parsed = deserializeAnnotation(serializeAnnotation(annotation));
+  assert.equal(parsed.ok, true, JSON.stringify(parsed.issues));
+  const reordered = [
+    { ...MESH_B, id: 0, stableObjectId: objectB },
+    { ...MESH_A, id: 1, stableObjectId: objectA }
+  ];
+  const mapped = remapKinematicsAnnotation(parsed.annotation, projectId, reordered);
+  assert.equal(mapped.ok, true, mapped.reason);
+  assert.deepEqual(mapped.annotation.parts[0].meshIds, [1, 0]);
+  assert.deepEqual(mapped.annotation.parts[0].meshObjectIds, [objectA, objectB]);
+});
+
+test('运动学 v2：工程 ID 不匹配、缺失或歧义对象均失败关闭', () => {
+  const projectId = 'acproj-00000000-0000-4000-8000-000000000001';
+  const objectA = `cadobj-${'a'.repeat(64)}`;
+  const part = draftFromMesh({ ...MESH_A, stableObjectId: objectA });
+  part.point = 'Y0';
+  part.role = 'extend';
+  part.travelMm = 30;
+  const annotation = annotationFromParts('fixture.step', [part], projectId);
+  assert.equal(remapKinematicsAnnotation(annotation, 'acproj-00000000-0000-4000-8000-000000000002', [MESH_A]).ok, false);
+  assert.equal(remapKinematicsAnnotation(annotation, projectId, [MESH_A]).ok, false);
+  assert.equal(remapKinematicsAnnotation(annotation, projectId, [
+    { ...MESH_A, stableObjectId: objectA },
+    { ...MESH_B, id: 1, stableObjectId: objectA }
+  ]).ok, false);
+  assert.equal(remapKinematicsAnnotation({ version: 1, sourceFile: 'fixture.step', parts: [part] }, projectId, [MESH_A]).ok, false);
+});
+
+test('运动学 store：同名 CAD 的不同 project ID 不共享标注', () => {
+  const memory = new Map();
+  const storage = {
+    getItem: (key) => (memory.has(key) ? memory.get(key) : null),
+    setItem: (key, value) => memory.set(key, value),
+    removeItem: (key) => memory.delete(key)
+  };
+  const store = createKinematicsStore(storage);
+  const projectA = 'acproj-00000000-0000-4000-8000-000000000001';
+  const projectB = 'acproj-00000000-0000-4000-8000-000000000002';
+  store.set(projectA, { version: 1, sourceFile: 'fixture.step', parts: [linearPart()] });
+  store.set(projectB, { version: 1, sourceFile: 'fixture.step', parts: [] });
+  assert.equal(store.get(projectA).parts.length, 1);
+  assert.equal(store.get(projectB).parts.length, 0);
 });

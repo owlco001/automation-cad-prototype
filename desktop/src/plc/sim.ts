@@ -1,5 +1,6 @@
 import type { PlcAdapter, PlcConfig, PlcPoint, PlcStatus, PlcValue, SimRule } from './types.ts';
 import { trackedClearInterval, trackedSetInterval } from '../shared/resources.ts';
+import { validatePlcValue } from './value.ts';
 
 type ValueMap = Record<string, PlcValue>;
 type Predicate = (values: ValueMap) => boolean;
@@ -11,23 +12,6 @@ interface CompiledRule {
 
 interface TimerState {
   since: number | null;
-}
-
-function readValue(point: PlcPoint, value: unknown): PlcValue {
-  if (point.dataType === 'bool') {
-    if (typeof value !== 'boolean') throw new Error(`点位「${point.id}」需要布尔值`);
-    return value;
-  }
-  if (typeof value !== 'number' || !Number.isInteger(value)) {
-    throw new Error(`点位「${point.id}」需要整数`);
-  }
-  if (point.dataType === 'int16' && (value < -32768 || value > 32767)) {
-    throw new Error(`点位「${point.id}」超出 int16 范围（-32768 ~ 32767）`);
-  }
-  if (point.dataType === 'uint16' && (value < 0 || value > 65535)) {
-    throw new Error(`点位「${point.id}」超出 uint16 范围（0 ~ 65535）`);
-  }
-  return value;
 }
 
 function tokenize(expr: string): string[] {
@@ -161,7 +145,7 @@ export class SimPlcAdapter implements PlcAdapter {
         for (const [id, value] of Object.entries(config.initialValues)) {
           const point = this.points.get(id);
           if (!point) throw new Error(`初始值引用了不存在的点位：${id}`);
-          this.initialValues[id] = readValue(point, value);
+          this.initialValues[id] = validatePlcValue(point, value);
         }
       }
       this.values = { ...this.values, ...this.initialValues };
@@ -194,7 +178,7 @@ export class SimPlcAdapter implements PlcAdapter {
   async write(id: string, value: PlcValue): Promise<void> {
     this.assertConnected();
     const point = this.point(id);
-    const normalized = readValue(point, value);
+    const normalized = validatePlcValue(point, value);
     this.forced.delete(id);
     this.setValue(id, normalized);
     this.evaluateRules();
@@ -204,7 +188,7 @@ export class SimPlcAdapter implements PlcAdapter {
   async force(id: string, value: PlcValue): Promise<void> {
     this.assertConnected();
     const point = this.point(id);
-    const normalized = readValue(point, value);
+    const normalized = validatePlcValue(point, value);
     this.forced.add(id);
     this.setValue(id, normalized);
     this.evaluateRules();
