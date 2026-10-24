@@ -272,6 +272,14 @@ export const WRITE_TOOLS = new Set([
   'export_cost_report'
 ]);
 
+/**
+ * 写授权默认失败关闭：只有明确列入只读白名单的工具可免确认。
+ * 新增工具若漏加分类，仍会先要求确认，而不是静默执行。
+ */
+export function requiresWriteConfirmation(toolName: string): boolean {
+  return !READ_ONLY_TOOLS.has(toolName);
+}
+
 /** 类别同义词 → 数据包里的真实 category。 */
 const CATEGORY_SYNONYMS: Record<string, string> = {
   断路器: '断路器',

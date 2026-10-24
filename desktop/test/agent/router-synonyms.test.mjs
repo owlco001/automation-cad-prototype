@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { extractQuery, isOffDomainTopic, planReadOnly, planTool, routeIntent } from '../../src/agent/router.ts';
+import { extractQuery, isOffDomainTopic, planReadOnly, planTool, routeIntent, READ_ONLY_TOOLS, WRITE_TOOLS, requiresWriteConfirmation } from '../../src/agent/router.ts';
 import { scanUntrusted } from '../../src/agent/guard.ts';
 
 function check(input, intent, tool, args = {}) {
@@ -13,6 +13,12 @@ function check(input, intent, tool, args = {}) {
   }
   return plan;
 }
+
+test('写授权分类：仅只读白名单免确认，写工具和未分类工具均需确认', () => {
+  for (const tool of READ_ONLY_TOOLS) assert.equal(requiresWriteConfirmation(tool), false, tool);
+  for (const tool of WRITE_TOOLS) assert.equal(requiresWriteConfirmation(tool), true, tool);
+  assert.equal(requiresWriteConfirmation('future_tool'), true);
+});
 
 test('同义词：查询类口语（有啥/看下/检索/有没有/调出/物料明细）', () => {
   check('接触器都有啥', 'query', 'list_components', { category: '接触器' });

@@ -22,6 +22,7 @@ preload.ts → contextBridge 暴露 window.desktop（只转 IPC，无业务逻�
 | `userDir` | `%APPDATA%/AutomationCAD/packs` |
 | `stateFile` | `%APPDATA%/AutomationCAD/packs-state.json` |
 | `version` | `app.getVersion()`，供 `/health` 与「关于」使用 |
+| `trustedUiPath` / `getWindow` | 应用入口 HTML 与当前主窗口；IPC 调用校验页面路径及主 frame 来源 |
 | `getAgentInfo` | 返回 `{url,port,toolCount}` 或 `{error}`，不抛异常 |
 
 `preload.ts` 暴露的命名空间：`desktop.version / openCadDialog / readFileBuffer / packs.* / agent.info / factory.* / plc.* / sync.* / onOpenCad / onImportPack / onSetDomain`。
@@ -42,7 +43,8 @@ preload.ts → contextBridge 暴露 window.desktop（只转 IPC，无业务逻�
 3. **注入扩展脚本用 `executeJavaScript` 追加 `<script>`，不要用 preload 里的 import**：扩展是 IIFE bundle，需要页面 `file://` 源，preload 的模块作用域注入拿不到 DOM。
 4. **打包后 `__dirname` 是 `app.asar/dist-electron`**，`desktopRoot()` 不能用于 resources 路径；凡是打包资源一律走 `process.resourcesPath`。
 5. **Linux root 运行必须加 `--no-sandbox`**（main.ts 已按 uid 自动加），否则 Electron 起不来。
-6. **`will-navigate` 必须拦非 file: 跳转**，否则外部链接会把应用窗口导航走，且丢失 preload 上下文。
+6. **主窗口只能停留在应用入口 HTML**：导航/重定向到其他页面都会拦截，弹出窗口一律拒绝。
+7. **IPC 入口统一验证来源**：所有 invoke 通道只接受当前主窗口主 frame，且该 frame 必须仍是应用入口 HTML；无窗口、已销毁窗口或其他来源均失败关闭。
 
 ## 进度
 

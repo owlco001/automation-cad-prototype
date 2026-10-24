@@ -6,7 +6,8 @@ import {
   type Tool
 } from '@modelcontextprotocol/sdk/types.js';
 import type { AgentTools } from './tools.ts';
-import { AGENT_TOOL_MODULES } from '../modules/tool-gates.ts';
+import { authorizeAgentToolCall, type ConfirmAgentToolWrite } from './policy.ts';
+import { WRITE_TOOLS } from './router.ts';
 import {
   DesktopRpcError,
   DesktopRpcUnavailableError,
@@ -20,26 +21,17 @@ export interface McpServerInfo {
 
 export interface McpServerOptions {
   proxy?: DesktopRpcProxy;
+  confirmWrite?: ConfirmAgentToolWrite;
 }
 
 const LOCAL_READ_TOOLS = new Set(['list_components', 'search_components', 'search_docs']);
 const DESKTOP_REQUIRED_TOOLS = new Set([
-  'import_cad',
-  'insert_component',
-  'place_component',
-  'update_component',
-  'remove_component',
-  'verify_plc_program',
-  'run_plc_generate',
-  'run_electrical_check',
-  'export_files',
-  'undo_last',
+  ...WRITE_TOOLS,
   'get_bom',
   'get_project_context',
   'run_interference_check',
   'suggest_kinematics',
-  'run_cost_report',
-  'export_cost_report'
+  'run_cost_report'
 ]);
 
 const DESKTOP_NOT_RUNNING = {
@@ -129,6 +121,8 @@ export function buildMcpServer(
       if (!LOCAL_READ_TOOLS.has(name) && DESKTOP_REQUIRED_TOOLS.has(name) && !options.proxy) {
         return toolResult(DESKTOP_NOT_RUNNING, true);
       }
+      const authorization = await authorizeAgentToolCall(name, argsObject, options.confirmWrite);
+      if (!authorization.ok) return toolResult(authorization, true);
       const result = await tools.call(name, argsObject);
       return toolResult(result);
     } catch (error) {

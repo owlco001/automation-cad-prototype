@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, test } from 'node:test';
@@ -63,6 +63,19 @@ test('agent-llm.json 写入权限为 600 且只保存四个配置字段', { skip
   assert.equal(statSync(file).mode & 0o777, 0o600);
   const raw = JSON.parse(readFileSync(file, 'utf8'));
   assert.deepEqual(Object.keys(raw).sort(), ['apiKey', 'baseUrl', 'maxIterations', 'model']);
+});
+
+test('旧的远程 HTTP 模型配置仍可读取以便修正，但新写入会被拒绝', () => {
+  const legacy = {
+    baseUrl: 'http://llm.example.com/v1',
+    apiKey: 'legacy-secret',
+    model: 'gpt-test',
+    maxIterations: 6
+  };
+  writeFileSync(join(sandbox, 'agent-llm.json'), JSON.stringify(legacy));
+  assert.deepEqual(readLlmConfig(sandbox), legacy);
+  assert.throws(() => writeLlmConfig(sandbox, legacy), /明文传输 API Key/);
+  assert.doesNotThrow(() => writeLlmConfig(sandbox, { ...legacy, baseUrl: 'http://127.0.0.1:8000/v1' }));
 });
 
 test('空或掩码 apiKey 保存时保留原密钥，新密钥才覆盖', () => {

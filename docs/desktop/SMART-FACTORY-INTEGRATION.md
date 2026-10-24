@@ -26,7 +26,7 @@
 ### 鉴权
 - 新增 `X-Design-Key: <key>`，key 在管理台「设备接入」页生成，**只存哈希**（bcrypt/argon2），可吊销、可限定 `deviceId` 范围
 - 与用户 Bearer 分离：设计同步是机器身份，不做用户会话
-- 传输要求 HTTPS（生产已有 cloudflared/反代）
+- 泛内网段（私有 IP / 回环）允许 HTTP；公网服务要求 HTTPS（生产已有 cloudflared/反代）
 
 ### 1) 上传设计包
 ```

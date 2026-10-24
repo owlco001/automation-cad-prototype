@@ -95,8 +95,7 @@ try {
     ELECTRON_DISABLE_SANDBOX: '1',
     AUTOMATIONCAD_SCREENSHOT_DIR: outputDir,
     AUTOMATIONCAD_EVAL_DIR: evalDir,
-    AUTOMATIONCAD_STUB_BASE_URL: baseUrl,
-    AUTOMATIONCAD_AUTOCONFIRM: '1'
+    AUTOMATIONCAD_STUB_BASE_URL: baseUrl
   };
   const electronArgs = ['.', '--headless-machine-screenshots'];
   const xvfbArgs = ['-a', '-s', '-screen 0 1920x1200x24', electronBin, ...electronArgs];

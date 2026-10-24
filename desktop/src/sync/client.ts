@@ -1,4 +1,6 @@
-import { MAX_DESIGN_PACKAGE_BYTES, sha256Hex } from './package.ts';
+import { sha256Hex } from './package.ts';
+import { normalizeBaseUrl } from './config.ts';
+import { assertSafeApiKeyUrl } from '../shared/api-key-transport.ts';
 import type {
   DesignDiff,
   DesignManifest,
@@ -35,6 +37,7 @@ function readableError(error: unknown): string {
 
 function requireConfig(config: SyncConfig): void {
   if (!config.baseUrl.trim()) throw new Error('请先填写智慧工厂 baseUrl');
+  assertSafeApiKeyUrl(new URL(normalizeBaseUrl(config.baseUrl)));
   if (!config.deviceId.trim()) throw new Error('请先填写机台编号 device_no');
   if (!config.apiKey.trim()) throw new Error('请先填写 apiKey');
 }
@@ -134,6 +137,7 @@ export class SyncClient {
   }
 
   private async request(url: string, init: RequestInit, label: string): Promise<Response> {
+    assertSafeApiKeyUrl(new URL(url));
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     timer.unref?.();

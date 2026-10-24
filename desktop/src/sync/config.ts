@@ -1,6 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { SyncConfig, SyncPublicConfig } from './types.ts';
+import { assertSafeApiKeyUrl } from '../shared/api-key-transport.ts';
 
 /** deviceId 为智慧工厂侧机台编号（device_no）。 */
 export const SYNC_CONFIG_DEFAULTS: SyncConfig = {
@@ -91,6 +92,7 @@ export function readSyncConfig(file: string): SyncConfig {
 
 export function writeSyncConfig(file: string, config: SyncConfig): void {
   const normalized = parseSyncConfig(config);
+  if (normalized.baseUrl) assertSafeApiKeyUrl(new URL(normalized.baseUrl));
   mkdirSync(dirname(file), { recursive: true });
   const temporary = `${file}.${process.pid}.tmp`;
   try {

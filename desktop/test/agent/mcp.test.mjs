@@ -8,6 +8,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { PackRegistry } from '../../src/packs/registry.ts';
 import { AgentTools } from '../../src/agent/tools.ts';
 import { buildMcpServer } from '../../src/agent/mcp.ts';
+import { DesktopRpcUnavailableError } from '../../src/agent/mcp-proxy.ts';
 
 let sandbox;
 let client;
@@ -86,4 +87,49 @@ test('MCP 未知工具返回 isError', async () => {
   const result = await client.callTool({ name: 'not_a_tool', arguments: {} });
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /未知工具/);
+});
+
+test('MCP 代理断开后，已知写工具走桌面路由、未分类写工具在本地回退失败关闭', async () => {
+  let executions = 0;
+  const summaries = ['apply_machine_design', 'future_write'].map((name) => ({
+    name,
+    description: 'test write tool',
+    inputSchema: { type: 'object', properties: {} }
+  }));
+  const tools = {
+    summaries: () => summaries,
+    has: (name) => summaries.some((tool) => tool.name === name),
+    async call() {
+      executions += 1;
+      return { ok: true };
+    }
+  };
+  const unavailableProxy = {
+    async callTool() {
+      throw new DesktopRpcUnavailableError();
+    }
+  };
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const fallbackServer = buildMcpServer(
+    tools,
+    { name: 'mcp-fallback-auth-test', version: '0.1.0-test' },
+    { proxy: unavailableProxy }
+  );
+  const fallbackClient = new Client({ name: 'mcp-fallback-auth-client', version: '1.0.0' });
+  await fallbackServer.connect(serverTransport);
+  await fallbackClient.connect(clientTransport);
+  try {
+    for (const name of ['apply_machine_design', 'future_write']) {
+      const result = await fallbackClient.callTool({ name, arguments: {} });
+      assert.equal(result.isError, true, name);
+      const expectedCode = name === 'apply_machine_design'
+        ? 'DESKTOP_NOT_RUNNING'
+        : 'WRITE_CONFIRMATION_REQUIRED';
+      assert.equal(result.structuredContent.code, expectedCode, name);
+    }
+    assert.equal(executions, 0);
+  } finally {
+    await fallbackClient.close();
+    await fallbackServer.close();
+  }
 });

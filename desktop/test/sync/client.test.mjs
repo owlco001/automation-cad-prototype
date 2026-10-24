@@ -76,6 +76,20 @@ test('testConnection 使用 Bearer 并验证设备图纸接口', async () => {
   }
 });
 
+test('同步客户端拒绝将 API Key 发往远程 HTTP，且不会调用 fetch', async () => {
+  let fetchCalls = 0;
+  const client = new SyncClient(config({ baseUrl: 'http://factory.example.com' }), {
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      throw new Error('不应发起请求');
+    }
+  });
+  const result = await client.testConnection();
+  assert.equal(result.ok, false);
+  assert.match(result.message, /明文传输 API Key/);
+  assert.equal(fetchCalls, 0);
+});
+
 test('testConnection 对 401 与 404 返回可操作中文提示', async () => {
   let calls = 0;
   const server = await startServer((_request, response) => {

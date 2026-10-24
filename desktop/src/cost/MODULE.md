@@ -59,7 +59,7 @@ PlanExportNameOptions { directory, format, fileName?, suggestedName?, overwrite?
 - 命名：默认 `成本报告-<项目名或 device_no>-<yyyyMMdd-HHmm>.<ext>`；去掉 `/\:*?"<>|`、控制字符与首尾空白/点，最终 ≤80 字符；扩展名按 format 强制；`overwrite=false` 冲突时追加 ` (1)`、` (2)`…。
 - 渲染：PDF 复用 `renderCostReportHtml`（A4 纵向）+ 主进程 `printToPDF`；CSV 复用 `costReportCsv`（UTF-8 BOM）。两者与 `run_cost_report` 共用 `computeCostReport`，数字同源。
 - 返回：`{ok:true,path,bytes,format,lines,grand}`；失败 `DENIED` / `WRITE_FAILED` / `UNSUPPORTED_FORMAT`（缺 BOM/价格簿沿用可操作错误码）。
-- 确认：`session.ts` 的 `MUTATING_TOOLS` 包含该工具，应用内对话执行前二次确认；MCP 写工具白名单同步。
+- 确认：`router.ts` 的 `WRITE_TOOLS` 包含该工具；对话、MCP 与 JSON-RPC 共用 `requiresWriteConfirmation`，只读白名单以外默认要求桌面确认；缺少确认回调或用户拒绝时不执行。
 
 ## 门控与恢复
 

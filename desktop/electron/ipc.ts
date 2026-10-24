@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell, type OpenDialogOptions, type WebContents } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent, type OpenDialogOptions } from 'electron';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join, resolve, sep } from 'node:path';
@@ -79,6 +79,7 @@ import {
   parsePlcHistory,
   type PlcHistoryEntry
 } from '../src/plcgen/history.ts';
+import { isTrustedIpcSender } from './security.ts';
 
 export interface IpcContext {
   builtinDir: string;
@@ -88,6 +89,8 @@ export interface IpcContext {
   plcConfigFile: string;
   syncConfigFile: string;
   version: string;
+  trustedUiPath: string;
+  getWindow(): BrowserWindow | null;
   getAgentInfo(): unknown;
   isMainWindowSender(sender: WebContents): boolean;
   getParametric(): ParametricManager | null;
@@ -112,7 +115,7 @@ export interface AgentChatIpcContext {
   getTools(): AgentTools | null;
   getBus(): CommandBus | null;
   getWindow(): BrowserWindow | null;
-  isAgentResumeEnabled(): boolean;
+  trustedUiPath: string;
 }
 
 export { CAD_EXTENSIONS } from '../src/shared/cad';
@@ -424,7 +427,6 @@ function plcExportFailure(error: unknown): { ok: false; code: string; message: s
     message: error instanceof Error ? error.message : String(error)
   };
 }
-
 let ipcRuntime: { factory: FactoryManager; plc: PlcManager } | null = null;
 
 /** 退出前由主进程调用；断开工厂/PLC 网络与定时器。 */
@@ -435,11 +437,29 @@ export async function disposeIpcRuntime(): Promise<void> {
   await Promise.allSettled([runtime.factory.dispose(), runtime.plc.dispose()]);
 }
 
+type IpcHandler = (event: IpcMainInvokeEvent, ...args: any[]) => any;
+
+function createTrustedIpcHandler(
+  getWindow: () => BrowserWindow | null,
+  trustedUiPath: string
+): (channel: string, handler: IpcHandler) => void {
+  return (channel, handler) => {
+    ipcMain.handle(channel, (event, ...args) => {
+      const window = getWindow();
+      if (!window || window.isDestroyed() || !isTrustedIpcSender(event, window.webContents.id, trustedUiPath)) {
+        throw new Error(`拒绝来自非受信桌面页面的 IPC 请求：${channel}`);
+      }
+      return handler(event, ...args);
+    });
+  };
+}
+
 export function registerIpcHandlers(context: IpcContext): PackRegistry {
   const registry = createPackRegistry(context);
   const factory = new FactoryManager({ configFile: context.factoryConfigFile });
   const plc = new PlcManager({ configFile: context.plcConfigFile });
   ipcRuntime = { factory, plc };
+  const handle = createTrustedIpcHandler(() => context.getWindow(), context.trustedUiPath);
   const broadcast = (channel: string, payload: unknown): void => {
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed()) window.webContents.send(channel, payload);
@@ -450,7 +470,7 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
   plc.on('status', (status: unknown) => broadcast('plc:status', status));
   plc.on('values', (values: unknown) => broadcast('plc:values', values));
 
-  ipcMain.handle('app:version', () => ({
+  handle('app:version', () => ({
     app: context.version,
     electron: process.versions.electron,
     chrome: process.versions.chrome,
@@ -458,100 +478,7 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
     platform: process.platform
   }));
 
-  ipcMain.on('modules:sync-plcgen-enabled', (event, enabled: unknown) => {
-    const trustedWindow = BrowserWindow.getAllWindows().some((window) =>
-      !window.isDestroyed() && window.webContents === event.sender
-    );
-    if (!trustedWindow || typeof enabled !== 'boolean') {
-      event.returnValue = false;
-      return;
-    }
-    context.setPlcgenEnabled(enabled);
-    event.returnValue = true;
-  });
-
-  ipcMain.on('modules:sync-elec-validation-enabled', (event, enabled: unknown) => {
-    const frame = event.senderFrame;
-    const trustedMainFrame = Boolean(frame && frame === event.sender.mainFrame && frame.url.startsWith('file://'));
-    if (!context.isMainWindowSender(event.sender) || !trustedMainFrame || typeof enabled !== 'boolean') {
-      event.returnValue = false;
-      return;
-    }
-    context.setElecValidationEnabled(enabled);
-    event.returnValue = true;
-  });
-
-  ipcMain.on('modules:sync-cost-estimation-enabled', (event, enabled: unknown) => {
-    const frame = event.senderFrame;
-    const trustedMainFrame = Boolean(frame && frame === event.sender.mainFrame && frame.url.startsWith('file://'));
-    if (!context.isMainWindowSender(event.sender) || !trustedMainFrame || typeof enabled !== 'boolean') {
-      event.returnValue = false;
-      return;
-    }
-    context.setCostEstimationEnabled(enabled);
-    event.returnValue = true;
-  });
-
-  ipcMain.on('modules:sync-factory-plc-sync-enabled', (event, enabled: unknown) => {
-    const trustedWindow = BrowserWindow.getAllWindows().some((window) =>
-      !window.isDestroyed() && window.webContents === event.sender
-    );
-    if (!trustedWindow || typeof enabled !== 'boolean') {
-      event.returnValue = false;
-      return;
-    }
-    context.setFactoryPlcSyncEnabled(enabled);
-    event.returnValue = true;
-  });
-
-  ipcMain.on('modules:sync-cad-parametric-import-enabled', (event, enabled: unknown) => {
-    const trustedWindow = BrowserWindow.getAllWindows().some((window) =>
-      !window.isDestroyed() && window.webContents === event.sender
-    );
-    if (!trustedWindow || typeof enabled !== 'boolean') {
-      event.returnValue = false;
-      return;
-    }
-    context.setParametricImportEnabled(enabled);
-    event.returnValue = true;
-  });
-
-  ipcMain.on('modules:sync-agent-resume-enabled', (event, enabled: unknown) => {
-    const trustedWindow = BrowserWindow.getAllWindows().some((window) =>
-      !window.isDestroyed() && window.webContents === event.sender
-    );
-    if (!trustedWindow || typeof enabled !== 'boolean') {
-      event.returnValue = false;
-      return;
-    }
-    context.setAgentResumeEnabled(enabled);
-    event.returnValue = true;
-  });
-
-  ipcMain.on('modules:sync-project-portable-enabled', (event, enabled: unknown) => {
-    const trustedWindow = BrowserWindow.getAllWindows().some((window) =>
-      !window.isDestroyed() && window.webContents === event.sender
-    );
-    if (!trustedWindow || typeof enabled !== 'boolean') {
-      event.returnValue = false;
-      return;
-    }
-    context.setProjectPortableEnabled(enabled);
-    event.returnValue = true;
-  });
-
-  ipcMain.on('modules:sync-system-update-enabled', (event, enabled: unknown) => {
-    const frame = event.senderFrame;
-    const trustedMainFrame = Boolean(frame && frame === event.sender.mainFrame && frame.url.startsWith('file://'));
-    if (!context.isMainWindowSender(event.sender) || !trustedMainFrame || typeof enabled !== 'boolean') {
-      event.returnValue = false;
-      return;
-    }
-    context.setSystemUpdateEnabled(enabled);
-    event.returnValue = true;
-  });
-
-  ipcMain.handle('export:saveFile', async (_event, name: unknown, data: unknown) => {
+  handle('export:saveFile', async (_event, name: unknown, data: unknown) => {
     const validated = validateExportFileName(name);
     const content = exportPayload(data);
     const window = BrowserWindow.getFocusedWindow();
@@ -573,70 +500,7 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
     return { canceled: false, path: target };
   });
 
-  const chooseProjectArchiveOpenFile = async (
-    title: string,
-    filters: NonNullable<OpenDialogOptions['filters']>
-  ): Promise<{ canceled: true } | { canceled: false; path: string }> => {
-    const options: OpenDialogOptions = { title, properties: ['openFile'], filters };
-    const window = BrowserWindow.getFocusedWindow();
-    const result = window
-      ? await dialog.showOpenDialog(window, options)
-      : await dialog.showOpenDialog(options);
-    const path = result.filePaths[0];
-    return result.canceled || !path ? { canceled: true } : { canceled: false, path };
-  };
-
-  const createProjectArchiveDependencies = () => ({
-    isEnabled: context.isProjectPortableEnabled,
-    chooseCadFile: () => chooseProjectArchiveOpenFile('选择要收录的 CAD 原件', [
-      { name: '支持的单文件 CAD', extensions: ['step', 'stp', 'iges', 'igs', 'brep', 'stl', 'glb'] },
-      { name: '所有文件', extensions: ['*'] }
-    ]),
-    chooseArchiveDestination: async (suggestedName: string) => {
-      const options = {
-        title: '保存 CAD 原件工程档案',
-        defaultPath: suggestedName,
-        filters: [{ name: 'AutomationCAD 工程档案', extensions: ['acproj'] }]
-      };
-      const window = BrowserWindow.getFocusedWindow();
-      const result = window
-        ? await dialog.showSaveDialog(window, options)
-        : await dialog.showSaveDialog(options);
-      return result.canceled || !result.filePath
-        ? { canceled: true as const }
-        : { canceled: false as const, path: result.filePath };
-    },
-    chooseArchiveFile: () => chooseProjectArchiveOpenFile('选择要校验与预览的工程档案', [
-      { name: 'AutomationCAD 工程档案', extensions: ['acproj'] },
-      { name: '所有文件', extensions: ['*'] }
-    ]),
-    statFile: (path: string) => {
-      if (!existsSync(path)) return { isFile: false, size: 0 };
-      const info = statSync(path);
-      return { isFile: info.isFile(), size: info.size };
-    },
-    readFile: (path: string) => readFileSync(path),
-    writeFileExclusive: writePortableArchiveExclusively,
-    appVersion: context.version
-  });
-
-  ipcMain.handle('project-archive:export', async (event, snapshot: unknown) => {
-    const trustedWindow = BrowserWindow.getAllWindows().some((window) =>
-      !window.isDestroyed() && window.webContents === event.sender
-    );
-    if (!trustedWindow) return { ok: false, code: 'FAILED', message: '拒绝非应用窗口的工程档案请求。' };
-    return await exportSelectedCadAsPortableArchive(createProjectArchiveDependencies(), snapshot);
-  });
-
-  ipcMain.handle('project-archive:preview', async (event) => {
-    const trustedWindow = BrowserWindow.getAllWindows().some((window) =>
-      !window.isDestroyed() && window.webContents === event.sender
-    );
-    if (!trustedWindow) return { ok: false, code: 'FAILED', message: '拒绝非应用窗口的工程档案请求。' };
-    return await previewSelectedPortableArchive(createProjectArchiveDependencies());
-  });
-
-  ipcMain.handle('export:report', async (_event, payload: unknown) => await exportReport(payload));
+  handle('export:report', async (_event, payload: unknown) => await exportReport(payload));
 
   ipcMain.handle('cost:exportPanelPdf', async (_event, payload: unknown) =>
     await exportCostPanelPdf(payload, context.isCostEstimationEnabled));
@@ -673,7 +537,7 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
   });
 
   // Agent 成本报告落盘：目录固定 userData/exports，不接受调用方传入路径，也不弹系统对话框。
-  ipcMain.handle('export:costFile', async (_event, payload: unknown) => {
+  handle('export:costFile', async (_event, payload: unknown) => {
     try {
       if (!context.isCostEstimationEnabled()) return costEstimationDisabledResult();
       if (!isRecord(payload)) throw new Error('导出参数必须是对象');
@@ -709,12 +573,9 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
   });
 
   // PLC 生成历史与导出：目录固定 userData/exports/plc，不接受任意绝对路径。
-  ipcMain.handle('plcgen:history', () => readPlcGenHistory());
+  handle('plcgen:history', () => readPlcGenHistory());
 
-  ipcMain.handle('plcgen:recordHistory', (_event, value: unknown) => {
-    if (!context.isPlcgenEnabled()) {
-      return { ok: false, code: 'MODULE_DISABLED', message: 'PLC 模块当前已关闭，已拒绝写入生成历史。' };
-    }
+  handle('plcgen:recordHistory', (_event, value: unknown) => {
     const entry = normalizeHistoryEntry(value);
     if (!entry) throw new Error('PLC 生成历史条目格式不合法');
     const next = parsePlcHistory(mergePlcHistory(readPlcGenHistory(), entry));
@@ -722,10 +583,7 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
     return next;
   });
 
-  ipcMain.handle('plcgen:export', (_event, payload: unknown) => {
-    if (!context.isPlcgenEnabled()) {
-      return { ok: false, code: 'MODULE_DISABLED', message: 'PLC 模块当前已关闭，已拒绝导出文件。' };
-    }
+  handle('plcgen:export', (_event, payload: unknown) => {
     try {
       if (!isRecord(payload)) throw new Error('PLC 导出参数必须是对象');
       const files = plcExportFiles(payload.files);
@@ -756,7 +614,7 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
     }
   });
 
-  ipcMain.handle('plcgen:openExportDir', async (_event, value: unknown) => {
+  handle('plcgen:openExportDir', async (_event, value: unknown) => {
     try {
       const root = resolve(plcExportRoot());
       const target = typeof value === 'string' && value.trim() ? resolve(value) : root;
@@ -775,7 +633,7 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
     }
   });
 
-  ipcMain.handle('cad:open-dialog', async () => {
+  handle('cad:open-dialog', async () => {
     const window = BrowserWindow.getFocusedWindow();
     const options: OpenDialogOptions = {
       title: '打开 CAD 文件',
@@ -791,7 +649,7 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
     return { canceled: result.canceled, filePaths: result.filePaths };
   });
 
-  ipcMain.handle('cad:read-file', (_event, filePath: unknown) => {
+  handle('cad:read-file', (_event, filePath: unknown) => {
     setDiagnosticOperation('cad:read-file');
     try {
       if (typeof filePath !== 'string' || !filePath) throw new Error('缺少文件路径');
@@ -813,8 +671,7 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
   });
 
   // 成本估算的内置价格簿：只读，返回校验后的价格簿与条目统计（示例条目不计价）。
-  ipcMain.handle('cost:pricebook', () => {
-    if (!context.isCostEstimationEnabled()) return costEstimationDisabledResult();
+  handle('cost:pricebook', () => {
     const pricebookPath = join(context.builtinDir, 'pricebook-cn', 'pricebook.json');
     if (!existsSync(pricebookPath)) {
       return { ok: false, message: `内置价格簿缺失：${pricebookPath}` };
@@ -837,22 +694,22 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
     }
   });
 
-  ipcMain.handle('packs:list', async () => await registry.scan());
-  ipcMain.handle('packs:import-zip', async (_event, zipPath: unknown) => {
+  handle('packs:list', async () => await registry.scan());
+  handle('packs:import-zip', async (_event, zipPath: unknown) => {
     if (typeof zipPath !== 'string' || !zipPath) throw new Error('缺少 ZIP 路径');
     return await registry.importZip(zipPath);
   });
-  ipcMain.handle('packs:set-enabled', async (_event, id: unknown, enabled: unknown) => {
+  handle('packs:set-enabled', async (_event, id: unknown, enabled: unknown) => {
     if (typeof id !== 'string' || typeof enabled !== 'boolean') throw new Error('参数不合法');
     await registry.setEnabled(id, enabled);
     return { ok: true };
   });
-  ipcMain.handle('packs:remove', async (_event, id: unknown) => {
+  handle('packs:remove', async (_event, id: unknown) => {
     if (typeof id !== 'string') throw new Error('参数不合法');
     await registry.remove(id);
     return { ok: true };
   });
-  ipcMain.handle('packs:list-parts', (_event, filter: unknown) => {
+  handle('packs:list-parts', (_event, filter: unknown) => {
     const source = typeof filter === 'object' && filter !== null ? filter as Record<string, unknown> : {};
     return registry.listParts({
       ...(typeof source.q === 'string' ? { q: source.q } : {}),
@@ -861,7 +718,7 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
     });
   });
 
-  ipcMain.handle('packs:choose-zip', async () => {
+  handle('packs:choose-zip', async () => {
     const window = BrowserWindow.getFocusedWindow();
     const options: OpenDialogOptions = {
       title: '导入数据包',
@@ -874,7 +731,7 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
     return { canceled: result.canceled, filePaths: result.filePaths };
   });
 
-  ipcMain.handle('agent:info', () => context.getAgentInfo());
+  handle('agent:info', () => context.getAgentInfo());
 
   const getParametric = (): ParametricManager | null => context.getParametric();
   const unavailableStatus = { status: 'unavailable' as const, message: '参数化建模内核不可用' };
@@ -887,20 +744,13 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
   });
   const parametric = getParametric();
   parametric?.onStatus((state) => broadcast('parametric:status-changed', state));
-  ipcMain.handle('parametric:status', () => {
-    if (!parametricEnabled()) return parametricModuleDisabledStatus();
-    return getParametric()?.status() ?? unavailableStatus;
-  });
-  ipcMain.handle('parametric:start', async () => {
-    if (!parametricEnabled()) {
-      return { ok: false, code: 'MODULE_DISABLED' as const, ...parametricModuleDisabledStatus() };
-    }
+  handle('parametric:status', () => getParametric()?.status() ?? unavailableStatus);
+  handle('parametric:start', async () => {
     const manager = getParametric();
     if (!manager) return { ok: false, status: 'unavailable', message: unavailableStatus.message };
     return publicStart(await manager.start());
   });
-  ipcMain.handle('parametric:build', async (_event, doc: unknown) => {
-    if (!parametricEnabled()) return parametricModuleDisabledBuildResult();
+  handle('parametric:build', async (_event, doc: unknown) => {
     const manager = getParametric();
     if (!manager) return { ok: false, code: 'UNAVAILABLE', message: unavailableStatus.message };
     if (typeof doc !== 'object' || doc === null || Array.isArray(doc)) {
@@ -908,57 +758,57 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
     }
     return await manager.build(doc as FeatureDoc);
   });
-  ipcMain.handle('parametric:stop', async () => {
+  handle('parametric:stop', async () => {
     const manager = getParametric();
     if (!manager) return unavailableStatus;
     await manager.stop();
     return manager.status();
   });
 
-  ipcMain.handle('factory:info', () => ({ ok: true, adapters: factory.list(), status: factory.getStatus() }));
-  ipcMain.handle('factory:list', () => ({ ok: true, data: factory.list() }));
-  ipcMain.handle('factory:status', () => ({ ok: true, data: factory.getStatus() }));
-  ipcMain.handle('factory:config', () => factory.getConfig());
-  ipcMain.handle('factory:connect', (_event, config: unknown) => factory.connect(config));
-  ipcMain.handle('factory:disconnect', () => factory.disconnect());
-  ipcMain.handle('factory:browse', (_event, nodeId: unknown) => {
+  handle('factory:info', () => ({ ok: true, adapters: factory.list(), status: factory.getStatus() }));
+  handle('factory:list', () => ({ ok: true, data: factory.list() }));
+  handle('factory:status', () => ({ ok: true, data: factory.getStatus() }));
+  handle('factory:config', () => factory.getConfig());
+  handle('factory:connect', (_event, config: unknown) => factory.connect(config));
+  handle('factory:disconnect', () => factory.disconnect());
+  handle('factory:browse', (_event, nodeId: unknown) => {
     if (nodeId !== undefined && typeof nodeId !== 'string') {
       return { ok: false, code: 'INVALID_ARGUMENT', message: 'nodeId 必须是字符串' };
     }
     return factory.browse(nodeId);
   });
-  ipcMain.handle('factory:read-tags', (_event, ids: unknown) => {
+  handle('factory:read-tags', (_event, ids: unknown) => {
     if (!Array.isArray(ids)) return { ok: false, code: 'INVALID_ARGUMENT', message: '点位 id 必须是数组' };
     return factory.readTags(ids);
   });
-  ipcMain.handle('factory:write-tag', (_event, id: unknown, value: unknown) => {
+  handle('factory:write-tag', (_event, id: unknown, value: unknown) => {
     if (typeof id !== 'string') return { ok: false, code: 'INVALID_ARGUMENT', message: '缺少点位 id' };
     return factory.writeTag(id, value);
   });
-  ipcMain.handle('factory:subscribe', (_event, ids: unknown) => {
+  handle('factory:subscribe', (_event, ids: unknown) => {
     if (!Array.isArray(ids)) return { ok: false, code: 'INVALID_ARGUMENT', message: '点位 id 必须是数组' };
     return factory.subscribe(ids, (value) => broadcast('factory:values', value));
   });
 
-  ipcMain.handle('plc:info', () => ({ ok: true, adapters: plc.list(), status: plc.getStatus() }));
-  ipcMain.handle('plc:list', () => ({ ok: true, data: plc.list() }));
-  ipcMain.handle('plc:status', () => ({ ok: true, data: plc.getStatus() }));
-  ipcMain.handle('plc:config', () => plc.getConfig());
-  ipcMain.handle('plc:connect', (_event, config: unknown) => plc.connect(config));
-  ipcMain.handle('plc:disconnect', () => plc.disconnect());
-  ipcMain.handle('plc:read', (_event, id: unknown) => {
+  handle('plc:info', () => ({ ok: true, adapters: plc.list(), status: plc.getStatus() }));
+  handle('plc:list', () => ({ ok: true, data: plc.list() }));
+  handle('plc:status', () => ({ ok: true, data: plc.getStatus() }));
+  handle('plc:config', () => plc.getConfig());
+  handle('plc:connect', (_event, config: unknown) => plc.connect(config));
+  handle('plc:disconnect', () => plc.disconnect());
+  handle('plc:read', (_event, id: unknown) => {
     if (typeof id !== 'string') return { ok: false, code: 'INVALID_ARGUMENT', message: '缺少点位 id' };
     return plc.read(id);
   });
-  ipcMain.handle('plc:read-all', () => plc.readAll());
-  ipcMain.handle('plc:write', (_event, id: unknown, value: unknown) => {
+  handle('plc:read-all', () => plc.readAll());
+  handle('plc:write', (_event, id: unknown, value: unknown) => {
     if (typeof id !== 'string') return { ok: false, code: 'INVALID_ARGUMENT', message: '缺少点位 id' };
     if (typeof value !== 'boolean' && typeof value !== 'number') {
       return { ok: false, code: 'INVALID_ARGUMENT', message: '点位值必须是布尔值或数字' };
     }
     return plc.write(id, value);
   });
-  ipcMain.handle('plc:force', (_event, id: unknown, value: unknown) => {
+  handle('plc:force', (_event, id: unknown, value: unknown) => {
     if (typeof id !== 'string') return { ok: false, code: 'INVALID_ARGUMENT', message: '缺少点位 id' };
     if (typeof value !== 'boolean' && typeof value !== 'number') {
       return { ok: false, code: 'INVALID_ARGUMENT', message: '点位值必须是布尔值或数字' };
@@ -970,27 +820,27 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
   const syncClient = (config: SyncConfig): SyncClient => new SyncClient(config);
   const syncPlcEnabled = (): boolean => context.isPlcgenEnabled() && context.isFactoryPlcSyncEnabled();
 
-  ipcMain.handle('sync:getConfig', () => publicSyncConfig(syncConfig()));
-  ipcMain.handle('sync:saveConfig', (_event, patch: unknown) => {
+  handle('sync:getConfig', () => publicSyncConfig(syncConfig()));
+  handle('sync:saveConfig', (_event, patch: unknown) => {
     const next = mergeSyncConfig(syncConfig(), patch);
     writeSyncConfig(context.syncConfigFile, next);
     return publicSyncConfig(next);
   });
-  ipcMain.handle('sync:test', async () => {
+  handle('sync:test', async () => {
     try {
       return await syncClient(syncConfig()).testConnection();
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) };
     }
   });
-  ipcMain.handle('sync:list', async () => {
+  handle('sync:list', async () => {
     try {
       return await syncClient(syncConfig()).listPackages();
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) };
     }
   });
-  ipcMain.handle('sync:diff', async (_event, packageId: unknown) => {
+  handle('sync:diff', async (_event, packageId: unknown) => {
     if (typeof packageId !== 'string' || !packageId.trim()) {
       return { ok: false, message: '缺少 packageId' };
     }
@@ -1000,61 +850,7 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
       return { ok: false, message: error instanceof Error ? error.message : String(error) };
     }
   });
-  ipcMain.handle('sync:downloadCandidate', async (_event, packageId: unknown, machineContext: unknown) => {
-    if (typeof packageId !== 'string' || !packageId.trim()) {
-      return { ok: false, stage: '下载', code: 'DOWNLOAD_FAILED', message: '缺少 packageId' };
-    }
-    let currentMachine: ReturnType<typeof validateMachineConfig> | undefined;
-    if (machineContext !== undefined && machineContext !== null) {
-      try {
-        currentMachine = validateMachineConfig(machineContext);
-      } catch (error) {
-        return {
-          ok: false,
-          stage: '解析',
-          code: 'INVALID_MACHINE_CONTEXT',
-          message: `当前机型上下文无效：${error instanceof Error ? error.message : String(error)}`
-        };
-      }
-    }
-    try {
-      const downloaded = await syncClient(syncConfig()).downloadPackage(packageId);
-      if (!downloaded.ok) return downloaded;
-      try {
-        const candidate = parseDesignPackage(downloaded.zip, currentMachine, { allowPlc: syncPlcEnabled() });
-        return {
-          ok: true,
-          candidate,
-          bytes: downloaded.bytes,
-          sha256: downloaded.sha256,
-          ...(downloaded.etag ? { etag: downloaded.etag } : {})
-        };
-      } catch (error) {
-        return {
-          ok: false,
-          stage: '解析',
-          code: 'PACKAGE_VALIDATION_FAILED',
-          message: `下载包校验失败，未写入本地工程：${error instanceof Error ? error.message : String(error)}`
-        };
-      }
-    } catch (error) {
-      return {
-        ok: false,
-        stage: '下载',
-        code: 'DOWNLOAD_FAILED',
-        message: error instanceof Error ? error.message : String(error)
-      };
-    }
-  });
-  ipcMain.handle('sync:upload', async (_event, value: unknown) => {
-    if (isRecord(value) && value.plc !== undefined && !syncPlcEnabled()) {
-      return {
-        ok: false,
-        stage: '打包',
-        code: 'MODULE_DISABLED',
-        message: '智慧工厂 PLC 同步模块或 PLC 生成模块当前已关闭，已拒绝生成或上传包含 PLC 源码/IO mapping 的同步包。'
-      };
-    }
+  handle('sync:upload', async (_event, value: unknown) => {
     let payload: SyncUploadPayload;
     try {
       payload = parseSyncPayload(value);
@@ -1160,6 +956,7 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
 }
 
 export function registerAgentChatIpc(context: AgentChatIpcContext): void {
+  const handle = createTrustedIpcHandler(() => context.getWindow(), context.trustedUiPath);
   let session: AgentSession | null = null;
   const thread = new AgentThread();
   let activeChat: AbortController | null = null;
@@ -1291,10 +1088,10 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
     return session;
   };
 
-  ipcMain.handle('agent:llm:get', () => publicLlmConfig(readLlmConfig(context.userDataDir)));
+  handle('agent:llm:get', () => publicLlmConfig(readLlmConfig(context.userDataDir)));
 
   // 当前工程机型：只读 active 指针，供渲染层启动时恢复 3D 配置。
-  ipcMain.handle('machine:active', () => {
+  handle('machine:active', () => {
     try {
       const design = readActiveMachineDesign(context.userDataDir);
       return design
@@ -1306,7 +1103,7 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
   });
 
   // 当前机型 → PLC IO 点位。只读当前 active 方案，供 CAD 侧栏预览。
-  ipcMain.handle('machine:io-map', () => {
+  handle('machine:io-map', () => {
     try {
       const design = readActiveMachineDesign(context.userDataDir);
       if (!design) return { ok: false, message: '尚未应用机型方案', rows: [], csv: '' };
@@ -1328,13 +1125,13 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
     }
   });
 
-  ipcMain.handle('agent:llm:save', (_event, patch: unknown) => {
+  handle('agent:llm:save', (_event, patch: unknown) => {
     const saved = saveLlmConfig(context.userDataDir, patch);
     clearSession();
     return publicLlmConfig(saved);
   });
 
-  ipcMain.handle('agent:llm:test', async (_event, patch: unknown) => {
+  handle('agent:llm:test', async (_event, patch: unknown) => {
     let config: ReturnType<typeof readLlmConfig>;
     try {
       const existing = readLlmConfig(context.userDataDir);
@@ -1346,10 +1143,10 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
     return await testLlmConnection(config);
   });
 
-  ipcMain.handle('agent:chat:history', () => ({ ok: true, messages: session?.history() ?? [] }));
+  handle('agent:chat:history', () => ({ ok: true, messages: session?.history() ?? [] }));
 
   // 审计只读接口：最近 200 条，凭据已在写入前脱敏；更早记录用 total/dropped 如实回报。
-  ipcMain.handle('agent:audit:read', () => {
+  handle('agent:audit:read', () => {
     const file = join(context.userDataDir, 'agent-audit.jsonl');
     try {
       // 当前文件 + 轮转份数（agent-audit.N.jsonl）一起读；面板仍只显示最近 200 条，total/summary 覆盖全部保留份数。
@@ -1364,7 +1161,7 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
     }
   });
 
-  ipcMain.handle('agent:chat:clear', () => {
+  handle('agent:chat:clear', () => {
     clearSession();
     return { ok: true, messages: [] };
   });
@@ -1431,7 +1228,7 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
   });
 
   // P7-C：计划执行。规划在渲染层离线完成；主进程只接受已注册工具并再次校验。
-  ipcMain.handle('agent:plan:execute', async (event, payload: unknown) => {
+  handle('agent:plan:execute', async (event, payload: unknown) => {
     const tools = context.getTools();
     const bus = context.getBus();
     if (!tools || !bus) {
@@ -1643,7 +1440,6 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
       onProgress: emitProgress,
       confirmPlan: async (request) => {
         confirmCount += 1;
-        if (process.env.AUTOMATIONCAD_AUTOCONFIRM === '1') return true;
         const window = context.getWindow();
         if (!window || window.isDestroyed()) return false;
         const detail = request.steps
@@ -1752,7 +1548,7 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
   });
 
   // P7-I：流程模板执行。模板与占位符在共享模块中解析，主进程只负责逐步骤确认、审计与进度。
-  ipcMain.handle('agent:recipe:execute', async (event, payload: unknown) => {
+  handle('agent:recipe:execute', async (event, payload: unknown) => {
     const tools = context.getTools();
     const bus = context.getBus();
     let recipeId = '';
@@ -1886,25 +1682,25 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
     return { ...result, confirmations: confirmCount };
   });
 
-  ipcMain.handle('agent:chat:cancel', () => {
+  handle('agent:chat:cancel', () => {
     if (!activeChat) return { ok: true, cancelled: false, message: '当前没有执行中的对话' };
     activeChat.abort();
     return { ok: true, cancelled: true };
   });
 
-  ipcMain.handle('agent:plan:cancel', () => {
+  handle('agent:plan:cancel', () => {
     if (!activePlan) return { ok: true, cancelled: false, message: '当前没有执行中的计划' };
     activePlan.abort();
     return { ok: true, cancelled: true };
   });
 
-  ipcMain.handle('agent:recipe:cancel', () => {
+  handle('agent:recipe:cancel', () => {
     if (!activeRecipe) return { ok: true, cancelled: false, message: '当前没有执行中的流程' };
     activeRecipe.abort();
     return { ok: true, cancelled: true };
   });
 
-  ipcMain.handle('agent:chat:send', async (event, text: unknown) => {
+  handle('agent:chat:send', async (event, text: unknown) => {
     if (typeof text !== 'string' || !text.trim()) {
       return { ok: false, message: '请输入要发送给智能体的内容', tokens: session?.usage() ?? emptyAgentUsage(), messages: session?.history() ?? [] };
     }

@@ -2,7 +2,7 @@ import type { CommandResult } from './commands.ts';
 import type { AgentCommandExecutor } from './tools.ts';
 import type { LlmChatResponse, LlmClient, LlmMessage, LlmToolCall } from './llm.ts';
 import type { AgentAuditRecord } from './audit.ts';
-import { describePlan, planReadOnly, routeIntent, READ_ONLY_TOOLS } from './router.ts';
+import { describePlan, planReadOnly, routeIntent, READ_ONLY_TOOLS, requiresWriteConfirmation } from './router.ts';
 import {
   emptyAgentContext,
   serializeAgentContext,
@@ -162,18 +162,6 @@ export function emptyAgentUsage(model = ''): AgentUsageSnapshot {
   };
 }
 
-const MUTATING_TOOLS = new Set([
-  'apply_machine_design',
-  'import_cad',
-  'insert_component',
-  'place_component',
-  'update_component',
-  'remove_component',
-  'run_plc_generate',
-  'export_files',
-  'undo_last',
-  'export_cost_report'
-]);
 const COMMAND_ALIASES: Record<string, string> = {
   run_interference_check: 'run_interference'
 };
@@ -774,7 +762,7 @@ export class AgentSession {
           args: { ...args },
           ok,
           code,
-          wrote: ok && MUTATING_TOOLS.has(name)
+          wrote: ok && requiresWriteConfirmation(name)
         });
       }
     };
@@ -797,7 +785,7 @@ export class AgentSession {
         );
         return result;
       }
-      if (MUTATING_TOOLS.has(name)) {
+      if (requiresWriteConfirmation(name)) {
         // 硬边界：无论用户文本、模型输出或调用路径如何，写工具必须先拿到明确确认。
         const priorDenial = findDenial(this.denials, name, denialKey);
         if (priorDenial && priorDenial.reason !== 'timeout') {
@@ -934,14 +922,14 @@ export class AgentSession {
         throw new AgentCancelledError(context.completed, name, false);
       }
       const command = COMMAND_ALIASES[name] ?? name;
-      if (MUTATING_TOOLS.has(name)) this.cache.invalidateAfterWrite(name);
+      if (requiresWriteConfirmation(name)) this.cache.invalidateAfterWrite(name);
       const result = await withAbort(
         name === 'undo_last'
           ? this.bus.undoLast(context.signal)
           : this.bus.execute(command, args, context.signal),
         context.signal
       );
-      if (MUTATING_TOOLS.has(name)) this.cache.invalidateAfterWrite(name);
+      if (requiresWriteConfirmation(name)) this.cache.invalidateAfterWrite(name);
       this.memory.record(summarizeToolCall(name, args, result));
       const code = result.ok ? 'OK' : (result.error?.code ?? 'COMMAND_FAILED');
       const policyDenial = !result.ok && (code === 'TARGET_PATH_UNSUPPORTED' || code === 'POLICY_DENIED')
@@ -976,7 +964,7 @@ export class AgentSession {
       if (error instanceof AgentCancelledError) throw error;
       if (error instanceof AgentAborted) {
         finish(false, 'CANCELLED', '已取消');
-        throw new AgentCancelledError(context.completed, name, MUTATING_TOOLS.has(name));
+        throw new AgentCancelledError(context.completed, name, requiresWriteConfirmation(name));
       }
       const message = error instanceof Error ? error.message : String(error);
       this.memory.record(summarizeToolCall(name, args, { ok: false, code: 'TOOL_EXECUTION_FAILED' }));
@@ -1247,7 +1235,7 @@ export class AgentSession {
     if (!this.offlineFallback) return null;
     const plan = planReadOnly(text, this.turnContext);
     if (!plan) return null;
-    if (MUTATING_TOOLS.has(plan.tool)) {
+    if (requiresWriteConfirmation(plan.tool)) {
       const reply = '当前模型不可用，写操作必须联网并经用户确认，未执行。';
       this.push({ role: 'assistant', content: reply });
       return reply;
@@ -1290,7 +1278,7 @@ export class AgentSession {
           message: '已取消',
           source: 'chat'
         });
-        throw new AgentCancelledError(completed, plan.tool, MUTATING_TOOLS.has(plan.tool));
+        throw new AgentCancelledError(completed, plan.tool, requiresWriteConfirmation(plan.tool));
       }
       const message = error instanceof Error ? error.message : String(error);
       this.recordAudit({
@@ -1327,7 +1315,7 @@ export class AgentSession {
       ...(result.ok ? {} : { message: result.error?.message ?? '未知错误' }),
       source: 'chat'
     });
-    completed.push({ step: 1, tool: plan.tool, args: { ...plan.args }, ok: result.ok, code, wrote: result.ok && MUTATING_TOOLS.has(plan.tool) });
+    completed.push({ step: 1, tool: plan.tool, args: { ...plan.args }, ok: result.ok, code, wrote: result.ok && requiresWriteConfirmation(plan.tool) });
     this.memory.record(summarizeToolCall(plan.tool, plan.args, result));
     if (!result.ok) {
       return `模型暂不可用，离线规则已调用 ${plan.tool}，但返回失败：${result.error?.message ?? '未知错误'}`;

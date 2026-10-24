@@ -123,55 +123,26 @@ test('MCP 代理把写工具原样转发到桌面 RPC 并返回结构化结果',
   }
 });
 
-test('MCP tools/list 动态同步 PLC 模块状态；关闭后旧工具名返回 MODULE_DISABLED', async () => {
-  plcgenEnabled = true;
-  const proxy = new DesktopRpcProxy({ userDataDir: sandbox, port: desktopPort });
-  const connection = await connectedClient(proxy);
-  try {
-    let listed = await connection.client.listTools();
-    assert.ok(listed.tools.some((tool) => tool.name === 'verify_plc_program'));
-    assert.ok(listed.tools.some((tool) => tool.name === 'run_plc_generate'));
-
-    plcgenEnabled = false;
-    listed = await connection.client.listTools();
-    assert.equal(listed.tools.some((tool) => tool.name === 'verify_plc_program'), false);
-    assert.equal(listed.tools.some((tool) => tool.name === 'run_plc_generate'), false);
-    for (const name of ['verify_plc_program', 'run_plc_generate']) {
-      const result = await connection.client.callTool({ name, arguments: {} });
-      assert.equal(result.isError, true);
-      assert.equal(result.structuredContent.code, 'MODULE_DISABLED');
+test('MCP 代理拒绝向非回环 HTTP 主机发送本地 token', async () => {
+  let fetchCalls = 0;
+  const proxy = new DesktopRpcProxy({
+    userDataDir: sandbox,
+    host: 'mcp.example.com',
+    port: desktopPort,
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      throw new Error('不应发起请求');
     }
-    plcgenEnabled = true;
-    listed = await connection.client.listTools();
-    assert.ok(listed.tools.some((tool) => tool.name === 'verify_plc_program'));
-  } finally {
-    plcgenEnabled = true;
-    await connection.close();
-  }
-});
-
-test('MCP tools/list 动态同步 elec.validation；关闭后旧工具名返回 MODULE_DISABLED', async () => {
-  elecValidationEnabled = true;
-  const proxy = new DesktopRpcProxy({ userDataDir: sandbox, port: desktopPort });
-  const connection = await connectedClient(proxy);
-  try {
-    let listed = await connection.client.listTools();
-    assert.ok(listed.tools.some((tool) => tool.name === 'run_electrical_check'));
-
-    elecValidationEnabled = false;
-    listed = await connection.client.listTools();
-    assert.equal(listed.tools.some((tool) => tool.name === 'run_electrical_check'), false);
-    const result = await connection.client.callTool({ name: 'run_electrical_check', arguments: {} });
-    assert.equal(result.isError, true);
-    assert.equal(result.structuredContent.code, 'MODULE_DISABLED');
-
-    elecValidationEnabled = true;
-    listed = await connection.client.listTools();
-    assert.ok(listed.tools.some((tool) => tool.name === 'run_electrical_check'));
-  } finally {
-    elecValidationEnabled = true;
-    await connection.close();
-  }
+  });
+  await assert.rejects(
+    () => proxy.callTool('get_bom', {}),
+    (error) => {
+      assert.ok(error instanceof DesktopRpcUnavailableError);
+      assert.doesNotMatch(error.message, new RegExp(token));
+      return true;
+    }
+  );
+  assert.equal(fetchCalls, 0);
 });
 
 test('桌面不可达时只读工具回退本地 registry', async () => {

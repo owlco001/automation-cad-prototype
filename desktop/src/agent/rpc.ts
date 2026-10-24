@@ -4,6 +4,7 @@ import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import type { AgentTools } from './tools';
+import { authorizeAgentToolCall, type ConfirmAgentToolWrite } from './policy.ts';
 
 export interface AgentRpcOptions {
   tools: AgentTools;
@@ -11,6 +12,7 @@ export interface AgentRpcOptions {
   version: string;
   host?: string;
   port?: number;
+  confirmWrite?: ConfirmAgentToolWrite;
 }
 
 export interface AgentRpcInfo {
@@ -78,6 +80,7 @@ export class AgentRpcServer {
   readonly version: string;
   readonly host: string;
   readonly port: number;
+  readonly confirmWrite: ConfirmAgentToolWrite | undefined;
   private server: Server | null = null;
   private actualPort = 0;
   private tokenFile: string | undefined;
@@ -88,6 +91,7 @@ export class AgentRpcServer {
     this.version = options.version;
     this.host = options.host ?? '127.0.0.1';
     this.port = options.port ?? 7420;
+    this.confirmWrite = options.confirmWrite;
   }
 
   async start(tokenFile?: string): Promise<AgentRpcInfo> {
@@ -191,14 +195,14 @@ export class AgentRpcServer {
         const name = typeof params.name === 'string' ? params.name : '';
         if (!this.tools.has(name)) throw new RpcError(-32601, `工具不存在：${name || '(空)'}`);
         const args = isRecord(params.arguments) ? params.arguments : {};
-        const toolResult = await this.tools.call(name, args);
+        const toolResult = await this.callTool(name, args);
         result = {
           content: [{ type: 'text', text: JSON.stringify(toolResult) }],
           structuredContent: toolResult,
           isError: isRecord(toolResult) && toolResult.ok === false
         };
       } else if (this.tools.has(payload.method)) {
-        result = await this.tools.call(payload.method, params);
+        result = await this.callTool(payload.method, params);
       } else {
         throw new RpcError(-32601, `方法不存在：${payload.method}`);
       }
@@ -217,6 +221,12 @@ export class AgentRpcServer {
         }
       };
     }
+  }
+
+  private async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+    const authorization = await authorizeAgentToolCall(name, args, this.confirmWrite);
+    if (!authorization.ok) return authorization;
+    return await this.tools.call(name, args);
   }
 }
 

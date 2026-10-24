@@ -50,6 +50,21 @@ function jsonResponse(response, status, payload, statusText = '') {
   response.end(JSON.stringify(payload));
 }
 
+test('LLM 客户端在发出请求前拒绝向远程 HTTP 发送 API Key', () => {
+  let fetchCalls = 0;
+  assert.throws(() => new OpenAiCompatibleClient({
+    baseUrl: 'http://llm.example.com/v1',
+    apiKey: 'sk-secret',
+    model: 'gpt-test',
+    tools,
+    fetchImpl: async () => {
+      fetchCalls += 1;
+      throw new Error('不应发起请求');
+    }
+  }), /明文传输 API Key/);
+  assert.equal(fetchCalls, 0);
+});
+
 test('LLM 客户端发送工具表并解析 tool_calls', async () => {
   const server = await startServer((_captured, response) => {
     jsonResponse(response, 200, {

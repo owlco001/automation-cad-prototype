@@ -15,6 +15,51 @@ let plcgenEnabled = true;
 let elecValidationEnabled = true;
 let costEstimationEnabled = true;
 
+async function startWriteRpc(confirmWrite) {
+  const calls = [];
+  const confirmations = [];
+  const summary = {
+    name: 'insert_component',
+    description: 'test write tool',
+    inputSchema: { type: 'object', properties: {} }
+  };
+  const tools = {
+    list: () => [summary],
+    summaries: () => [summary],
+    has: (name) => name === summary.name,
+    async call(name, args) {
+      calls.push({ name, args });
+      return { ok: true, name, args };
+    }
+  };
+  const rpcToken = createAgentToken();
+  const rpc = new AgentRpcServer({
+    tools,
+    token: rpcToken,
+    version: '0.1.0-auth-test',
+    host: '127.0.0.1',
+    port: 0,
+    confirmWrite: async (name, args) => {
+      confirmations.push({ name, args });
+      return await confirmWrite(name, args);
+    }
+  });
+  const info = await rpc.start();
+  return { rpc, url: info.url, token: rpcToken, calls, confirmations };
+}
+
+async function postRpc(target, authToken, payload) {
+  const response = await fetch(`${target}/rpc`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${authToken}`,
+      'content-type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+  });
+  return await response.json();
+}
+
 before(async () => {
   sandbox = mkdtempSync(join(tmpdir(), 'cad-rpc-test-'));
   const builtin = join(sandbox, 'builtin', 'smc-cn');
@@ -126,144 +171,60 @@ test('有 token 能调用 list_components', async () => {
   assert.equal(body.result.isError, false);
 });
 
-test('PLC 模块关闭时隐藏工具并拒绝 MCP 风格、直接工具方法与未知别名路由', async () => {
-  plcgenEnabled = false;
-  try {
-    const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
-    const listed = await fetch(`${url}/rpc`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ jsonrpc: '2.0', id: 20, method: 'tools/list' })
-    });
-    const listBody = await listed.json();
-    const names = listBody.result.tools.map((tool) => tool.name);
-    assert.equal(names.length, 19);
-    assert.equal(names.includes('verify_plc_program'), false);
-    assert.equal(names.includes('run_plc_generate'), false);
-
-    for (const [id, name] of [[21, 'verify_plc_program'], [22, 'run_plc_generate']]) {
-      const response = await fetch(`${url}/rpc`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: {} } })
-      });
-      const body = await response.json();
-      assert.equal(body.result.isError, true);
-      assert.equal(body.result.structuredContent.code, 'MODULE_DISABLED');
-    }
-
-    const direct = await fetch(`${url}/rpc`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ jsonrpc: '2.0', id: 23, method: 'verify_plc_program', params: {} })
-    });
-    assert.equal((await direct.json()).result.code, 'MODULE_DISABLED');
-
-    const unknownAlias = await fetch(`${url}/rpc`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ jsonrpc: '2.0', id: 24, method: 'verify_plc', params: {} })
-    });
-    assert.equal((await unknownAlias.json()).error.code, -32601);
-    plcgenEnabled = true;
-    const reenabled = await fetch(`${url}/rpc`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ jsonrpc: '2.0', id: 25, method: 'tools/list' })
-    });
-    assert.equal((await reenabled.json()).result.tools.length, 21);
-  } finally {
-    plcgenEnabled = true;
-  }
+test('JSON-RPC 写工具缺少桌面确认回调时默认拒绝', async () => {
+  const body = await postRpc(url, token, {
+    jsonrpc: '2.0',
+    id: 5,
+    method: 'tools/call',
+    params: { name: 'insert_component', arguments: { partId: 'MXQ20-50' } }
+  });
+  assert.equal(body.result.isError, true);
+  assert.equal(body.result.structuredContent.code, 'WRITE_CONFIRMATION_REQUIRED');
 });
 
-test('elec.validation 关闭时 RPC 隐藏校验工具、拒绝旧名称和直接方法；重新启用后恢复', async () => {
-  elecValidationEnabled = false;
+test('JSON-RPC tools/call 与直接工具方法共用授权回调，拒绝不执行、明确批准才执行', async () => {
+  const denied = await startWriteRpc(async () => false);
   try {
-    const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
-    const listed = await fetch(`${url}/rpc`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ jsonrpc: '2.0', id: 30, method: 'tools/list' })
+    const standard = await postRpc(denied.url, denied.token, {
+      jsonrpc: '2.0',
+      id: 6,
+      method: 'tools/call',
+      params: { name: 'insert_component', arguments: { partId: 'MXQ20-50' } }
     });
-    const names = (await listed.json()).result.tools.map((tool) => tool.name);
-    assert.equal(names.includes('run_electrical_check'), false);
-    assert.equal(names.length, 20);
-
-    const oldName = await fetch(`${url}/rpc`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ jsonrpc: '2.0', id: 31, method: 'tools/call', params: { name: 'run_electrical_check', arguments: {} } })
+    const direct = await postRpc(denied.url, denied.token, {
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'insert_component',
+      params: { partId: 'MXQ20-50' }
     });
-    const oldNameBody = await oldName.json();
-    assert.equal(oldNameBody.result.isError, true);
-    assert.equal(oldNameBody.result.structuredContent.code, 'MODULE_DISABLED');
-
-    const direct = await fetch(`${url}/rpc`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ jsonrpc: '2.0', id: 32, method: 'run_electrical_check', params: {} })
-    });
-    assert.equal((await direct.json()).result.code, 'MODULE_DISABLED');
-
-    elecValidationEnabled = true;
-    const reenabled = await fetch(`${url}/rpc`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ jsonrpc: '2.0', id: 33, method: 'tools/list' })
-    });
-    const reenabledBody = await reenabled.json();
-    assert.equal(reenabledBody.result.tools.length, 21);
-    assert.equal(reenabledBody.result.tools.some((tool) => tool.name === 'run_electrical_check'), true);
+    assert.equal(standard.result.structuredContent.code, 'USER_DENIED');
+    assert.equal(direct.result.code, 'USER_DENIED');
+    assert.equal(denied.confirmations.length, 2);
+    assert.equal(denied.calls.length, 0);
   } finally {
-    elecValidationEnabled = true;
+    await denied.rpc.stop();
   }
-});
 
-test('cost.estimation 关闭时 RPC 隐藏成本工具并拒绝工具名/直接方法；重新启用后恢复', async () => {
-  costEstimationEnabled = false;
+  const allowed = await startWriteRpc(async () => true);
   try {
-    const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
-    const listed = await fetch(`${url}/rpc`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ jsonrpc: '2.0', id: 40, method: 'tools/list' })
+    const standard = await postRpc(allowed.url, allowed.token, {
+      jsonrpc: '2.0',
+      id: 8,
+      method: 'tools/call',
+      params: { name: 'insert_component', arguments: { partId: 'MXQ20-50' } }
     });
-    const names = (await listed.json()).result.tools.map((tool) => tool.name);
-    assert.equal(names.length, 19);
-    assert.equal(names.includes('run_cost_report'), false);
-    assert.equal(names.includes('export_cost_report'), false);
-    assert.equal(names.includes('get_bom'), true);
-
-    for (const [id, name] of [[41, 'run_cost_report'], [42, 'export_cost_report']]) {
-      const called = await fetch(`${url}/rpc`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: {} } })
-      });
-      const body = await called.json();
-      assert.equal(body.result.isError, true);
-      assert.equal(body.result.structuredContent.code, 'MODULE_DISABLED');
-      const direct = await fetch(`${url}/rpc`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ jsonrpc: '2.0', id: id + 10, method: name, params: {} })
-      });
-      assert.equal((await direct.json()).result.code, 'MODULE_DISABLED');
-    }
-
-    costEstimationEnabled = true;
-    const reenabled = await fetch(`${url}/rpc`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ jsonrpc: '2.0', id: 50, method: 'tools/list' })
+    const direct = await postRpc(allowed.url, allowed.token, {
+      jsonrpc: '2.0',
+      id: 9,
+      method: 'insert_component',
+      params: { partId: 'LC1D09' }
     });
-    const reenabledNames = (await reenabled.json()).result.tools.map((tool) => tool.name);
-    assert.equal(reenabledNames.length, 21);
-    assert.equal(reenabledNames.includes('run_cost_report'), true);
-    assert.equal(reenabledNames.includes('export_cost_report'), true);
+    assert.equal(standard.result.structuredContent.ok, true);
+    assert.equal(direct.result.ok, true);
+    assert.deepEqual(allowed.calls.map(({ args }) => args.partId), ['MXQ20-50', 'LC1D09']);
+    assert.equal(allowed.confirmations.length, 2);
   } finally {
-    costEstimationEnabled = true;
+    await allowed.rpc.stop();
   }
 });
 

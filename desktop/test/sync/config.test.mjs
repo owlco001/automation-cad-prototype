@@ -53,6 +53,20 @@ test('写入 sync.json 权限为 600，读取保持原值', () => {
   }
 });
 
+test('旧的远程 HTTP 同步配置仍可读取以便修正，但新写入会被拒绝', () => {
+  const legacy = {
+    baseUrl: 'http://factory.example.com',
+    apiKey: 'legacy-secret',
+    deviceId: 'DEV-1',
+    projectId: 'asm',
+    enabled: true
+  };
+  writeFileSync(configFile, JSON.stringify(legacy));
+  assert.deepEqual(readSyncConfig(configFile), legacy);
+  assert.throws(() => writeSyncConfig(configFile, legacy), /明文传输 API Key/);
+  assert.doesNotThrow(() => writeSyncConfig(configFile, { ...legacy, baseUrl: 'http://localhost:9000' }));
+});
+
 test('空或掩码 apiKey 保存时保留原密钥，新密钥才覆盖', () => {
   const existing = { baseUrl: 'https://f.example.com', apiKey: 'old-secret', deviceId: 'DEV-1', projectId: 'asm', enabled: true };
   assert.equal(mergeSyncConfig(existing, { baseUrl: 'https://f.example.com', apiKey: '', deviceId: 'DEV-1', projectId: 'asm', enabled: true }).apiKey, 'old-secret');

@@ -1,13 +1,15 @@
 /**
  * 会话策略层（纯函数）
  *
- * 这里承载两条不能依赖提示词的硬边界：
+ * 这里承载不能依赖提示词的硬边界：
  * 1. 绕过确认意图识别 —— 只用于收紧权限，命中后写工具仍必须确认；
  * 2. 导出目标路径判定 —— 用户给的路径不能静默改写，默认只接受纯文件名。
+ * 3. MCP / JSON-RPC 写授权 —— 只有明确只读白名单可免确认，其余调用失败关闭。
  *
- * 模块自身不做 IO，也不决定工具是否执行；执行入口仍由 `session.ts` /
- * `commands.ts` 强制调用确认或返回结构化错误。
+ * 模块自身不做 IO；对话会话与协议入口都必须显式确认后才允许执行写操作。
  */
+
+import { requiresWriteConfirmation } from './router.ts';
 
 export interface BypassIntent {
   bypass: true;
@@ -15,6 +17,37 @@ export interface BypassIntent {
 }
 
 export const BYPASS_CONFIRMATION_NOTICE = '用户要求跳过确认，但写操作必须确认';
+
+export type ConfirmAgentToolWrite = (
+  name: string,
+  args: Record<string, unknown>
+) => Promise<boolean> | boolean;
+
+export type ToolAuthorizationResult =
+  | { ok: true }
+  | { ok: false; code: 'WRITE_CONFIRMATION_REQUIRED' | 'USER_DENIED' | 'CONFIRMATION_FAILED'; message: string };
+
+/** MCP 与 JSON-RPC 共用的写授权边界；缺回调、拒绝或回调异常均不放行。 */
+export async function authorizeAgentToolCall(
+  name: string,
+  args: Record<string, unknown>,
+  confirmWrite?: ConfirmAgentToolWrite
+): Promise<ToolAuthorizationResult> {
+  if (!requiresWriteConfirmation(name)) return { ok: true };
+  if (typeof confirmWrite !== 'function') {
+    return {
+      ok: false,
+      code: 'WRITE_CONFIRMATION_REQUIRED',
+      message: '该工具会执行写操作，但当前入口没有桌面确认回调；未执行。'
+    };
+  }
+  try {
+    if (await confirmWrite(name, args) === true) return { ok: true };
+    return { ok: false, code: 'USER_DENIED', message: '用户拒绝写操作，未执行。' };
+  } catch {
+    return { ok: false, code: 'CONFIRMATION_FAILED', message: '桌面确认失败，已拒绝写操作。' };
+  }
+}
 
 const EXPLICIT_CONSENT_PATTERN = /同意|确认|就改|继续改|我批准/;
 

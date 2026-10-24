@@ -1,5 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { assertSafeApiKeyUrl } from '../shared/api-key-transport.ts';
 
 export interface AgentLlmConfig {
   baseUrl: string;
@@ -122,6 +123,7 @@ export function readLlmConfig(userDataDir: string): AgentLlmConfig {
 
 export function writeLlmConfig(userDataDir: string, config: AgentLlmConfig): AgentLlmConfig {
   const normalized = normalizeLlmConfig(config);
+  assertSafeApiKeyUrl(new URL(normalized.baseUrl));
   mkdirSync(userDataDir, { recursive: true });
   const file = llmConfigPath(userDataDir);
   const temporary = `${file}.${process.pid}.tmp`;

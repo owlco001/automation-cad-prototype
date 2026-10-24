@@ -1,5 +1,7 @@
 import type { AgentToolSummary } from './tools.ts';
+import { normalizeBaseUrl } from './llm-config.ts';
 import type { AgentLlmConfig } from './llm-config.ts';
+import { assertSafeApiKeyUrl } from '../shared/api-key-transport.ts';
 
 export type LlmRole = 'system' | 'user' | 'assistant' | 'tool';
 
@@ -141,7 +143,8 @@ export class OpenAiCompatibleClient implements LlmClient {
   private responseFormat: boolean;
 
   constructor(options: AgentLlmOptions) {
-    this.baseUrl = options.baseUrl.replace(/\/+$/, '');
+    this.baseUrl = normalizeBaseUrl(options.baseUrl);
+    assertSafeApiKeyUrl(new URL(this.baseUrl));
     this.apiKey = options.apiKey;
     this.model = options.model;
     this.getTools = typeof options.tools === 'function' ? options.tools : () => options.tools as AgentToolSummary[];
