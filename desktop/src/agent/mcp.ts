@@ -8,6 +8,7 @@ import {
 import type { AgentTools } from './tools.ts';
 import { authorizeAgentToolCall, type ConfirmAgentToolWrite } from './policy.ts';
 import { WRITE_TOOLS } from './router.ts';
+import { AGENT_TOOL_MODULES } from '../modules/tool-gates.ts';
 import {
   DesktopRpcError,
   DesktopRpcUnavailableError,
@@ -31,7 +32,9 @@ const DESKTOP_REQUIRED_TOOLS = new Set([
   'get_project_context',
   'run_interference_check',
   'suggest_kinematics',
-  'run_cost_report'
+  'run_cost_report',
+  'run_electrical_check',
+  'verify_plc_program'
 ]);
 
 const DESKTOP_NOT_RUNNING = {

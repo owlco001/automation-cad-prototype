@@ -4603,7 +4603,8 @@ async function bootstrap(): Promise<void> {
     getTools: () => agentTools,
     getBus: () => commandBus,
     getWindow: () => mainWindow,
-    trustedUiPath: indexHtmlPath()
+    trustedUiPath: indexHtmlPath(),
+    isAgentResumeEnabled: () => agentResumeModuleEnabled
   });
 
   app.on('activate', () => {

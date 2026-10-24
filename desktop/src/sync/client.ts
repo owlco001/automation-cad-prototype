@@ -1,4 +1,4 @@
-import { sha256Hex } from './package.ts';
+import { MAX_DESIGN_PACKAGE_BYTES, sha256Hex } from './package.ts';
 import { normalizeBaseUrl } from './config.ts';
 import { assertSafeApiKeyUrl } from '../shared/api-key-transport.ts';
 import type {

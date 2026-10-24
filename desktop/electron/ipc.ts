@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent, type OpenDialogOptions } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent, type OpenDialogOptions, type WebContents } from 'electron';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, extname, join, resolve, sep } from 'node:path';
@@ -116,6 +116,7 @@ export interface AgentChatIpcContext {
   getBus(): CommandBus | null;
   getWindow(): BrowserWindow | null;
   trustedUiPath: string;
+  isAgentResumeEnabled(): boolean;
 }
 
 export { CAD_EXTENSIONS } from '../src/shared/cad';
