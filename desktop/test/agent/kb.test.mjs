@@ -182,6 +182,33 @@ test('kb.json 与源文件标题 hash 同步（改 md 忘记重建会被发现�
   }
 });
 
+test('省略重复标题元数据但保留标题 hash 与全部 chunk 字段', () => {
+  const rebuilt = buildKnowledgeBase({ repoRoot: REPO_ROOT, generatedAt: 'compact-check' });
+  assert.deepEqual(kb.chunks, rebuilt.chunks);
+  for (const path of KB_DOC_FILES) {
+    const expectedPath = `docs/desktop/${path}`;
+    const committed = docSource(expectedPath);
+    const markdown = readFileSync(resolve(REPO_ROOT, expectedPath), 'utf8');
+    assert.ok(committed?.headingHash, `${expectedPath} 缺少标题 hash`);
+    assert.equal(committed.headingHash, computeHeadingHash(markdown), `${expectedPath} 标题 hash 已变化`);
+    assert.equal(Object.hasOwn(committed, 'headings'), false, `${expectedPath} 不应重复序列化标题清单`);
+  }
+});
+
+test('BACKLOG 索引保留当前 P0–P2 和未决事项，跳过归档/纯运维内容以维持余量', () => {
+  const backlogChunks = kb.chunks.filter((chunk) => chunk.file === 'docs/desktop/BACKLOG.md');
+  const text = backlogChunks.map((chunk) => chunk.text).join('\n');
+  assert.match(text, /P1：PLC 同步扩展外部联调/);
+  assert.match(text, /P1：可移植工程档案恢复/);
+  assert.match(text, /P2：Core-only 最小化安装与可选模块独立分发/);
+  assert.match(text, /Core 项目附件续测/);
+  assert.match(text, /32 MiB/);
+  assert.match(text, /STEP\/STP\/IGES/);
+  assert.match(text, /\| D2 \|/);
+  assert.doesNotMatch(text, /仓库双推约定|SMOKE_OK|历史问题原文见/);
+  assert.ok(kb.meta.bytes <= KB_MAX_BYTES * 0.95);
+});
+
 test('search_docs 工具返回 hits 且校验参数', async () => {
   const tools = new AgentTools({ listParts: () => [] });
   const summary = tools.summaries().find((tool) => tool.name === 'search_docs');

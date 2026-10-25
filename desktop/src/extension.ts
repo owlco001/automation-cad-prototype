@@ -39,6 +39,7 @@ import { initModuleSettingsUi } from './modules/ui';
 import { initUpdatePanel } from './update/ui';
 import { initCommissionPanel, type CommissionPanelHandle } from './commission/ui';
 import type { MachineConfig } from './commission/machine-config';
+import type { PlcTarget } from './plcgen/types.ts';
 import { buildOptionalSyncPlcPayload } from './sync/plc.ts';
 import { initSyncPanel } from './sync/ui';
 import { initAgentPanel, setAgentResumeModuleEnabled } from './agent/ui';
@@ -525,7 +526,7 @@ function buildReportHtml(): string {
   });
 }
 
-async function buildSyncPayload(): Promise<SyncUploadPayload> {
+async function buildSyncPayload(target: PlcTarget = 'generic'): Promise<SyncUploadPayload> {
   if (!viewer) throw new Error('请先在 CAD 查看器中打开模型');
   const bomRows = currentBomRows();
   if (bomRows.length === 0) throw new Error('当前模型没有可同步的 BOM 行');
@@ -537,7 +538,8 @@ async function buildSyncPayload(): Promise<SyncUploadPayload> {
   const plc = buildOptionalSyncPlcPayload(
     commission?.getMachineConfig() ?? null,
     modules.plcgen,
-    modules.plcSync
+    modules.plcSync,
+    target
   );
   return {
     projectName: exportBaseName(),
@@ -2190,7 +2192,10 @@ function init(): void {
     enumerable: false
   });
   initEnclosureUi();
-  initSyncPanel({ buildPayload: buildSyncPayload });
+  initSyncPanel({
+    buildPayload: (target) => buildSyncPayload(target),
+    getMachineContext: () => commission?.getMachineConfig() ?? null
+  });
   initAgentPanel();
   buildOverlay();
   refreshProjectArchiveControls();

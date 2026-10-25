@@ -1,7 +1,10 @@
 import type { MachineConfig } from '../commission/machine-config.ts';
 
-/** 生成目标；P8-3 只影响 README 注释与命名前缀，不改变 ST 内容。 */
-export type PlcTarget = 'generic' | 's7-1200' | 's7-1500' | 'codesys';
+/** 同步与生成面板共同使用的支持目标白名单。 */
+export const PLC_TARGETS = ['generic', 's7-1200', 's7-1500', 'codesys'] as const;
+
+/** 生成目标；当前只影响 README 注释与命名前缀，不改变 ST 内容。 */
+export type PlcTarget = typeof PLC_TARGETS[number];
 
 export interface Issue {
   code: string;

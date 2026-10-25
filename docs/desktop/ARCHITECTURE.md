@@ -76,6 +76,53 @@ class PackRegistry {
 interface AgentTool { name: string; description: string; inputSchema: object; handler(args: any): Promise<any> }
 ```
 
+## P1 决策草案：机型安全 IO 映射持久化（2026-10-25）
+
+**状态：提议，待确认；未实现。** 本节是后续实现边界，不代表当前应用已持久化安全映射、已通过 PLC 验收或可连接真实 PLC。
+
+### 审计结论（当前实现）
+
+- 机型方案确实存于既有 `userData/machine/<sanitized-id>.json`，active 指针位于 `machine/active.json`；读取器仍会把解析出的结构归一为 v1，未严格拒绝缺失/未知外层 schema/kind，也未交叉核验 profile 的 `id`、`config.id` 与请求的 machine ID 或 pointer 的 `machineId` 与 `file`。仓库 writer 历史上一直生成 v1 元数据，但仓库没有固定的历史 profile/pointer 字节 fixture；当前往返测试由同一 writer 动态生成，不能证明真实旧档案格式。故本轮不启用严格拒绝，待有经验证的历史字节 fixture 后再加校验，以免误拒绝旧文件。`writeText` 当前是直接写入，不是原子替换。
+- `MachineConfig` 仅包含 `id/name/stations/actuators/sensors`。`validateMachineConfig` 重新构造这几个字段，因此不会持久化或保留 PLC 扩展的 `safety`、`ioPoints`、传感器 `role/address/ioAddress` 等字段；`validateMachineDesign` 使用该 validator。当前机型档案中没有带机型身份、schema 版本和来源配置版本校验的安全点位/地址绑定。
+- `buildMachineIoMap` 从当前基础配置调用 `collectIoRefs` / `buildTags` 现场派生 CSV，不读取持久化映射。PLC 生成 UI 的 `localStorage` 持久化项是生成历史；同步上传也从联调面板当前 `MachineConfig` 重建 PLC 内容。模块开关和包内 machine ID/hash 校验不是安全映射持久化或用户确认。
+- 因此：本地存在机型方案档案和可重算的通用 IO 表，但不存在可证明安全的、逐机型持久化的 safety IO mapping。新增候选审阅导出不读取、生成、保存或导出该安全映射，也不改变既有 PLC 连接/模块门控。
+
+### 本地 PLC 候选审阅导出的安全边界（2026-10-25）
+
+下载包仍由主进程解析；只有成功解析后的含 PLC 候选才可由用户显式导出。候选只保存在主进程内存中，按 package ID 关联，15 分钟失效，并在新下载时替换。渲染层 IPC 不接受文件系统路径或候选内容；主进程核对应用主窗口的可信主 frame 后自行打开原生父目录选择器，并且只使用该次已校验的缓存候选。
+
+输出路径固定为 8 个 ST、`io-tags.csv` 和 `mapping.json`；机型 `plc/machine-io-map.csv` 与 manifest/README 均不输出。写出前再次执行 exact allowlist、相对路径与大小写唯一性、扩展类型、manifest 哈希、凭据特征和 1 MiB/8 MiB 上限校验。输出以 0600 独占创建到 0700 私有同级临时目录，成功后才原子改名为带 package ID 安全标签和随机后缀的新目录；目标存在拒绝，异常清理临时目录。此副本不安装、不应用、不执行 ST，不触碰当前工程/机型配置，不上传或连接 PLC。解析与审阅副本不等于 PLC 语法、安全性或硬件验收。
+
+### 建议的单一存储与最小 schema（待确认）
+
+不要新增 localStorage、sidecar 文件或第二份 machine registry。确认采用后，将映射嵌入现有 machine profile 文件，并升级外层 profile schema；最小示意：
+
+```json
+{
+  "schemaVersion": 2,
+  "kind": "machine-design",
+  "id": "machine-01",
+  "config": { "id": "machine-01", "name": "示例机型" },
+  "plcIoMapping": {
+    "schemaVersion": 1,
+    "machineId": "machine-01",
+    "sourceConfigSha256": "<规范化 MachineConfig 的 SHA-256>",
+    "safety": [
+      { "role": "emergencyStop", "point": "X8", "address": "I1.0" },
+      { "role": "safetyDoor", "point": "X9", "address": "I1.1" }
+    ]
+  }
+}
+```
+
+校验需核对支持的外层/映射 schema、profile 与映射的 `machineId` 一致、`sourceConfigSha256` 匹配规范化当前配置；每个安全点必须存在于该机型、方向为输入、地址合法且无重复/冲突，角色只能是显式枚举（急停/安全门/复位）。不得依据名称、`part` 文本或自动分配结果猜测安全角色；人工确认前映射未完成。PLC 同步的后续接入必须只消费该已验证映射。
+
+### 迁移与失败策略（待确认）
+
+- 旧 v1 档案可继续用于既有非 PLC 机型显示/编辑，但一律视为“无已确认安全映射”；不静默生成、不按名称迁移。只有用户显式复核并确认后，才写入带当前 machine ID 和配置摘要的 v2 档案。
+- 未知 schema、machine ID 不符、配置摘要过期、点位缺失/重复、地址非法或角色不合法时，保留原档案字节，不自动降级或部分套用；对要求安全映射的未来 PLC 生成/同步入口整体拒绝，不回退到 demo、启发式映射或自动地址表。非 PLC 工作流不因缺少映射而中断。
+- 映射变更须在临时文件中完成完整校验后原子替换，失败时原档案保持不变；读取不得触发迁移写入。实现前还需确定人工确认 UI、schema bump 与回滚验收测试。
+
 ## 5. 里程碑
 
 - **M1 基础外壳 + CAD 查看**（本轮）：Electron 可启动；打开/拖入 STEP/IGES/STL/OBJ/GLTF；零件树与三角面统计；缩放到适合；最近文件。
@@ -90,3 +137,4 @@ interface AgentTool { name: string; description: string; inputSchema: object; ha
 2. `npm test` 全绿：包校验（合法/缺字段/路径穿越）、STEP 解析（cube.stp 包围盒 300³）、Agent 工具注册表、JSON-RPC 鉴权。
 3. Electron 以 `--headless-smoke` 启动，主窗口 `did-finish-load` 后退出码 0，日志含 `SMOKE_OK`。
 4. GitHub Actions `windows.yml` 成功产出 `AutomationCAD-Setup-*.exe`（artifact 可下载）。
+输出路径固定为 8 个 ST、`io-tags.csv` 和 `mapping.json`；机型 `plc/machine-io-map.csv` 与 manifest/README 均不输出。写出前再次执行 exact allowlist、相对路径与大小写唯一性、扩展类型、manifest 哈希、凭据特征和 1 MiB/8 MiB 上限校验。输出以 0600 独占创建到 0700 私有同级临时目录，成功后才原子改名为带 package ID 短 SHA-256 标签和随机后缀的新目录；不写出原始 ID，目标存在即拒绝，异常清理临时目录。此副本不安装、不应用、不执行 ST，不触碰当前工程/机型配置，不上传或连接 PLC。解析与审阅副本不等于 PLC 语法、安全性或硬件验收。

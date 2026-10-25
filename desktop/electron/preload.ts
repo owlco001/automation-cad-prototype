@@ -170,7 +170,8 @@ const desktopApi = {
     list: () => ipcRenderer.invoke('sync:list'),
     diff: (packageId: string) => ipcRenderer.invoke('sync:diff', packageId),
     downloadCandidate: (packageId: string, machineContext?: unknown) =>
-      ipcRenderer.invoke('sync:downloadCandidate', packageId, machineContext)
+      ipcRenderer.invoke('sync:downloadCandidate', packageId, machineContext),
+    exportCandidateReview: (packageId: string) => ipcRenderer.invoke('sync:exportCandidateReview', packageId)
   },
   onOpenCad: (callback: (payload: OpenCadPayload) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: OpenCadPayload) => callback(payload);

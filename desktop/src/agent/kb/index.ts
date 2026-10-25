@@ -321,6 +321,45 @@ export interface BuildKnowledgeBaseOptions {
   maxChunks?: number;
 }
 
+/** Keep current work searchable without indexing material already archived or operational-only. */
+function prepareBacklogForIndex(markdown: string): string {
+  const lines = markdown.replace(/\r\n?/g, '\n').split('\n');
+  const headings = scanHeadings(markdown);
+  const excluded = new Set([
+    '模块门控、工程安全与更新通道（2026-10-24，本轮）',
+    '夜间执行约束',
+    '仓库双推约定（GitHub + Gitee，2026-10-24 起）'
+  ]);
+  for (let index = headings.length - 1; index >= 0; index -= 1) {
+    const heading = headings[index];
+    if (!heading) continue;
+    let endLine = lines.length;
+    for (let next = index + 1; next < headings.length; next += 1) {
+      const candidate = headings[next];
+      if (candidate && candidate.level <= heading.level) {
+        endLine = candidate.line - 1;
+        break;
+      }
+    }
+    const start = heading.line - 1;
+    if (excluded.has(heading.title)) {
+      for (let line = start; line < endLine; line += 1) lines[line] = '';
+      continue;
+    }
+    if (heading.title === '已知问题（记录，不阻塞）') {
+      for (let line = start + 1; line < endLine; line += 1) lines[line] = '';
+      lines[start + 1] = '历史问题原文保留于 BACKLOG-HISTORY.md；当前阻塞事项列在上方 P0–P2 待办中。';
+    }
+  }
+  for (let index = 0; index < lines.length; index += 1) {
+    if (/^\|\s*D(?:5|8|10)\s*\|/.test(lines[index] ?? '')) lines[index] = '';
+    if (/^\s+- (?:本轮局部进展（不代表 P2 完成）|新增 Windows x64 NSIS|2026-10-25 本地续测（不代表 P2 完成）|2026-10-25 Core CAD 预览续测)/u.test(lines[index] ?? '')) {
+      lines[index] = '';
+    }
+  }
+  return lines.join('\n');
+}
+
 /** 构建期生成索引；运行时不调用，启动也不扫盘。 */
 export function buildKnowledgeBase(options: BuildKnowledgeBaseOptions): KbData {
   const repoRoot = options.repoRoot;
@@ -334,14 +373,13 @@ export function buildKnowledgeBase(options: BuildKnowledgeBaseOptions): KbData {
   for (const name of KB_DOC_FILES) {
     const filePath = join(docsDir, name);
     const markdown = readFileSync(filePath, 'utf8');
-    const headings = scanHeadings(markdown);
-    const docChunks = chunkMarkdown(`docs/desktop/${name}`, markdown);
+    const indexMarkdown = name === 'BACKLOG.md' ? prepareBacklogForIndex(markdown) : markdown;
+    const docChunks = chunkMarkdown(`docs/desktop/${name}`, indexMarkdown);
     chunks.push(...docChunks);
     sources.push({
       path: `docs/desktop/${name}`,
       kind: 'doc',
       headingHash: computeHeadingHash(markdown),
-      headings: headings.map((heading) => heading.title),
       chunks: docChunks.length
     });
   }

@@ -1,15 +1,23 @@
-# 项目状态 · 2026-10-24
+# 项目状态 · 2026-10-25
 
 ## 概览
 
 - 基线：远端 `main` 为 `0d69dc0`；本轮实现提交 `eb0c830`，位于独立分支 `feat/desktop-module-safety-update`，PR 待审且未合并。PR #6、#7 与原 PR #8 分支均保持不变。
-- 版本：`desktop/package.json` → **0.3.0**；本轮未打包、未触发 Windows workflow、未打 tag 或创建 Release。
+- 版本：`desktop/package.json` → **0.3.0**；本轮仅生成不覆盖既有产物的 Linux Core 验证包，未提交/推送/开 PR、构建 Windows installer、触发 Windows workflow、签名、打 tag 或创建 Release。
 - 测试：最新 main 基线上 `TZ=UTC npm test` **1800/1800 通过，0 失败、0 跳过**。
 - 构建与冒烟：`npm run build:ext` 通过（含 TypeScript 检查）；fake parametric sidecar 下 Electron headless smoke 最终输出 `SMOKE_OK`。覆盖模块门控、Agent checkpoint、CAD 只读导入/参数化、PLC/sync 和 10 个元器件包校验。
 - 评估：最近一次既有记录 `npm run eval:agent` 为 `EVAL_AGENT_OK accuracy=1.00 tools=1.00 refused=1.00`；本轮未重跑离线或真实模型评估。
 - 最近发布：`v0.3.0` NSIS `AutomationCAD-Setup-0.3.0.exe`（129 MB，未签名；上一版 `v0.2.0`）。本轮更新通道只有 mock/本机代码路径验证，未做真实签名或升级验收。
 
-## 验证记录（本轮真实执行）
+## P1/P2 本地续测（2026-10-25；覆盖上方旧快照的相关状态）
+
+- PR #9 已合并。当前工作分支为 `feat/desktop-module-safety-update`，保留既有未提交改动；本轮未提交、推送或修改 PR。
+- 前次全量基线 `TZ=UTC npm test`：1829/1829 通过，0 失败、0 跳过；本轮最终 KB 重建包含 13 份文档、356 个 chunk、未截断且满足至少 5% 容量预留。KB 专项回归包含逐 chunk/hash 校验。
+- P1 PLC 本地目标选择器已实现：默认 `generic`，支持 `generic`、`s7-1200`、`s7-1500`、`codesys`，所选目标写入 `manifest.plc`。现可在 PLC 候选成功解析后显式导出新的本地审阅副本；只含白名单 ST、`io-tags.csv`、`mapping.json`，不含机型 IO CSV；不安装/应用、不执行 ST、不改当前工程或机型配置、不上传或连接 PLC。服务端兼容/真实联调、所有者批准的工程应用流程和机型安全 IO mapping 持久化仍待完成。便携工程档案恢复继续只读预览，跨机器几何重绑定及多状态整体事务尚未证明。
+- 本轮验证：新增审阅导出 8 项及主 frame 授权 4 项专项测试通过；`npm run build:ext`、Electron `npm run smoke`（`SMOKE_OK`）通过；`TZ=UTC npm test` **1859/1859** 通过。KB 重建为 13 文档/356 chunks/388,662 B，未截断，余量 5.11%。未联接真实服务端或 PLC。
+- P2 当前仍未验收：旧验证包括 Core runtime/Profile、10 个独立模块 ZIP 与 Linux x64 unpacked Core；此前模块 ZIP 合计 129,709 bytes。当前独立 Core 支持只读 STL（二进制/ASCII）和受限 GLB 静态网格预览，并可在用户明确打开/新建项目后，将主进程解析通过的文件保存为不可变 SHA-256 项目附件；独立附件索引 schema v1 原子更新，解析/复制/索引失败保持既有状态，不支持 STEP/STP/IGES。Core 九文件白名单不变，`installable: false`、unsigned 模块阻止激活、生产 feed/签名信任未配置。最终 fresh-output Linux 包 `desktop/release/core-runtime-linux-unpacked-p2-attachment-final-20261025/` 为 287,374,989 B，较此前预览包增加 38,647 B（0.01345%），仍比完整版小约 37.1%；TypeScript、29 项 Core/附件/Windows 契约专项测试及实际 Electron packaged smoke（附件添加并重开、畸形 GLB 失败保留、源文件不变、外部请求 0）通过。完整 `TZ=UTC npm test` 通过 **1851/1851**；KB 13 文档/356 chunks、未截断并满足至少 5% 空间预留。未构建 Windows installer；完整离线工作区、CAD 编辑/STEP B-rep、PLC 和生产模块激活仍未实现。此前下方 2026-10-24 验证表为旧轮次记录。
+
+## 验证记录（2026-10-24 主线整体验收）
 
 | 命令 | 结果 |
 |------|------|

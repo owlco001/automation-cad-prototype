@@ -2,7 +2,7 @@ import AdmZip from 'adm-zip';
 import { createHash } from 'node:crypto';
 import { buildMachineIoMap } from '../machine/io-map.ts';
 import { validateMachineConfig, type MachineConfig } from '../commission/machine-config.ts';
-import type { PlcTarget } from '../plcgen/types.ts';
+import { PLC_TARGETS, type PlcTarget } from '../plcgen/types.ts';
 import { PLCGEN_VERSION } from '../plcgen/st.ts';
 import {
   DESIGN_MANIFEST_SCHEMA_VERSION,
@@ -33,7 +33,6 @@ export const MAX_PLC_TOTAL_BYTES = 8 * 1024 * 1024;
 export const MAX_PLC_PROGRAM_FILES = 10;
 export const MAX_MANIFEST_BYTES = 1024 * 1024;
 
-const PLC_TARGETS = ['generic', 's7-1200', 's7-1500', 'codesys'] as const satisfies readonly PlcTarget[];
 const PLC_PROGRAM_PATHS = [
   'plc/src/OB1_Main.st',
   'plc/src/DB_IO.st',
@@ -137,7 +136,7 @@ function isSafeRelativePath(path: string): boolean {
   return parts.every((part) => part.length > 0 && part !== '.' && part !== '..' && !/[\u0000-\u001f\u007f]/.test(part));
 }
 
-function validatePlcText(value: string, path: string): Uint8Array {
+export function validatePlcText(value: string, path: string): Uint8Array {
   const bytes = bytesOf(value);
   if (bytes.byteLength === 0) throw new Error(`PLC 文件不能为空：${path}`);
   if (bytes.byteLength > MAX_PLC_FILE_BYTES) throw new Error(`PLC 文件超过 1 MiB 上限：${path}`);
@@ -467,7 +466,7 @@ export function parseDesignPackage(
     if (ref.plc) {
       actualPlcTotal += bytes.byteLength;
       const text = decodeUtf8(bytes, path);
-      if (CREDENTIAL_PATTERNS.some((pattern) => pattern.test(text))) throw new Error(`PLC 文件疑似包含密钥或凭据：${path}`);
+      validatePlcText(text, path);
       if (path === plc?.mapping.path) mappingCsv = text;
       else parsedProgramFiles.push({ path: path.slice('plc/'.length), content: text });
     }

@@ -1,0 +1,36 @@
+{
+  "appId": "cn.automationcad.core.runtime",
+  "productName": "AutomationCAD Core",
+  "asar": true,
+  "directories": {
+    "output": "../release/core-runtime-windows-nsis"
+  },
+  "files": [
+    "core-main.cjs",
+    "core-preload.cjs",
+    "core.html",
+    "core.css",
+    "core-viewer.js",
+    "renderer.js",
+    "THREE-LICENSE.txt",
+    "package.json",
+    "profile.json"
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": [
+          "x64"
+        ]
+      }
+    ],
+    "signAndEditExecutable": false
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "differentialPackage": false,
+    "artifactName": "AutomationCAD-Core-Setup-${version}.${ext}"
+  }
+}

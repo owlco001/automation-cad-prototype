@@ -24,6 +24,10 @@ schema v2 可收录经现有 schema 验证的 Parametric feature tree、具有 `
 
 每个 payload 的大小和 SHA-256 必须匹配 manifest；源 identity 还与 CAD dependency 的原名、大小、hash 交叉验证。哈希和路径校验提供损坏检测/结构完整性，不提供作者认证：manifest 未签名，能同时改写 ZIP 与 manifest 的人也能重新计算 payload 摘要。CAD loader 的 B-rep/几何有效性与跨设备模型等价性不由 archive parser 保证。
 
+## 恢复安全审计（2026-10-25）
+
+本轮复核确认仍无档案应用 API、跨机器几何重绑定证明或 viewer/参数化/运动学/视角与持久状态的整体事务。恢复 API 前还须收紧 archive IPC 的主 frame/本地页面来源校验，并处理损坏的参数化/运动学 localStorage bucket：当前坏数据会回退为空桶，后续写入可能覆盖原记录。详细缺口、事务设计和故障注入验收见 [PROJECT-ARCHIVE-RESTORE-BOUNDARY.md](../../../docs/desktop/PROJECT-ARCHIVE-RESTORE-BOUNDARY.md)。
+
 ## API 与测试
 
 - `resolveCadProjectIdentity(...)`：依据本机 identity registry 创建或复用持久工程 ID，并从当前 import 网格数据生成确定性的 model identity；registry 损坏/歧义时 fail-closed，不按 basename 自动回退。

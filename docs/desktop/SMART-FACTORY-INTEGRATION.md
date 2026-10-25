@@ -184,3 +184,4 @@ SYNC_E2E_OK package=dsp_4f91342229f84bbc99dfef09e51257f6 dup=true diff=1 bytes=8
 - 生产实例 `221.231.106.194:5556` 从开发机不可达，本节验证只证明 0.22.0 代码在本地临时库上可用，不代表生产已部署。
 - 端到端使用 loopback + 临时 SQLite + 最小 GLB 占位文件，不覆盖真实 CAD 几何、生产网络、反向代理/HTTPS 与密钥轮换。
 - 该脚本调用真实后端与真实文件系统，故意不纳入 `npm test`/`npm run smoke`；单测仍只打本地 mock。
+PLC 扩展限 8 个 ST、`io-tags.csv`、`mapping.json` 与机型 IO CSV；每项 ≤1 MiB、总量 ≤8 MiB，并校验目标/版本、白名单路径、哈希、凭据与可用的机型映射。候选解析只读；成功后用户可显式导出十个程序文件到新建本地审阅目录。主进程打开父目录选择器，渲染层只传 package ID；导出不含机型 IO CSV，不安装/应用、不执行 ST、不改工程、不上传或连接 PLC。机型安全映射 schema 仍未确定，生产服务端未联调。

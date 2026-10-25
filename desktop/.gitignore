@@ -1,5 +1,8 @@
 node_modules/
 dist/
 dist-electron/
+dist-profiles/
+dist-core/
+dist-core-p2-*/
 release/
 *.tsbuildinfo

@@ -14,9 +14,18 @@
 ## 待办（按优先级）
 
 - **P0：Windows 更新真实验收**：维护者配置并保护代码签名证书/密码、核对 Authenticode Subject；在隔离 Windows 环境验证 stable/beta 升级、签名与 SHA-512 拒绝、blockmap 失败回退、断网/磁盘不足及安装恢复。当前本地 mock/Linux smoke 不替代此项，未通过前不发布。
-- **P1：PLC 同步扩展外部联调**：服务端先兼容 `manifest.plc` 与 `plc/` 文件，再验证真实上传/下载；补目标 PLC 平台选择、下载候选 UI 与显式应用流程，并决定机型安全 IO mapping 的持久化口径。
+- **P1：PLC 同步扩展外部联调**：本地目标 PLC 平台选择已实现并测试（默认 `generic`，支持目标写入 `manifest.plc`）；新增的下载候选能力仅允许用户显式导出受限的本地审阅副本，不是安装或应用。服务端兼容性与真实上传/下载联调、经所有者确认的显式工程应用流程及机型安全 IO mapping 持久化口径仍待完成。
+-  - 2026-10-25 本地审计：既有 machine profile 仅保存基础 `MachineConfig`，PLC safety 扩展会被 validator 丢弃；IO 表由当前配置派生，未发现带 machine ID/schema/配置摘要校验的持久安全映射。持久化 schema、旧档案迁移和失败关闭草案见 [ARCHITECTURE.md](ARCHITECTURE.md#p1-决策草案机型安全-io-映射持久化2026-10-25)。本轮只增加经过可信主 frame IPC 的显式本地审阅导出；未改变安全映射、同步门控或 PLC 连接行为。待决策/实现事项仍未完成。
 - **P1：可移植工程档案恢复**：在只读严格预览后设计用户确认的显式应用、备份与事务回滚；补跨机器 CAD 几何复核，并继续定义尚未纳入的 PLC/工厂/Agent 数据迁移。
-- **P1/P2：扩展模块化边界**：继续迁移尚未门控的机械、CAD 只读/运动学、工厂、同步和通用导出能力；当前开关不卸载应用内代码。真正的按需下载须另行设计签名包、兼容性、离线安装和回滚。
+  - 2026-10-25 本地安全审计：当前无可证明的跨机器几何重绑定或 viewer/参数化/运动学/视角/持久状态整体事务；未启用部分恢复，继续只读预览。事务设计与故障注入验收条件见 [PROJECT-ARCHIVE-RESTORE-BOUNDARY.md](PROJECT-ARCHIVE-RESTORE-BOUNDARY.md)。本项仍为未完成待办。
+- **P2：Core-only 最小化安装与可选模块独立分发（部分原型已实现，尚未验收）**：提供仅含 Core 的安装方式，将可选模块拆分为独立构建产物，并支持用户安装后按需选择下载模块；继续迁移尚未门控的机械、CAD 只读/运动学、工厂、同步和通用导出能力。完整版仍把功能代码编入同一个 renderer IIFE；独立制品和 Core 原型尚未形成生产安装/激活渠道。
+  - 验收条件：不含可选模块时 Core 可离线工作；模块可分别选择、下载、更新和卸载；安装/更新前校验兼容性与声明权限；模块数据在卸载及更新时得到保留；模块安装或更新失败不会破坏 Core。
+  - 本轮局部进展（不代表 P2 完成）：独立 Core 已支持本机项目列表、新建、打开和保存；Core 页面增加固定来源目录浏览、多选及下载到应用数据目录暂存区的原型，并校验 schema/ID/版本/兼容性/大小/hash。生产目录源仍未配置；loopback mock 仅用于测试，包未签名且不解压、不执行、不激活。Core 仍为 `installable: false`，不含完整 CAD 工作区。详见 [CORE-LOCAL-PROJECTS.md](CORE-LOCAL-PROJECTS.md) 与 [MODULE-ARTIFACTS.md](MODULE-ARTIFACTS.md)。
+  - 新增 Windows x64 NSIS 专用白名单配置、构建/包内容检查脚本及契约测试；本轮因 Linux 主机无 Windows Electron/NSIS 缓存且不会为此下载大型目标工具链，未运行实际 installer 构建或 Windows 安装/smoke。没有安装包可交付；Core 仍不是完整 CAD 工作区，`installable` 保持 `false`。
+  - 2026-10-25 本地续测（不代表 P2 完成）：在隔离临时副本中按当前工作树完成 Core runtime + Core profile + 10 个独立模块包构建，并生成 Linux x64 unpacked Core 验证包；全量测试 1825/1825、最终目录模块 ZIP/清单校验及实际 Electron 包 smoke 通过。输出位于 `desktop/release/core-runtime-linux-unpacked-p1-20261025/` 和 `desktop/release/module-artifacts-p1-20261025/`。产物未签名，Core 保持 `installable: false`，模块仍阻止激活；未构建 Windows installer、未签名/发布或连接外部服务。Windows 安装验收仍待完成。
+  - 本轮局部进展（不代表 P2 完成）：用户现可按已暂存包的模块 ID/版本清理单个已下载 ZIP 缓存包以释放暂存空间；它只是 cache cleanup，不是模块卸载，不删除/迁移/修改项目数据或其他包，也不解压、安装、更新、执行或激活模块。staging 未显式启用或目录不安全时会拒绝操作；清理不依赖目录源且不发网络请求。生产目录源仍未配置，unsigned 包仍不可信且激活被阻止；Windows installer、生产 feed、签名信任、完整安装/更新/卸载，以及数据保留/回滚仍未完成。
+  - 2026-10-25 Core CAD 预览续测（仍不代表 P2 完成）：独立 Core runtime 增加只读 STL（二进制/ASCII）和受限 GLB 2.0 静态三角网格预览，原生主进程文件对话框仅接受 `.stl`/`.glb`；单文件上限 32 MiB，三角形上限 500,000、顶点上限 1,000,000。GLB 外部资源、扩展、纹理、动画和骨骼均拒绝；不含 STEP/STP 支持，不编辑/保存 CAD、不应用档案、不执行模块、不访问 PLC，CSP 禁止网络。Core `app.asar` 仅增列独立 viewer bundle 和 Three.js MIT 声明，合计 9 个白名单文件。新 Linux x64 unpacked 目录 287,335,398 B（274.02 MiB），相较此前同机 Core 286,741,709 B 增 593,689 B（0.57 MiB，0.21%）；仍比完整版 456,857,771 B 小 37.1%，但不是安装包或完整 CAD 工作区。实际打包 Electron 使用合成 STL/GLB 验证渲染、坏 GLB 与 `.stp` 拒绝且失败不替换现有预览，外部请求为 0；Core 本机项目 smoke、TypeScript、17 项专项测试、Windows 九文件 allowlist 预检和全量 `TZ=UTC npm test`（1844/1844）通过。未构建 Windows installer；`installable: false`、签名信任与可选模块激活策略保持不变。
+  - 2026-10-25 Core 项目附件续测（不代表 P2 完成）：在原项目元数据 schema v1 之外新增独立附件索引 v1；仅允许主进程解析通过的 STL/有限 GLB（每文件最多 32 MiB），按 UUID + SHA-256 存为不可覆盖的只读对象，索引原子更新。必须先明确打开/新建项目，可从附件列表重开；源文件不变，失败不改变项目元数据或已登记附件。不支持 STEP/STP/IGES、任意路径、外部资源、PLC 或模块执行。解析、复制、索引写失败、并发去重、不安全 ID/hash 与 symlink 故障注入 **29/29 专项测试通过**；最终 fresh-output Linux Core packaged smoke 验证 STL/GLB 预览、添加并重开、畸形 GLB 拒绝且项目状态/源文件保持、外部请求 0。最终 unpacked 包 287,374,989 B，较此前 Core 预览包增加 38,647 B（0.01345%）。全量测试与 KB 同步结果见本轮状态记录。Core 仍 `installable: false`，生产 feed、签名信任和激活继续阻止。
 
 ## 待决策（需要老王拍板，不阻塞其他开发）
 

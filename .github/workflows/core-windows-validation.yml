@@ -1,0 +1,101 @@
+name: core-windows-nsis-validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-core-nsis:
+    name: Build unsigned Core NSIS test package
+    runs-on: windows-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: desktop
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+    steps:
+      - name: Check out selected ref
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Core NSIS contract tests
+        run: node --test test/core-windows-nsis.test.mjs
+
+      - name: Build unsigned Core NSIS installer
+        run: npm run build:core:win-nsis
+
+      - name: Verify packaged app.asar allowlist and Core profile
+        shell: pwsh
+        run: |
+          @'
+          import { readFileSync } from 'node:fs';
+          import asar from '@electron/asar';
+          import { CORE_RUNTIME_FILES, inspectCoreWindowsPackage } from './scripts/core-windows-nsis-contract.mjs';
+
+          const outputDir = 'release/core-runtime-windows-nsis';
+          const appDir = `${outputDir}/win-unpacked`;
+          const archivePath = `${appDir}/resources/app.asar`;
+          const { version } = JSON.parse(readFileSync('package.json', 'utf8'));
+          const installerPath = `${outputDir}/AutomationCAD-Core-Setup-${version}.exe`;
+          const result = inspectCoreWindowsPackage({ appDir, installerPath });
+          const profile = JSON.parse(asar.extractFile(archivePath, 'profile.json').toString('utf8'));
+          const actualFiles = asar.listPackage(archivePath, { isPack: false })
+            .map((name) => name.replace(/^\/+/, ''))
+            .sort();
+          const expectedFiles = [...CORE_RUNTIME_FILES].sort();
+          if (actualFiles.join('\n') !== expectedFiles.join('\n')) {
+            throw new Error(`Unexpected app.asar file allowlist: ${actualFiles.join(', ')}`);
+          }
+          if (
+            profile.profile !== 'core-only' ||
+            profile.runtime !== 'separate-electron-shell' ||
+            profile.optionalRuntime !== 'not-present' ||
+            profile.installable !== false ||
+            profile.authenticity !== 'unsigned-build-artifact' ||
+            profile.offlineCapability !== 'project-store-local-only' ||
+            profile.workspaceCapability !== 'local-project-store-v1'
+          ) {
+            throw new Error(`Unexpected Core profile flags: ${JSON.stringify(profile)}`);
+          }
+          console.log(`CORE_PACKAGE_VERIFY_OK files=${actualFiles.length} profile=${profile.profile} installable=${profile.installable} signed=false installerBytes=${result.installerBytes}`);
+          '@ | node --input-type=module
+
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $installer = Join-Path 'release/core-runtime-windows-nsis' "AutomationCAD-Core-Setup-$version.exe"
+          $signature = Get-AuthenticodeSignature $installer
+          if ($signature.Status -ne 'NotSigned') {
+            throw "Expected an unsigned test installer, received Authenticode status: $($signature.Status)"
+          }
+          Write-Host 'CORE_INSTALLER_UNSIGNED_OK'
+
+      # This smoke launches a BrowserWindow and executes renderer UI operations. The hosted
+      # Windows runner has no reliable interactive desktop, so keep the package UI smoke visibly skipped.
+      - name: Packaged Core UI smoke (skipped; no interactive desktop)
+        if: ${{ false }}
+        shell: pwsh
+        run: |
+          throw 'Intentionally skipped: hosted Windows runner does not provide a reliable interactive desktop.'
+
+      - name: Upload unsigned Core installer test artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-nsis-unsigned-validation-${{ github.run_id }}
+          path: desktop/release/core-runtime-windows-nsis/AutomationCAD-Core-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 3

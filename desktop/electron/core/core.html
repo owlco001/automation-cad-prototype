@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>AutomationCAD Core</title>
+  <link rel="stylesheet" href="./core.css">
+  <script defer src="./core-viewer.js"></script>
+  <script defer src="./renderer.js"></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="brand">
+      <div class="brand-mark" aria-hidden="true">A</div>
+      <div>
+        <p class="eyebrow">AUTOMATIONCAD · CORE PROFILE</p>
+        <h1>Core 本地工作区</h1>
+      </div>
+      <span id="startup-status" class="status-pill" role="status" aria-live="polite">正在启动…</span>
+    </header>
+
+    <section class="status-card" aria-labelledby="runtime-title">
+      <div class="status-heading">
+        <div>
+          <p class="eyebrow">运行边界</p>
+          <h2 id="runtime-title">Core-only 本地项目存储</h2>
+        </div>
+      </div>
+      <dl class="facts">
+        <div><dt>应用版本</dt><dd id="app-version">读取中</dd></div>
+        <div><dt>运行配置</dt><dd id="runtime-profile">读取中</dd></div>
+        <div><dt>可选模块</dt><dd id="optional-modules">读取中</dd></div>
+        <div><dt>离线范围</dt><dd id="offline-capability">读取中</dd></div>
+        <div><dt>安装状态</dt><dd id="installability">读取中</dd></div>
+        <div><dt>工作区能力</dt><dd id="workspace-capability">读取中</dd></div>
+        <div><dt>CAD 预览</dt><dd id="cad-preview-capability">读取中</dd></div>
+      </dl>
+    </section>
+
+    <section id="cad-preview-panel" class="cad-preview-card" aria-labelledby="cad-preview-title" data-preview-state="idle">
+      <div class="cad-preview-heading">
+        <div>
+          <p class="eyebrow">本机文件 · 只读 · 可选择保存为项目附件</p>
+          <h2 id="cad-preview-title">CAD 网格预览</h2>
+        </div>
+        <div class="cad-preview-actions">
+          <button id="reset-cad-preview-view" class="button" type="button">重置视角</button>
+          <button id="open-cad-preview" class="button button-primary" type="button">打开 STL / GLB</button>
+        </div>
+      </div>
+      <p id="cad-preview-status" class="workspace-status" role="status" aria-live="polite" data-kind="neutral">尚未打开模型。</p>
+      <div id="cad-preview-view" class="cad-preview-view" aria-label="只读 CAD 模型视口"></div>
+      <div class="cad-preview-meta">
+        <strong id="cad-preview-file">尚无模型</strong>
+        <span id="cad-preview-summary">支持 STL 与静态、未压缩、无纹理的 GLB；单文件最多 32 MiB、50 万三角面。仅可只读预览；用户可显式将所选原文件的字节作为不可变项目附件保存，不编辑或另存 CAD。</span>
+      </div>
+      <section class="project-cad-attachments" aria-labelledby="project-cad-attachments-title">
+        <div class="project-cad-attachments-heading">
+          <h3 id="project-cad-attachments-title">项目预览附件</h3>
+          <button id="add-project-cad-attachment" class="button button-primary" type="button" disabled>添加 STL / GLB 附件</button>
+        </div>
+        <p id="cad-project-current" class="cad-project-current" data-project-id="">当前未选择项目；请先新建项目或从本机项目列表明确打开一个项目。</p>
+        <p id="empty-project-cad-attachments" class="empty-state">先明确打开或新建一个项目，再添加附件。</p>
+        <ul id="project-cad-attachment-list" class="project-cad-attachment-list" aria-label="当前项目 CAD 预览附件"></ul>
+      </section>
+    </section>
+
+    <section class="workspace-card" aria-labelledby="workspace-title">
+      <div class="workspace-heading">
+        <div>
+          <p class="eyebrow">本地存储 · schema v1</p>
+          <h2 id="workspace-title">项目</h2>
+        </div>
+        <form id="create-project-form" class="create-form">
+          <label class="visually-hidden" for="new-project-name">新项目名称</label>
+          <input id="new-project-name" name="name" type="text" maxlength="100" autocomplete="off" placeholder="新项目名称" required>
+          <button id="create-project-button" class="button button-primary" type="submit">新建项目</button>
+        </form>
+      </div>
+      <p id="workspace-status" class="workspace-status" role="status" aria-live="polite">正在读取本地项目…</p>
+      <div class="workspace-grid">
+        <section class="editor-panel" aria-label="当前项目编辑器">
+          <label for="project-name">项目名称</label>
+          <input id="project-name" type="text" maxlength="100" autocomplete="off" disabled>
+          <label for="project-notes">项目备注</label>
+          <textarea id="project-notes" rows="9" maxlength="20000" placeholder="记录设计目标、设备范围或待确认事项。" disabled></textarea>
+          <div class="editor-footer">
+            <span id="project-updated">尚未打开项目</span>
+            <button id="save-project" class="button button-primary" type="button" disabled>保存项目</button>
+          </div>
+        </section>
+        <aside class="project-list-panel" aria-labelledby="project-list-title">
+          <h3 id="project-list-title">本机项目</h3>
+          <p id="empty-projects" class="empty-state">还没有项目。新建项目后会保存在此设备。</p>
+          <ul id="project-list" class="project-list"></ul>
+        </aside>
+      </div>
+    </section>
+
+    <section class="modules-card" aria-labelledby="modules-title">
+      <div class="modules-heading">
+        <div>
+          <p class="eyebrow">固定来源 · 下载暂存原型</p>
+          <h2 id="modules-title">可选模块</h2>
+        </div>
+        <button id="refresh-modules" class="button" type="button">刷新目录</button>
+      </div>
+      <p id="module-status" class="workspace-status" role="status" aria-live="polite">正在读取模块目录…</p>
+      <p class="module-policy">目录来源由应用固定配置，页面不接受自定义地址。模块 ZIP 与内部清单会校验 ID、版本、大小和 SHA-256；下载只进入本机暂存区，不解压、不运行、不安装或激活。可清理单个已下载缓存 ZIP 以释放空间；这不是模块卸载，不会修改项目数据或其他暂存包。unsigned 包仍不可信，激活被阻止。</p>
+      <p id="empty-modules" class="empty-state">尚未配置经审核的固定模块目录来源；当前没有可下载模块。</p>
+      <ul id="module-list" class="module-list" aria-label="可选模块"></ul>
+      <div class="module-actions">
+        <button id="download-selected-modules" class="button button-primary" type="button" disabled>下载所选到暂存区</button>
+      </div>
+      <div class="staged-heading">
+        <h3>本机暂存缓存包</h3>
+        <span>未签名 · 不可信 · 激活被阻止</span>
+      </div>
+      <p id="empty-staged-modules" class="empty-state">还没有已暂存模块包。</p>
+      <ul id="staged-module-list" class="staged-module-list" aria-label="本机暂存模块"></ul>
+    </section>
+
+    <aside class="notice" aria-label="能力范围说明">
+      <strong>当前范围</strong>
+      <p>项目名称与备注可在本机离线创建、打开和保存；CAD 只支持 STL/有限 GLB 只读预览，并可由用户显式添加为不可变项目附件，不编辑、另存或删除 CAD。这不代表 CAD 建模、STEP/B-rep、PLC、同步、模块安装或完整离线工作流已实现或验收。模块目录来源当前未配置，暂存包也不能安装或执行。</p>
+    </aside>
+    <footer>项目与下载包留在应用专用数据目录；页面不能访问任意文件路径或网络。CAD 文件仅由主进程通过系统文件对话框读取；显式添加时仅保存主进程解析通过的 STL/GLB 原始字节为 SHA-256 内容寻址附件，来源文件不改写，附件不可替换或删除。</footer>
+  </main>
+</body>
+</html>

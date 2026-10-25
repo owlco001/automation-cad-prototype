@@ -205,6 +205,15 @@ interface DesktopSyncDownloadCandidateResult {
   code?: string;
 }
 
+interface DesktopSyncCandidateReviewExportResult {
+  ok: boolean;
+  canceled?: boolean;
+  folderName?: string;
+  fileCount?: number;
+  code?: string;
+  message?: string;
+}
+
 type DesktopParametricStatus = 'stopped' | 'starting' | 'ready' | 'unavailable' | 'crashed';
 
 interface DesktopParametricStatusInfo {
@@ -898,6 +907,7 @@ interface Window {
       list(): Promise<DesktopSyncListResult>;
       diff(packageId: string): Promise<DesktopSyncDiffResult>;
       downloadCandidate(packageId: string, machineContext?: unknown): Promise<DesktopSyncDownloadCandidateResult>;
+      exportCandidateReview(packageId: string): Promise<DesktopSyncCandidateReviewExportResult>;
     };
     onOpenCad(callback: (payload: { path: string; source: string }) => void): () => void;
     onImportPack(callback: (payload: { path: string }) => void): () => void;

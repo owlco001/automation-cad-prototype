@@ -9,8 +9,9 @@ import { PlcManager } from '../src/plc/manager.ts';
 import { SyncClient } from '../src/sync/client.ts';
 import { mergeSyncConfig, publicSyncConfig, readSyncConfig, writeSyncConfig } from '../src/sync/config.ts';
 import { buildDesignPackage, parseDesignPackage } from '../src/sync/package.ts';
+import { exportCandidateReviewFolder } from '../src/sync/candidate-review-export.ts';
 import { validateMachineConfig } from '../src/commission/machine-config.ts';
-import type { DesignBomRow, SyncConfig, SyncPlcUploadPayload, SyncUploadPayload } from '../src/sync/types.ts';
+import type { DesignBomRow, SyncConfig, SyncImportCandidate, SyncPlcUploadPayload, SyncUploadPayload } from '../src/sync/types.ts';
 import {
   EXPORT_EXTENSIONS,
   assertAllowedTargetPath,
@@ -70,6 +71,7 @@ import {
   previewSelectedPortableArchive,
   writePortableArchiveExclusively
 } from '../src/project-archive/desktop.ts';
+import { isTrustedProjectArchiveRequest } from './project-archive-ipc-auth.ts';
 import { planPlcExportDirectory } from '../src/plcgen/export.ts';
 import { readActiveMachineDesign } from '../src/machine/store.ts';
 import { buildMachineIoMap } from '../src/machine/io-map.ts';
@@ -88,6 +90,7 @@ export interface IpcContext {
   plcConfigFile: string;
   syncConfigFile: string;
   version: string;
+  mainWindowRendererUrl: string;
   getAgentInfo(): unknown;
   isMainWindowSender(sender: WebContents): boolean;
   getParametric(): ParametricManager | null;
@@ -621,18 +624,24 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
   });
 
   ipcMain.handle('project-archive:export', async (event, snapshot: unknown) => {
-    const trustedWindow = BrowserWindow.getAllWindows().some((window) =>
-      !window.isDestroyed() && window.webContents === event.sender
+    const trustedRequest = isTrustedProjectArchiveRequest(
+      context.isMainWindowSender(event.sender),
+      event.sender,
+      event.senderFrame,
+      context.mainWindowRendererUrl
     );
-    if (!trustedWindow) return { ok: false, code: 'FAILED', message: '拒绝非应用窗口的工程档案请求。' };
+    if (!trustedRequest) return { ok: false, code: 'FAILED', message: '拒绝非应用窗口的工程档案请求。' };
     return await exportSelectedCadAsPortableArchive(createProjectArchiveDependencies(), snapshot);
   });
 
   ipcMain.handle('project-archive:preview', async (event) => {
-    const trustedWindow = BrowserWindow.getAllWindows().some((window) =>
-      !window.isDestroyed() && window.webContents === event.sender
+    const trustedRequest = isTrustedProjectArchiveRequest(
+      context.isMainWindowSender(event.sender),
+      event.sender,
+      event.senderFrame,
+      context.mainWindowRendererUrl
     );
-    if (!trustedWindow) return { ok: false, code: 'FAILED', message: '拒绝非应用窗口的工程档案请求。' };
+    if (!trustedRequest) return { ok: false, code: 'FAILED', message: '拒绝非应用窗口的工程档案请求。' };
     return await previewSelectedPortableArchive(createProjectArchiveDependencies());
   });
 
@@ -969,6 +978,7 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
   const syncConfig = (): SyncConfig => readSyncConfig(context.syncConfigFile);
   const syncClient = (config: SyncConfig): SyncClient => new SyncClient(config);
   const syncPlcEnabled = (): boolean => context.isPlcgenEnabled() && context.isFactoryPlcSyncEnabled();
+  let lastPlcReviewCandidate: { packageId: string; candidate: SyncImportCandidate; expiresAt: number } | null = null;
 
   ipcMain.handle('sync:getConfig', () => publicSyncConfig(syncConfig()));
   ipcMain.handle('sync:saveConfig', (_event, patch: unknown) => {
@@ -1004,6 +1014,7 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
     if (typeof packageId !== 'string' || !packageId.trim()) {
       return { ok: false, stage: '下载', code: 'DOWNLOAD_FAILED', message: '缺少 packageId' };
     }
+    lastPlcReviewCandidate = null;
     let currentMachine: ReturnType<typeof validateMachineConfig> | undefined;
     if (machineContext !== undefined && machineContext !== null) {
       try {
@@ -1022,6 +1033,9 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
       if (!downloaded.ok) return downloaded;
       try {
         const candidate = parseDesignPackage(downloaded.zip, currentMachine, { allowPlc: syncPlcEnabled() });
+        if (candidate.plc && syncPlcEnabled()) {
+          lastPlcReviewCandidate = { packageId, candidate, expiresAt: Date.now() + 15 * 60 * 1000 };
+        }
         return {
           ok: true,
           candidate,
@@ -1044,6 +1058,42 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
         code: 'DOWNLOAD_FAILED',
         message: error instanceof Error ? error.message : String(error)
       };
+    }
+  });
+  ipcMain.handle('sync:exportCandidateReview', async (event, packageId: unknown) => {
+    const trustedRequest = isTrustedProjectArchiveRequest(
+      context.isMainWindowSender(event.sender),
+      event.sender,
+      event.senderFrame,
+      context.mainWindowRendererUrl
+    );
+    if (!trustedRequest) return { ok: false, code: 'FORBIDDEN', message: '拒绝非应用主窗口的 PLC 审阅导出请求。' };
+    if (!syncPlcEnabled()) return { ok: false, code: 'MODULE_DISABLED', message: 'PLC 同步或生成模块已关闭，已拒绝审阅导出。' };
+    if (typeof packageId !== 'string' || !packageId.trim()) {
+      return { ok: false, code: 'INVALID_ARGUMENT', message: '缺少 packageId。' };
+    }
+    const cached = lastPlcReviewCandidate;
+    if (!cached || cached.packageId !== packageId || cached.expiresAt <= Date.now() || !cached.candidate.plc) {
+      return { ok: false, code: 'CANDIDATE_UNAVAILABLE', message: '没有可导出的近期已校验 PLC 候选；请重新下载并校验。' };
+    }
+    try {
+      const options: OpenDialogOptions = {
+        title: '选择本地 PLC 候选审阅导出的父文件夹',
+        properties: ['openDirectory']
+      };
+      const window = BrowserWindow.fromWebContents(event.sender);
+      const picked = window
+        ? await dialog.showOpenDialog(window, options)
+        : await dialog.showOpenDialog(options);
+      if (picked.canceled || !picked.filePaths[0]) return { ok: true, canceled: true };
+      if (!syncPlcEnabled()) return { ok: false, code: 'MODULE_DISABLED', message: 'PLC 同步或生成模块已关闭，已拒绝审阅导出。' };
+      if (lastPlcReviewCandidate !== cached || cached.expiresAt <= Date.now()) {
+        return { ok: false, code: 'CANDIDATE_UNAVAILABLE', message: '候选已过期或已被替换；请重新下载并校验。' };
+      }
+      const exported = exportCandidateReviewFolder(picked.filePaths[0], packageId, cached.candidate);
+      return { ok: true, canceled: false, folderName: exported.folderName, fileCount: exported.fileCount };
+    } catch (error) {
+      return { ok: false, code: 'EXPORT_FAILED', message: error instanceof Error ? error.message : String(error) };
     }
   });
   ipcMain.handle('sync:upload', async (_event, value: unknown) => {

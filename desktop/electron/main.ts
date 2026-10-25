@@ -87,17 +87,18 @@ import {
 } from '../src/shared/diagnostics.ts';
 
 const HEADLESS_SMOKE = process.argv.includes('--headless-smoke');
+const HEADLESS_CORE_SMOKE = process.argv.includes('--headless-core-smoke');
 const DIAGNOSE = process.argv.includes('--diagnose');
 const HEADLESS_SCREENSHOTS = process.argv.includes('--headless-screenshots');
 const HEADLESS_MACHINE_SCREENSHOTS = process.argv.includes('--headless-machine-screenshots');
-const HEADLESS = HEADLESS_SMOKE || HEADLESS_SCREENSHOTS || HEADLESS_MACHINE_SCREENSHOTS;
+const HEADLESS = HEADLESS_SMOKE || HEADLESS_CORE_SMOKE || HEADLESS_SCREENSHOTS || HEADLESS_MACHINE_SCREENSHOTS;
 const APP_NAME = 'AutomationCAD';
 app.setName(APP_NAME);
 
 if (process.platform === 'linux' && typeof process.getuid === 'function' && process.getuid() === 0) {
   app.commandLine.appendSwitch('no-sandbox');
 }
-if (HEADLESS_SMOKE) {
+if (HEADLESS_SMOKE || HEADLESS_CORE_SMOKE) {
   app.disableHardwareAcceleration();
   // CI 的 xvfb 环境没有 GPU；显式关闭 WebGL 以稳定覆盖降级面板路径。
   app.commandLine.appendSwitch('disable-webgl');
@@ -225,7 +226,11 @@ function indexHtmlPath(): string {
 }
 
 function extensionPath(): string {
-  return join(app.getAppPath(), 'dist', 'extension.js');
+  const appPath = app.getAppPath();
+  const corePath = join(appPath, 'dist-profiles', 'core', 'extension.js');
+  const fullPath = join(appPath, 'dist', 'extension.js');
+  if (process.argv.includes('--core-only') || (!existsSync(fullPath) && existsSync(corePath))) return corePath;
+  return fullPath;
 }
 
 function extensionBaseUrl(): string {
@@ -650,7 +655,7 @@ function createWindow(): BrowserWindow {
     minWidth: 1000,
     minHeight: 680,
     backgroundColor: '#1E2124',
-    show: !HEADLESS_SMOKE,
+    show: !HEADLESS_SMOKE && !HEADLESS_CORE_SMOKE,
     title: 'AutomationCAD · 非标自动化整机设计',
     webPreferences: {
       preload: join(__dirname, 'preload.cjs'),
@@ -697,6 +702,51 @@ function createWindow(): BrowserWindow {
     } catch (error) {
       recordDiagnosticError('EXTENSION_INJECT_FAILED', error);
       console.error('[desktop] 扩展脚本注入失败', error);
+    }
+    if (HEADLESS_CORE_SMOKE) {
+      try {
+        let result: {
+          ready: boolean;
+          profile?: string;
+          modules?: string[];
+          unavailable?: string;
+          rejected?: boolean;
+          installable?: boolean;
+          offlineCapability?: string;
+        } = { ready: false };
+        for (let attempt = 0; attempt < 40 && !result.ready; attempt += 1) {
+          await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+          result = await window.webContents.executeJavaScript(
+            `(() => {
+              const runtime = window.__CoreOnlyRuntime;
+              const registry = window.__ModuleRegistry;
+              if (!runtime || !registry) return { ready: false };
+              let rejected = false;
+              try { registry.setEnabled('plcgen', true); } catch { rejected = true; }
+              return {
+                ready: true,
+                profile: runtime.profile,
+                modules: registry.list().map((module) => module.id),
+                unavailable: registry.getStatus('plcgen')?.status,
+                rejected,
+                installable: runtime.installable,
+                offlineCapability: runtime.offlineCapability
+              };
+            })()`
+          ) as typeof result;
+        }
+        if (!result.ready || result.profile !== 'core-only' || result.modules?.join(',') !== 'core' ||
+            result.unavailable !== 'unavailable' || !result.rejected || result.installable !== false ||
+            result.offlineCapability !== 'unverified') {
+          throw new Error(`Core-only runtime smoke 失败：${JSON.stringify(result)}`);
+        }
+        console.log('SMOKE_CORE_PROFILE_OK modules=core optional=blocked installable=false offline=unverified');
+        setTimeout(() => app.quit(), 100);
+      } catch (error) {
+        console.error('SMOKE_CORE_PROFILE_FAIL', error);
+        setTimeout(() => app.exit(1), 100);
+      }
+      return;
     }
       if (HEADLESS_MACHINE_SCREENSHOTS) {
         const outputDir = process.env.AUTOMATIONCAD_SCREENSHOT_DIR
@@ -1775,27 +1825,39 @@ function createWindow(): BrowserWindow {
             if (!entry) return { error: '智慧工厂入口按钮缺失' };
             entry.click();
             await wait(120);
-            const ids = ['syncBaseUrl', 'syncDeviceId', 'syncProjectId', 'syncApiKey', 'syncEnabled', 'syncTest', 'syncUpload', 'syncLastResult'];
+            const ids = ['syncBaseUrl', 'syncDeviceId', 'syncProjectId', 'syncApiKey', 'syncEnabled', 'syncPlcTarget', 'syncTest', 'syncUpload', 'syncLastResult', 'syncCandidate'];
             const missing = ids.filter((id) => !document.getElementById(id));
             const apiKeyType = document.getElementById('syncApiKey')?.getAttribute('type') || '';
             const enabledType = document.getElementById('syncEnabled')?.getAttribute('type') || '';
+            const plcTarget = document.getElementById('syncPlcTarget');
+            const plcTargetType = plcTarget?.tagName.toLowerCase() || '';
+            const plcTargetDefault = plcTarget?.value || '';
+            const plcTargetOptions = plcTarget instanceof HTMLSelectElement ? Array.from(plcTarget.options).map((option) => option.value) : [];
             const drawer = document.getElementById('syncDrawer');
             return {
               missing,
               apiKeyType,
               enabledType,
+              plcTargetType,
+              plcTargetDefault,
+              plcTargetOptions,
               visible: Boolean(drawer && !drawer.hidden),
-              fields: ids.length
+              fields: ids.length,
+              candidateReadOnly: document.getElementById('syncCandidate')?.textContent?.includes('不提供安装、应用或恢复操作') === true,
+              reviewExportCopy: document.getElementById('syncCandidate')?.textContent?.includes('本地审阅副本') === true,
+              pathFreeReviewExport: typeof window.desktop?.sync?.exportCandidateReview === 'function'
             };
           })()`
-        ) as { error?: string; missing: string[]; apiKeyType: string; enabledType: string; visible: boolean; fields: number };
+        ) as { error?: string; missing: string[]; apiKeyType: string; enabledType: string; plcTargetType: string; plcTargetDefault: string; plcTargetOptions: string[]; visible: boolean; fields: number; candidateReadOnly: boolean; reviewExportCopy: boolean; pathFreeReviewExport: boolean };
         if (syncUi.error || syncUi.missing.length > 0 || syncUi.apiKeyType !== 'password' ||
-            syncUi.enabledType !== 'checkbox' || !syncUi.visible) {
+            syncUi.enabledType !== 'checkbox' || syncUi.plcTargetType !== 'select' || syncUi.plcTargetDefault !== 'generic' ||
+            JSON.stringify(syncUi.plcTargetOptions) !== JSON.stringify(['generic', 's7-1200', 's7-1500', 'codesys']) ||
+            !syncUi.visible || !syncUi.candidateReadOnly || !syncUi.reviewExportCopy || !syncUi.pathFreeReviewExport) {
           console.error('SMOKE_FAIL sync_ui', JSON.stringify(syncUi));
           setTimeout(() => app.exit(1), 100);
           return;
         }
-        console.log(`SMOKE_SYNC_UI_OK fields=${syncUi.fields} apiKey=password enabled=checkbox`);
+        console.log(`SMOKE_SYNC_UI_OK fields=${syncUi.fields} apiKey=password enabled=checkbox plcTarget=select reviewExport=path-free default=${syncUi.plcTargetDefault}`);
       } catch (error) {
         console.error('SMOKE_FAIL sync_ui_exception', error);
         setTimeout(() => app.exit(1), 100);
@@ -4509,6 +4571,7 @@ async function bootstrap(): Promise<void> {
     plcConfigFile: join(app.getPath('userData'), 'plc.json'),
     syncConfigFile: join(app.getPath('userData'), 'sync.json'),
     version: app.getVersion(),
+    mainWindowRendererUrl: pathToFileURL(indexHtmlPath()).href,
     getAgentInfo: publicAgentInfo,
     isMainWindowSender: (sender) => Boolean(mainWindow && !mainWindow.isDestroyed() && sender === mainWindow.webContents),
     getParametric: () => parametric,
