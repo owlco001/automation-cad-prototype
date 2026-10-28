@@ -19,8 +19,13 @@ export const seedDoc = {
   updatedAt: '2026-10-28T00:00:00+08:00'
 };
 
-const store = new Store(seedDoc);
+const store = new Store(seedDoc, { dataDir: process.env.FT_DATA_DIR });
+// 有 FT_DATA_DIR 就先恢复存档（版本/历史/快照），再按恢复后的树重建几何；
+// 不设就是一个进程内的内存态（默认行为，契约 §15.1 的持久化方案还没拍板）。
+const restored = await store.restore();
 await store.init();
+if (restored) console.log(`已从存档恢复：${store.dataFile}（版本 r${store.revision}）`);
+if (store.restoreError) console.error(store.restoreError);
 const sseClients = new Set();
 store.onChange((change) => {
   const line = `data: ${JSON.stringify(change)}\n\n`;

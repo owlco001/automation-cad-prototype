@@ -268,7 +268,7 @@ npm start
 
 ## 目录结构
 | `qt-client/` | Qt6 新客户端壳子 v0.1（FeatureManager / PropertyManager / 占位视口；写操作全部走 `featuretree-service`，带 `expectedRevision`，409 冲突拒绝覆盖） |
-| `featuretree-service/` | FeatureTree 读写契约服务（Node 标准库，只监听 127.0.0.1）：字段层 + 整树层校验、乐观锁、原子事务、历史留痕、undo/redo、SSE 变更事件；另有 `mcp.mjs` 把服务暴露成 MCP 工具（`ft_get_tree` / `ft_update_params` / `ft_undo` / `ft_list_revisions`）与只读资源；`rebuild-sidecar.py`（build123d）提供真实体积/包围盒/质量，验收 `tests.mjs`(20) / `mcp-tests.mjs`(11) / `build-tests.mjs`(8)；契约见 `docs/featuretree-contract.md` |
+| `featuretree-service/` | FeatureTree 读写契约服务（Node 标准库，只监听 127.0.0.1）：字段层 + 整树层校验、乐观锁、原子事务、历史留痕、undo/redo、SSE 变更事件；另有 `mcp.mjs` 把服务暴露成 MCP 工具（`ft_get_tree` / `ft_update_params` / `ft_undo` / `ft_list_revisions`）与只读资源；`rebuild-sidecar.py`（build123d）提供真实体积/包围盒/质量，验收 `tests.mjs`(32) / `mcp-tests.mjs`(11) / `build-tests.mjs`(8)；契约见 `docs/featuretree-contract.md` |
 
 ```
 .

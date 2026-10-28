@@ -1,6 +1,9 @@
 // FeatureTree 文档存储：包络（revision / origin / history）+ 操作 + 乐观锁 + 原子事务。
 // 流程固定：校验 → 编译 → 重建钩子 → 发布新版本 → 通知订阅者；任一步失败则版本不变。
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { validateDoc, checkPanelEdit, compileOps } from './validate.mjs';
 
 export function clone(v) { return JSON.parse(JSON.stringify(v)); }
@@ -69,7 +72,11 @@ export async function rebuild(doc) {
 }
 
 export class Store {
-  constructor(initialDoc) {
+  /**
+   * @param initialDoc 种子文档（磁盘上没有存档时用它）
+   * @param options.dataDir 设置后启用落盘（FT_DATA_DIR）；不设就是纯内存态（默认，契约 §15.1 未拍板）
+   */
+  constructor(initialDoc, options = {}) {
     this.doc = clone(initialDoc);
     this.revision = 0;
     this.history = [];
@@ -78,6 +85,8 @@ export class Store {
     this.geometry = null;
     // undo 不是终点：撤回的那一版必须能再“重做”回来。栈上限 50，避免无限长内存。
     this.redoStack = [];
+    this.dataDir = options.dataDir || null;
+    this.dataFile = this.dataDir ? join(this.dataDir, 'demo-adapter.json') : null;
     const errs = validateDoc(this.doc);
     if (errs.length) throw new Error('初始文档校验失败：' + errs.join('；'));
   }
@@ -85,6 +94,45 @@ export class Store {
    * 启动时把种子树也重建一次，这样首个 GET /v1/tree 就带 geometry。
    * sidecar 配了但连不上时不让服务起不来：只记下错误，等写操作时按 REBUILD_FAILED 报。
    */
+  /** 从磁盘恢复（有存档就用存档的文档/版本/历史/快照），然后重建几何 */
+  async restore() {
+    if (!this.dataFile || !existsSync(this.dataFile)) return false;
+    const raw = await readFile(this.dataFile, 'utf8');
+    const saved = JSON.parse(raw);
+    if (!saved || typeof saved !== 'object' || !saved.doc) return false;
+    const errs = validateDoc(saved.doc);
+    if (errs.length) {
+      // 存档坏了不要静默覆盖：报出来，让调用方决定（这里保留种子树并记下原因）
+      this.restoreError = `存档校验失败，已回退种子树：${errs.join('；')}`;
+      return false;
+    }
+    this.doc = clone(saved.doc);
+    this.revision = Number.isInteger(saved.revision) ? saved.revision : 0;
+    this.history = Array.isArray(saved.history) ? saved.history : [];
+    this.snapshots = Array.isArray(saved.snapshots) && saved.snapshots.length
+      ? saved.snapshots.map((entry) => clone(entry))
+      : [clone(this.doc)];
+    if (!this.snapshots[this.revision]) this.snapshots[this.revision] = clone(this.doc);
+    return true;
+  }
+
+  /** 原子落盘：先写临时文件再 rename，避免写一半断电留下半个 JSON */
+  async persist() {
+    if (!this.dataFile) return;
+    await mkdir(dirname(this.dataFile), { recursive: true });
+    const payload = JSON.stringify({
+      documentId: 'demo-adapter',
+      revision: this.revision,
+      doc: this.doc,
+      history: this.history,
+      snapshots: this.snapshots,
+      savedAt: nowIso()
+    }, null, 2);
+    const temp = `${this.dataFile}.tmp`;
+    await writeFile(temp, payload, 'utf8');
+    await rename(temp, this.dataFile);
+  }
+
   async init() {
     this.lastInitAttempt = Date.now();
     const rb = await rebuild(this.doc);
@@ -147,6 +195,7 @@ export class Store {
     this.history.push(entry);
     const env = this.envelope();
     this.emit({ documentId: env.documentId, revision: env.revision, changedFeatureIds: featureIds, actor });
+    await this.persist();
     return env;
   }
 
@@ -263,6 +312,7 @@ export class Store {
     if (rb.geometry) this.history[this.history.length - 1].geometry = rb.geometry;
     const env = this.envelope();
     this.emit({ documentId: env.documentId, revision: env.revision, changedFeatureIds: [], actor });
+    await this.persist();
     return env;
   }
 
@@ -297,6 +347,7 @@ export class Store {
     this.history.push(entry);
     const env = this.envelope();
     this.emit({ documentId: env.documentId, revision: env.revision, changedFeatureIds: [], actor });
+    await this.persist();
     return env;
   }
 }
