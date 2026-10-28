@@ -52,6 +52,7 @@
 | `docs/desktop/screenshots/qt-client-09-ctxmenu.png` | 特征右键菜单：「压缩 / 解除压缩」「删除特征（可撤销）」，都在服务端校验后执行 |
 | `docs/desktop/screenshots/qt-client-16-iso.png` | 默认等轴测视角（视图菜单可选等轴测/正视/俯视/右视/适合视图） |
 | `docs/desktop/screenshots/qt-client-17-top.png` | 俯视：8 个孔（4 沉头 + 4 通孔）和四角 R3 一眼可见——视口画的是服务端真几何，不是占位盒 |
+| `docs/desktop/screenshots/qt-client-29-measure.png` | 点选平面测面积：状态栏「选中平面 · 面积 7770.38 mm²（命中点 -3.27, -22.37, 12.00 mm）」，与手算一致 |
 | `docs/desktop/screenshots/qt-client-28-edit-member.png` | 装配里双击成员 → 改 X/Y/Z 偏移与绕 Z 转角 → `PUT /v1/assemblies/{id}`，几何自动重新 fuse |
 | `docs/desktop/screenshots/qt-client-27-interference.png` | 「评估 → 装配干涉检查」(Ctrl+I)：真实布尔交集，状态栏/弹窗给出「1 对成员存在实体干涉」与每对的重叠体积 |
 | `docs/desktop/screenshots/qt-client-26-assembly.png` | 装配只读视图（文件→打开装配…）：树里 3 个成员带偏移，视口画服务端 fuse 后的合成 STL（19,812 面） |
@@ -100,8 +101,14 @@ CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI �
 俯视 639×639（正方形，等于 90×90 板面）、正视 639×103、右视 639×103（≈90:16）、等轴测 639×455。
 真机图：`qt-client-22-occt-iso.png` / `-23-occt-front.png` / `-24-occt-top.png` / `-25-occt-right.png`。
 
-**还没做**：选面与测量。试过 `MoveTo + SelectDetected`，点击后 `HasSelectedShape()` 返回 false（没崩，但选不中），
-所以没有把选中/测面积做进界面——不留假功能。需要自绘视口时 `AUTOMATIONCAD_QT_OCCT=0`。
+**选面与面积测量**：不用 AIS 的 `SelectDetected`（在 `Aspect_NeutralWindow` 下 `MoveTo` 实测会段错误），
+改成 `V3d_View::ConvertWithProj` 取射线 + `IntCurvesFace_ShapeIntersector` 与 BRep 求交，取最近交点所在面。
+由于 STL 读进来是「一个三角面 = 一个 Face」，再按「同法向 + 同平面距离」把三角形合并成平面区域算面积。
+
+实测转接板俯视点一下：**7,770.38 mm²**，命中点 `(-3.27, -22.37, 12.00)`。
+手算 90×90 − 4×Ø8.5 沉孔 227.0 − 4×Ø5.5 通孔 95.0 − 四角 R3 7.7 = **7,770.3**，差 0.08（三角化误差）。
+
+需要自绘视口时 `AUTOMATIONCAD_QT_OCCT=0`。
 
 ## 自检入口（CI 用）
 

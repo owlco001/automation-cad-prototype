@@ -11,6 +11,19 @@
 #include <QWheelEvent>
 
 #include <Aspect_DisplayConnection.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepGProp.hxx>
+#include <TopExp_Explorer.hxx>
+#include <cmath>
+#include <gp_Lin.hxx>
+#include <IntCurvesFace_ShapeIntersector.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Pnt.hxx>
+#include <BRep_Tool.hxx>
+#include <GProp_GProps.hxx>
+#include <TopAbs_ShapeEnum.hxx>
+#include <TopoDS.hxx>
+#include <gp_Pnt.hxx>
 #include <Graphic3d_MaterialAspect.hxx>
 #include <Quantity_Color.hxx>
 #include <V3d_ListOfLight.hxx>
@@ -167,6 +180,10 @@ void OcctViewport::displayShape(const TopoDS_Shape &shape) {
     m_shape->SetColor(Quantity_Color(0.64, 0.70, 0.80, Quantity_TOC_sRGB));
     m_shape->SetMaterial(Graphic3d_NOM_PLASTIC);
     m_context->Display(m_shape, AIS_Shaded, -1, true);
+    // 关键：显示之后再按「这个对象」激活选面模式。之前在 initializeView 里全局 Activate，
+    // 会被 Display(..., mode=-1) 的默认模式覆盖，MoveTo 自然选不中任何东西。
+    m_context->Activate(m_shape, AIS_Shape::SelectionMode(TopAbs_FACE));
+    m_context->SetAutomaticHilight(true);
     m_hasGeometry = true;
     m_view->FitAll(0.02, false);
     m_view->Redraw();
@@ -202,8 +219,71 @@ void OcctViewport::mouseMoveEvent(QMouseEvent *event) {
     m_lastPos = event->pos();
 }
 
-void OcctViewport::mouseReleaseEvent(QMouseEvent *) {
-    if (m_viewReady) m_view->Redraw();
+void OcctViewport::mouseReleaseEvent(QMouseEvent *event) {
+    if (!m_viewReady) return;
+    const QPoint delta = event->pos() - m_lastPos;
+    m_view->Redraw();
+    if (event->button() != Qt::LeftButton || delta.manhattanLength() > 4 || !m_hasGeometry) return;
+
+    // 不用 AIS 的 SelectDetected：在 Aspect_NeutralWindow 下 MoveTo 会直接段错误（实测两次）。
+    // 改成自己算射线，再与 BRep 求交——结果一样（最近的面），但没有那套隐藏状态。
+    Standard_Real px = 0.0, py = 0.0, pz = 0.0, dx = 0.0, dy = 0.0, dz = 0.0;
+    m_view->ConvertWithProj(event->pos().x(), event->pos().y(), px, py, pz, dx, dy, dz);
+    gp_Pnt origin(px, py, pz);
+    gp_Dir direction(dx, dy, dz);
+    if (gp_Vec(direction).SquareMagnitude() < 1e-12) return;
+
+    IntCurvesFace_ShapeIntersector intersector;
+    intersector.Load(m_shape->Shape(), 1e-6);
+    intersector.Perform(gp_Lin(origin, direction), -1e6, 1e6);
+    if (!intersector.IsDone() || intersector.NbPnt() < 1) {
+        emit measured(tr("未选中（点到空白处）"));
+        return;
+    }
+    // 取最近的交点所在面
+    Standard_Real nearest = 1e18;
+    TopoDS_Face picked;
+    for (Standard_Integer i = 1; i <= intersector.NbPnt(); ++i) {
+        const Standard_Real w = intersector.WParameter(i);
+        if (w < nearest) {
+            nearest = w;
+            picked = intersector.Face(i);
+        }
+    }
+    if (picked.IsNull()) {
+        emit measured(tr("未选中"));
+        return;
+    }
+    // STL 读进来是「一个三角面 = 一个 TopoDS_Face」，直接取单面面积只有几 mm²。
+    // 所以按「同一平面」把三角形合并：法向一致 + 到点同距，面积相加。
+    BRepAdaptor_Surface pickedSurface(picked);
+    double area = 0.0;
+    if (pickedSurface.GetType() == GeomAbs_Plane) {
+        const gp_Dir normal = pickedSurface.Plane().Axis().Direction();
+        const gp_Pnt hit = intersector.Pnt(1);
+        for (TopExp_Explorer explorer(m_shape->Shape(), TopAbs_FACE); explorer.More(); explorer.Next()) {
+            const TopoDS_Face face = TopoDS::Face(explorer.Current());
+            BRepAdaptor_Surface surface(face);
+            if (surface.GetType() != GeomAbs_Plane) continue;
+            gp_Dir faceNormal = surface.Plane().Axis().Direction();
+            if (face.Orientation() == TopAbs_REVERSED) faceNormal.Reverse();
+            if (std::abs(faceNormal.Dot(normal)) < 0.999) continue;
+            if (std::abs(surface.Plane().Distance(hit)) > 1e-3) continue;
+            GProp_GProps faceProps;
+            BRepGProp::SurfaceProperties(face, faceProps);
+            area += faceProps.Mass();
+        }
+    } else {
+        GProp_GProps faceProps;
+        BRepGProp::SurfaceProperties(picked, faceProps);
+        area = faceProps.Mass();
+    }
+    emit measured(tr("选中平面 · 面积 %1 mm²（命中点 %2, %3, %4 mm）")
+                      .arg(area, 0, 'f', 2)
+                      .arg(intersector.Pnt(1).X(), 0, 'f', 2)
+                      .arg(intersector.Pnt(1).Y(), 0, 'f', 2)
+                      .arg(intersector.Pnt(1).Z(), 0, 'f', 2));
+    qInfo().noquote() << "OCCT_PICK_RAY area=" << area << "w=" << nearest;
 }
 
 void OcctViewport::wheelEvent(QWheelEvent *event) {

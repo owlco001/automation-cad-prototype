@@ -33,6 +33,8 @@ public:
 signals:
     void loaded(int triangles);
     void failed(const QString &message);
+    /// 选中面/边/点的测量结果
+    void measured(const QString &message);
 
 protected:
     void paintEvent(QPaintEvent *event) override;

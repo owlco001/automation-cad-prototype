@@ -36,7 +36,7 @@ if(OCCT_INCLUDE_FOUNDATION AND OCCT_INCLUDE_AIS)
   target_include_directories(automationcad-qt PRIVATE ${OCCT_INCLUDE_FOUNDATION} ${OCCT_INCLUDE_AIS})
   target_compile_definitions(automationcad-qt PRIVATE AUTOMATIONCAD_HAVE_OCCT=1)
   target_link_libraries(automationcad-qt PRIVATE
-      TKOpenGl TKV3d TKService TKMath TKBRep TKTopAlgo TKPrim TKSTL TKernel)
+      TKOpenGl TKV3d TKService TKMath TKBRep TKTopAlgo TKPrim TKSTL TKernel TKG3d TKGeomBase)
 else()
   message(STATUS "OCCT AIS 视口：未启用（缺头文件），回退到 OpenGL STL 视口")
 endif()

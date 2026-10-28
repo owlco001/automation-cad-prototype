@@ -151,6 +151,9 @@ MainWindow::MainWindow(QWidget *parent)
         connect(m_occtViewport, &OcctViewport::failed, this, [this](const QString &message) {
             statusBar()->showMessage(message, 6000);
         });
+        connect(m_occtViewport, &OcctViewport::measured, this, [this](const QString &message) {
+            statusBar()->showMessage(message, 10000);
+        });
     }
 #endif
     if (!m_viewport) {
