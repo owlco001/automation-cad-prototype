@@ -56,6 +56,8 @@ public:
     /// 当前文档 id（默认 demo-adapter）
     void setDocument(const QString &documentId);
     QString documentId() const { return m_documentId; }
+    /// 装配只读视图：按 assemblyId 拉 /v1/assemblies/<id> 与合成 STL；空字符串回到零件文档
+    void openAssembly(const QString &assemblyId);
     /// 撤销/重做（走服务端 /v1/undo、/v1/redo，带 expectedRevision）
     void undoOnce();
     void redoOnce();
@@ -115,6 +117,8 @@ private:
     bool m_updatingPanel = false;
     QString m_serviceBase = QStringLiteral("http://127.0.0.1:18080");
     QString m_documentId = QStringLiteral("demo-adapter");
+    QString m_assemblyId;
+    void loadAssembly(const QString &assemblyId);
     class QComboBox *m_documentCombo = nullptr;
     QString docQuery() const;
 };

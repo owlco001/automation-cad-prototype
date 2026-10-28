@@ -7,6 +7,7 @@
 //   GET  /v1/events?documentId=demo-adapter   (SSE，变更时推送)
 import { createServer } from 'node:http';
 import { Store } from './store.mjs';
+import { compileOps } from './validate.mjs';
 
 export const seedDoc = {
   schemaVersion: 1,
@@ -44,6 +45,31 @@ async function addDocument(documentId, source = seedDoc) {
 }
 
 const DOCUMENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+// 装配：只存「成员 + 偏移」，几何由 sidecar fuse 出来（服务端不自己算 B-rep）
+const assemblies = new Map();
+
+async function buildAssembly(assemblyId, members) {
+  const base = process.env.FT_BUILD_URL;
+  if (!base) return { ok: false, message: '未配置 FT_BUILD_URL，装配需要几何 sidecar' };
+  const payload = [];
+  for (const member of members) {
+    const store = documents.get(member.documentId);
+    if (!store) return { ok: false, message: `成员文档不存在：${member.documentId}` };
+    const ops = compileOps(store.doc);
+    if (!ops.length) return { ok: false, message: `成员文档没有可构建几何：${member.documentId}` };
+    payload.push({ ops, offset: member.offset || [0, 0, 0] });
+  }
+  const response = await fetch(`${base.replace(/\/+$/, '')}/assemble`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ assemblyId, members: payload }),
+    signal: AbortSignal.timeout(60_000)
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok || !body?.ok) return { ok: false, message: body?.message || `sidecar HTTP ${response.status}` };
+  return body;
+}
 
 await addDocument('demo-adapter');
 
@@ -129,6 +155,66 @@ const server = createServer(async (req, res) => {
       }
       const store = await addDocument(documentId);
       return send(res, 201, { documentId, revision: store.revision, envelope: store.envelope() });
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/assemblies') {
+      const body = await readBody(req);
+      const assemblyId = typeof body.documentId === 'string' && body.documentId.trim() ? body.documentId.trim() : `asm-${Date.now().toString(36)}`;
+      if (!DOCUMENT_ID_PATTERN.test(assemblyId)) {
+        return send(res, 422, { error: 'VALIDATION_FAILED', message: 'assemblyId 只能包含字母数字与 . _ -，且不超过 64 字符' });
+      }
+      const members = Array.isArray(body.members) ? body.members : [];
+      if (members.length < 2) {
+        return send(res, 422, { error: 'VALIDATION_FAILED', message: '装配至少需要两个成员（单件请直接用文档）' });
+      }
+      for (const member of members) {
+        if (!member || typeof member.documentId !== 'string' || !documents.has(member.documentId)) {
+          return send(res, 422, { error: 'VALIDATION_FAILED', message: `成员文档不存在：${member?.documentId}` });
+        }
+        if (member.offset && (!Array.isArray(member.offset) || member.offset.length !== 3 || member.offset.some((v) => typeof v !== 'number'))) {
+          return send(res, 422, { error: 'VALIDATION_FAILED', message: '成员 offset 必须是 [x, y, z] 三个数字（mm）' });
+        }
+      }
+      const built = await buildAssembly(assemblyId, members);
+      if (!built.ok) return send(res, 422, { error: 'REBUILD_FAILED', message: built.message });
+      const record = {
+        assemblyId,
+        members: members.map((member) => ({
+          documentId: member.documentId,
+          revision: documents.get(member.documentId).revision,
+          offset: member.offset || [0, 0, 0]
+        })),
+        geometry: {
+          volumeMm3: built.volumeMm3,
+          bboxMm: built.bboxMm,
+          massKg: built.massKg,
+          kernel: built.kernel
+        },
+        stlUrl: `/v1/assemblies/${encodeURIComponent(assemblyId)}/geometry.stl`
+      };
+      assemblies.set(assemblyId, record);
+      return send(res, 201, record);
+    }
+    if (req.method === 'GET' && url.pathname.startsWith('/v1/assemblies/')) {
+      const rest = url.pathname.slice('/v1/assemblies/'.length);
+      if (rest.endsWith('/geometry.stl')) {
+        const assemblyId = decodeURIComponent(rest.slice(0, -'/geometry.stl'.length));
+        if (!assemblies.has(assemblyId)) return send(res, 404, { error: 'NOT_FOUND', message: `装配不存在：${assemblyId}` });
+        const base = process.env.FT_BUILD_URL;
+        if (!base) return send(res, 404, { error: 'NOT_FOUND', message: '未配置 FT_BUILD_URL' });
+        const upstream = await fetch(`${base.replace(/\/+$/, '')}/stl?assemblyId=${encodeURIComponent(assemblyId)}`,
+          { signal: AbortSignal.timeout(30_000) });
+        if (!upstream.ok) return send(res, 502, { error: 'GEOMETRY_UNAVAILABLE', message: `sidecar HTTP ${upstream.status}` });
+        const buffer = Buffer.from(await upstream.arrayBuffer());
+        res.writeHead(200, { 'Content-Type': 'model/stl', 'Content-Length': buffer.length });
+        return res.end(buffer);
+      }
+      const assemblyId = decodeURIComponent(rest);
+      const record = assemblies.get(assemblyId);
+      if (!record) return send(res, 404, { error: 'NOT_FOUND', message: `装配不存在：${assemblyId}` });
+      return send(res, 200, record);
+    }
+    if (req.method === 'GET' && url.pathname === '/v1/assemblies') {
+      return send(res, 200, { assemblies: [...assemblies.values()] });
     }
     if (req.method === 'GET' && url.pathname === '/v1/tree') {
       const doc = requireDocument(url, null, res);

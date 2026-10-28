@@ -173,6 +173,11 @@ int main(int argc, char *argv[]) {
     window.refreshNow();
     window.startEventStream();
     window.startAutoRefresh(10'000);
+    // 截图用：AUTOMATIONCAD_QT_ASSEMBLY=<id> 启动后打开装配视图
+    if (qEnvironmentVariableIsSet("AUTOMATIONCAD_QT_ASSEMBLY")) {
+        const QString asmId = qEnvironmentVariable("AUTOMATIONCAD_QT_ASSEMBLY");
+        QTimer::singleShot(1500, &window, [&window, asmId]() { window.openAssembly(asmId); });
+    }
     // 截图用：AUTOMATIONCAD_QT_DOC=<id> 启动后切到指定文档
     if (qEnvironmentVariableIsSet("AUTOMATIONCAD_QT_DOC")) {
         const QString doc = qEnvironmentVariable("AUTOMATIONCAD_QT_DOC");

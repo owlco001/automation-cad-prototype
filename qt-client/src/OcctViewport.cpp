@@ -108,6 +108,7 @@ void OcctViewport::ensureRevision(int revision, const QString &url) {
 }
 
 void OcctViewport::loadFromUrl(const QString &url) {
+    qInfo().noquote() << "OCCT_LOAD_URL" << url;
     if (m_pending) { m_pending->abort(); m_pending->deleteLater(); m_pending = nullptr; }
     QNetworkRequest request{QUrl(url)};
     request.setTransferTimeout(15'000);
@@ -150,6 +151,7 @@ void OcctViewport::loadFromUrl(const QString &url) {
             return;
         }
         m_triangles = static_cast<int>(count);
+        qInfo().noquote() << "OCCT_LOAD_DONE tris=" << m_triangles << "bytes=" << data.size();
         displayShape(shape);
         emit loaded(m_triangles);
     });

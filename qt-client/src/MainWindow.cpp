@@ -52,7 +52,15 @@ MainWindow::MainWindow(QWidget *parent)
     resize(1280, 800);
 
     auto *fileMenu = menuBar()->addMenu(tr("文件"));
-    fileMenu->addAction(tr("刷新特征树"), this, &MainWindow::loadTree);
+    fileMenu->addAction(tr("刷新特征树"), this, &MainWindow::refreshNow);
+    fileMenu->addSeparator();
+    fileMenu->addAction(tr("打开装配…"), this, [this]() {
+        bool ok = false;
+        const QString id = QInputDialog::getText(this, tr("打开装配"), tr("装配 id（如 asm-demo）："),
+                                                 QLineEdit::Normal, m_assemblyId, &ok);
+        if (ok && !id.trimmed().isEmpty()) openAssembly(id.trimmed());
+    });
+    fileMenu->addAction(tr("退出装配视图"), this, [this]() { m_assemblyId.clear(); refreshNow(); });
     auto *viewMenu = menuBar()->addMenu(tr("视图"));
     viewMenu->addAction(tr("等轴测"), this, [this]() { setViewportStandardView(0); });
     viewMenu->addAction(tr("正视"), this, [this]() { setViewportStandardView(1); });
@@ -196,6 +204,7 @@ QString MainWindow::docQuery() const {
 
 void MainWindow::setDocument(const QString &documentId) {
     if (documentId.isEmpty() || documentId == m_documentId) return;
+    m_assemblyId.clear(); // 选文档就退出装配视图
     m_documentId = documentId;
     m_envelope = QJsonObject();
     // 换文档必须让视口忘掉上一份的缓存（版本号可能相同，不然不会重载几何）
@@ -546,12 +555,65 @@ bool MainWindow::runHistorySelfTest(const QString &base, int *undoRevision, int 
     return true;
 }
 
-void MainWindow::refreshNow() { loadTree(); }
+void MainWindow::refreshNow() {
+    if (!m_assemblyId.isEmpty()) { loadAssembly(m_assemblyId); return; }
+    loadTree();
+}
+
+void MainWindow::openAssembly(const QString &assemblyId) {
+    m_assemblyId = assemblyId;
+    loadAssembly(assemblyId);
+}
+
+void MainWindow::loadAssembly(const QString &assemblyId) {
+    QNetworkRequest req{QUrl(m_serviceBase + QStringLiteral("/v1/assemblies/") +
+                             QString::fromUtf8(QUrl::toPercentEncoding(assemblyId)))};
+    req.setTransferTimeout(30'000); // 装配要 fuse，比读树慢
+    QNetworkReply *reply = m_net->get(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, assemblyId]() {
+        reply->deleteLater();
+        const QJsonObject record = readReply(reply);
+        if (reply->error() != QNetworkReply::NoError || record.contains(QStringLiteral("error"))) {
+            statusBar()->showMessage(tr("装配读取失败：%1")
+                                         .arg(record.value(QStringLiteral("message")).toString(reply->errorString())), 8000);
+            return;
+        }
+        const QJsonObject geometry = record.value(QStringLiteral("geometry")).toObject();
+        const QJsonArray members = record.value(QStringLiteral("members")).toArray();
+
+        m_tree->clear();
+        auto *root = new QTreeWidgetItem(m_tree, {tr("装配 %1 · %2 个成员").arg(assemblyId).arg(members.size())});
+        root->setToolTip(0, tr("装配只读视图：几何由服务端 fuse 合成，不是把成员体积相加"));
+        for (const auto &entry : members) {
+            const QJsonObject member = entry.toObject();
+            const QJsonArray offset = member.value(QStringLiteral("offset")).toArray();
+            auto *item = new QTreeWidgetItem(root, {
+                tr("%1（r%2） @ %3, %4, %5 mm")
+                    .arg(member.value(QStringLiteral("documentId")).toString())
+                    .arg(member.value(QStringLiteral("revision")).toInt())
+                    .arg(offset.at(0).toDouble()).arg(offset.at(1).toDouble()).arg(offset.at(2).toDouble())
+            });
+        }
+        m_tree->expandAll();
+        const QJsonObject bbox = geometry.value(QStringLiteral("bboxMm")).toObject();
+        m_statusRevision->setText(tr("装配 %1").arg(assemblyId));
+        m_statusGeometry->setText(tr("体积 %1 mm³ · 质量 %2 kg · %3×%4×%5 mm · 合成几何")
+                                      .arg(geometry.value(QStringLiteral("volumeMm3")).toDouble(), 0, 'f', 1)
+                                      .arg(geometry.value(QStringLiteral("massKg")).toDouble(), 0, 'f', 4)
+                                      .arg(bbox.value(QStringLiteral("x")).toDouble())
+                                      .arg(bbox.value(QStringLiteral("y")).toDouble())
+                                      .arg(bbox.value(QStringLiteral("z")).toDouble()));
+        m_documentCombo->setEnabled(false);
+        // 装配几何单独取：revision 传 -1 强制重下（不同装配可能同 revision）
+        setViewportGeometry(-1, m_serviceBase + QStringLiteral("/v1/assemblies/") +
+                                    QString::fromUtf8(QUrl::toPercentEncoding(assemblyId)) + QStringLiteral("/geometry.stl"));
+    });
+}
 
 void MainWindow::startAutoRefresh(int intervalMs) {
     if (!m_pollTimer) {
         m_pollTimer = new QTimer(this);
-        connect(m_pollTimer, &QTimer::timeout, this, &MainWindow::loadTree);
+        connect(m_pollTimer, &QTimer::timeout, this, &MainWindow::refreshNow);
     }
     m_pollTimer->start(intervalMs);
 }
@@ -646,6 +708,8 @@ bool MainWindow::runSseSelfTest(const QString &base, int *revision, QString *err
 }
 
 void MainWindow::loadTree() {
+    // 装配视图期间不读零件树：否则启动时那次迟到的 /v1/tree 响应会把装配几何顶掉
+    if (!m_assemblyId.isEmpty()) return;
     QNetworkRequest req(QUrl(m_serviceBase + QStringLiteral("/v1/tree") + docQuery()));
     // 服务没起来时不要让界面无限等；8 秒后按连接失败处理
     req.setTransferTimeout(8000);
@@ -755,6 +819,7 @@ void MainWindow::refreshTree(const QJsonObject &envelope) {
         if (suppressed) item->setForeground(0, Qt::gray);
     }
     m_tree->expandAll();
+    m_documentCombo->setEnabled(true);
     m_undoAction->setEnabled(envelope.value(QStringLiteral("undoDepth")).toInt() > 0);
     m_redoAction->setEnabled(envelope.value(QStringLiteral("redoDepth")).toInt() > 0);
     const int revision = envelope.value(QStringLiteral("revision")).toInt();

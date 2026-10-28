@@ -30,6 +30,7 @@ BOX_ALIGN = (Align.CENTER, Align.CENTER, Align.MIN)
 MAX_OPS = 64
 LAST_SOLID = None  # 兼容单文档：最近一次成功重建的实体
 SOLIDS = {}        # 多文档：documentId -> 最近一次成功重建的实体
+ASSEMBLIES = {}    # 装配：assemblyId -> 融合后的实体
 DEFAULT_DENSITY = 7.85  # g/cm³，结构钢；调用方可以传入别的密度
 
 
@@ -133,6 +134,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.startswith("/stl"):
+            from urllib.parse import urlparse, parse_qs
+            q = parse_qs(urlparse(self.path).query)
+            asm_id = (q.get("assemblyId") or [None])[0]
+            if asm_id:
+                target_asm = ASSEMBLIES.get(asm_id)
+                if target_asm is None:
+                    self._send(404, {"ok": False, "message": f"装配不存在：{asm_id}"})
+                    return
+                import tempfile
+                from build123d import export_stl
+                with tempfile.NamedTemporaryFile(suffix=".stl", delete=True) as handle:
+                    export_stl(target_asm, handle.name)
+                    handle.seek(0)
+                    data = handle.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "model/stl")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             # 把最近一次重建的实体导出成二进制 STL，客户端（Qt/OCCT）直接读来显示，
             # 不在客户端重算几何——几何只有一个来源：服务端 sidecar。
             from urllib.parse import urlparse, parse_qs
@@ -161,6 +182,47 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"ok": False, "message": f"未知路径：{self.path}"})
 
     def do_POST(self):
+        if self.path == "/assemble":
+            # 装配：把各成员按偏移平移后 fuse，返回合成体积/包围盒；STL 供客户端显示
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+            except Exception as error:  # noqa: BLE001
+                self._send(400, {"ok": False, "message": f"JSON 解析失败：{error}"})
+                return
+            members = body.get("members") or []
+            if not members:
+                self._send(422, {"ok": False, "message": "装配至少要一个成员"})
+                return
+            density = body.get("densityGPerCm3", DEFAULT_DENSITY)
+            assembly_id = str(body.get("assemblyId") or "asm")
+            combined = None
+            per_member = []
+            try:
+                for index, member in enumerate(members):
+                    result = build(member.get("ops") or [], density, f"{assembly_id}#{index}")
+                    if not result.get("ok"):
+                        self._send(200, {"ok": False, "message": f"成员 {index} 重建失败：{result.get('message')}"})
+                        return
+                    solid = SOLIDS[f"{assembly_id}#{index}"]
+                    offset = member.get("offset") or [0, 0, 0]
+                    moved = solid.translate((float(offset[0]), float(offset[1]), float(offset[2])))
+                    combined = moved if combined is None else combined.fuse(moved)
+                    per_member.append({"index": index, "volumeMm3": result["volumeMm3"], "offset": offset})
+                volume = float(combined.volume)
+                bbox = combined.bounding_box().size
+                ASSEMBLIES[assembly_id] = combined
+                self._send(200, {
+                    "ok": True,
+                    "volumeMm3": round(volume, 1),
+                    "bboxMm": {"x": round(bbox.X, 2), "y": round(bbox.Y, 2), "z": round(bbox.Z, 2)},
+                    "massKg": round(volume / 1000.0 * float(density) / 1000.0, 4),
+                    "members": per_member,
+                    "kernel": "build123d"
+                })
+            except Exception as error:  # noqa: BLE001
+                self._send(200, {"ok": False, "message": f"装配失败：{error}"})
+            return
         if self.path != "/rebuild":
             self._send(404, {"ok": False, "message": f"未知路径：{self.path}"})
             return

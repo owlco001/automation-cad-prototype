@@ -147,6 +147,11 @@ jobs:
           pip install --quiet --upgrade pip
           pip install --quiet build123d==0.13.0
       # 真实 OCCT 重建：种子树体积必须等于手算（94166.8 mm³），改板厚后按手算变化
+      - name: 装配验收（并集 / 包围盒 / STL / 错误路径）
+        timeout-minutes: 10
+        run: |
+          . .venv-ft/bin/activate
+          FT_PYTHON="$PWD/.venv-ft/bin/python" node featuretree-service/assembly-tests.mjs
       - name: 体积/包围盒/质量 + 失败路径
         timeout-minutes: 10
         run: |
