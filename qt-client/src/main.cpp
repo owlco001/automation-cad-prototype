@@ -156,5 +156,11 @@ int main(int argc, char *argv[]) {
     window.refreshNow();
     window.startEventStream();
     window.startAutoRefresh(10'000);
+    // 截图/自检用：AUTOMATIONCAD_QT_VIEW=0..3 启动后直接切标准视角
+    if (qEnvironmentVariableIsSet("AUTOMATIONCAD_QT_VIEW")) {
+        bool ok = false;
+        const int which = qEnvironmentVariable("AUTOMATIONCAD_QT_VIEW").toInt(&ok);
+        if (ok) QTimer::singleShot(1800, &window, [&window, which]() { window.applyStandardView(which); });
+    }
     return app.exec();
 }

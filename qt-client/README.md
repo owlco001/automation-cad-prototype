@@ -68,6 +68,32 @@
 `StlViewport::ensureRevision(revision, url)` 这层接口与 OCCT 无关，等 dev 包装得上可以整体换成
 `AIS_InteractiveContext`，上层不用改。
 
+## OCCT AIS 视口（实验，`AUTOMATIONCAD_QT_OCCT=1` 打开）
+
+默认视口是自绘 OpenGL + 服务端 STL；OCCT AIS 视口作为可选项已能编译并渲染。
+
+**为什么之前装不上**：本机 Debian 12/13 混源，`libocct-data-exchange-dev` / `libocct-visualization-dev`
+依赖 `libfreetype-dev` 的 12 版，而系统里是 13 版，apt 报 held broken packages。
+解法（只取头文件，不动系统 freetype）：
+
+```sh
+cd /tmp && mkdir occt && cd occt
+apt-get download libocct-visualization-dev libocct-data-exchange-dev
+for f in *.deb; do dpkg -x "$f" root; done
+cp -r root/usr/include/opencascade /usr/local/include/
+cp -a root/usr/lib/x86_64-linux-gnu/*.so /usr/lib/x86_64-linux-gnu/ && ldconfig
+cmake -S qt-client -B build-qt && cmake --build build-qt -j4   # 会打印「OCCT AIS 视口：启用」
+```
+
+CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI 就是这条路径，已验证能编）。
+
+已实现：`/v1/geometry.stl` → `StlAPI_Reader` → `TopoDS_Shape` → `AIS_Shape` 显示；旋转/滚轮缩放/FitAll；
+低左角坐标三轴。踩到的坑：OCCT 的颜色是线性色，直接给 0.09 会被写进 sRGB 帧缓冲变成中灰（实测亮度 85），
+必须用 `Quantity_TOC_sRGB`；默认灯光在浅色面上过曝，统一压到 0.85。
+
+**还没调好**：视图菜单的四个标准视角在 OCCT 下映射不对（`SetProj` 组合待校准），也还没接选择面/测量。
+所以默认仍是 OpenGL 视口，OCCT 用环境变量打开；真机图见 `qt-client-18-occt-iso.png` / `qt-client-19-occt-top.png`。
+
 ## 自检入口（CI 用）
 
 ```sh

@@ -52,12 +52,12 @@ MainWindow::MainWindow(QWidget *parent)
     auto *fileMenu = menuBar()->addMenu(tr("文件"));
     fileMenu->addAction(tr("刷新特征树"), this, &MainWindow::loadTree);
     auto *viewMenu = menuBar()->addMenu(tr("视图"));
-    viewMenu->addAction(tr("等轴测"), this, [this]() { m_viewport->setStandardView(0); });
-    viewMenu->addAction(tr("正视"), this, [this]() { m_viewport->setStandardView(1); });
-    viewMenu->addAction(tr("俯视"), this, [this]() { m_viewport->setStandardView(2); });
-    viewMenu->addAction(tr("右视"), this, [this]() { m_viewport->setStandardView(3); });
+    viewMenu->addAction(tr("等轴测"), this, [this]() { setViewportStandardView(0); });
+    viewMenu->addAction(tr("正视"), this, [this]() { setViewportStandardView(1); });
+    viewMenu->addAction(tr("俯视"), this, [this]() { setViewportStandardView(2); });
+    viewMenu->addAction(tr("右视"), this, [this]() { setViewportStandardView(3); });
     viewMenu->addSeparator();
-    viewMenu->addAction(tr("适合视图"), this, [this]() { m_viewport->fitView(); });
+    viewMenu->addAction(tr("适合视图"), this, [this]() { fitViewport(); });
     auto *insertMenu = menuBar()->addMenu(tr("插入"));
     QAction *newFeature = insertMenu->addAction(tr("新建特征…"), this, &MainWindow::createFeatureDialog);
     newFeature->setShortcut(QKeySequence::New);
@@ -114,13 +114,31 @@ MainWindow::MainWindow(QWidget *parent)
 
     // 视口：几何来自服务端 /v1/geometry.stl（build123d 真建实体导出的二进制 STL），
     // 客户端只负责画，不参与建模。
-    m_viewport = new StlViewport(this);
-    connect(m_viewport, &StlViewport::loaded, this, [this](int triangles) {
-        statusBar()->showMessage(tr("几何已加载：%1 个三角面（服务端 STL）").arg(triangles), 5000);
-    });
-    connect(m_viewport, &StlViewport::failed, this, [this](const QString &message) {
-        statusBar()->showMessage(message, 6000);
-    });
+    // 默认用自绘 OpenGL STL 视口（四个标准视角已像素级验过）；OCCT AIS 视口目前是**实验性**的，
+    // 渲染与旋转可用，但标准视角/选取还没调好，需要时用 AUTOMATIONCAD_QT_OCCT=1 打开。
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    const bool preferOcct = qEnvironmentVariable("AUTOMATIONCAD_QT_OCCT", "0") == QStringLiteral("1");
+    if (preferOcct) {
+        m_occtViewport = new OcctViewport(this);
+        m_viewport = m_occtViewport;
+        connect(m_occtViewport, &OcctViewport::loaded, this, [this](int triangles) {
+            statusBar()->showMessage(tr("几何已加载：%1 个三角面（OCCT AIS · 服务端 STL）").arg(triangles), 5000);
+        });
+        connect(m_occtViewport, &OcctViewport::failed, this, [this](const QString &message) {
+            statusBar()->showMessage(message, 6000);
+        });
+    }
+#endif
+    if (!m_viewport) {
+        m_glViewport = new StlViewport(this);
+        m_viewport = m_glViewport;
+        connect(m_glViewport, &StlViewport::loaded, this, [this](int triangles) {
+            statusBar()->showMessage(tr("几何已加载：%1 个三角面（服务端 STL）").arg(triangles), 5000);
+        });
+        connect(m_glViewport, &StlViewport::failed, this, [this](const QString &message) {
+            statusBar()->showMessage(message, 6000);
+        });
+    }
 
     m_panel = new QTableWidget(0, 2, this);
     m_panel->setHorizontalHeaderLabels({tr("参数"), tr("值")});
@@ -517,6 +535,29 @@ void MainWindow::onTreeReply() {
     refreshTree(readReply(reply));
 }
 
+void MainWindow::setViewportGeometry(int revision, const QString &url) {
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    if (m_occtViewport) { m_occtViewport->ensureRevision(revision, url); return; }
+#endif
+    if (m_glViewport) m_glViewport->ensureRevision(revision, url);
+}
+
+void MainWindow::fitViewport() {
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    if (m_occtViewport) { m_occtViewport->fitView(); return; }
+#endif
+    if (m_glViewport) m_glViewport->fitView();
+}
+
+void MainWindow::applyStandardView(int which) { setViewportStandardView(which); }
+
+void MainWindow::setViewportStandardView(int which) {
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    if (m_occtViewport) { m_occtViewport->setStandardView(which); return; }
+#endif
+    if (m_glViewport) m_glViewport->setStandardView(which);
+}
+
 void MainWindow::undoOnce() {
     postHistory("undo");
 }
@@ -611,9 +652,9 @@ void MainWindow::refreshTree(const QJsonObject &envelope) {
     }
     // 几何只在版本变化时重新拉，避免每次 1.5s 轮询都下一遍 STL
     if (geometryInfo.isEmpty()) {
-        m_viewport->ensureRevision(-1, QString());
+        setViewportGeometry(-1, QString());
     } else {
-        m_viewport->ensureRevision(revisionFromEnvelope, m_serviceBase + QStringLiteral("/v1/geometry.stl"));
+        setViewportGeometry(revisionFromEnvelope, m_serviceBase + QStringLiteral("/v1/geometry.stl"));
     }
     emit envelopeRefreshed(revision);
 }

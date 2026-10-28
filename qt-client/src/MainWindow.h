@@ -3,6 +3,9 @@
 // 契约：本窗口不持有可独立写回的树副本；一切写操作走 FeatureTree 服务（POST /v1/operations，
 // 带 expectedRevision），成功后以返回的包络全文刷新，409 冲突时提示重新读取，禁止自动覆盖。
 #include "StlViewport.h"
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+#include "OcctViewport.h"
+#endif
 
 #include <QJsonObject>
 #include <QMap>
@@ -43,6 +46,8 @@ public:
     bool runSseSelfTest(const QString &base, int *revision, QString *error);
     /// 立即读一次
     void refreshNow();
+    /// 0=等轴测 1=正视 2=俯视 3=右视（截图/自检用，和视图菜单同一实现）
+    void applyStandardView(int which);
     /// 撤销/重做（走服务端 /v1/undo、/v1/redo，带 expectedRevision）
     void undoOnce();
     void redoOnce();
@@ -70,13 +75,20 @@ private:
     void postHistory(const QString &kind);
     void showConflict(const QJsonObject &current);
     void refreshPanelFromEnvelope();
+    void setViewportGeometry(int revision, const QString &url);
+    void fitViewport();
+    void setViewportStandardView(int which);
     QJsonObject requestSync(const QByteArray &verb, const QString &path, const QJsonObject &body,
                             int *status, QString *error, int timeoutMs = 8000);
 
     QNetworkAccessManager *m_net;
     QTreeWidget *m_tree;
     QTableWidget *m_panel;
-    StlViewport *m_viewport;
+    QWidget *m_viewport = nullptr;
+    StlViewport *m_glViewport = nullptr;
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    OcctViewport *m_occtViewport = nullptr;
+#endif
     QLabel *m_statusRevision;
     QLabel *m_statusGeometry;
     QLabel *m_statusLink = nullptr;
