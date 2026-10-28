@@ -37,6 +37,15 @@
 3. 在客户端里点特征、改属性面板数值，即走一次 `POST /v1/operations`；
    服务端版本 +1 后界面以返回的包络全文刷新。
 
+## 自检入口（CI 用）
+
+```sh
+# 写链路：读树 → 改 height+1 → 回读校验
+QT_QPA_PLATFORM=offscreen ./build/automationcad-qt --selftest --base http://127.0.0.1:18080
+# 自动刷新：读一次 → 外部改树 → 客户端 1.5s 轮询内刷到新 revision
+node ../qt-client/tests/watch.mjs --binary build/automationcad-qt
+```
+
 ## 下一步（按契约第 15 节未定项推进，不要擅自默认）
 
 - OCCT AIS 视口接入（拾取、高亮、剖切）；

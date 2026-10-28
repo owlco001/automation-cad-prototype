@@ -5,6 +5,10 @@
 #include <QApplication>
 #include <QDebug>
 #include <QStringList>
+#include <QTimer>
+
+#include <cstdio>
+#include <cstdlib>
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
@@ -28,7 +32,45 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    // 自动刷新自检：--watch-selftest [--base URL]
+    // 读一次 → 打印 WATCH_READY → 外部改一次树 → 客户端应在 1.5s 内检测到新 revision 并打印 REFRESH_OK。
+    if (args.contains(QStringLiteral("--watch-selftest"))) {
+        QString base = QStringLiteral("http://127.0.0.1:18080");
+        const int baseIndex = args.indexOf(QStringLiteral("--base"));
+        if (baseIndex >= 0 && baseIndex + 1 < args.size()) base = args.at(baseIndex + 1);
+        MainWindow window;
+        window.setServiceBase(base);
+        int seen = -1;
+        bool firstSeen = false;
+        QObject::connect(&window, &MainWindow::envelopeRefreshed, &app, [&](int revision) {
+            if (!firstSeen) {
+                firstSeen = true;
+                seen = revision;
+                qInfo().noquote() << QStringLiteral("FT_QT_WATCH_READY revision=%1").arg(revision);
+                return;
+            }
+            if (revision != seen) {
+                qInfo().noquote() << QStringLiteral("FT_QT_REFRESH_OK revision=%1").arg(revision);
+                // 自检进程必须立刻、确定地退出：exit(0) 在嵌套事件循环里可能被推迟，
+                // 这里先刷 stdout 再直接结束进程，避免 CI 里等 5s 超时。
+                std::fflush(stdout);
+                std::_Exit(0);
+            }
+        });
+        window.startAutoRefresh(1500);
+        window.refreshNow();
+        QTimer::singleShot(20000, &app, []() {
+            qCritical().noquote() << QStringLiteral("FT_QT_WATCH_TIMEOUT");
+            QCoreApplication::exit(1);
+        });
+        return app.exec();
+    }
+
+    QString base = QStringLiteral("http://127.0.0.1:18080");
+    const int baseIndex = args.indexOf(QStringLiteral("--base"));
+    if (baseIndex >= 0 && baseIndex + 1 < args.size()) base = args.at(baseIndex + 1);
     MainWindow window;
+    window.setServiceBase(base);
     window.show();
     return app.exec();
 }

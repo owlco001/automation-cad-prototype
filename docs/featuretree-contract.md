@@ -214,7 +214,7 @@
 | # | 标准 | v0.1 状态（2026-10-28） |
 |---|---|---|
 | 1 | 转接板示例树（90×90×12、Ø5.5 通孔、Ø8.5×5 沉窝、R3 四角）能完整写入、读出、重建，且体积、质量与手算一致 | ⚠️ 部分：写入/读出/编译算子 + 指纹已通过；**体积与质量未算**（重建仍是占位钩子，未接 OCCT/build123d） |
-| 2 | 手动改 → 版本 +1 → MCP 读到；MCP 改 → 版本 +1 → Qt 树自动刷新，双向 | ✅ 双向已通（2026-10-28）：`featuretree-service/mcp.mjs` 暴露 `ft_get_tree/ft_update_params/ft_undo/ft_list_revisions`，`mcp-tests.mjs` 11 条断言验「MCP 写→HTTP 读得到」「HTTP 写→MCP 读得到」「旧 revision 经 MCP 也被 409」；Qt 侧 `--selftest` 读→写→回读（`FT_QT_SELFTEST_OK revision=1 height=13`）。**界面自动刷新仍靠手动/重读，SSE 未接到 Qt** |
+| 2 | 手动改 → 版本 +1 → MCP 读到；MCP 改 → 版本 +1 → Qt 树自动刷新，双向 | ✅ 双向已通（2026-10-28）：`featuretree-service/mcp.mjs` 暴露 `ft_get_tree/ft_update_params/ft_undo/ft_list_revisions`，`mcp-tests.mjs` 11 条断言验「MCP 写→HTTP 读得到」「HTTP 写→MCP 读得到」「旧 revision 经 MCP 也被 409」；Qt 侧 `--selftest` 读→写→回读（`FT_QT_SELFTEST_OK revision=1 height=13`）。Qt 侧自动刷新已接：`--watch-selftest` 用 1.5s 轮询 `/v1/tree`，外部改树后实测在轮询周期内刷到新 revision（`qt-client/tests/watch.mjs` 4 条断言）。SSE 端点可用但客户端未订阅 |
 | 3 | 旧版本提交被 `CONFLICT_STALE_REVISION` 拒绝，文档不变 | ✅ `tests.mjs` 第 4/5 条 |
 | 4 | 批量事务任一子操作失败整单回滚，版本不变 | ✅ `tests.mjs` 第 10/11 条 |
 | 5 | 重建失败时版本不变，界面不显示“已保存” | ✅ 已实现：`rebuild()` 在算子为空（全部压缩/无实体特征）时返回失败，服务回 422 `REBUILD_FAILED` 且版本与特征树完全不变（`tests.mjs` 第 19/20 条）；Qt 侧收到错误只弹提示并重读，不会显示“已保存”。注意：真实 OCCT 重建仍缺，这一条验的是失败路径而不是几何成功 |
@@ -229,6 +229,6 @@
 2. 草图对象的完整 schema 与 SolveSpace 接入方式（进程内库还是独立服务）。
 3. 拓扑命名层的稳定键生成规则（几何指纹算法、重命名策略）。
 4. 配合求解器的范围（先做重合 / 同轴 / 距离，还是再加平行 / 垂直 / 角度）。
-5. 变更事件的传输方式（SSE 还是长轮询）与局域网访问是否开放。——**v0.1 的实现选择：已按 SSE 实现**（`GET /v1/events`），理由是与 HTTP 同栈、客户端零依赖；若最终选长轮询，服务端只需保留 `GET /v1/revisions` 轮询语义，客户端改动集中在事件订阅处。**这是 v0 的临时选择，不是已拍板结论。**
+5. 变更事件的传输方式（SSE 还是长轮询）与局域网访问是否开放。——**v0.1 的实际状态：服务端提供 SSE（`GET /v1/events`），Qt 客户端暂用 1.5s 轮询 `/v1/tree`（已验：外部改树 → 客户端自动刷新）**。选轮询的理由是 Qt 侧零额外依赖、断线自恢复；若改 SSE，服务端不用动，客户端把轮询换成事件订阅即可。**这是 v0 的临时选择，不是已拍板结论。**
 6. 历史记录的保留条数 / 归档策略。
 7. Qt 客户端在仓库里的确切目录名与构建系统（CMake 还是 qmake），以及 Qt + OCCT 在 Windows 真机上的工具链验证方式。

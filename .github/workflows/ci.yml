@@ -82,6 +82,9 @@ jobs:
           kill $SERVICE_PID || true
           cat /tmp/ft-service.log
           exit $STATUS
+      - name: Qt 自动刷新验收（外部改树 → 客户端 1.5s 内刷新）
+        timeout-minutes: 5
+        run: node qt-client/tests/watch.mjs --binary build-qt/automationcad-qt
 
   smoke:
     name: Electron smoke (xvfb)

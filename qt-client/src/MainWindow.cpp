@@ -96,6 +96,18 @@ MainWindow::MainWindow(QWidget *parent)
     loadTree();
 }
 
+void MainWindow::setServiceBase(const QString &base) { m_serviceBase = base; }
+
+void MainWindow::refreshNow() { loadTree(); }
+
+void MainWindow::startAutoRefresh(int intervalMs) {
+    if (!m_pollTimer) {
+        m_pollTimer = new QTimer(this);
+        connect(m_pollTimer, &QTimer::timeout, this, &MainWindow::loadTree);
+    }
+    m_pollTimer->start(intervalMs);
+}
+
 void MainWindow::loadTree() {
     QNetworkRequest req(QUrl(m_serviceBase + QStringLiteral("/v1/tree")));
     // 服务没起来时不要让界面无限等；8 秒后按连接失败处理
@@ -128,7 +140,9 @@ void MainWindow::refreshTree(const QJsonObject &envelope) {
         if (f.value(QStringLiteral("suppressed")).toBool()) item->setForeground(0, Qt::gray);
     }
     m_tree->expandAll();
-    m_statusRevision->setText(tr("版本 r%1").arg(envelope.value(QStringLiteral("revision")).toInt()));
+    const int revision = envelope.value(QStringLiteral("revision")).toInt();
+    m_statusRevision->setText(tr("版本 r%1").arg(revision));
+    emit envelopeRefreshed(revision);
 }
 
 void MainWindow::onTreeItemSelected(QTreeWidgetItem *item, int) {

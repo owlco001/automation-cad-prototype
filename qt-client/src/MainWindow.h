@@ -21,6 +21,17 @@ public:
     /// 成功返回 true 并填 revision/height；失败返回 false 并填 error。
     bool runSelfTest(const QString &base, int *revision, double *height, QString *error);
 
+    /// 服务地址（默认 127.0.0.1:18080）
+    void setServiceBase(const QString &base);
+    /// 定时拉取 /v1/tree，revision 变化时刷新界面并发出 envelopeRefreshed（等价于 SSE 未接入前的自动刷新）
+    void startAutoRefresh(int intervalMs = 1500);
+    /// 立即读一次
+    void refreshNow();
+
+signals:
+    /// 每次成功读到包络后发出（首次加载与后续变化都会发）
+    void envelopeRefreshed(int revision);
+
 private slots:
     void loadTree();
     void onTreeItemSelected(QTreeWidgetItem *item, int column);
@@ -43,6 +54,7 @@ private:
     QLabel *m_viewportPlaceholder;
     QLabel *m_statusRevision;
     QSplitter *m_splitter;
+    class QTimer *m_pollTimer = nullptr;
     QJsonObject m_envelope;
     QString m_selectedFeatureId;
     bool m_updatingPanel = false;
