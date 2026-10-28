@@ -182,6 +182,44 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"ok": False, "message": f"未知路径：{self.path}"})
 
     def do_POST(self):
+        if self.path == "/interfere":
+            # 干涉：两两求交集体积（mm³）。不是 AABB 初筛，是真实布尔交集。
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length).decode("utf-8"))
+            except Exception as error:  # noqa: BLE001
+                self._send(400, {"ok": False, "message": f"JSON 解析失败：{error}"})
+                return
+            members = body.get("members") or []
+            if len(members) < 2:
+                self._send(422, {"ok": False, "message": "干涉检查至少要两个成员"})
+                return
+            solids = []
+            try:
+                for index, member in enumerate(members):
+                    result = build(member.get("ops") or [], body.get("densityGPerCm3", DEFAULT_DENSITY), f"ifc#{index}")
+                    if not result.get("ok"):
+                        self._send(200, {"ok": False, "message": f"成员 {index} 重建失败：{result.get('message')}"})
+                        return
+                    solid = SOLIDS[f"ifc#{index}"]
+                    offset = member.get("offset") or [0, 0, 0]
+                    solids.append(solid.translate((float(offset[0]), float(offset[1]), float(offset[2]))))
+                pairs = []
+                for i in range(len(solids)):
+                    for j in range(i + 1, len(solids)):
+                        overlap = solids[i] & solids[j]
+                        volume = float(overlap.volume) if overlap is not None else 0.0
+                        if volume > 1e-6:
+                            bbox = overlap.bounding_box().size
+                            pairs.append({
+                                "a": i, "b": j,
+                                "overlapMm3": round(volume, 2),
+                                "bboxMm": {"x": round(bbox.X, 2), "y": round(bbox.Y, 2), "z": round(bbox.Z, 2)}
+                            })
+                self._send(200, {"ok": True, "pairs": pairs, "checked": len(members)})
+            except Exception as error:  # noqa: BLE001
+                self._send(200, {"ok": False, "message": f"干涉检查失败：{error}"})
+            return
         if self.path == "/assemble":
             # 装配：把各成员按偏移平移后 fuse，返回合成体积/包围盒；STL 供客户端显示
             length = int(self.headers.get("Content-Length") or 0)

@@ -95,7 +95,9 @@ MainWindow::MainWindow(QWidget *parent)
             postOperation(body);
         });
     }
-    menuBar()->addMenu(tr("评估"));
+    auto *evalMenu = menuBar()->addMenu(tr("评估"));
+    QAction *interference = evalMenu->addAction(tr("装配干涉检查"), this, &MainWindow::runInterferenceCheck);
+    interference->setShortcut(QKeySequence(QStringLiteral("Ctrl+I")));
 
     auto *editMenu = menuBar()->addMenu(tr("编辑"));
     m_undoAction = editMenu->addAction(tr("撤销"), this, &MainWindow::undoOnce);
@@ -210,6 +212,50 @@ void MainWindow::setDocument(const QString &documentId) {
     // 换文档必须让视口忘掉上一份的缓存（版本号可能相同，不然不会重载几何）
     setViewportGeometry(-1, QString());
     refreshNow();
+}
+
+void MainWindow::runInterferenceCheck() {
+    if (m_assemblyId.isEmpty()) {
+        statusBar()->showMessage(tr("先在「文件 → 打开装配…」里打开一个装配，再做干涉检查"), 6000);
+        return;
+    }
+    QJsonObject body;
+    QNetworkRequest req{QUrl(m_serviceBase + QStringLiteral("/v1/assemblies/") +
+                             QString::fromUtf8(QUrl::toPercentEncoding(m_assemblyId)) + QStringLiteral("/interference"))};
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    req.setTransferTimeout(60'000); // 布尔交集比读树慢得多
+    QNetworkReply *reply = m_net->post(req, QJsonDocument(body).toJson());
+    statusBar()->showMessage(tr("正在做布尔交集干涉检查（真实几何，不是 AABB 初筛）…"));
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const QJsonObject result = readReply(reply);
+        if (reply->error() != QNetworkReply::NoError || result.contains(QStringLiteral("error"))) {
+            QMessageBox::warning(this, tr("干涉检查失败"),
+                result.value(QStringLiteral("message")).toString(reply->errorString()));
+            return;
+        }
+        const QJsonArray pairs = result.value(QStringLiteral("pairs")).toArray();
+        QString detail;
+        for (const auto &entry : pairs) {
+            const QJsonObject pair = entry.toObject();
+            const QJsonObject bbox = pair.value(QStringLiteral("bboxMm")).toObject();
+            detail += tr("· %1 ↔ %2：干涉体积 %3 mm³（重叠区 %4×%5×%6 mm）\n")
+                          .arg(pair.value(QStringLiteral("aId")).toString())
+                          .arg(pair.value(QStringLiteral("bId")).toString())
+                          .arg(pair.value(QStringLiteral("overlapMm3")).toDouble(), 0, 'f', 2)
+                          .arg(bbox.value(QStringLiteral("x")).toDouble())
+                          .arg(bbox.value(QStringLiteral("y")).toDouble())
+                          .arg(bbox.value(QStringLiteral("z")).toDouble());
+        }
+        const QString summary = result.value(QStringLiteral("summary")).toString();
+        if (pairs.isEmpty()) {
+            QMessageBox::information(this, tr("干涉检查"), tr("%1\n\n检查成员：%2 个")
+                                         .arg(summary).arg(result.value(QStringLiteral("checked")).toInt()));
+        } else {
+            QMessageBox::warning(this, tr("干涉检查"), tr("%1\n\n%2").arg(summary, detail));
+        }
+        statusBar()->showMessage(summary, 8000);
+    });
 }
 
 void MainWindow::reloadDocuments() {

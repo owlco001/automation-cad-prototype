@@ -119,6 +119,20 @@ try {
   const tris = bytes.length >= 84 ? bytes.readUInt32LE(80) : 0;
   ok(tris > 10 && 84 + tris * 50 === bytes.length, '装配 STL 三角面数自洽', `tris=${tris}`);
 
+  // 3.5) 装配级干涉：真实布尔交集，不是 AABB 初筛
+  const interferenceOverlap = await http('POST', '/v1/assemblies/asm-overlap/interference', {});
+  ok(interferenceOverlap.status === 200, '同位置装配能跑干涉检查', `status=${interferenceOverlap.status}`);
+  const pairs = interferenceOverlap.json?.pairs ?? [];
+  ok(pairs.length === 1, '同位置两块板检出 1 对干涉', JSON.stringify(interferenceOverlap.json).slice(0, 160));
+  ok(pairs[0] && Math.abs(pairs[0].overlapMm3 - volA) <= 2,
+    '干涉体积 = 被完全包住那块（12 厚板 94,166.8）', `actual=${pairs[0]?.overlapMm3} expected=${volA}`);
+  ok(pairs[0]?.aId === 'demo-adapter' && pairs[0]?.bId === 'doc-asm-b', '干涉结果带成员 id，能定位到具体两块');
+
+  const interferenceStacked = await http('POST', '/v1/assemblies/asm-stacked/interference', {});
+  ok(interferenceStacked.status === 200 && (interferenceStacked.json?.pairs ?? []).length === 0,
+    '不重叠的装配判为无干涉', JSON.stringify(interferenceStacked.json).slice(0, 120));
+  ok(/未发现/.test(interferenceStacked.json?.summary || ''), '无干涉时给的是「未发现实体干涉」而不是空数组');
+
   // 4) 错误路径
   const tooFew = await http('POST', '/v1/assemblies', { documentId: 'asm-bad', members: [{ documentId: 'demo-adapter' }] });
   ok(tooFew.status === 422, '单成员装配被拒（422）', `status=${tooFew.status}`);

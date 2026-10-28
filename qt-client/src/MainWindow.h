@@ -69,6 +69,7 @@ signals:
 private slots:
     void loadTree();
     void reloadDocuments();
+    void runInterferenceCheck();
     void onCreateDocument();
     void onEventStreamReadyRead();
     void onEventStreamFinished();

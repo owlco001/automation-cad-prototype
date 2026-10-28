@@ -213,6 +213,38 @@ const server = createServer(async (req, res) => {
       if (!record) return send(res, 404, { error: 'NOT_FOUND', message: `装配不存在：${assemblyId}` });
       return send(res, 200, record);
     }
+    if (req.method === 'POST' && url.pathname.startsWith('/v1/assemblies/') && url.pathname.endsWith('/interference')) {
+      const assemblyId = decodeURIComponent(url.pathname.slice('/v1/assemblies/'.length, -'/interference'.length));
+      const record = assemblies.get(assemblyId);
+      if (!record) return send(res, 404, { error: 'NOT_FOUND', message: `装配不存在：${assemblyId}` });
+      const base = process.env.FT_BUILD_URL;
+      if (!base) return send(res, 422, { error: 'REBUILD_FAILED', message: '未配置 FT_BUILD_URL，干涉检查需要几何 sidecar' });
+      const members = [];
+      for (const member of record.members) {
+        const store = documents.get(member.documentId);
+        if (!store) return send(res, 422, { error: 'VALIDATION_FAILED', message: `成员文档已不存在：${member.documentId}` });
+        members.push({ ops: compileOps(store.doc), offset: member.offset });
+      }
+      const response = await fetch(`${base.replace(/\/+$/, '')}/interfere`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ members }),
+        signal: AbortSignal.timeout(60_000)
+      });
+      const body = await response.json().catch(() => null);
+      if (!response.ok || !body?.ok) return send(res, 422, { error: 'REBUILD_FAILED', message: body?.message || `sidecar HTTP ${response.status}` });
+      return send(res, 200, {
+        assemblyId,
+        checked: body.checked,
+        // 给客户端一个能直接读的中文结论，避免把「0 对」当成检查失败
+        summary: body.pairs.length ? `${body.pairs.length} 对成员存在实体干涉` : '未发现实体干涉',
+        pairs: body.pairs.map((pair) => ({
+          ...pair,
+          aId: record.members[pair.a]?.documentId,
+          bId: record.members[pair.b]?.documentId
+        }))
+      });
+    }
     if (req.method === 'GET' && url.pathname === '/v1/assemblies') {
       return send(res, 200, { assemblies: [...assemblies.values()] });
     }
