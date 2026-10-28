@@ -1,6 +1,7 @@
 #include "OcctViewport.h"
 
 #include <QDebug>
+#include <QDir>
 #include <QMouseEvent>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -135,7 +136,8 @@ void OcctViewport::loadFromUrl(const QString &url) {
             return;
         }
         // StlAPI_Reader 只吃文件：写临时文件再读，避免自己造 TopoDS 的误差
-        QTemporaryFile temp(QStringLiteral("XXXXXX.stl"));
+        // 临时文件必须落到系统临时目录：模板不带路径时会写到进程 cwd（实测把 .stl 漏进仓库根目录）
+        QTemporaryFile temp(QDir::tempPath() + QStringLiteral("/automationcad-XXXXXX.stl"));
         temp.setAutoRemove(true);
         if (!temp.open()) {
             emit failed(tr("无法创建临时 STL 文件"));

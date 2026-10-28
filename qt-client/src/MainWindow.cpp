@@ -633,11 +633,13 @@ void MainWindow::loadAssembly(const QString &assemblyId) {
         for (const auto &entry : members) {
             const QJsonObject member = entry.toObject();
             const QJsonArray offset = member.value(QStringLiteral("offset")).toArray();
+            const double rotateZ = member.value(QStringLiteral("rotateZ")).toDouble();
             auto *item = new QTreeWidgetItem(root, {
-                tr("%1（r%2） @ %3, %4, %5 mm")
+                tr("%1（r%2） @ %3, %4, %5 mm%6")
                     .arg(member.value(QStringLiteral("documentId")).toString())
                     .arg(member.value(QStringLiteral("revision")).toInt())
                     .arg(offset.at(0).toDouble()).arg(offset.at(1).toDouble()).arg(offset.at(2).toDouble())
+                    .arg(rotateZ != 0.0 ? tr(" · 绕 Z 转 %1°").arg(rotateZ) : QString())
             });
         }
         m_tree->expandAll();

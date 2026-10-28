@@ -21,7 +21,7 @@ import os
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from build123d import Align, Box, Cylinder, Pos, fillet  # noqa: F401
+from build123d import Align, Axis, Box, Cylinder, Pos, fillet  # noqa: F401
 
 # 板体按「底面贴 z=0、向上生长」建，和画布/装配的坐标口径一致；
 # build123d 的 Box 默认以原点为中心，直接用会让孔深与板厚错位（实测体积差 8%）。
@@ -203,6 +203,9 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     solid = SOLIDS[f"ifc#{index}"]
                     offset = member.get("offset") or [0, 0, 0]
+                    rotate_z = float(member.get("rotateZ") or 0.0)
+                    if rotate_z:
+                        solid = solid.rotate(Axis.Z, rotate_z)
                     solids.append(solid.translate((float(offset[0]), float(offset[1]), float(offset[2]))))
                 pairs = []
                 for i in range(len(solids)):
@@ -244,6 +247,10 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     solid = SOLIDS[f"{assembly_id}#{index}"]
                     offset = member.get("offset") or [0, 0, 0]
+                    # 先绕自身 Z 轴转（度），再平移；顺序固定，避免“转完位置跑掉”
+                    rotate_z = float(member.get("rotateZ") or 0.0)
+                    if rotate_z:
+                        solid = solid.rotate(Axis.Z, rotate_z)
                     moved = solid.translate((float(offset[0]), float(offset[1]), float(offset[2])))
                     combined = moved if combined is None else combined.fuse(moved)
                     per_member.append({"index": index, "volumeMm3": result["volumeMm3"], "offset": offset})

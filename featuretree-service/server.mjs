@@ -58,7 +58,7 @@ async function buildAssembly(assemblyId, members) {
     if (!store) return { ok: false, message: `成员文档不存在：${member.documentId}` };
     const ops = compileOps(store.doc);
     if (!ops.length) return { ok: false, message: `成员文档没有可构建几何：${member.documentId}` };
-    payload.push({ ops, offset: member.offset || [0, 0, 0] });
+    payload.push({ ops, offset: member.offset || [0, 0, 0], rotateZ: member.rotateZ || 0 });
   }
   const response = await fetch(`${base.replace(/\/+$/, '')}/assemble`, {
     method: 'POST',
@@ -173,6 +173,9 @@ const server = createServer(async (req, res) => {
         if (member.offset && (!Array.isArray(member.offset) || member.offset.length !== 3 || member.offset.some((v) => typeof v !== 'number'))) {
           return send(res, 422, { error: 'VALIDATION_FAILED', message: '成员 offset 必须是 [x, y, z] 三个数字（mm）' });
         }
+        if (member.rotateZ !== undefined && typeof member.rotateZ !== 'number') {
+          return send(res, 422, { error: 'VALIDATION_FAILED', message: '成员 rotateZ 必须是角度数字（度，绕自身 Z 轴）' });
+        }
       }
       const built = await buildAssembly(assemblyId, members);
       if (!built.ok) return send(res, 422, { error: 'REBUILD_FAILED', message: built.message });
@@ -181,7 +184,8 @@ const server = createServer(async (req, res) => {
         members: members.map((member) => ({
           documentId: member.documentId,
           revision: documents.get(member.documentId).revision,
-          offset: member.offset || [0, 0, 0]
+          offset: member.offset || [0, 0, 0],
+          rotateZ: member.rotateZ || 0
         })),
         geometry: {
           volumeMm3: built.volumeMm3,
@@ -223,7 +227,7 @@ const server = createServer(async (req, res) => {
       for (const member of record.members) {
         const store = documents.get(member.documentId);
         if (!store) return send(res, 422, { error: 'VALIDATION_FAILED', message: `成员文档已不存在：${member.documentId}` });
-        members.push({ ops: compileOps(store.doc), offset: member.offset });
+        members.push({ ops: compileOps(store.doc), offset: member.offset, rotateZ: member.rotateZ || 0 });
       }
       const response = await fetch(`${base.replace(/\/+$/, '')}/interfere`, {
         method: 'POST',

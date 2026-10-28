@@ -133,6 +133,34 @@ try {
     '不重叠的装配判为无干涉', JSON.stringify(interferenceStacked.json).slice(0, 120));
   ok(/未发现/.test(interferenceStacked.json?.summary || ''), '无干涉时给的是「未发现实体干涉」而不是空数组');
 
+  // 3.6) 成员绕 Z 轴旋转：120×60 的板转 90° 后包围盒应变成 60×120
+  const wide = await http('POST', '/v1/documents', { documentId: 'doc-wide' });
+  ok(wide.status === 201, '建第三块板 doc-wide', `status=${wide.status}`);
+  const wideEdit = await http('POST', '/v1/operations', {
+    documentId: 'doc-wide', expectedRevision: 0, actor: 'manual',
+    operation: 'updateFeatureParams', featureId: 'f-body', patch: { length: 120, width: 90 }
+  });
+  ok(wideEdit.status === 200, 'doc-wide 改成 120×90', `status=${wideEdit.status}`);
+
+  const rotated = await http('POST', '/v1/assemblies', {
+    documentId: 'asm-rotated',
+    members: [
+      { documentId: 'doc-wide', offset: [0, 0, 0], rotateZ: 90 },
+      { documentId: 'doc-asm-b', offset: [200, 0, 0] }
+    ]
+  });
+  ok(rotated.status === 201, '带 rotateZ 的装配创建成功', JSON.stringify(rotated.json).slice(0, 140));
+  const rotatedBox = rotated.json.geometry?.bboxMm;
+  // 120×90 的板绕 Z 转 90° → X 占 90、Y 占 120；另一块板只有 90 宽，所以 Y 方向能区分「转没转」
+  ok(rotatedBox && Math.abs(rotatedBox.y - 120) <= 2,
+    '旋转 90° 后 Y 方向变成 120（未旋转时是 90）', JSON.stringify(rotatedBox));
+
+  const badRotate = await http('POST', '/v1/assemblies', {
+    documentId: 'asm-bad-rot',
+    members: [{ documentId: 'doc-wide', rotateZ: '90' }, { documentId: 'demo-adapter' }]
+  });
+  ok(badRotate.status === 422, 'rotateZ 传字符串被拒（422）', `status=${badRotate.status}`);
+
   // 4) 错误路径
   const tooFew = await http('POST', '/v1/assemblies', { documentId: 'asm-bad', members: [{ documentId: 'demo-adapter' }] });
   ok(tooFew.status === 422, '单成员装配被拒（422）', `status=${tooFew.status}`);
