@@ -76,6 +76,8 @@ export class Store {
     this.snapshots = [clone(this.doc)]; // snapshots[revision] = 该版本文档全文
     this.listeners = new Set();
     this.geometry = null;
+    // undo 不是终点：撤回的那一版必须能再“重做”回来。栈上限 50，避免无限长内存。
+    this.redoStack = [];
     const errs = validateDoc(this.doc);
     if (errs.length) throw new Error('初始文档校验失败：' + errs.join('；'));
   }
@@ -98,6 +100,9 @@ export class Store {
       documentId: 'demo-adapter',
       kind: 'part',
       revision: this.revision,
+      // 给 UI 用：能不能撤销/重做不用客户端自己猜
+      undoDepth: Math.max(0, this.revision),
+      redoDepth: this.redoStack.length,
       doc: clone(this.doc),
       history: clone(this.history),
       ...(this.geometry ? { geometry: clone(this.geometry) } : {})
@@ -124,6 +129,8 @@ export class Store {
     this.revision += 1;
     this.snapshots[this.revision] = clone(this.doc);
     this.geometry = rb.geometry;
+    // 一旦发生新的写操作，原来的 redo 分支就作废（否则会重做出一棵不相干的树）
+    this.redoStack = [];
     const entry = { revision: this.revision, beforeRevision: before, timestamp: this.doc.updatedAt, actor, operation, featureIds, fingerprint: rb.fingerprint, ...(rb.geometry ? { geometry: rb.geometry } : {}) };
     this.history.push(entry);
     const env = this.envelope();
@@ -233,6 +240,8 @@ export class Store {
     const rb = await rebuild(restored);
     if (!rb.ok) return { error: 'REBUILD_FAILED', message: rb.message || '重建失败' };
     const before = this.revision;
+    this.redoStack.push(clone(this.doc));
+    if (this.redoStack.length > 50) this.redoStack.shift();
     this.doc = restored;
     this.doc.updatedAt = nowIso();
     this.revision += 1;
@@ -240,6 +249,40 @@ export class Store {
     this.geometry = rb.geometry;
     this.history.push({ revision: this.revision, beforeRevision: before, timestamp: this.doc.updatedAt, actor, operation: 'undo', featureIds: [], fingerprint: rb.fingerprint, undoTarget: target });
     if (rb.geometry) this.history[this.history.length - 1].geometry = rb.geometry;
+    const env = this.envelope();
+    this.emit({ documentId: env.documentId, revision: env.revision, changedFeatureIds: [], actor });
+    return env;
+  }
+
+  /**
+   * 重做：把最近一次 undo 撤回掉的文档放回来。
+   * 和 undo 一样走乐观锁 + 校验 + 重建，失败则版本与文档都不动。
+   * 新写操作会清空 redo 栈（分支历史不合并）。
+   */
+  async redo(expectedRevision, actor = 'manual', steps = 1) {
+    if (expectedRevision !== this.revision) {
+      return { error: 'CONFLICT_STALE_REVISION', message: `版本过期：期望 ${expectedRevision}，当前 ${this.revision}`, current: this.envelope() };
+    }
+    const count = Math.max(1, Math.min(steps, this.redoStack.length));
+    if (!this.redoStack.length) {
+      return { error: 'REDO_EMPTY', message: '没有可重做的操作（redo 栈为空，或之后又发生了新的修改）' };
+    }
+    // 连续重做多步时，最终落在倒数第 count 个快照上
+    const restored = clone(this.redoStack[this.redoStack.length - count]);
+    const errs = validateDoc(restored);
+    if (errs.length) return { error: 'VALIDATION_FAILED', message: errs.join('；') };
+    const rb = await rebuild(restored);
+    if (!rb.ok) return { error: 'REBUILD_FAILED', message: rb.message || '重建失败' };
+    const before = this.revision;
+    this.redoStack.splice(this.redoStack.length - count, count);
+    this.doc = restored;
+    this.doc.updatedAt = nowIso();
+    this.revision += 1;
+    this.snapshots[this.revision] = clone(this.doc);
+    this.geometry = rb.geometry;
+    const entry = { revision: this.revision, beforeRevision: before, timestamp: this.doc.updatedAt, actor, operation: 'redo', featureIds: [], fingerprint: rb.fingerprint, redoSteps: count };
+    if (rb.geometry) entry.geometry = rb.geometry;
+    this.history.push(entry);
     const env = this.envelope();
     this.emit({ documentId: env.documentId, revision: env.revision, changedFeatureIds: [], actor });
     return env;

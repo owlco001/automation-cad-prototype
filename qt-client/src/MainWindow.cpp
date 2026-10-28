@@ -2,6 +2,7 @@
 // 不含 OCCT 头文件；视口是占位 QWidget，OCCT AIS 接入是后续里程碑。
 #include "MainWindow.h"
 
+#include <QAction>
 #include <QColor>
 #include <QEventLoop>
 #include <QFormLayout>
@@ -54,7 +55,18 @@ MainWindow::MainWindow(QWidget *parent)
     menuBar()->addMenu(tr("工具"));
     menuBar()->addMenu(tr("评估"));
 
+    auto *editMenu = menuBar()->addMenu(tr("编辑"));
+    m_undoAction = editMenu->addAction(tr("撤销"), this, &MainWindow::undoOnce);
+    m_undoAction->setShortcut(QKeySequence::Undo);
+    m_redoAction = editMenu->addAction(tr("重做"), this, &MainWindow::redoOnce);
+    m_redoAction->setShortcut(QKeySequence::Redo);
+    m_undoAction->setEnabled(false);
+    m_redoAction->setEnabled(false);
+
     auto *toolbar = addToolBar(tr("特征工具栏"));
+    toolbar->addAction(m_undoAction);
+    toolbar->addAction(m_redoAction);
+    toolbar->addSeparator();
     toolbar->addAction(tr("拉伸凸台"), this, [] {});
     toolbar->addAction(tr("拉伸切除"), this, [] {});
     toolbar->addAction(tr("旋转"), this, [] {});
@@ -100,6 +112,85 @@ MainWindow::MainWindow(QWidget *parent)
 
 void MainWindow::setServiceBase(const QString &base) { m_serviceBase = base; }
 
+bool MainWindow::runHistorySelfTest(const QString &base, int *undoRevision, int *redoRevision, double *height, QString *error) {
+    m_serviceBase = base;
+    int status = 0;
+    QString localError;
+    const QJsonObject tree = requestSync("GET", QStringLiteral("/v1/tree"), {}, &status, &localError);
+    if (status != 200) {
+        if (error) *error = tr("读取特征树失败（HTTP %1）：%2").arg(status).arg(localError);
+        return false;
+    }
+    const auto heightOf = [](const QJsonObject &envelope) -> double {
+        const QJsonArray features = envelope.value(QStringLiteral("doc")).toObject().value(QStringLiteral("features")).toArray();
+        for (const auto &fv : features) {
+            const QJsonObject f = fv.toObject();
+            if (f.value(QStringLiteral("id")).toString() == QStringLiteral("f-body")) {
+                return f.value(QStringLiteral("params")).toObject().value(QStringLiteral("height")).toDouble();
+            }
+        }
+        return -1;
+    };
+    const int startRevision = tree.value(QStringLiteral("revision")).toInt();
+    const double startHeight = heightOf(tree);
+    if (startHeight <= 0) {
+        if (error) *error = QStringLiteral("种子树里找不到 f-body/height");
+        return false;
+    }
+
+    QJsonObject patch; patch.insert(QStringLiteral("height"), startHeight + 3);
+    QJsonObject edit;
+    edit.insert(QStringLiteral("documentId"), QStringLiteral("demo-adapter"));
+    edit.insert(QStringLiteral("expectedRevision"), startRevision);
+    edit.insert(QStringLiteral("actor"), QStringLiteral("manual"));
+    edit.insert(QStringLiteral("operation"), QStringLiteral("updateFeatureParams"));
+    edit.insert(QStringLiteral("featureId"), QStringLiteral("f-body"));
+    edit.insert(QStringLiteral("patch"), patch);
+    const QJsonObject edited = requestSync("POST", QStringLiteral("/v1/operations"), edit, &status, &localError);
+    if (status != 200) {
+        if (error) *error = tr("写入失败（HTTP %1）：%2").arg(status).arg(localError);
+        return false;
+    }
+
+    QJsonObject undoBody;
+    undoBody.insert(QStringLiteral("documentId"), QStringLiteral("demo-adapter"));
+    undoBody.insert(QStringLiteral("expectedRevision"), edited.value(QStringLiteral("revision")).toInt());
+    undoBody.insert(QStringLiteral("actor"), QStringLiteral("manual"));
+    undoBody.insert(QStringLiteral("steps"), 1);
+    const QJsonObject undone = requestSync("POST", QStringLiteral("/v1/undo"), undoBody, &status, &localError);
+    if (status != 200) {
+        if (error) *error = tr("撤销失败（HTTP %1）：%2").arg(status).arg(localError);
+        return false;
+    }
+    if (heightOf(undone) != startHeight) {
+        if (error) *error = tr("撤销后高度不是 %1，而是 %2").arg(startHeight).arg(heightOf(undone));
+        return false;
+    }
+    if (undone.value(QStringLiteral("redoDepth")).toInt() < 1) {
+        if (error) *error = QStringLiteral("撤销后 redoDepth 应该是 1");
+        return false;
+    }
+
+    QJsonObject redoBody;
+    redoBody.insert(QStringLiteral("documentId"), QStringLiteral("demo-adapter"));
+    redoBody.insert(QStringLiteral("expectedRevision"), undone.value(QStringLiteral("revision")).toInt());
+    redoBody.insert(QStringLiteral("actor"), QStringLiteral("manual"));
+    redoBody.insert(QStringLiteral("steps"), 1);
+    const QJsonObject redone = requestSync("POST", QStringLiteral("/v1/redo"), redoBody, &status, &localError);
+    if (status != 200) {
+        if (error) *error = tr("重做失败（HTTP %1）：%2").arg(status).arg(localError);
+        return false;
+    }
+    if (heightOf(redone) != startHeight + 3) {
+        if (error) *error = tr("重做后高度不是 %1，而是 %2").arg(startHeight + 3).arg(heightOf(redone));
+        return false;
+    }
+    if (undoRevision) *undoRevision = undone.value(QStringLiteral("revision")).toInt();
+    if (redoRevision) *redoRevision = redone.value(QStringLiteral("revision")).toInt();
+    if (height) *height = heightOf(redone);
+    return true;
+}
+
 void MainWindow::refreshNow() { loadTree(); }
 
 void MainWindow::startAutoRefresh(int intervalMs) {
@@ -129,19 +220,76 @@ void MainWindow::onTreeReply() {
     refreshTree(readReply(reply));
 }
 
+void MainWindow::undoOnce() {
+    postHistory("undo");
+}
+
+void MainWindow::redoOnce() {
+    postHistory("redo");
+}
+
+void MainWindow::postHistory(const QString &kind) {
+    const int revision = m_envelope.value(QStringLiteral("revision")).toInt();
+    QJsonObject body;
+    body.insert(QStringLiteral("documentId"), QStringLiteral("demo-adapter"));
+    body.insert(QStringLiteral("expectedRevision"), revision);
+    body.insert(QStringLiteral("actor"), QStringLiteral("manual"));
+    body.insert(QStringLiteral("steps"), 1);
+    QNetworkRequest req(QUrl(m_serviceBase + QStringLiteral("/v1/") + kind));
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    req.setTransferTimeout(8000);
+    QNetworkReply *reply = m_net->post(req, QJsonDocument(body).toJson());
+    connect(reply, &QNetworkReply::finished, this, [this, reply, kind]() {
+        reply->deleteLater();
+        const QJsonObject payload = readReply(reply);
+        if (reply->error() != QNetworkReply::NoError || payload.contains(QStringLiteral("error"))) {
+            const QString message = payload.value(QStringLiteral("message")).toString(reply->errorString());
+            statusBar()->showMessage(tr("%1失败：%2").arg(kind == QStringLiteral("undo") ? tr("撤销") : tr("重做"), message), 6000);
+            // 失败（含 409 版本过期）一律重新读一次，绝不在本地硬套
+            refreshNow();
+            return;
+        }
+        refreshTree(payload);
+        statusBar()->showMessage(tr("%1成功 → 版本 r%2").arg(kind == QStringLiteral("undo") ? tr("撤销") : tr("重做"))
+                                     .arg(payload.value(QStringLiteral("revision")).toInt()), 4000);
+    });
+}
+
 void MainWindow::refreshTree(const QJsonObject &envelope) {
     m_envelope = envelope;
     const QJsonObject doc = envelope.value(QStringLiteral("doc")).toObject();
     const QJsonArray features = doc.value(QStringLiteral("features")).toArray();
     m_tree->clear();
-    auto *part = new QTreeWidgetItem(m_tree, {tr("零件")});
+    const int revisionFromEnvelope = envelope.value(QStringLiteral("revision")).toInt();
+    auto *root = new QTreeWidgetItem(m_tree, {tr("%1 · 版本 r%2")
+                                                  .arg(envelope.value(QStringLiteral("documentId")).toString())
+                                                  .arg(revisionFromEnvelope)});
+    root->setToolTip(0, tr("文档根节点：点特征看参数；撤销/重做走服务端，版本号只由服务端推进"));
+    auto *part = new QTreeWidgetItem(root, {tr("零件：%1").arg(doc.value(QStringLiteral("name")).toString(QStringLiteral("未命名"))) });
     for (const auto &fv : features) {
         QJsonObject f = fv.toObject();
-        auto *item = new QTreeWidgetItem(part, {f.value(QStringLiteral("name")).toString()});
+        const QJsonObject params = f.value(QStringLiteral("params")).toObject();
+        // 名称后面带一句关键尺寸，树里不用展开就能看出这个特征是什么
+        QString summary = f.value(QStringLiteral("name")).toString();
+        const bool suppressed = f.value(QStringLiteral("suppressed")).toBool();
+        if (suppressed) summary += tr("（已压缩）");
+        else if (f.value(QStringLiteral("type")).toString() == QStringLiteral("body")) {
+            summary += QStringLiteral("  %1×%2×%3").arg(params.value(QStringLiteral("length")).toDouble())
+                           .arg(params.value(QStringLiteral("width")).toDouble())
+                           .arg(params.value(QStringLiteral("height")).toDouble());
+        } else if (params.contains(QStringLiteral("diameter"))) {
+            summary += QStringLiteral("  Ø%1").arg(params.value(QStringLiteral("diameter")).toDouble());
+        } else if (params.contains(QStringLiteral("radius"))) {
+            summary += QStringLiteral("  R%1").arg(params.value(QStringLiteral("radius")).toDouble());
+        }
+        auto *item = new QTreeWidgetItem(part, {summary});
         item->setData(0, Qt::UserRole, f.value(QStringLiteral("id")).toString());
-        if (f.value(QStringLiteral("suppressed")).toBool()) item->setForeground(0, Qt::gray);
+        item->setToolTip(0, QString::fromUtf8(QJsonDocument(params).toJson(QJsonDocument::Compact)));
+        if (suppressed) item->setForeground(0, Qt::gray);
     }
     m_tree->expandAll();
+    m_undoAction->setEnabled(envelope.value(QStringLiteral("undoDepth")).toInt() > 0);
+    m_redoAction->setEnabled(envelope.value(QStringLiteral("redoDepth")).toInt() > 0);
     const int revision = envelope.value(QStringLiteral("revision")).toInt();
     m_statusRevision->setText(tr("版本 r%1").arg(revision));
     // 真实几何（build123d sidecar 算出）：体积/质量/包围盒，没有就如实说没有

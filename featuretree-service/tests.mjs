@@ -128,6 +128,47 @@ try {
   ok(afterRebuildFail.json.revision === 5 &&
      JSON.stringify(afterRebuildFail.json.doc.features) === JSON.stringify(beforeAllOff.json.doc.features),
     '重建失败后版本与特征树完全不变');
+
+  // 13. undo → redo：撤回来的那一版必须能原样重做，版本 +1，参数回到撤销前
+  const beforeEdit = await req('GET', '/v1/tree');
+  const revBeforeEdit = beforeEdit.json.revision;
+  const heightBeforeEdit = beforeEdit.json.doc.features.find((f) => f.id === 'f-body').params.height;
+  const writeEdit = await req('POST', '/v1/operations', {
+    documentId: 'demo-adapter', expectedRevision: revBeforeEdit, actor: 'manual',
+    operation: 'updateFeatureParams', featureId: 'f-body', patch: { height: heightBeforeEdit + 4 }
+  });
+  ok(writeEdit.status === 200, '写一次便于撤销的修改', `status=${writeEdit.status}`);
+  const heightEdited = heightBeforeEdit + 4;
+  const undoIt = await req('POST', '/v1/undo', { expectedRevision: writeEdit.json.revision, actor: 'manual', steps: 1 });
+  ok(undoIt.status === 200 && undoIt.json.doc.features.find((f) => f.id === 'f-body').params.height === heightBeforeEdit,
+    '撤销后高度回到修改前', JSON.stringify(undoIt.json.doc?.features?.[0]?.params).slice(0, 120));
+  const redoIt = await req('POST', '/v1/redo', { expectedRevision: undoIt.json.revision, actor: 'manual', steps: 1 });
+  ok(redoIt.status === 200 && redoIt.json.doc.features.find((f) => f.id === 'f-body').params.height === heightEdited,
+    '重做后高度回到撤销前那一版', `height=${redoIt.json.doc?.features?.find((f) => f.id === 'f-body')?.params?.height}`);
+  ok(redoIt.json.revision === undoIt.json.revision + 1, '重做本身也是一次版本推进');
+  ok(redoIt.json.history.at(-1).operation === 'redo', '历史里记的是 redo，不是又一次 undo');
+  ok(redoIt.json.redoDepth === 0 && redoIt.json.undoDepth === redoIt.json.revision, '包络带 undoDepth/redoDepth（UI 据此启停按钮）',
+    `undo=${redoIt.json.undoDepth} redo=${redoIt.json.redoDepth}`);
+  ok(undoIt.json.redoDepth === 1, '撤销后 redoDepth=1（有一次可重做）', `redo=${undoIt.json.redoDepth}`);
+
+  // 14. redo 栈空 → 409 REDO_EMPTY（不装作成功，也不改版本）
+  const emptyRedo = await req('POST', '/v1/redo', { expectedRevision: redoIt.json.revision, actor: 'manual', steps: 1 });
+  ok(emptyRedo.status === 409 && emptyRedo.json.error === 'REDO_EMPTY', 'redo 栈空返回 409 REDO_EMPTY', JSON.stringify(emptyRedo.json).slice(0, 140));
+
+  // 15. 撤销后再做新操作 → redo 分支作废
+  const again = await req('POST', '/v1/operations', {
+    documentId: 'demo-adapter', expectedRevision: redoIt.json.revision, actor: 'manual',
+    operation: 'updateFeatureParams', featureId: 'f-body', patch: { height: heightEdited + 1 }
+  });
+  const undoAgain = await req('POST', '/v1/undo', { expectedRevision: again.json.revision, actor: 'manual', steps: 1 });
+  ok(undoAgain.status === 200, '再撤销一次，redo 栈里有一版');
+  const branchEdit = await req('POST', '/v1/operations', {
+    documentId: 'demo-adapter', expectedRevision: undoAgain.json.revision, actor: 'manual',
+    operation: 'updateFeatureParams', featureId: 'f-body', patch: { height: heightEdited + 2 }
+  });
+  ok(branchEdit.status === 200, '撤销后发生新修改');
+  const staleRedo = await req('POST', '/v1/redo', { expectedRevision: branchEdit.json.revision, actor: 'manual', steps: 1 });
+  ok(staleRedo.status === 409 && staleRedo.json.error === 'REDO_EMPTY', '新操作清空 redo 栈（分支历史不合并）', JSON.stringify(staleRedo.json).slice(0, 140));
 } catch (error) {
   failures.push('异常：' + (error instanceof Error ? error.message : String(error)));
   console.error('FT_TEST_FAIL', error);

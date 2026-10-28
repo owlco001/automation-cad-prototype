@@ -21,12 +21,18 @@ public:
     /// 成功返回 true 并填 revision/height；失败返回 false 并填 error。
     bool runSelfTest(const QString &base, int *revision, double *height, QString *error);
 
+    /// 撤销/重做自检：改一次 → 撤销 → 重做，三步都要在服务端真的落地。
+    bool runHistorySelfTest(const QString &base, int *undoRevision, int *redoRevision, double *height, QString *error);
+
     /// 服务地址（默认 127.0.0.1:18080）
     void setServiceBase(const QString &base);
     /// 定时拉取 /v1/tree，revision 变化时刷新界面并发出 envelopeRefreshed（等价于 SSE 未接入前的自动刷新）
     void startAutoRefresh(int intervalMs = 1500);
     /// 立即读一次
     void refreshNow();
+    /// 撤销/重做（走服务端 /v1/undo、/v1/redo，带 expectedRevision）
+    void undoOnce();
+    void redoOnce();
 
 signals:
     /// 每次成功读到包络后发出（首次加载与后续变化都会发）
@@ -43,6 +49,8 @@ private:
     void refreshTree(const QJsonObject &envelope);
     void refreshPanel(const QJsonObject &feature);
     void postOperation(const QJsonObject &body);
+    /// 撤销/重做共用的写操作（kind = undo | redo）
+    void postHistory(const QString &kind);
     void showConflict(const QJsonObject &current);
     void refreshPanelFromEnvelope();
     QJsonObject requestSync(const QByteArray &verb, const QString &path, const QJsonObject &body,
@@ -54,6 +62,8 @@ private:
     QLabel *m_viewportPlaceholder;
     QLabel *m_statusRevision;
     QLabel *m_statusGeometry;
+    class QAction *m_undoAction = nullptr;
+    class QAction *m_redoAction = nullptr;
     QSplitter *m_splitter;
     class QTimer *m_pollTimer = nullptr;
     QJsonObject m_envelope;

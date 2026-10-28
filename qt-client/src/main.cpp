@@ -32,6 +32,24 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    // 撤销/重做自检：--history-selftest [--base URL]
+    if (args.contains(QStringLiteral("--history-selftest"))) {
+        QString base = QStringLiteral("http://127.0.0.1:18080");
+        const int baseIndex = args.indexOf(QStringLiteral("--base"));
+        if (baseIndex >= 0 && baseIndex + 1 < args.size()) base = args.at(baseIndex + 1);
+        MainWindow window;
+        int undoRevision = -1;
+        int redoRevision = -1;
+        double height = -1;
+        QString error;
+        if (!window.runHistorySelfTest(base, &undoRevision, &redoRevision, &height, &error)) {
+            qCritical().noquote() << "FT_QT_HISTORY_FAIL" << error;
+            return 1;
+        }
+        qInfo().noquote() << QStringLiteral("FT_QT_HISTORY_OK undo=r%1 redo=r%2 height=%3").arg(undoRevision).arg(redoRevision).arg(height);
+        return 0;
+    }
+
     // 自动刷新自检：--watch-selftest [--base URL]
     // 读一次 → 打印 WATCH_READY → 外部改一次树 → 客户端应在 1.5s 内检测到新 revision 并打印 REFRESH_OK。
     if (args.contains(QStringLiteral("--watch-selftest"))) {

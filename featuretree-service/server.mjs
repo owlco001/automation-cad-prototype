@@ -54,6 +54,7 @@ function readBody(req) {
 }
 // 错误码 → HTTP 状态（契约 §13 只定错误码，HTTP 映射在这里集中一处）
 function errorStatus(code) {
+  if (code === 'REDO_EMPTY') return 409;
   if (code === 'CONFLICT_STALE_REVISION' || code === 'REFERENCE_IN_USE') return 409;
   if (code === 'NOT_FOUND') return 404;
   if (code === 'PAYLOAD_TOO_LARGE') return 413;
@@ -80,6 +81,12 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/v1/operations') {
       const body = await readBody(req);
       const out = await store.applyOperation(body);
+      if (out.error) return send(res, errorStatus(out.error), out);
+      return send(res, 200, out);
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/redo') {
+      const body = await readBody(req);
+      const out = await store.redo(body.expectedRevision, body.actor === 'agent' ? `agent:${body.agentId || 'unknown'}` : 'manual', body.steps ?? 1);
       if (out.error) return send(res, errorStatus(out.error), out);
       return send(res, 200, out);
     }

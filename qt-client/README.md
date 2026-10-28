@@ -41,9 +41,11 @@
 
 | 图 | 内容 |
 | --- | --- |
-| `docs/desktop/screenshots/qt-client-01-tree.png` | 启动即读契约服务：特征树 4 条 + 状态栏「版本 r0 / 体积 94,166.8 mm³ · 质量 0.7392 kg · 90×90×12 mm」 |
-| `docs/desktop/screenshots/qt-client-02-selected.png` | 选中「90×90×12 板体」，右侧 PropertyManager 列出 length/width/height（可改，白名单外只读） |
-| `docs/desktop/screenshots/qt-client-03-refreshed.png` | 外部客户端把 height 改成 18 后，1.5s 内自动刷新成「版本 r1 / 体积 141,580.0 mm³ · 质量 1.1114 kg · 90×90×18 mm · build123d」 |
+| `docs/desktop/screenshots/qt-client-01-tree.png` | 启动即读契约服务：树是「文档根 → 零件 → 4 条特征」，状态栏「版本 r0 / 体积 94,166.8 mm³ · 质量 0.7392 kg · 90×90×12 mm」，撤销/重做此时都不可用 |
+| `docs/desktop/screenshots/qt-client-02-selected.png` | 选中「90×90×12 板体」，右侧 PropertyManager 列出 length/width/height（白名单可改，其余只读） |
+| `docs/desktop/screenshots/qt-client-03-refreshed.png` | 外部客户端把 height 改成 18 后 1.5s 内自动刷新成「版本 r1 / 体积 141,580.0 mm³ / 90×90×18 mm」 |
+| `docs/desktop/screenshots/qt-client-04-undo.png` | Ctrl+Z（走服务端 `/v1/undo`）：撤销成功 → 版本 r2，体积回到 94,166.8 mm³、90×90×12，重做按钮变可用 |
+| `docs/desktop/screenshots/qt-client-05-redo.png` | Ctrl+Shift+Z（`/v1/redo`）：重做成功 → 版本 r3，体积回到 141,580.0 mm³、90×90×18 |
 
 ## 自检入口（CI 用）
 

@@ -145,7 +145,13 @@
 - 重建失败时整单回滚：文档停在原 `revision`，错误按 `REBUILD_FAILED` 返回并附带重建方原始错误信息；**不许出现“树已更新、模型还是旧的”这种中间态**。
 - 几何缓存以 `revision` 为键；`revision` 不变则缓存不变，不重复重建。
 
-## 9. MCP 与 Qt 的映射（现有工具不直写，全部收敛到第 3 节）
+## 9. 撤销、重做与 MCP/Qt 映射（现有工具不直写，全部收敛到第 3 节）
+
+> v0.1 实现：`POST /v1/undo` 与 `POST /v1/redo` 都走乐观锁（`expectedRevision`）→ 校验 → 重建 → 版本 +1，
+> 历史只追加不删除（`operation: undo | redo`）。撤销前的那一版压进 redo 栈（上限 50），
+> 一旦发生新的写操作 redo 栈清空（分支历史不合并，避免重做出一棵不相干的树）。
+> redo 栈空时返回 `409 REDO_EMPTY`，不假装成功。包络里带 `undoDepth` / `redoDepth`，UI 据此启停按钮，
+> 不用客户端自己猜。
 
 > v0.1 实现：`featuretree-service/mcp.mjs`（stdio JSON-RPC）把契约服务暴露成四个 MCP 工具
 > `ft_get_tree` / `ft_update_params` / `ft_undo` / `ft_list_revisions` 与一个只读资源
