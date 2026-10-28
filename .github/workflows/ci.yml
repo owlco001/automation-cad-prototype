@@ -45,6 +45,9 @@ jobs:
       - name: MCP ↔ 契约服务双向验收
         timeout-minutes: 5
         run: node ../featuretree-service/mcp-tests.mjs
+      - name: Store 单元验收（不经 HTTP）
+        timeout-minutes: 5
+        run: node ../featuretree-service/store-tests.mjs
       - name: 落盘/恢复验收（FT_DATA_DIR）
         timeout-minutes: 5
         run: node ../featuretree-service/persistence-tests.mjs

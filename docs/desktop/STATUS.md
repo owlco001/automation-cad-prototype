@@ -42,6 +42,7 @@ desktop `npm test` **2589（2587 通过 / 2 跳过）**。
 | `npm run packs:validate` | `PACKS_VALIDATE_OK packs=10 errors=0 warnings=0 parts=617 models=612` |
 | `node featuretree-service/tests.mjs` | 全部通过：**35 条**（契约校验/乐观锁/undo-redo/材料/413/引用检查） |
 | `node featuretree-service/mcp-tests.mjs` | `MCP_FEATURETREE_OK`，**16 条 PASS**（双向读写、6 工具、引用拒绝、资源） |
+| `node featuretree-service/store-tests.mjs` | `STORE_OK`，**16 条 PASS**（乐观锁/undo steps/redo 栈/越界/重复 id/材料/孤儿基体/白名单） |
 | `node featuretree-service/persistence-tests.mjs` | `FT_PERSISTENCE_OK`，**10 条 PASS**（默认不写盘 / 落盘 / 重启恢复 / 快照可 undo） |
 | `node featuretree-service/build-tests.mjs` | `FT_BUILD_OK`，**18 条 PASS**（体积 94,166.8 与手算一致、STL 6,604 面、铝 0.2543 kg、fail-closed） |
 | `qt-client --selftest` / `--history-selftest` / `--feature-ops-selftest` / `--sse-selftest` | 全过；SSE 实测 **138ms**，压缩孔阵列 +1,140.4 mm³ 与手算一致 |
