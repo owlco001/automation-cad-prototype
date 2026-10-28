@@ -156,11 +156,23 @@ const server = createServer(async (req, res) => {
       const store = await addDocument(documentId);
       return send(res, 201, { documentId, revision: store.revision, envelope: store.envelope() });
     }
-    if (req.method === 'POST' && url.pathname === '/v1/assemblies') {
+    // 装配新建（POST /v1/assemblies）与改成员位姿（PUT /v1/assemblies/{id}）共用一套校验
+    if ((req.method === 'POST' || req.method === 'PUT') &&
+        (url.pathname === '/v1/assemblies' || url.pathname.startsWith('/v1/assemblies/')) &&
+        !url.pathname.endsWith('/interference')) {
       const body = await readBody(req);
-      const assemblyId = typeof body.documentId === 'string' && body.documentId.trim() ? body.documentId.trim() : `asm-${Date.now().toString(36)}`;
+      const isUpdate = req.method === 'PUT';
+      const assemblyId = isUpdate
+        ? decodeURIComponent(url.pathname.slice('/v1/assemblies/'.length))
+        : (typeof body.documentId === 'string' && body.documentId.trim() ? body.documentId.trim() : `asm-${Date.now().toString(36)}`);
       if (!DOCUMENT_ID_PATTERN.test(assemblyId)) {
         return send(res, 422, { error: 'VALIDATION_FAILED', message: 'assemblyId 只能包含字母数字与 . _ -，且不超过 64 字符' });
+      }
+      if (isUpdate && !assemblies.has(assemblyId)) {
+        return send(res, 404, { error: 'NOT_FOUND', message: `装配不存在：${assemblyId}` });
+      }
+      if (!isUpdate && assemblies.has(assemblyId)) {
+        return send(res, 409, { error: 'DUPLICATE_ID', message: `装配已存在：${assemblyId}（改成员请用 PUT）` });
       }
       const members = Array.isArray(body.members) ? body.members : [];
       if (members.length < 2) {
@@ -196,7 +208,7 @@ const server = createServer(async (req, res) => {
         stlUrl: `/v1/assemblies/${encodeURIComponent(assemblyId)}/geometry.stl`
       };
       assemblies.set(assemblyId, record);
-      return send(res, 201, record);
+      return send(res, isUpdate ? 200 : 201, record);
     }
     if (req.method === 'GET' && url.pathname.startsWith('/v1/assemblies/')) {
       const rest = url.pathname.slice('/v1/assemblies/'.length);

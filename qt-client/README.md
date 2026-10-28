@@ -52,6 +52,7 @@
 | `docs/desktop/screenshots/qt-client-09-ctxmenu.png` | 特征右键菜单：「压缩 / 解除压缩」「删除特征（可撤销）」，都在服务端校验后执行 |
 | `docs/desktop/screenshots/qt-client-16-iso.png` | 默认等轴测视角（视图菜单可选等轴测/正视/俯视/右视/适合视图） |
 | `docs/desktop/screenshots/qt-client-17-top.png` | 俯视：8 个孔（4 沉头 + 4 通孔）和四角 R3 一眼可见——视口画的是服务端真几何，不是占位盒 |
+| `docs/desktop/screenshots/qt-client-28-edit-member.png` | 装配里双击成员 → 改 X/Y/Z 偏移与绕 Z 转角 → `PUT /v1/assemblies/{id}`，几何自动重新 fuse |
 | `docs/desktop/screenshots/qt-client-27-interference.png` | 「评估 → 装配干涉检查」(Ctrl+I)：真实布尔交集，状态栏/弹窗给出「1 对成员存在实体干涉」与每对的重叠体积 |
 | `docs/desktop/screenshots/qt-client-26-assembly.png` | 装配只读视图（文件→打开装配…）：树里 3 个成员带偏移，视口画服务端 fuse 后的合成 STL（19,812 面） |
 | `docs/desktop/screenshots/qt-client-20-multidoc.png` | 多文档：工具栏「文档」下拉 + 「新建文档…」；切到 doc-qt-test 时树根显示「doc-qt-test · 版本 r1」，与默认文档互不影响 |

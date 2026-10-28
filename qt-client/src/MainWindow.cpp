@@ -5,6 +5,9 @@
 
 #include <QAction>
 #include <QComboBox>
+#include <QDialogButtonBox>
+#include <QDoubleSpinBox>
+#include <QFormLayout>
 #include <QInputDialog>
 #include <QColor>
 #include <QEventLoop>
@@ -190,6 +193,12 @@ MainWindow::MainWindow(QWidget *parent)
         if (index < 0) return;
         setDocument(m_documentCombo->itemData(index).toString());
     });
+    connect(m_tree, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem *item, int) {
+        if (m_assemblyId.isEmpty() || !item) return;
+        const QVariant index = item->data(0, Qt::UserRole);
+        if (!index.isValid()) return;
+        editAssemblyMember(index.toInt());
+    });
     connect(m_tree, &QTreeWidget::itemClicked, this, &MainWindow::onTreeItemSelected);
     m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_tree, &QTreeWidget::customContextMenuRequested, this, &MainWindow::showTreeMenu);
@@ -212,6 +221,74 @@ void MainWindow::setDocument(const QString &documentId) {
     // 换文档必须让视口忘掉上一份的缓存（版本号可能相同，不然不会重载几何）
     setViewportGeometry(-1, QString());
     refreshNow();
+}
+
+void MainWindow::editAssemblyMember(int memberIndex) {
+    const QJsonObject record = m_assemblyRecord;
+    const QJsonArray members = record.value(QStringLiteral("members")).toArray();
+    if (memberIndex < 0 || memberIndex >= members.size()) return;
+    const QJsonObject member = members.at(memberIndex).toObject();
+    const QJsonArray offset = member.value(QStringLiteral("offset")).toArray();
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("编辑成员：%1").arg(member.value(QStringLiteral("documentId")).toString()));
+    auto *form = new QFormLayout(&dialog);
+    auto *x = new QDoubleSpinBox(&dialog);
+    auto *y = new QDoubleSpinBox(&dialog);
+    auto *z = new QDoubleSpinBox(&dialog);
+    auto *rot = new QDoubleSpinBox(&dialog);
+    for (QDoubleSpinBox *box : {x, y, z, rot}) {
+        box->setRange(-100000.0, 100000.0);
+        box->setDecimals(2);
+    }
+    rot->setRange(-360.0, 360.0);
+    rot->setSuffix(tr(" °"));
+    x->setValue(offset.at(0).toDouble());
+    y->setValue(offset.at(1).toDouble());
+    z->setValue(offset.at(2).toDouble());
+    rot->setValue(member.value(QStringLiteral("rotateZ")).toDouble());
+    form->addRow(tr("X 偏移 (mm)"), x);
+    form->addRow(tr("Y 偏移 (mm)"), y);
+    form->addRow(tr("Z 偏移 (mm)"), z);
+    form->addRow(tr("绕 Z 旋转"), rot);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    QJsonArray updated;
+    for (int i = 0; i < members.size(); ++i) {
+        const QJsonObject existing = members.at(i).toObject();
+        QJsonObject entry;
+        entry.insert(QStringLiteral("documentId"), existing.value(QStringLiteral("documentId")).toString());
+        const QJsonArray oldOffset = existing.value(QStringLiteral("offset")).toArray();
+        entry.insert(QStringLiteral("offset"), i == memberIndex
+            ? QJsonArray{x->value(), y->value(), z->value()}
+            : oldOffset);
+        entry.insert(QStringLiteral("rotateZ"), i == memberIndex
+            ? rot->value()
+            : existing.value(QStringLiteral("rotateZ")).toDouble());
+        updated.append(entry);
+    }
+    QJsonObject body;
+    body.insert(QStringLiteral("members"), updated);
+    QNetworkRequest req{QUrl(m_serviceBase + QStringLiteral("/v1/assemblies/") +
+                             QString::fromUtf8(QUrl::toPercentEncoding(m_assemblyId)))};
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    req.setTransferTimeout(60'000);
+    QNetworkReply *reply = m_net->put(req, QJsonDocument(body).toJson());
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const QJsonObject result = readReply(reply);
+        if (reply->error() != QNetworkReply::NoError || result.contains(QStringLiteral("error"))) {
+            QMessageBox::warning(this, tr("更新装配失败"),
+                result.value(QStringLiteral("message")).toString(reply->errorString()));
+            return;
+        }
+        statusBar()->showMessage(tr("成员位姿已更新，正在重新合成几何…"), 5000);
+        loadAssembly(m_assemblyId);
+    });
 }
 
 void MainWindow::runInterferenceCheck() {
@@ -624,13 +701,16 @@ void MainWindow::loadAssembly(const QString &assemblyId) {
                                          .arg(record.value(QStringLiteral("message")).toString(reply->errorString())), 8000);
             return;
         }
+        m_assemblyRecord = record;
         const QJsonObject geometry = record.value(QStringLiteral("geometry")).toObject();
         const QJsonArray members = record.value(QStringLiteral("members")).toArray();
 
         m_tree->clear();
         auto *root = new QTreeWidgetItem(m_tree, {tr("装配 %1 · %2 个成员").arg(assemblyId).arg(members.size())});
         root->setToolTip(0, tr("装配只读视图：几何由服务端 fuse 合成，不是把成员体积相加"));
+        int memberIndex = -1;
         for (const auto &entry : members) {
+            ++memberIndex;
             const QJsonObject member = entry.toObject();
             const QJsonArray offset = member.value(QStringLiteral("offset")).toArray();
             const double rotateZ = member.value(QStringLiteral("rotateZ")).toDouble();
@@ -641,6 +721,8 @@ void MainWindow::loadAssembly(const QString &assemblyId) {
                     .arg(offset.at(0).toDouble()).arg(offset.at(1).toDouble()).arg(offset.at(2).toDouble())
                     .arg(rotateZ != 0.0 ? tr(" · 绕 Z 转 %1°").arg(rotateZ) : QString())
             });
+            item->setData(0, Qt::UserRole, memberIndex);
+            item->setToolTip(0, tr("双击改这个成员的偏移与转角"));
         }
         m_tree->expandAll();
         const QJsonObject bbox = geometry.value(QStringLiteral("bboxMm")).toObject();

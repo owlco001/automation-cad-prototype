@@ -161,6 +161,29 @@ try {
   });
   ok(badRotate.status === 422, 'rotateZ 传字符串被拒（422）', `status=${badRotate.status}`);
 
+  // 3.7) 改成员位姿（PUT）：把第二块从 z=20 挪到 z=40，包围盒应该跟着变
+  const moved = await http('PUT', '/v1/assemblies/asm-stacked', {
+    members: [
+      { documentId: 'demo-adapter', offset: [0, 0, 0] },
+      { documentId: 'doc-asm-b', offset: [0, 0, 40] }
+    ]
+  });
+  ok(moved.status === 200, 'PUT 改成员位姿成功', JSON.stringify(moved.json).slice(0, 120));
+  ok(moved.json.geometry && Math.abs(moved.json.geometry.bboxMm.z - 70) <= 1,
+    '改成 z=40 后包围盒高度 70', JSON.stringify(moved.json.geometry?.bboxMm));
+  ok(Math.abs((moved.json.geometry?.volumeMm3 ?? 0) - stackedVolume) <= 2,
+    '只挪位置不改体积', `before=${stackedVolume} after=${moved.json.geometry?.volumeMm3}`);
+
+  const dupAsm = await http('POST', '/v1/assemblies', {
+    documentId: 'asm-stacked',
+    members: [{ documentId: 'demo-adapter' }, { documentId: 'doc-asm-b' }]
+  });
+  ok(dupAsm.status === 409, '重复创建同名装配 → 409（改成员请用 PUT）', `status=${dupAsm.status}`);
+  const putMissing = await http('PUT', '/v1/assemblies/no-such-asm', {
+    members: [{ documentId: 'demo-adapter' }, { documentId: 'doc-asm-b' }]
+  });
+  ok(putMissing.status === 404, 'PUT 不存在的装配 → 404', `status=${putMissing.status}`);
+
   // 4) 错误路径
   const tooFew = await http('POST', '/v1/assemblies', { documentId: 'asm-bad', members: [{ documentId: 'demo-adapter' }] });
   ok(tooFew.status === 422, '单成员装配被拒（422）', `status=${tooFew.status}`);

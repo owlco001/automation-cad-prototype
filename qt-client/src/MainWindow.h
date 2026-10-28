@@ -119,6 +119,8 @@ private:
     QString m_serviceBase = QStringLiteral("http://127.0.0.1:18080");
     QString m_documentId = QStringLiteral("demo-adapter");
     QString m_assemblyId;
+    QJsonObject m_assemblyRecord;
+    void editAssemblyMember(int memberIndex);
     void loadAssembly(const QString &assemblyId);
     class QComboBox *m_documentCombo = nullptr;
     QString docQuery() const;
