@@ -49,7 +49,7 @@ import { createPipScene, type PipScene } from './pip3d.ts';
 import { checkNodeSizes, describeModelCheck } from './model-check.ts';
 import type { InterferencePart } from '../mech/interference.ts';
 import { adapterFeatureDoc, describeAdapterModel } from './adapter-model.ts';
-import { mountFeatureWorkbench } from './feature-tree-mount.ts';
+import { featureWorkbench, releaseFeatureWorkbench } from './feature-tree-mount.ts';
 import { adapterPlateDxf, describeAdapterDxf } from './adapter-dxf.ts';
 import { buildLayoutDxf, describeLayoutDxf } from './layout-dxf.ts';
 import { buildSchemeReport } from './summary-report.ts';
@@ -1073,27 +1073,17 @@ function renderInspector(): void {
   if (state.inspector === 'prop') host.innerHTML = inspectorProp(node);
   else if (state.inspector === 'mech') host.innerHTML = inspectorMech(node);
   else host.innerHTML = inspectorBom(node);
+  // 特征树/属性面板：同一容器幂等挂载（renderInspector 每次选中都会重跑，
+  // 直接 mount 会按渲染次数叠加监听器，每个监听各闭一份旧文档）
   const selected = selectedNode();
   const treeEl = document.getElementById('featureTree');
   const panelEl = document.getElementById('propertyPanel');
-  if (selected && isAdapterNode(selected)) {
-    const doc = adapterFeatureDoc(selected);
-    if (doc && treeEl && panelEl) {
-      mountFeatureWorkbench(doc, {
-        tree: treeEl,
-        panel: panelEl
-      });
-    } else {
-      const tree = document.getElementById('featureTree');
-      const panel = document.getElementById('propertyPanel');
-      if (tree) tree.innerHTML = '';
-      if (panel) panel.innerHTML = '';
-    }
+  const doc = selected && isAdapterNode(selected) ? adapterFeatureDoc(selected) : null;
+  if (doc && treeEl && panelEl) {
+    featureWorkbench(doc, { tree: treeEl, panel: panelEl });
   } else {
-    const tree = document.getElementById('featureTree');
-    const panel = document.getElementById('propertyPanel');
-    if (tree) tree.innerHTML = '';
-    if (panel) panel.innerHTML = '';
+    releaseFeatureWorkbench(treeEl);
+    releaseFeatureWorkbench(panelEl);
   }
 }
 

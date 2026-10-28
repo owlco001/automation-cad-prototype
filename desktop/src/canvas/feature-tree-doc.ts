@@ -33,7 +33,9 @@ export function reorderFeature(doc: FeatureDocLike, id: string, targetIndex: num
   const from = findIndex(doc, id);
   if (from === -1) return { ok: false, error: `找不到特征：${id}` };
   const features = [...doc.features];
-  const [moved] = features.splice(from, 1);
+  const moved = features.splice(from, 1)[0];
+  if (!moved) return { ok: false, error: `找不到特征：${id}` };
+  // targetIndex 是"移动后的最终下标"：先摘出再按原坐标夹取，移下去时正好落在期望位置
   const clamped = Math.max(0, Math.min(targetIndex, features.length));
   features.splice(clamped, 0, moved);
   return { ok: true, value: { ...doc, features } };
@@ -57,9 +59,11 @@ export function applyDocFeatureEdit(
   value: unknown
 ): EditResult<FeatureDocLike> {
   const index = findIndex(doc, id);
-  if (index === -1) return { ok: false, error: `找不到特征：${id}` };
-  const result = applyPanelEdit(doc.features[index], key, value);
-  if (!result.ok || result.value === undefined) return { ok: false, error: result.error ?? '校验失败' };
-  const features = doc.features.map((feature, i) => (i === index ? result.value! : feature));
+  const target = index === -1 ? undefined : doc.features[index];
+  if (!target) return { ok: false, error: `找不到特征：${id}` };
+  const result = applyPanelEdit(target, key, value);
+  const next = result.value;
+  if (!result.ok || next === undefined) return { ok: false, error: result.error ?? '校验失败' };
+  const features = doc.features.map((feature, i) => (i === index ? next : feature));
   return { ok: true, value: { ...doc, features } };
 }

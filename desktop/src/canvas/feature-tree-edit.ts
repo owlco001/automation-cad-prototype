@@ -21,27 +21,34 @@ export interface EditResult<T> {
   error?: string;
 }
 
+/**
+ * 校验器结果用可判别联合，而不是 EditResult<number>：
+ * 后者在 ok=false 时 value 是 number 类型，赋给 EditResult<Params> 会被
+ * exactOptionalPropertyTypes 判成类型不兼容；联合里失败分支根本没有 value 字段。
+ */
+type Check<T> = { ok: true; value: T } | { ok: false; error: string };
+
 type Params = Record<string, unknown>;
 
-function fail<T>(error: string): EditResult<T> {
+function fail<T>(error: string): Check<T> {
   return { ok: false, error };
 }
 
-function positiveNumber(value: unknown, label: string): EditResult<number> {
+function positiveNumber(value: unknown, label: string): Check<number> {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
     return fail(`${label}必须是大于 0 的数`);
   }
   return { ok: true, value };
 }
 
-function nonNegativeNumber(value: unknown, label: string): EditResult<number> {
+function nonNegativeNumber(value: unknown, label: string): Check<number> {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
     return fail(`${label}必须是不小于 0 的数`);
   }
   return { ok: true, value };
 }
 
-function positiveInteger(value: unknown, label: string): EditResult<number> {
+function positiveInteger(value: unknown, label: string): Check<number> {
   if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
     return fail(`${label}必须是大于等于 1 的整数`);
   }

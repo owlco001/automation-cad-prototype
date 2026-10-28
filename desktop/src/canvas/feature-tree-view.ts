@@ -51,14 +51,39 @@ export function renderFeatureTreeHtml(root: FeatureTreeNode, selectedId: string 
   return `<ul class="feature-tree">${renderNode(root, selectedId)}</ul>`;
 }
 
+/** 可直接编辑的字段：数字/布尔/字符串；派生值（如孔数 count）只读。 */
+export function isEditableField(field: PanelField): boolean {
+  if (field.key === 'count') return false;
+  return typeof field.value === 'number' || typeof field.value === 'boolean' || typeof field.value === 'string';
+}
+
+export interface PanelRenderOptions {
+  /** true 时把可编辑字段渲染成输入框（挂载层用 change 事件写回） */
+  editable?: boolean;
+}
+
 /** 属性面板 -> HTML：标题 + 字段表，字段名与 feature-tree.ts 的 PanelField 一一对应。 */
-export function renderPanelHtml(title: string, fields: PanelField[]): string {
+export function renderPanelHtml(title: string, fields: PanelField[], options: PanelRenderOptions = {}): string {
   const rows = fields
-    .map(
-      (field) =>
-        `<tr data-panel-key="${escapeHtml(field.key)}"><th>${escapeHtml(field.label)}</th>` +
-        `<td>${escapeHtml(formatValue(field))}</td></tr>`
-    )
+    .map((field) => {
+      const key = escapeHtml(field.key);
+      const head = `<th>${escapeHtml(field.label)}</th>`;
+      if (!options.editable || !isEditableField(field)) {
+        return `<tr data-panel-key="${key}">${head}<td>${escapeHtml(formatValue(field))}</td></tr>`;
+      }
+      const type = typeof field.value;
+      const unit = field.unit ? ` <span class="pp-unit">${escapeHtml(field.unit)}</span>` : '';
+      if (type === 'boolean') {
+        const checked = field.value === true ? ' checked' : '';
+        return `<tr data-panel-key="${key}">${head}<td><input class="pp-input pp-check" type="checkbox" data-edit-key="${key}" data-value-type="boolean"${checked}></td></tr>`;
+      }
+      const raw = field.value === null || field.value === undefined ? '' : String(field.value);
+      return (
+        `<tr data-panel-key="${key}">${head}<td>` +
+        `<input class="pp-input" type="text" inputmode="${type === 'number' ? 'decimal' : 'text'}" ` +
+        `data-edit-key="${key}" data-value-type="${type}" value="${escapeHtml(raw)}">${unit}</td></tr>`
+      );
+    })
     .join('');
   return (
     `<section class="property-panel"><h2>${escapeHtml(title)}</h2>` +
