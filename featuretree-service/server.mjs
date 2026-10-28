@@ -69,7 +69,11 @@ function send(res, code, obj) {
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
   try {
-    if (req.method === 'GET' && url.pathname === '/v1/tree') return send(res, 200, store.envelope());
+    if (req.method === 'GET' && url.pathname === '/v1/tree') {
+      // sidecar 晚于服务起来时（build123d 首次 import 慢），这里补一次重建，别让界面永远「没有几何」
+      if (!store.geometry) await store.retryInit();
+      return send(res, 200, store.envelope());
+    }
     if (req.method === 'GET' && url.pathname === '/v1/geometry.stl') {
       // 透传 sidecar 的二进制 STL：客户端只渲染，不参与建模
       const base = process.env.FT_BUILD_URL;

@@ -158,6 +158,45 @@ try {
   deadService.kill('SIGTERM');
 }
 
+// sidecar 晚于服务起来（build123d 首次 import 慢）→ GET /v1/tree 应自动补几何
+{
+  const latePort = 17988;
+  const lateService = spawn(process.execPath, [resolve(here, 'server.mjs')], {
+    env: { ...process.env, FT_PORT: '0', FT_BUILD_URL: `http://127.0.0.1:${latePort}` },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  let lateLog = '';
+  lateService.stdout.setEncoding('utf8');
+  lateService.stdout.on('data', (chunk) => { lateLog += chunk; });
+  let lateBase = '';
+  for (let attempt = 0; attempt < 100 && !lateBase; attempt += 1) {
+    const match = lateLog.match(/http:\/\/127\.0\.0\.1:(\d+)/);
+    if (match) lateBase = `http://127.0.0.1:${match[1]}`;
+    else await sleep(100);
+  }
+  if (lateBase) {
+    const before = await (await fetch(`${lateBase}/v1/tree`)).json();
+    ok(!before.geometry, 'sidecar 未起时几何为空（不编造）');
+    const lateSidecar = spawn(python, [resolve(here, 'rebuild-sidecar.py')], {
+      env: { ...process.env, FT_BUILD_PORT: String(latePort) },
+      stdio: ['ignore', 'ignore', 'ignore']
+    });
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      try {
+        const health = await fetch(`http://127.0.0.1:${latePort}/health`, { signal: AbortSignal.timeout(1000) });
+        if (health.ok) break;
+      } catch { /* 还没起来 */ }
+      await sleep(250);
+    }
+    await sleep(5500); // 服务端 init 重试有 5s 节流
+    const after = await (await fetch(`${lateBase}/v1/tree`)).json();
+    ok(Boolean(after.geometry) && Math.abs(after.geometry.volumeMm3 - 94166.8) <= 1,
+      'sidecar 起来后 GET /v1/tree 自动补上几何', `geometry=${JSON.stringify(after.geometry).slice(0, 90)}`);
+    lateSidecar.kill('SIGTERM');
+  }
+  lateService.kill('SIGTERM');
+}
+
 if (failures > 0) {
   console.error(`失败 ${failures} 条`);
   process.exit(1);

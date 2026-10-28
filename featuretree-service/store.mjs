@@ -86,6 +86,7 @@ export class Store {
    * sidecar 配了但连不上时不让服务起不来：只记下错误，等写操作时按 REBUILD_FAILED 报。
    */
   async init() {
+    this.lastInitAttempt = Date.now();
     const rb = await rebuild(this.doc);
     if (rb.ok) {
       this.geometry = rb.geometry;
@@ -93,6 +94,17 @@ export class Store {
     } else {
       this.geometryError = rb.message || '重建失败';
     }
+  }
+
+  /**
+   * 启动时 sidecar 可能还没加载完（build123d import 要几秒）。init 失败不该让服务永久没有几何，
+   * 所以在 GET /v1/tree 里做一次带节流的重试：成功就补上，失败就等下一次。
+   */
+  async retryInit() {
+    const now = Date.now();
+    if (this.geometry || now - (this.lastInitAttempt || 0) < 5000) return;
+    this.lastInitAttempt = now;
+    await this.init();
   }
 
   envelope() {

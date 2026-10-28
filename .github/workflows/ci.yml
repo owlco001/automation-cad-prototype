@@ -98,10 +98,15 @@ jobs:
           . .venv-ft/bin/activate
           FT_BUILD_PORT=18081 python featuretree-service/rebuild-sidecar.py > /tmp/sidecar.log 2>&1 &
           SIDECAR_PID=$!
+          # 先等 sidecar 真的起来（build123d 首次 import 要几秒），再起契约服务，避免 init 撞空
+          for i in $(seq 1 120); do
+            grep -q "rebuild sidecar listening" /tmp/sidecar.log && break
+            sleep 0.5
+          done
           FT_PORT=18082 FT_BUILD_URL=http://127.0.0.1:18081 node featuretree-service/server.mjs > /tmp/ft-service2.log 2>&1 &
           SERVICE_PID=$!
           for i in $(seq 1 80); do
-            grep -q "服务已启动" /tmp/ft-service2.log && grep -q "rebuild sidecar listening" /tmp/sidecar.log && break
+            grep -q "服务已启动" /tmp/ft-service2.log && break
             sleep 0.3
           done
           QT_QPA_PLATFORM=offscreen ./build-qt/automationcad-qt --feature-ops-selftest --base http://127.0.0.1:18082
