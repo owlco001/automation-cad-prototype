@@ -84,6 +84,31 @@ jobs:
           kill $SERVICE_PID || true
           cat /tmp/ft-service.log
           exit $STATUS
+      - name: 装 build123d（特征操作自检要真几何）
+        timeout-minutes: 12
+        run: |
+          python3 -m venv .venv-ft
+          . .venv-ft/bin/activate
+          pip install --quiet --upgrade pip
+          pip install --quiet build123d==0.13.0
+      - name: 压缩 / 删除引用 / 解除压缩（真几何）
+        timeout-minutes: 8
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          . .venv-ft/bin/activate
+          FT_BUILD_PORT=18081 python featuretree-service/rebuild-sidecar.py > /tmp/sidecar.log 2>&1 &
+          SIDECAR_PID=$!
+          FT_PORT=18082 FT_BUILD_URL=http://127.0.0.1:18081 node featuretree-service/server.mjs > /tmp/ft-service2.log 2>&1 &
+          SERVICE_PID=$!
+          for i in $(seq 1 80); do
+            grep -q "服务已启动" /tmp/ft-service2.log && grep -q "rebuild sidecar listening" /tmp/sidecar.log && break
+            sleep 0.3
+          done
+          QT_QPA_PLATFORM=offscreen ./build-qt/automationcad-qt --feature-ops-selftest --base http://127.0.0.1:18082
+          STATUS=$?
+          kill $SERVICE_PID $SIDECAR_PID || true
+          cat /tmp/sidecar.log /tmp/ft-service2.log
+          exit $STATUS
       - name: Qt 自动刷新验收（外部改树 → 客户端 1.5s 内刷新）
         timeout-minutes: 5
         run: node qt-client/tests/watch.mjs --binary build-qt/automationcad-qt

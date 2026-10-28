@@ -23,6 +23,9 @@ public:
     /// 成功返回 true 并填 revision/height；失败返回 false 并填 error。
     bool runSelfTest(const QString &base, int *revision, double *height, QString *error);
 
+    /// 特征操作自检：压缩 → 体积变大；删除被引用基体 → 409 REFERENCE_IN_USE；解除压缩 → 体积复原。
+    bool runFeatureOpsSelfTest(const QString &base, double *suppressedVolume, double *restoredVolume, QString *error);
+
     /// 撤销/重做自检：改一次 → 撤销 → 重做，三步都要在服务端真的落地。
     bool runHistorySelfTest(const QString &base, int *undoRevision, int *redoRevision, double *height, QString *error);
 
@@ -42,6 +45,7 @@ signals:
 
 private slots:
     void loadTree();
+    void showTreeMenu(const QPoint &pos);
     void onTreeItemSelected(QTreeWidgetItem *item, int column);
     void onPropertyCellChanged(int row, int column);
     void onTreeReply();

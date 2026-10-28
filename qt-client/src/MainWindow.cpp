@@ -10,6 +10,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QLabel>
+#include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QNetworkReply>
@@ -112,11 +113,85 @@ MainWindow::MainWindow(QWidget *parent)
     statusBar()->showMessage(tr("单位：mm 优先"));
 
     connect(m_tree, &QTreeWidget::itemClicked, this, &MainWindow::onTreeItemSelected);
+    m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_tree, &QTreeWidget::customContextMenuRequested, this, &MainWindow::showTreeMenu);
     connect(m_panel, &QTableWidget::cellChanged, this, &MainWindow::onPropertyCellChanged);
     loadTree();
 }
 
 void MainWindow::setServiceBase(const QString &base) { m_serviceBase = base; }
+
+bool MainWindow::runFeatureOpsSelfTest(const QString &base, double *suppressedVolume, double *restoredVolume, QString *error) {
+    m_serviceBase = base;
+    int status = 0;
+    QString localError;
+    const QJsonObject tree = requestSync("GET", QStringLiteral("/v1/tree"), {}, &status, &localError);
+    if (status != 200) {
+        if (error) *error = tr("读取特征树失败（HTTP %1）").arg(status);
+        return false;
+    }
+    const auto volumeOf = [](const QJsonObject &envelope) {
+        return envelope.value(QStringLiteral("geometry")).toObject().value(QStringLiteral("volumeMm3")).toDouble();
+    };
+    const double baseVolume = volumeOf(tree);
+    if (baseVolume <= 0) {
+        if (error) *error = QStringLiteral("服务端没返回几何（缺 sidecar？）");
+        return false;
+    }
+
+    QJsonObject suppress;
+    suppress.insert(QStringLiteral("documentId"), QStringLiteral("demo-adapter"));
+    suppress.insert(QStringLiteral("expectedRevision"), tree.value(QStringLiteral("revision")).toInt());
+    suppress.insert(QStringLiteral("actor"), QStringLiteral("manual"));
+    suppress.insert(QStringLiteral("operation"), QStringLiteral("setSuppressed"));
+    suppress.insert(QStringLiteral("featureId"), QStringLiteral("f-holes-out"));
+    suppress.insert(QStringLiteral("suppressed"), true);
+    const QJsonObject suppressed = requestSync("POST", QStringLiteral("/v1/operations"), suppress, &status, &localError);
+    if (status != 200) {
+        if (error) *error = tr("压缩失败（HTTP %1）：%2").arg(status).arg(localError);
+        return false;
+    }
+    const double suppressedVol = volumeOf(suppressed);
+    if (!(suppressedVol > baseVolume + 100)) {
+        if (error) *error = tr("压缩孔阵列后体积没变大：%1 → %2").arg(baseVolume).arg(suppressedVol);
+        return false;
+    }
+
+    // 删除被孔/沉头引用的基体：服务端必须 409 REFERENCE_IN_USE（界面不能只弹个“失败”了事）
+    QJsonObject del;
+    del.insert(QStringLiteral("documentId"), QStringLiteral("demo-adapter"));
+    del.insert(QStringLiteral("expectedRevision"), suppressed.value(QStringLiteral("revision")).toInt());
+    del.insert(QStringLiteral("actor"), QStringLiteral("manual"));
+    del.insert(QStringLiteral("operation"), QStringLiteral("deleteFeature"));
+    del.insert(QStringLiteral("featureId"), QStringLiteral("f-body"));
+    const QJsonObject deleted = requestSync("POST", QStringLiteral("/v1/operations"), del, &status, &localError);
+    if (status != 409 || deleted.value(QStringLiteral("error")).toString() != QStringLiteral("REFERENCE_IN_USE")) {
+        if (error) *error = tr("删除被引用基体应返回 409 REFERENCE_IN_USE，实际 HTTP %1 / %2")
+                                .arg(status).arg(deleted.value(QStringLiteral("message")).toString(localError));
+        return false;
+    }
+    if (deleted.value(QStringLiteral("message")).toString().isEmpty()) {
+        if (error) *error = QStringLiteral("REFERENCE_IN_USE 没说明引用方");
+        return false;
+    }
+
+    QJsonObject restore = suppress;
+    restore.insert(QStringLiteral("expectedRevision"), suppressed.value(QStringLiteral("revision")).toInt());
+    restore.insert(QStringLiteral("suppressed"), false);
+    const QJsonObject restored = requestSync("POST", QStringLiteral("/v1/operations"), restore, &status, &localError);
+    if (status != 200) {
+        if (error) *error = tr("解除压缩失败（HTTP %1）：%2").arg(status).arg(localError);
+        return false;
+    }
+    const double restoredVol = volumeOf(restored);
+    if (qAbs(restoredVol - baseVolume) > 0.5) {
+        if (error) *error = tr("解除压缩后体积没复原：%1 vs %2").arg(restoredVol).arg(baseVolume);
+        return false;
+    }
+    if (suppressedVolume) *suppressedVolume = suppressedVol;
+    if (restoredVolume) *restoredVolume = restoredVol;
+    return true;
+}
 
 bool MainWindow::runHistorySelfTest(const QString &base, int *undoRevision, int *redoRevision, double *height, QString *error) {
     m_serviceBase = base;
@@ -382,6 +457,44 @@ void MainWindow::onPropertyCellChanged(int row, int) {
     body.insert(QStringLiteral("operation"), QStringLiteral("updateFeatureParams"));
     body.insert(QStringLiteral("featureId"), m_selectedFeatureId);
     body.insert(QStringLiteral("patch"), patch);
+    postOperation(body);
+}
+
+void MainWindow::showTreeMenu(const QPoint &pos) {
+    QTreeWidgetItem *item = m_tree->itemAt(pos);
+    if (!item) return;
+    const QString id = item->data(0, Qt::UserRole).toString();
+    if (id.isEmpty()) {
+        statusBar()->showMessage(tr("这是文档根或零件节点，右键请选具体特征"), 3000);
+        return;
+    }
+    m_selectedFeatureId = id;
+    onTreeItemSelected(item, 0);
+
+    bool suppressed = false;
+    const QJsonArray features = m_envelope.value(QStringLiteral("doc")).toObject().value(QStringLiteral("features")).toArray();
+    for (const auto &fv : features) {
+        const QJsonObject f = fv.toObject();
+        if (f.value(QStringLiteral("id")).toString() == id) suppressed = f.value(QStringLiteral("suppressed")).toBool();
+    }
+
+    QMenu menu(this);
+    QAction *toggle = menu.addAction(suppressed ? tr("解除压缩") : tr("压缩"));
+    QAction *remove = menu.addAction(tr("删除特征（可撤销）"));
+    QAction *chosen = menu.exec(m_tree->viewport()->mapToGlobal(pos));
+    if (!chosen) return;
+
+    QJsonObject body;
+    body.insert(QStringLiteral("documentId"), QStringLiteral("demo-adapter"));
+    body.insert(QStringLiteral("expectedRevision"), m_envelope.value(QStringLiteral("revision")).toInt());
+    body.insert(QStringLiteral("actor"), QStringLiteral("manual"));
+    body.insert(QStringLiteral("featureId"), id);
+    if (chosen == toggle) {
+        body.insert(QStringLiteral("operation"), QStringLiteral("setSuppressed"));
+        body.insert(QStringLiteral("suppressed"), !suppressed);
+    } else if (chosen == remove) {
+        body.insert(QStringLiteral("operation"), QStringLiteral("deleteFeature"));
+    }
     postOperation(body);
 }
 

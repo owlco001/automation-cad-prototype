@@ -42,6 +42,23 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    // 特征操作自检：--feature-ops-selftest [--base URL]
+    if (args.contains(QStringLiteral("--feature-ops-selftest"))) {
+        QString base = QStringLiteral("http://127.0.0.1:18080");
+        const int baseIndex = args.indexOf(QStringLiteral("--base"));
+        if (baseIndex >= 0 && baseIndex + 1 < args.size()) base = args.at(baseIndex + 1);
+        MainWindow window;
+        double suppressedVolume = -1;
+        double restoredVolume = -1;
+        QString error;
+        if (!window.runFeatureOpsSelfTest(base, &suppressedVolume, &restoredVolume, &error)) {
+            qCritical().noquote() << "FT_QT_FEATUREOPS_FAIL" << error;
+            return 1;
+        }
+        qInfo().noquote() << QStringLiteral("FT_QT_FEATUREOPS_OK suppressed=%1 restored=%2").arg(suppressedVolume).arg(restoredVolume);
+        return 0;
+    }
+
     // 撤销/重做自检：--history-selftest [--base URL]
     if (args.contains(QStringLiteral("--history-selftest"))) {
         QString base = QStringLiteral("http://127.0.0.1:18080");
