@@ -39,6 +39,12 @@ function plateOf(features) {
 
 export function validateDoc(doc) {
   const errs = [];
+  if (doc && doc.material !== undefined) {
+    const allowed = ['steel', 'aluminum', 'stainless', 'brass'];
+    if (typeof doc.material !== 'string' || !allowed.includes(doc.material)) {
+      errs.push(`材料「${String(doc.material)}」不支持，可选：${allowed.join('/')}`);
+    }
+  }
   if (!isRec(doc) || !Array.isArray(doc.features)) return ['特征树格式无效：features 必须是数组'];
   const feats = doc.features;
   if (feats.length === 0) errs.push('特征树为空，至少需要一个特征');

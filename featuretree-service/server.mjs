@@ -10,6 +10,7 @@ import { Store } from './store.mjs';
 
 export const seedDoc = {
   schemaVersion: 1,
+  material: 'steel',
   features: [
     { id: 'f-body', type: 'box', name: '90×90×12 板体', params: { length: 90, width: 90, height: 12, centered: true } },
     { id: 'f-cb-in', type: 'counterbore', name: '母件侧沉头孔 Ø5.5 / Ø8.5×5（M5）', params: { diameter: 5.5, cbDiameter: 8.5, cbDepth: 5, depth: 'through', positions: [[-30, -30], [30, -30], [-30, 30], [30, 30]] } },

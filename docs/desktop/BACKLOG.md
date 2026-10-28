@@ -61,18 +61,3 @@
 
 
 > 长期迭代与仓库推送约定见 [DEVELOPMENT-PLAN.md](DEVELOPMENT-PLAN.md#夜间迭代与仓库操作约定)。
-
-## FreeCAD 零件工程图（2026-10-26，`feat/freecad-techdraw`）
-
-- ✅ `drawings.techdraw` 可选模块（依赖 `cad.parametric-import`）：参数化抽屉「工程图（FreeCAD）」分区——选中零件/全部/重出过期、进度与取消、PDF/DXF/目录、过期徽标、未安装提示与「指定 freecadcmd 路径」。
-- ✅ 主进程 `freecad.ts` 运行器 + `drawings-service.ts`（逐件 STEP → freecadcmd → 工程目录 + manifest），IPC 走受信 sender + 模块 fail-closed，renderer 不传路径。
-- ✅ `techdraw_job.py`：第一角投影三视图 + 轴测、自动 A4/A3 与 GB 比例、外形尺寸、国标标题栏，PDF/DXF/SVG；沙箱 FreeCAD 1.0.0（conda-forge）+ build123d 0.13 真机跑通，两件批量约 1 s。
-- 测试：协议/过期/运行器（假 freecadcmd：成功、单件失败、崩溃、超时、取消、PDF 兜底、伪造路径、未安装）/服务/模块/脚本自检，+45 条。
-- 边界：DXF 隐藏线未分层；只标外形总尺寸，无孔位/公差/技术要求；PDF 中文依赖本机字体；Windows 实机未验收。
-
-## 孔位标注出图修正（2026-10-27，`fix/techdraw-holes`，脚本 1.1.1）
-
-- ✅ 沉孔/深度符号 ⌴ ↧ 改中文文字（「4×Ø6.6 沉孔Ø11深6.5」「2×M6-6H深10 孔深12」）：Noto Sans CJK SC 等中文字体无这两个字形，真机显示为方块。
-- ✅ 标注文字列避开剖切符号两端字母（禁区一维避让）；引线端点按「穿孔/槽数 → 是否沿中心线 → 长度」在同组各孔、孔周多方位里择优，不再穿 Ø8 孔 / M6 孔；有剖切线时左侧孔距尺寸外移。
-- ✅ freecadcmd 下 `--pass --self-test` 真正执行自检（此前静默跳过）。真机：转接板/法兰（螺纹）/滚筒三件出图 + e2e（改螺纹只判法兰过期，原因「孔规格」）。
-- 边界：剖切线过孔心时与该孔位尺寸界线重合（GB 允许，未特殊处理）；转接板 A3 1:1 轴测图仍因空间省略（原逻辑）。

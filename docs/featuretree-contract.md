@@ -226,6 +226,7 @@
 
 | # | 标准 | v0.1 状态（2026-10-28） |
 |---|---|---|
+| 0 | 材料与质量：材料是文档属性（`doc.material` ∈ steel/aluminum/stainless/brass），换材料**几何不变、质量按密度重算**，历史留痕 | ✅ 已实现：`setMaterial` 操作 + `MATERIALS` 表（7.85/2.70/7.93/8.50 g/cm³）；实测铝 0.2543 kg vs 钢 0.7392 kg，体积都是 94,166.8 mm³ |
 | 1 | 转接板示例树（90×90×12、Ø5.5 通孔、Ø8.5×5 沉窝、R3 四角）能完整写入、读出、重建，且体积、质量与手算一致 | ✅ 已达成（2026-10-28）：`rebuild-sidecar.py`（build123d 0.13.0）真建实体，种子树体积 **94,166.8 mm³** 与手算一致（板 97,200 − 4 通孔 1,140.4 − 4 沉头 1,800.1 − 4 圆角 92.7），包围盒 90×90×12，质量按密度 7.85 g/cm³ = **0.7392 kg**；改板厚 13 后体积按手算变化（`build-tests.mjs` 8 条断言）。**未接 sidecar 时只做编译+指纹，`geometry:null`，不会假装算过**；sidecar 连不上时 fail-closed 返回 `REBUILD_FAILED` |
 | 2 | 手动改 → 版本 +1 → MCP 读到；MCP 改 → 版本 +1 → Qt 树自动刷新，双向 | ✅ 双向已通（2026-10-28）：`featuretree-service/mcp.mjs` 暴露 `ft_get_tree/ft_update_params/ft_undo/ft_list_revisions`，`mcp-tests.mjs` 11 条断言验「MCP 写→HTTP 读得到」「HTTP 写→MCP 读得到」「旧 revision 经 MCP 也被 409」；Qt 侧 `--selftest` 读→写→回读（`FT_QT_SELFTEST_OK revision=1 height=13`）。Qt 侧自动刷新已接：`--watch-selftest` 用 1.5s 轮询 `/v1/tree`，外部改树后实测在轮询周期内刷到新 revision（`qt-client/tests/watch.mjs` 4 条断言）。SSE 端点可用但客户端未订阅 |
 | 3 | 旧版本提交被 `CONFLICT_STALE_REVISION` 拒绝，文档不变 | ✅ `tests.mjs` 第 4/5 条 |

@@ -118,6 +118,25 @@ try {
   // 二进制 STL：前 80 字节是 header，随后 4 字节是三角面个数
   const triangleCount = stlBytes.length >= 84 ? stlBytes.readUInt32LE(80) : 0;
   ok(triangleCount > 10 && 84 + triangleCount * 50 === stlBytes.length, 'STL 三角面数与文件长度自洽', `tris=${triangleCount} bytes=${stlBytes.length}`);
+  // 材料 → 质量：几何不变，质量按密度重算（铝 2.70 vs 钢 7.85）
+  const beforeMat = await http('GET', '/v1/tree');
+  const volume = beforeMat.json.geometry.volumeMm3;
+  const aluminum = await http('POST', '/v1/operations', {
+    documentId: 'demo-adapter', expectedRevision: beforeMat.json.revision, actor: 'manual',
+    operation: 'setMaterial', material: 'aluminum'
+  });
+  ok(aluminum.status === 200 && aluminum.json.doc.material === 'aluminum', '切换到铝成功');
+  ok(Math.abs(aluminum.json.geometry.volumeMm3 - volume) <= 0.5, '换材料几何不变（体积一致）',
+    `${volume} → ${aluminum.json.geometry.volumeMm3}`);
+  ok(Math.abs(aluminum.json.geometry.massKg - volume * 2.7 / 1e6) <= 0.002,
+    '铝质量 = 体积 × 2.70', `mass=${aluminum.json.geometry.massKg} expected=${(volume * 2.7 / 1e6).toFixed(4)}`);
+  ok(aluminum.json.geometry.materialLabel === '铝', '几何里带材料名');
+  const steel = await http('POST', '/v1/operations', {
+    documentId: 'demo-adapter', expectedRevision: aluminum.json.revision, actor: 'manual',
+    operation: 'setMaterial', material: 'steel'
+  });
+  ok(Math.abs(steel.json.geometry.massKg - volume * 7.85 / 1e6) <= 0.002, '切回钢质量按 7.85 重算',
+    `mass=${steel.json.geometry.massKg}`);
 } catch (error) {
   failures += 1;
   console.error('FT_BUILD_TEST_FAIL', error);

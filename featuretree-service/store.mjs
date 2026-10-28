@@ -9,6 +9,23 @@ import { validateDoc, checkPanelEdit, compileOps } from './validate.mjs';
 export function clone(v) { return JSON.parse(JSON.stringify(v)); }
 
 /**
+ * 材料表：密度是**输入**，不是猜的。质量 = 体积 × 密度，换了材料要重新算，
+ * 但几何（体积/包围盒）不变——这也是为什么材料是文档属性而不是特征的参数。
+ */
+export const MATERIALS = {
+  steel: { label: '钢', densityGPerCm3: 7.85 },
+  aluminum: { label: '铝', densityGPerCm3: 2.70 },
+  stainless: { label: '不锈钢', densityGPerCm3: 7.93 },
+  brass: { label: '黄铜', densityGPerCm3: 8.50 }
+};
+
+export function materialOf(doc) {
+  const key = doc && typeof doc.material === 'string' ? doc.material : 'steel';
+  const entry = MATERIALS[key] || MATERIALS.steel;
+  return { key: MATERIALS[key] ? key : 'steel', ...entry };
+}
+
+/**
  * 带真实时区偏移的 ISO 时间串。
  * 以前写的是 `toISOString().replace('Z','+08:00')`——那只是把 UTC 时刻改标成 +08:00，
  * 实际差 8 小时（实测留痕时间比真实时刻早 480 分钟）。这里按本机偏移重排各字段。
@@ -47,7 +64,7 @@ export async function rebuild(doc) {
     const response = await fetch(`${sidecar.replace(/\/+$/, '')}/rebuild`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ops, ...(process.env.FT_DENSITY ? { densityGPerCm3: Number(process.env.FT_DENSITY) } : {}) }),
+      body: JSON.stringify({ ops, densityGPerCm3: Number(process.env.FT_DENSITY) || materialOf(doc).densityGPerCm3 }),
       signal: AbortSignal.timeout(20_000)
     });
     const payload = await response.json().catch(() => null);
@@ -63,6 +80,8 @@ export async function rebuild(doc) {
         bboxMm: payload.bboxMm,
         massKg: payload.massKg,
         densityGPerCm3: payload.densityGPerCm3,
+        material: materialOf(doc).key,
+        materialLabel: materialOf(doc).label,
         kernel: 'build123d'
       }
     };
@@ -281,6 +300,14 @@ export class Store {
           }
           return null;
         });
+      }
+      case 'setMaterial': {
+        const key = typeof body.material === 'string' ? body.material.trim() : '';
+        if (!MATERIALS[key]) {
+          return { error: 'VALIDATION_FAILED', message: `未知材料「${key}」，可选：${Object.keys(MATERIALS).join('/')}` };
+        }
+        // 材料写在文档上：几何不变、质量重算，历史里能查到是谁改的
+        return await this.commit(expectedRevision, actorLabel, operation, [], (d) => { d.material = key; return null; });
       }
       default:
         return { error: 'VALIDATION_FAILED', message: `未知操作：${operation}` };

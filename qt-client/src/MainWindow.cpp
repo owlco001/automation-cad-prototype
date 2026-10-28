@@ -53,7 +53,30 @@ MainWindow::MainWindow(QWidget *parent)
     auto *viewMenu = menuBar()->addMenu(tr("视图"));
     viewMenu->addAction(tr("适合视图"), this, [] {});
     menuBar()->addMenu(tr("插入"));
-    menuBar()->addMenu(tr("工具"));
+    auto *toolsMenu = menuBar()->addMenu(tr("工具"));
+    // 材质：只改文档属性（密度），几何不变、质量重算；四条固定项对应服务端白名单
+    auto *materialMenu = toolsMenu->addMenu(tr("材质"));
+    const QVector<QPair<QString, QString>> materials = {
+        {QStringLiteral("steel"), tr("钢 7.85 g/cm³")},
+        {QStringLiteral("aluminum"), tr("铝 2.70 g/cm³")},
+        {QStringLiteral("stainless"), tr("不锈钢 7.93 g/cm³")},
+        {QStringLiteral("brass"), tr("黄铜 8.50 g/cm³")}
+    };
+    for (const auto &entry : materials) {
+        QAction *action = materialMenu->addAction(entry.second);
+        action->setCheckable(true);
+        action->setData(entry.first);
+        m_materialActions.insert(entry.first, action);
+        connect(action, &QAction::triggered, this, [this, key = entry.first]() {
+            QJsonObject body;
+            body.insert(QStringLiteral("documentId"), QStringLiteral("demo-adapter"));
+            body.insert(QStringLiteral("expectedRevision"), m_envelope.value(QStringLiteral("revision")).toInt());
+            body.insert(QStringLiteral("actor"), QStringLiteral("manual"));
+            body.insert(QStringLiteral("operation"), QStringLiteral("setMaterial"));
+            body.insert(QStringLiteral("material"), key);
+            postOperation(body);
+        });
+    }
     menuBar()->addMenu(tr("评估"));
 
     auto *editMenu = menuBar()->addMenu(tr("编辑"));
@@ -471,13 +494,18 @@ void MainWindow::refreshTree(const QJsonObject &envelope) {
     } else {
         const QJsonObject bbox = geometryInfo.value(QStringLiteral("bboxMm")).toObject();
         m_statusGeometry->setText(
-            QStringLiteral("体积 %1 mm³ · 质量 %2 kg · %3×%4×%5 mm · %6")
+            QStringLiteral("%1 · 体积 %2 mm³ · 质量 %3 kg · %4×%5×%6 mm · %7")
+                .arg(geometryInfo.value(QStringLiteral("materialLabel")).toString(QStringLiteral("钢")))
                 .arg(geometryInfo.value(QStringLiteral("volumeMm3")).toDouble(), 0, 'f', 1)
                 .arg(geometryInfo.value(QStringLiteral("massKg")).toDouble(), 0, 'f', 4)
                 .arg(bbox.value(QStringLiteral("x")).toDouble())
                 .arg(bbox.value(QStringLiteral("y")).toDouble())
                 .arg(bbox.value(QStringLiteral("z")).toDouble())
                 .arg(geometryInfo.value(QStringLiteral("kernel")).toString()));
+        const QString materialKey = doc.value(QStringLiteral("material")).toString(QStringLiteral("steel"));
+        for (auto it = m_materialActions.begin(); it != m_materialActions.end(); ++it) {
+            it.value()->setChecked(it.key() == materialKey);
+        }
     }
     // 几何只在版本变化时重新拉，避免每次 1.5s 轮询都下一遍 STL
     if (geometryInfo.isEmpty()) {

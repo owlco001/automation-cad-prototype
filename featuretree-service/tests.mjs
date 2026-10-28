@@ -173,6 +173,22 @@ try {
   ok(branchEdit.status === 200, '撤销后发生新修改');
   const staleRedo = await req('POST', '/v1/redo', { expectedRevision: branchEdit.json.revision, actor: 'manual', steps: 1 });
   ok(staleRedo.status === 409 && staleRedo.json.error === 'REDO_EMPTY', '新操作清空 redo 栈（分支历史不合并）', JSON.stringify(staleRedo.json).slice(0, 140));
+  // 16. 材料：只改文档属性，材料名非法必须 422；没接 sidecar 时也照样能改（几何不受影响）
+  const matBefore = await req('GET', '/v1/tree');
+  const setAl = await req('POST', '/v1/operations', {
+    documentId: 'demo-adapter', expectedRevision: matBefore.json.revision, actor: 'manual',
+    operation: 'setMaterial', material: 'aluminum'
+  });
+  ok(setAl.status === 200 && setAl.json.doc.material === 'aluminum', '切换到铝（doc.material=aluminum）', JSON.stringify(setAl.json).slice(0, 120));
+  const badMat = await req('POST', '/v1/operations', {
+    documentId: 'demo-adapter', expectedRevision: setAl.json.revision, actor: 'manual',
+    operation: 'setMaterial', material: 'unobtainium'
+  });
+  ok(badMat.status === 422 && badMat.json.error === 'VALIDATION_FAILED', '未知材料返回 422', JSON.stringify(badMat.json).slice(0, 140));
+  const matAfter = await req('GET', '/v1/tree');
+  ok(matAfter.json.revision === setAl.json.revision && matAfter.json.doc.material === 'aluminum', '非法材料不改版本、不改文档');
+
+
 } catch (error) {
   failures.push('异常：' + (error instanceof Error ? error.message : String(error)));
   console.error('FT_TEST_FAIL', error);

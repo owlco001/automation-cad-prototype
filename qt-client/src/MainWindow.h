@@ -5,6 +5,7 @@
 #include "StlViewport.h"
 
 #include <QJsonObject>
+#include <QMap>
 #include <QMainWindow>
 #include <QNetworkAccessManager>
 
@@ -78,6 +79,7 @@ private:
     class QNetworkReply *m_eventStream = nullptr;
     QByteArray m_eventBuffer;
     bool m_sseConnected = false;
+    QMap<QString, class QAction *> m_materialActions;
     class QAction *m_undoAction = nullptr;
     class QAction *m_redoAction = nullptr;
     QSplitter *m_splitter;
