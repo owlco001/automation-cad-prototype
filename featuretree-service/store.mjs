@@ -25,6 +25,11 @@ export function nowIso(date = new Date()) {
 // 在此之前，服务诚实地只保证“编译通过 + 指纹变化”，不宣称已生成 BRep。
 export function rebuild(doc) {
   const ops = compileOps(doc);
+  // 契约 §14.5：校验通过 ≠ 几何成功。全部特征被压缩（或只剩非实体特征）时算子为空，
+  // 这时必须如实报重建失败，而不是发布一个「空版本」让界面以为保存成功。
+  if (ops.length === 0) {
+    return { ok: false, message: '重建失败：没有任何可构建的特征（全部被压缩或缺少实体特征）' };
+  }
   const fingerprint = createHash('sha256').update(JSON.stringify(ops)).digest('hex').slice(0, 16);
   return { ok: true, ops, fingerprint };
 }

@@ -142,6 +142,12 @@
 
 ## 9. MCP 与 Qt 的映射（现有工具不直写，全部收敛到第 3 节）
 
+> v0.1 实现：`featuretree-service/mcp.mjs`（stdio JSON-RPC）把契约服务暴露成四个 MCP 工具
+> `ft_get_tree` / `ft_update_params` / `ft_undo` / `ft_list_revisions` 与一个只读资源
+> `featuretree://current/tree`。MCP 这一层不复制校验与乐观锁，全部转发给契约服务；
+> 写工具必须带 `expectedRevision`，冲突原样回 `CONFLICT_STALE_REVISION` 并提示先重读。
+> 双向验收：`node featuretree-service/mcp-tests.mjs`（11 条断言）。
+
 | 调用方 | 现有入口 / 界面动作 | 收敛到的契约操作 |
 |---|---|---|
 | MCP `update_component` | 改零部件参数 | `updateFeatureParams` / `updateInstanceTransform` |
@@ -208,14 +214,14 @@
 | # | 标准 | v0.1 状态（2026-10-28） |
 |---|---|---|
 | 1 | 转接板示例树（90×90×12、Ø5.5 通孔、Ø8.5×5 沉窝、R3 四角）能完整写入、读出、重建，且体积、质量与手算一致 | ⚠️ 部分：写入/读出/编译算子 + 指纹已通过；**体积与质量未算**（重建仍是占位钩子，未接 OCCT/build123d） |
-| 2 | 手动改 → 版本 +1 → MCP 读到；MCP 改 → 版本 +1 → Qt 树自动刷新，双向 | ❌ 未达成：MCP 侧未接入；Qt 侧已能读版本与刷新（SSE 可用但未接到客户端） |
+| 2 | 手动改 → 版本 +1 → MCP 读到；MCP 改 → 版本 +1 → Qt 树自动刷新，双向 | ✅ 双向已通（2026-10-28）：`featuretree-service/mcp.mjs` 暴露 `ft_get_tree/ft_update_params/ft_undo/ft_list_revisions`，`mcp-tests.mjs` 11 条断言验「MCP 写→HTTP 读得到」「HTTP 写→MCP 读得到」「旧 revision 经 MCP 也被 409」；Qt 侧 `--selftest` 读→写→回读（`FT_QT_SELFTEST_OK revision=1 height=13`）。**界面自动刷新仍靠手动/重读，SSE 未接到 Qt** |
 | 3 | 旧版本提交被 `CONFLICT_STALE_REVISION` 拒绝，文档不变 | ✅ `tests.mjs` 第 4/5 条 |
 | 4 | 批量事务任一子操作失败整单回滚，版本不变 | ✅ `tests.mjs` 第 10/11 条 |
-| 5 | 重建失败时版本不变，界面不显示“已保存” | ❌ 未达成：`rebuild()` 目前恒成功，失败路径与界面提示都没实现 |
+| 5 | 重建失败时版本不变，界面不显示“已保存” | ✅ 已实现：`rebuild()` 在算子为空（全部压缩/无实体特征）时返回失败，服务回 422 `REBUILD_FAILED` 且版本与特征树完全不变（`tests.mjs` 第 19/20 条）；Qt 侧收到错误只弹提示并重读，不会显示“已保存”。注意：真实 OCCT 重建仍缺，这一条验的是失败路径而不是几何成功 |
 | 6 | 压缩不参与编译、解除即恢复；删除被引用特征被拒绝并指明引用方 | ✅ 压缩/解除在第 12/13 条；删除引用在第 16 条（返回 `REFERENCE_IN_USE` 并点名引用方） |
 | 7 | 未知字段、重复 id、沉窝直径 ≤ 孔径、圆角超厚一半等按第 13 节错误码返回 | ✅ 第 8/9 条（`UNKNOWN_FIELD` / `VALIDATION_FAILED`），其余规则见 `validate.mjs` |
 
-**结论：§14 七条里 4 条全达成（3/4/6/7），1 条部分（1），2 条未达成（2/5）。在 2 和 5 补齐前，本契约只能算「校验与并发层落地」，不能对外称「FeatureTree 契约已落地」。**
+**结论（2026-10-28 更新）：§14 七条里 6 条达成（2/3/4/5/6/7），1 条部分（第 1 条：体积与质量仍未算，重建钩子只是编译算子 + 指纹）。剩下的硬缺口是「真实几何重建（OCCT/build123d）」与「SSE 接到 Qt 自动刷新」，不在这两条解决前不要对外说「FeatureTree 契约已完全落地」。**
 
 ## 15. 未定项（本文故意不定，需要 Sean 拍板，不许实现时擅自默认）
 

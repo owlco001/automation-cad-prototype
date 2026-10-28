@@ -116,6 +116,18 @@ try {
     tooLargeStatus = -1;
   }
   ok(tooLargeStatus === 413, '超过 1MB 的请求体返回 413', `status=${tooLargeStatus}`);
+  // 12. 契约 §14.5：全部压缩导致无任何可构建实体 → REBUILD_FAILED，版本与文档都不变
+  const beforeAllOff = await req('GET', '/v1/tree');
+  const allOff = await req('POST', '/v1/operations', { documentId: 'demo-adapter', expectedRevision: 5, actor: 'manual', operation: 'applyTransaction', operations: [
+    { operation: 'setSuppressed', featureId: 'f-body', suppressed: true },
+    { operation: 'setSuppressed', featureId: 'f-cb-in', suppressed: true },
+    { operation: 'setSuppressed', featureId: 'f-holes-out', suppressed: true }
+  ] });
+  ok(allOff.status === 422 && allOff.json.error === 'REBUILD_FAILED', '全部压缩后重建失败返回 REBUILD_FAILED', JSON.stringify(allOff.json).slice(0, 160));
+  const afterRebuildFail = await req('GET', '/v1/tree');
+  ok(afterRebuildFail.json.revision === 5 &&
+     JSON.stringify(afterRebuildFail.json.doc.features) === JSON.stringify(beforeAllOff.json.doc.features),
+    '重建失败后版本与特征树完全不变');
 } catch (error) {
   failures.push('异常：' + (error instanceof Error ? error.message : String(error)));
   console.error('FT_TEST_FAIL', error);

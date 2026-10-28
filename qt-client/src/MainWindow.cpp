@@ -3,6 +3,7 @@
 #include "MainWindow.h"
 
 #include <QColor>
+#include <QEventLoop>
 #include <QFormLayout>
 #include <QHeaderView>
 #include <QJsonArray>
@@ -16,6 +17,7 @@
 #include <QSplitter>
 #include <QStatusBar>
 #include <QTableWidget>
+#include <QTimer>
 #include <QToolBar>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -213,6 +215,98 @@ void MainWindow::onOperationReply() {
     QMessageBox::warning(this, tr("保存失败"),
         obj.value(QStringLiteral("message")).toString());
     loadTree(); // 失败后以服务端版本刷新，禁止在旧版本上继续编辑
+}
+
+QJsonObject MainWindow::requestSync(const QByteArray &verb, const QString &path, const QJsonObject &body,
+                                   int *status, QString *error, int timeoutMs) {
+    QNetworkRequest req(QUrl(m_serviceBase + path));
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    req.setTransferTimeout(timeoutMs);
+    QNetworkReply *reply = verb == "GET"
+        ? m_net->get(req)
+        : m_net->post(req, body.isEmpty() ? QByteArray("{}") : QJsonDocument(body).toJson());
+    QEventLoop loop;
+    QTimer timer;
+    timer.setSingleShot(true);
+    connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    timer.start(timeoutMs + 1000);
+    loop.exec();
+    if (!reply->isFinished()) {
+        reply->abort();
+        reply->deleteLater();
+        if (error) *error = tr("请求超时：%1").arg(path);
+        if (status) *status = 0;
+        return {};
+    }
+    if (status) *status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QJsonObject parsed = readReply(reply);
+    if (reply->error() != QNetworkReply::NoError && error) *error = reply->errorString();
+    reply->deleteLater();
+    return parsed;
+}
+
+bool MainWindow::runSelfTest(const QString &base, int *revision, double *height, QString *error) {
+    m_serviceBase = base;
+    int status = 0;
+    QString localError;
+    const QJsonObject tree = requestSync("GET", QStringLiteral("/v1/tree"), {}, &status, &localError);
+    if (status != 200) {
+        if (error) *error = tr("读取特征树失败（HTTP %1）：%2").arg(status).arg(localError);
+        return false;
+    }
+    const int rev = tree.value(QStringLiteral("revision")).toInt();
+    const QJsonArray features = tree.value(QStringLiteral("doc")).toObject().value(QStringLiteral("features")).toArray();
+    double current = -1;
+    for (const auto &fv : features) {
+        const QJsonObject f = fv.toObject();
+        if (f.value(QStringLiteral("id")).toString() == QStringLiteral("f-body")) {
+            current = f.value(QStringLiteral("params")).toObject().value(QStringLiteral("height")).toDouble();
+        }
+    }
+    if (current <= 0) {
+        if (error) *error = QStringLiteral("种子树里找不到 f-body/height");
+        return false;
+    }
+    QJsonObject patch; patch.insert(QStringLiteral("height"), current + 1);
+    QJsonObject body;
+    body.insert(QStringLiteral("documentId"), QStringLiteral("demo-adapter"));
+    body.insert(QStringLiteral("expectedRevision"), rev);
+    body.insert(QStringLiteral("actor"), QStringLiteral("manual"));
+    body.insert(QStringLiteral("operation"), QStringLiteral("updateFeatureParams"));
+    body.insert(QStringLiteral("featureId"), QStringLiteral("f-body"));
+    body.insert(QStringLiteral("patch"), patch);
+    const QJsonObject edited = requestSync("POST", QStringLiteral("/v1/operations"), body, &status, &localError);
+    if (status != 200) {
+        if (error) *error = tr("写入失败（HTTP %1）：%2").arg(status).arg(edited.value(QStringLiteral("message")).toString(localError));
+        return false;
+    }
+    const int nextRev = edited.value(QStringLiteral("revision")).toInt();
+    if (nextRev != rev + 1) {
+        if (error) *error = tr("版本未按预期 +1：%1 → %2").arg(rev).arg(nextRev);
+        return false;
+    }
+    // 再读一次，确认服务端真的落了这次修改（不是本地回显）
+    const QJsonObject again = requestSync("GET", QStringLiteral("/v1/tree"), {}, &status, &localError);
+    if (status != 200 || again.value(QStringLiteral("revision")).toInt() != nextRev) {
+        if (error) *error = tr("回读版本不一致（HTTP %1）").arg(status);
+        return false;
+    }
+    const QJsonArray features2 = again.value(QStringLiteral("doc")).toObject().value(QStringLiteral("features")).toArray();
+    double after = -1;
+    for (const auto &fv : features2) {
+        const QJsonObject f = fv.toObject();
+        if (f.value(QStringLiteral("id")).toString() == QStringLiteral("f-body")) {
+            after = f.value(QStringLiteral("params")).toObject().value(QStringLiteral("height")).toDouble();
+        }
+    }
+    if (after != current + 1) {
+        if (error) *error = tr("回读高度不符：期望 %1，实际 %2").arg(current + 1).arg(after);
+        return false;
+    }
+    if (revision) *revision = nextRev;
+    if (height) *height = after;
+    return true;
 }
 
 void MainWindow::refreshPanelFromEnvelope() {

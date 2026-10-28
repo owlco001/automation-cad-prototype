@@ -17,6 +17,10 @@ class MainWindow : public QMainWindow {
 public:
     explicit MainWindow(QWidget *parent = nullptr);
 
+    /// 无人值守自检：读树 → 改一个参数 → 再读，验证 Qt 侧网络/解析/乐观锁链路。
+    /// 成功返回 true 并填 revision/height；失败返回 false 并填 error。
+    bool runSelfTest(const QString &base, int *revision, double *height, QString *error);
+
 private slots:
     void loadTree();
     void onTreeItemSelected(QTreeWidgetItem *item, int column);
@@ -30,6 +34,8 @@ private:
     void postOperation(const QJsonObject &body);
     void showConflict(const QJsonObject &current);
     void refreshPanelFromEnvelope();
+    QJsonObject requestSync(const QByteArray &verb, const QString &path, const QJsonObject &body,
+                            int *status, QString *error, int timeoutMs = 8000);
 
     QNetworkAccessManager *m_net;
     QTreeWidget *m_tree;

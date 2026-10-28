@@ -42,6 +42,9 @@ jobs:
       - name: 契约服务验收（featuretree-service）
         timeout-minutes: 5
         run: node ../featuretree-service/tests.mjs   # unit job 的 cwd 是 desktop
+      - name: MCP ↔ 契约服务双向验收
+        timeout-minutes: 5
+        run: node ../featuretree-service/mcp-tests.mjs
       # 离线规则评估与能力报告此前没人跑，工具加了却不进评估集也发现不了（本轮就是 eval:agent 红的）
       - name: 离线规则评估（含工具覆盖校验）
         run: npm run eval:agent
@@ -64,6 +67,21 @@ jobs:
           cmake --build build-qt -j4
       - name: 可执行文件存在
         run: test -x build-qt/automationcad-qt
+      - name: Qt 客户端 ↔ 契约服务自检
+        timeout-minutes: 5
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          FT_PORT=18080 node featuretree-service/server.mjs > /tmp/ft-service.log 2>&1 &
+          SERVICE_PID=$!
+          for i in $(seq 1 50); do
+            grep -q "服务已启动" /tmp/ft-service.log && break
+            sleep 0.2
+          done
+          QT_QPA_PLATFORM=offscreen ./build-qt/automationcad-qt --selftest --base http://127.0.0.1:18080
+          STATUS=$?
+          kill $SERVICE_PID || true
+          cat /tmp/ft-service.log
+          exit $STATUS
 
   smoke:
     name: Electron smoke (xvfb)
