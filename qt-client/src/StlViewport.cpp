@@ -249,6 +249,16 @@ void StlViewport::paintGL() {
     m_program.release();
 }
 
+void StlViewport::setStandardView(int which) {
+    switch (which) {
+    case 1: m_yaw = 0.0f; m_pitch = 0.0f; break;        // 正视（沿 -Z 看 XY）
+    case 2: m_yaw = 0.0f; m_pitch = 89.0f; break;      // 俯视
+    case 3: m_yaw = 90.0f; m_pitch = 0.0f; break;      // 右视
+    default: m_yaw = -35.0f; m_pitch = 22.0f; break;   // 等轴测
+    }
+    update();
+}
+
 void StlViewport::fitView() {
     m_yaw = -35.0f;
     m_pitch = 22.0f;

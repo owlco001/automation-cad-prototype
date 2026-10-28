@@ -52,7 +52,12 @@ MainWindow::MainWindow(QWidget *parent)
     auto *fileMenu = menuBar()->addMenu(tr("文件"));
     fileMenu->addAction(tr("刷新特征树"), this, &MainWindow::loadTree);
     auto *viewMenu = menuBar()->addMenu(tr("视图"));
-    viewMenu->addAction(tr("适合视图"), this, [] {});
+    viewMenu->addAction(tr("等轴测"), this, [this]() { m_viewport->setStandardView(0); });
+    viewMenu->addAction(tr("正视"), this, [this]() { m_viewport->setStandardView(1); });
+    viewMenu->addAction(tr("俯视"), this, [this]() { m_viewport->setStandardView(2); });
+    viewMenu->addAction(tr("右视"), this, [this]() { m_viewport->setStandardView(3); });
+    viewMenu->addSeparator();
+    viewMenu->addAction(tr("适合视图"), this, [this]() { m_viewport->fitView(); });
     auto *insertMenu = menuBar()->addMenu(tr("插入"));
     QAction *newFeature = insertMenu->addAction(tr("新建特征…"), this, &MainWindow::createFeatureDialog);
     newFeature->setShortcut(QKeySequence::New);

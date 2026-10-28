@@ -30,6 +30,8 @@ public:
     void ensureRevision(int revision, const QString &url);
     int triangleCount() const { return m_triangles; }
     void fitView();
+    /// 标准视角：0=等轴测 1=正视(前) 2=俯视 3=右视
+    void setStandardView(int which);
     /// 自检用：等一次加载结束（最多 timeoutMs），返回是否成功
     bool waitForLoad(int timeoutMs);
 
