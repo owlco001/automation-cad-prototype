@@ -97,3 +97,22 @@
 | `npm run bench:render` | 500 件 / 100,000 三角面 → `drawCalls=20`，实例合并省 96%，`budget=OK` |
 | `npm run check:orbit-webgl` | `ORBIT_WEBGL_OK mode=webgl canvases=2 pick=cyl carriageX=140 clip=1 hits=1` |
 | `npm run sync:e2e` | `SYNC_E2E_OK package=dsp_4718a1a3b50b484da618dcf611277916 dup=true diff=1 bytes=856`（真实 material-flow 后端 8899） |
+
+---
+
+（由 STATUS.md 归档，不进离线索引）
+
+## 夜间迭代（2026-10-28 夜，5 个 PR 全绿合并）
+
+| PR | 内容 | 关键数字 |
+|----|------|----------|
+| #26 | Qt 特征右键菜单（压缩/解除压缩、删除特征）+ `--feature-ops-selftest` | 压缩沉头孔 94,166.8 → **95,966.9 mm³**（差值 1,800.1 正是该特征体积）；删除被引用基体走 409 `REFERENCE_IN_USE` |
+| #27 | Qt 改 SSE 推送为主、10s 轮询兜底、断线 3s 重连 | 自检把轮询调到 30s，改树 → 刷新 **138ms** |
+| #28 | 契约服务可选落盘 `FT_DATA_DIR`（单文件 JSON + 原子写 + 快照） | 重启后 r1/高度 19 还在；重启后 undo 仍能回到 12；默认不写盘 |
+| #29 | MCP 补 `ft_set_suppressed` / `ft_delete_feature`（4 → 6 工具） | 压缩后体积变大、删除引用基体回 `REFERENCE_IN_USE` + 提示「先处理引用方」 |
+| #30 | 材料与质量：`doc.material` + `setMaterial` + Qt「工具→材质」菜单 | 铝 **0.2543 kg** vs 钢 0.7392 kg，体积都是 94,166.8 mm³ |
+
+夜间实测汇总（本机 Linux）：featuretree **35/35**、MCP **16 条 PASS**、落盘 **10/10**、
+真几何 **18 条 PASS**、Qt 三个 selftest 全过（`FT_QT_SELFTEST_OK revision=2 height=13`、
+`FT_QT_HISTORY_OK undo=r2 redo=r3`、`FT_QT_FEATUREOPS_OK suppressed=95307.2 restored=94166.8`、`QT_SSE_OK 138ms`）、
+desktop `npm test` **2589（2587 通过 / 2 跳过）**。

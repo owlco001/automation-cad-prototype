@@ -12,20 +12,10 @@
 - 最近发布：`v0.4.0` NSIS `AutomationCAD-Setup-0.4.0.exe`（约 130 MB，未签名），更新通道未做真实签名与跨版本升级验收。
 
 
-## 夜间迭代（2026-10-28 夜，5 个 PR 全绿合并）
+## 夜间迭代（2026-10-28 夜）
 
-| PR | 内容 | 关键数字 |
-|----|------|----------|
-| #26 | Qt 特征右键菜单（压缩/解除压缩、删除特征）+ `--feature-ops-selftest` | 压缩沉头孔 94,166.8 → **95,966.9 mm³**（差值 1,800.1 正是该特征体积）；删除被引用基体走 409 `REFERENCE_IN_USE` |
-| #27 | Qt 改 SSE 推送为主、10s 轮询兜底、断线 3s 重连 | 自检把轮询调到 30s，改树 → 刷新 **138ms** |
-| #28 | 契约服务可选落盘 `FT_DATA_DIR`（单文件 JSON + 原子写 + 快照） | 重启后 r1/高度 19 还在；重启后 undo 仍能回到 12；默认不写盘 |
-| #29 | MCP 补 `ft_set_suppressed` / `ft_delete_feature`（4 → 6 工具） | 压缩后体积变大、删除引用基体回 `REFERENCE_IN_USE` + 提示「先处理引用方」 |
-| #30 | 材料与质量：`doc.material` + `setMaterial` + Qt「工具→材质」菜单 | 铝 **0.2543 kg** vs 钢 0.7392 kg，体积都是 94,166.8 mm³ |
-
-夜间实测汇总（本机 Linux）：featuretree **35/35**、MCP **16 条 PASS**、落盘 **10/10**、
-真几何 **18 条 PASS**、Qt 三个 selftest 全过（`FT_QT_SELFTEST_OK revision=2 height=13`、
-`FT_QT_HISTORY_OK undo=r2 redo=r3`、`FT_QT_FEATUREOPS_OK suppressed=95307.2 restored=94166.8`、`QT_SSE_OK 138ms`）、
-desktop `npm test` **2589（2587 通过 / 2 跳过）**。
+合并 8 个 PR（#26–#33）：特征右键菜单、SSE 推送、可选落盘、MCP 6 工具、材料与质量、新建特征、视图菜单、Store 单元验收；
+逐项数字与真机证据见 [STATUS-HISTORY.md](STATUS-HISTORY.md#夜间迭代5-个-pr)。
 
 ## 验证记录（逐条为本机真实输出）
 
@@ -74,13 +64,10 @@ desktop `npm test` **2589（2587 通过 / 2 跳过）**。
 
 ## Qt 客户端现状（真机验证）
 
-- 特征树：文档根（含版本）→ 零件 → 特征，特征名带关键尺寸，压缩项标灰「（已压缩）」；右键压缩/解除压缩/删除。
-- 属性面板：白名单字段可改（length/width/height/diameter/cbDiameter/cbDepth/radius），其余只读带 tooltip。
-- 3D 视口：`QOpenGLWidget` 渲染服务端 `/v1/geometry.stl`（build123d 导出），左键旋转、滚轮缩放、随版本重载。
-- 链路：SSE 订阅 `/v1/events`，断线 3s 重连 + 10s 轮询兜底，状态栏显示「SSE 已连接 / 轮询兜底」。
-- 材质：工具→材质四选一，换材质几何不变、质量重算。
+- 特征树：文档根（含版本）→ 零件 → 特征，带关键尺寸与「（已压缩）」；右键压缩/解除压缩/删除。属性面板只放行白名单字段，其余只读。
+- 视口：OCCT AIS（默认）或自绘 OpenGL 渲染服务端 STL，旋转/缩放/四标准视角/随版本重载；链路走 SSE（断线 3s 重连 + 10s 轮询兜底）；材质四选一，几何不变质量重算。
 - 新建特征：插入→新建特征（Ctrl+N），类型/参数按类型切换，服务端校验后重建。
-- OCCT AIS 视口（实验，`AUTOMATIONCAD_QT_OCCT=1`）：STL → TopoDS → AIS_Shape 可渲染可旋转，标准视角映射未校准、选择面/测量未接。
+- OCCT AIS 视口（有头文件时默认）：STL → TopoDS → AIS_Shape 渲染/旋转/四标准视角（像素比例已验证：俯视正方形、正视与右视 639×103）；选面/测量未实现（SelectDetected 返回空，未留假功能）。
 - **仍未做**：OCCT 选择面/测量/剖切（本机 Debian 12/13 混源，`libocct-{data-exchange,visualization}-dev` 被 `libfreetype-dev` 版本冲突卡住）、Windows 上编译 Qt、选择面/测量/剖切、新建特征对话框。
 
 ## 已知限制

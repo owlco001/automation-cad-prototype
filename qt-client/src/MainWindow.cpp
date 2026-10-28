@@ -124,10 +124,11 @@ MainWindow::MainWindow(QWidget *parent)
 
     // 视口：几何来自服务端 /v1/geometry.stl（build123d 真建实体导出的二进制 STL），
     // 客户端只负责画，不参与建模。
-    // 默认用自绘 OpenGL STL 视口（四个标准视角已像素级验过）；OCCT AIS 视口目前是**实验性**的，
-    // 渲染与旋转可用，但标准视角/选取还没调好，需要时用 AUTOMATIONCAD_QT_OCCT=1 打开。
+    // 有 OCCT 头文件时默认用 AIS 视口：四个标准视角已用像素比例验过
+    // （俯视 639×639 正方形 / 正视与右视 639×103 / 等轴测 639×455）。
+    // 选面与测量还没做（点击选中返回空选择），需要自绘视口时用 AUTOMATIONCAD_QT_OCCT=0。
 #ifdef AUTOMATIONCAD_HAVE_OCCT
-    const bool preferOcct = qEnvironmentVariable("AUTOMATIONCAD_QT_OCCT", "0") == QStringLiteral("1");
+    const bool preferOcct = qEnvironmentVariable("AUTOMATIONCAD_QT_OCCT", "1") != QStringLiteral("0");
     if (preferOcct) {
         m_occtViewport = new OcctViewport(this);
         m_viewport = m_occtViewport;

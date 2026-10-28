@@ -22,6 +22,7 @@ constexpr int kStlTriangleBytes = 50;
 
 OcctViewport::OcctViewport(QWidget *parent) : QWidget(parent), m_net(new QNetworkAccessManager(this)) {
     setMinimumSize(320, 240);
+    setMouseTracking(false);
     setAttribute(Qt::WA_NativeWindow); // OCCT 要真的原生窗口句柄
     setAttribute(Qt::WA_OpaquePaintEvent);
     setAutoFillBackground(false);
@@ -65,7 +66,10 @@ void OcctViewport::initializeView() {
         // 注意用 sRGB 口径：OCCT 的 RGB 是线性色，直接塞 0.09 会被写进 sRGB 帧缓冲变成
         // 亮度 85 的中灰（实测），所以这里显式声明 sRGB，让它自己做转换。
         m_view->SetBackgroundColor(Quantity_Color(0.09, 0.10, 0.12, Quantity_TOC_sRGB));
-        m_view->TriedronDisplay(Aspect_TOTP_LEFT_LOWER, Quantity_NOC_GRAY70, 0.08, V3d_ZBUFFER);
+        // 截图测量视角时用 AUTOMATIONCAD_OCCT_NO_TRIEDRON=1 关掉坐标三面，避免污染包围盒
+        if (!qEnvironmentVariableIsSet("AUTOMATIONCAD_OCCT_NO_TRIEDRON")) {
+            m_view->TriedronDisplay(Aspect_TOTP_LEFT_LOWER, Quantity_NOC_GRAY70, 0.08, V3d_ZBUFFER);
+        }
         m_view->SetImmediateUpdate(false);
         m_viewReady = true;
     } catch (const Standard_Failure &error) {

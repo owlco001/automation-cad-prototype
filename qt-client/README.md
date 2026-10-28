@@ -70,7 +70,7 @@
 `StlViewport::ensureRevision(revision, url)` 这层接口与 OCCT 无关，等 dev 包装得上可以整体换成
 `AIS_InteractiveContext`，上层不用改。
 
-## OCCT AIS 视口（实验，`AUTOMATIONCAD_QT_OCCT=1` 打开）
+## OCCT AIS 视口（有头文件时默认启用）
 
 默认视口是自绘 OpenGL + 服务端 STL；OCCT AIS 视口作为可选项已能编译并渲染。
 
@@ -93,8 +93,12 @@ CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI �
 低左角坐标三轴。踩到的坑：OCCT 的颜色是线性色，直接给 0.09 会被写进 sRGB 帧缓冲变成中灰（实测亮度 85），
 必须用 `Quantity_TOC_sRGB`；默认灯光在浅色面上过曝，统一压到 0.85。
 
-**还没调好**：视图菜单的四个标准视角在 OCCT 下映射不对（`SetProj` 组合待校准），也还没接选择面/测量。
-所以默认仍是 OpenGL 视口，OCCT 用环境变量打开；真机图见 `qt-client-18-occt-iso.png` / `qt-client-19-occt-top.png`。
+标准视角已用**像素比例**验过（关掉坐标三面后测投影包围盒）：
+俯视 639×639（正方形，等于 90×90 板面）、正视 639×103、右视 639×103（≈90:16）、等轴测 639×455。
+真机图：`qt-client-22-occt-iso.png` / `-23-occt-front.png` / `-24-occt-top.png` / `-25-occt-right.png`。
+
+**还没做**：选面与测量。试过 `MoveTo + SelectDetected`，点击后 `HasSelectedShape()` 返回 false（没崩，但选不中），
+所以没有把选中/测面积做进界面——不留假功能。需要自绘视口时 `AUTOMATIONCAD_QT_OCCT=0`。
 
 ## 自检入口（CI 用）
 
