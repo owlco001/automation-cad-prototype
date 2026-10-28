@@ -78,6 +78,7 @@ desktop `npm test` **2589（2587 通过 / 2 跳过）**。
 - 3D 视口：`QOpenGLWidget` 渲染服务端 `/v1/geometry.stl`（build123d 导出），左键旋转、滚轮缩放、随版本重载。
 - 链路：SSE 订阅 `/v1/events`，断线 3s 重连 + 10s 轮询兜底，状态栏显示「SSE 已连接 / 轮询兜底」。
 - 材质：工具→材质四选一，换材质几何不变、质量重算。
+- 新建特征：插入→新建特征（Ctrl+N），类型/参数按类型切换，服务端校验后重建。
 - **仍未做**：OCCT AIS 视口（本机 Debian 12/13 混源，`libocct-{data-exchange,visualization}-dev` 被 `libfreetype-dev` 版本冲突卡住）、Windows 上编译 Qt、选择面/测量/剖切、新建特征对话框。
 
 ## 已知限制

@@ -1,6 +1,7 @@
 // Qt 客户端壳子 v0.1 实现。注意：本文件只用 Qt Widgets + Network，
 // 不含 OCCT 头文件；视口是占位 QWidget，OCCT AIS 接入是后续里程碑。
 #include "MainWindow.h"
+#include "FeatureDialog.h"
 
 #include <QAction>
 #include <QColor>
@@ -52,7 +53,9 @@ MainWindow::MainWindow(QWidget *parent)
     fileMenu->addAction(tr("刷新特征树"), this, &MainWindow::loadTree);
     auto *viewMenu = menuBar()->addMenu(tr("视图"));
     viewMenu->addAction(tr("适合视图"), this, [] {});
-    menuBar()->addMenu(tr("插入"));
+    auto *insertMenu = menuBar()->addMenu(tr("插入"));
+    QAction *newFeature = insertMenu->addAction(tr("新建特征…"), this, &MainWindow::createFeatureDialog);
+    newFeature->setShortcut(QKeySequence::New);
     auto *toolsMenu = menuBar()->addMenu(tr("工具"));
     // 材质：只改文档属性（密度），几何不变、质量重算；四条固定项对应服务端白名单
     auto *materialMenu = toolsMenu->addMenu(tr("材质"));
@@ -90,6 +93,8 @@ MainWindow::MainWindow(QWidget *parent)
     auto *toolbar = addToolBar(tr("特征工具栏"));
     toolbar->addAction(m_undoAction);
     toolbar->addAction(m_redoAction);
+    toolbar->addSeparator();
+    toolbar->addAction(tr("新建特征"), this, &MainWindow::createFeatureDialog);
     toolbar->addSeparator();
     toolbar->addAction(tr("拉伸凸台"), this, [] {});
     toolbar->addAction(tr("拉伸切除"), this, [] {});
@@ -145,6 +150,98 @@ MainWindow::MainWindow(QWidget *parent)
 }
 
 void MainWindow::setServiceBase(const QString &base) { m_serviceBase = base; }
+
+bool MainWindow::runCreateFeatureSelfTest(const QString &base, double *withHole, double *restored, QString *error) {
+    m_serviceBase = base;
+    int status = 0;
+    QString localError;
+    const QJsonObject tree = requestSync("GET", QStringLiteral("/v1/tree"), {}, &status, &localError);
+    if (status != 200) {
+        if (error) *error = tr("读取特征树失败（HTTP %1）").arg(status);
+        return false;
+    }
+    const auto volumeOf = [](const QJsonObject &envelope) {
+        return envelope.value(QStringLiteral("geometry")).toObject().value(QStringLiteral("volumeMm3")).toDouble();
+    };
+    const double baseVolume = volumeOf(tree);
+    if (baseVolume <= 0) {
+        if (error) *error = QStringLiteral("服务端没返回几何（缺 sidecar？）");
+        return false;
+    }
+
+    // 上次自检异常中断可能留下同名特征：先清掉，让自检可重复跑
+    {
+        QJsonObject stale;
+        stale.insert(QStringLiteral("documentId"), QStringLiteral("demo-adapter"));
+        stale.insert(QStringLiteral("expectedRevision"), tree.value(QStringLiteral("revision")).toInt());
+        stale.insert(QStringLiteral("actor"), QStringLiteral("manual"));
+        stale.insert(QStringLiteral("operation"), QStringLiteral("deleteFeature"));
+        stale.insert(QStringLiteral("featureId"), QStringLiteral("f-selftest-hole"));
+        int staleStatus = 0;
+        QString staleError;
+        requestSync("POST", QStringLiteral("/v1/operations"), stale, &staleStatus, &staleError);
+        if (staleStatus == 200) return runCreateFeatureSelfTest(base, withHole, restored, error);
+    }
+
+    QJsonObject hole; hole.insert(QStringLiteral("id"), QStringLiteral("f-selftest-hole"));
+    hole.insert(QStringLiteral("type"), QStringLiteral("holes"));
+    hole.insert(QStringLiteral("name"), QStringLiteral("自检孔 Ø4"));
+    QJsonObject holeParams;
+    holeParams.insert(QStringLiteral("diameter"), 4.0);
+    holeParams.insert(QStringLiteral("depth"), QStringLiteral("through"));
+    holeParams.insert(QStringLiteral("positions"), QJsonArray{QJsonArray{0.0, 0.0}});
+    hole.insert(QStringLiteral("params"), holeParams);
+
+    QJsonObject create;
+    create.insert(QStringLiteral("documentId"), QStringLiteral("demo-adapter"));
+    create.insert(QStringLiteral("expectedRevision"), tree.value(QStringLiteral("revision")).toInt());
+    create.insert(QStringLiteral("actor"), QStringLiteral("manual"));
+    create.insert(QStringLiteral("operation"), QStringLiteral("createFeature"));
+    create.insert(QStringLiteral("feature"), hole);
+    const QJsonObject created = requestSync("POST", QStringLiteral("/v1/operations"), create, &status, &localError);
+    if (status != 200) {
+        if (error) *error = tr("新建特征失败（HTTP %1）：%2").arg(status).arg(created.value(QStringLiteral("message")).toString(localError));
+        return false;
+    }
+    const double withHoleVolume = volumeOf(created);
+    // Ø4 通孔按当前板厚算：π·r²·t（不要写死 12——板厚可能刚被改过）
+    double thickness = 0;
+    for (const auto &fv : tree.value(QStringLiteral("doc")).toObject().value(QStringLiteral("features")).toArray()) {
+        const QJsonObject f = fv.toObject();
+        if (f.value(QStringLiteral("id")).toString() == QStringLiteral("f-body")) {
+            thickness = f.value(QStringLiteral("params")).toObject().value(QStringLiteral("height")).toDouble();
+        }
+    }
+    if (thickness <= 0) {
+        if (error) *error = QStringLiteral("找不到板厚（f-body.height）");
+        return false;
+    }
+    const double expectedDelta = 3.141592653589793 * 4.0 * thickness;
+    if (qAbs((baseVolume - withHoleVolume) - expectedDelta) > 2.0) {
+        if (error) *error = tr("加孔后体积减少 %1 mm³，期望约 %2").arg(baseVolume - withHoleVolume).arg(expectedDelta, 0, 'f', 1);
+        return false;
+    }
+
+    QJsonObject del;
+    del.insert(QStringLiteral("documentId"), QStringLiteral("demo-adapter"));
+    del.insert(QStringLiteral("expectedRevision"), created.value(QStringLiteral("revision")).toInt());
+    del.insert(QStringLiteral("actor"), QStringLiteral("manual"));
+    del.insert(QStringLiteral("operation"), QStringLiteral("deleteFeature"));
+    del.insert(QStringLiteral("featureId"), QStringLiteral("f-selftest-hole"));
+    const QJsonObject deleted = requestSync("POST", QStringLiteral("/v1/operations"), del, &status, &localError);
+    if (status != 200) {
+        if (error) *error = tr("删除自检孔失败（HTTP %1）：%2").arg(status).arg(localError);
+        return false;
+    }
+    const double restoredVolume = volumeOf(deleted);
+    if (qAbs(restoredVolume - baseVolume) > 0.5) {
+        if (error) *error = tr("删孔后体积没复原：%1 vs %2").arg(restoredVolume).arg(baseVolume);
+        return false;
+    }
+    if (withHole) *withHole = withHoleVolume;
+    if (restored) *restored = restoredVolume;
+    return true;
+}
 
 bool MainWindow::runFeatureOpsSelfTest(const QString &base, double *suppressedVolume, double *restoredVolume, QString *error) {
     m_serviceBase = base;
@@ -576,6 +673,18 @@ void MainWindow::onPropertyCellChanged(int row, int) {
     body.insert(QStringLiteral("operation"), QStringLiteral("updateFeatureParams"));
     body.insert(QStringLiteral("featureId"), m_selectedFeatureId);
     body.insert(QStringLiteral("patch"), patch);
+    postOperation(body);
+}
+
+void MainWindow::createFeatureDialog() {
+    FeatureDialog dialog(this);
+    if (dialog.exec() != QDialog::Accepted) return;
+    QJsonObject body;
+    body.insert(QStringLiteral("documentId"), QStringLiteral("demo-adapter"));
+    body.insert(QStringLiteral("expectedRevision"), m_envelope.value(QStringLiteral("revision")).toInt());
+    body.insert(QStringLiteral("actor"), QStringLiteral("manual"));
+    body.insert(QStringLiteral("operation"), QStringLiteral("createFeature"));
+    body.insert(QStringLiteral("feature"), dialog.feature());
     postOperation(body);
 }
 

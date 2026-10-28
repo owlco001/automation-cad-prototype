@@ -114,6 +114,7 @@ jobs:
           done
           QT_QPA_PLATFORM=offscreen ./build-qt/automationcad-qt --feature-ops-selftest --base http://127.0.0.1:18082
           STATUS=$?
+          QT_QPA_PLATFORM=offscreen ./build-qt/automationcad-qt --create-feature-selftest --base http://127.0.0.1:18082 || STATUS=1
           kill $SERVICE_PID $SIDECAR_PID || true
           cat /tmp/sidecar.log /tmp/ft-service2.log
           exit $STATUS

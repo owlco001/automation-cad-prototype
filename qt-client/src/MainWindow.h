@@ -24,6 +24,9 @@ public:
     /// 成功返回 true 并填 revision/height；失败返回 false 并填 error。
     bool runSelfTest(const QString &base, int *revision, double *height, QString *error);
 
+    /// 新建特征自检：加一个 Ø4 通孔 → 体积按 πr²t 减少；删掉 → 复原。
+    bool runCreateFeatureSelfTest(const QString &base, double *withHole, double *restored, QString *error);
+
     /// 特征操作自检：压缩 → 体积变大；删除被引用基体 → 409 REFERENCE_IN_USE；解除压缩 → 体积复原。
     bool runFeatureOpsSelfTest(const QString &base, double *suppressedVolume, double *restoredVolume, QString *error);
 
@@ -53,6 +56,7 @@ private slots:
     void onEventStreamReadyRead();
     void onEventStreamFinished();
     void showTreeMenu(const QPoint &pos);
+    void createFeatureDialog();
     void onTreeItemSelected(QTreeWidgetItem *item, int column);
     void onPropertyCellChanged(int row, int column);
     void onTreeReply();

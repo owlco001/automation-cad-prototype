@@ -60,6 +60,23 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    // 新建特征自检：--create-feature-selftest [--base URL]
+    if (args.contains(QStringLiteral("--create-feature-selftest"))) {
+        QString base = QStringLiteral("http://127.0.0.1:18080");
+        const int baseIndex = args.indexOf(QStringLiteral("--base"));
+        if (baseIndex >= 0 && baseIndex + 1 < args.size()) base = args.at(baseIndex + 1);
+        MainWindow window;
+        double withHole = -1;
+        double restored = -1;
+        QString error;
+        if (!window.runCreateFeatureSelfTest(base, &withHole, &restored, &error)) {
+            qCritical().noquote() << "FT_QT_CREATEFEATURE_FAIL" << error;
+            return 1;
+        }
+        qInfo().noquote() << QStringLiteral("FT_QT_CREATEFEATURE_OK withHole=%1 restored=%2").arg(withHole).arg(restored);
+        return 0;
+    }
+
     // 特征操作自检：--feature-ops-selftest [--base URL]
     if (args.contains(QStringLiteral("--feature-ops-selftest"))) {
         QString base = QStringLiteral("http://127.0.0.1:18080");

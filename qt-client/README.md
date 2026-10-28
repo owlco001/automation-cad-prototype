@@ -50,6 +50,7 @@
 | `docs/desktop/screenshots/qt-client-07-3d-rotated.png` | 左键拖动旋转（yaw/pitch），滚轮缩放；旋转后画面确实变了 |
 | `docs/desktop/screenshots/qt-client-08-3d-thicker.png` | 外部把板厚改成 30：1.5s 内重下 STL 重绘，状态栏「版本 r1 · 体积 236,406.5 mm³ · 质量 1.8558 kg · 90×90×30」 |
 | `docs/desktop/screenshots/qt-client-09-ctxmenu.png` | 特征右键菜单：「压缩 / 解除压缩」「删除特征（可撤销）」，都在服务端校验后执行 |
+| `docs/desktop/screenshots/qt-client-15-new-feature.png` | 「插入 → 新建特征…」(Ctrl+N)：类型/特征 id/名称/参数按类型切换，确定后带 expectedRevision 提交，服务端校验后重建 |
 | `docs/desktop/screenshots/qt-client-13-material-menu.png` | 「工具 → 材质」四条（钢/铝/不锈钢/黄铜，密度写在菜单里），当前材质带勾 |
 | `docs/desktop/screenshots/qt-client-14-aluminum.png` | 切到铝：体积不变 94,166.8 mm³，质量 0.7392 → **0.2543 kg**（×2.70/7.85），状态栏材料名变「铝」 |
 | `docs/desktop/screenshots/qt-client-11-sse.png` | 状态栏右侧「链路：SSE 已连接」——普通启动就走 `/v1/events` 订阅，10s 轮询只做兜底 |
@@ -76,6 +77,8 @@ node ../qt-client/tests/watch.mjs --binary build/automationcad-qt
 node ../qt-client/tests/sse.mjs --binary build/automationcad-qt
 # 撤销/重做：改 → 撤销 → 重做（要服务端）
 QT_QPA_PLATFORM=offscreen ./build/automationcad-qt --history-selftest --base http://127.0.0.1:18080
+# 新建特征：加 Ø4 通孔 → 体积按 πr²t 减少 → 删掉复原（要 sidecar 真几何）
+QT_QPA_PLATFORM=offscreen ./build/automationcad-qt --create-feature-selftest --base http://127.0.0.1:18080
 # 特征操作：压缩 → 删除被引用基体必须 409 → 解除压缩（要 sidecar 真几何）
 QT_QPA_PLATFORM=offscreen ./build/automationcad-qt --feature-ops-selftest --base http://127.0.0.1:18080
 ```
