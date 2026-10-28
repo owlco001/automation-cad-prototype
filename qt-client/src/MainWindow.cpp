@@ -110,6 +110,8 @@ MainWindow::MainWindow(QWidget *parent)
     statusBar()->addPermanentWidget(m_statusRevision);
     m_statusGeometry = new QLabel(tr("几何：未接入"), this);
     statusBar()->addPermanentWidget(m_statusGeometry);
+    m_statusLink = new QLabel(tr("链路：未连接"), this);
+    statusBar()->addPermanentWidget(m_statusLink);
     statusBar()->showMessage(tr("单位：mm 优先"));
 
     connect(m_tree, &QTreeWidget::itemClicked, this, &MainWindow::onTreeItemSelected);
@@ -280,6 +282,95 @@ void MainWindow::startAutoRefresh(int intervalMs) {
         connect(m_pollTimer, &QTimer::timeout, this, &MainWindow::loadTree);
     }
     m_pollTimer->start(intervalMs);
+}
+
+void MainWindow::startEventStream() {
+    if (m_eventStream) return;
+    QNetworkRequest req{QUrl(m_serviceBase + QStringLiteral("/v1/events"))};
+    req.setRawHeader("Accept", "text/event-stream");
+    req.setTransferTimeout(0); // 长连接，不能让 8s 超时把流掐了
+    m_eventStream = m_net->get(req);
+    connect(m_eventStream, &QNetworkReply::readyRead, this, &MainWindow::onEventStreamReadyRead);
+    connect(m_eventStream, &QNetworkReply::finished, this, &MainWindow::onEventStreamFinished);
+}
+
+void MainWindow::onEventStreamReadyRead() {
+    if (!m_eventStream) return;
+    m_eventBuffer.append(m_eventStream->readAll());
+    int boundary = m_eventBuffer.indexOf("\n\n");
+    while (boundary >= 0) {
+        const QByteArray event = m_eventBuffer.left(boundary);
+        m_eventBuffer.remove(0, boundary + 2);
+        if (event.contains("\"hello\":true")) {
+            m_sseConnected = true;
+            m_statusLink->setText(tr("链路：SSE 已连接"));
+        }
+        // 只认 revision：具体内容一律重新 GET /v1/tree 拿，避免把事件当权威快照
+        const int revisionIndex = event.indexOf("\"revision\":");
+        if (revisionIndex >= 0 && !event.contains("\"hello\":true")) {
+            int value = 0;
+            int cursor = revisionIndex + 11;
+            while (cursor < event.size() && (event.at(cursor) < '0' || event.at(cursor) > '9')) ++cursor;
+            while (cursor < event.size() && event.at(cursor) >= '0' && event.at(cursor) <= '9') {
+                value = value * 10 + (event.at(cursor) - '0');
+                ++cursor;
+            }
+            if (value != m_envelope.value(QStringLiteral("revision")).toInt()) {
+                emit envelopeRefreshed(value);
+                loadTree();
+            } else {
+                emit envelopeRefreshed(value);
+            }
+        }
+        boundary = m_eventBuffer.indexOf("\n\n");
+    }
+}
+
+void MainWindow::onEventStreamFinished() {
+    if (m_eventStream) {
+        m_eventStream->deleteLater();
+        m_eventStream = nullptr;
+    }
+    const bool wasConnected = m_sseConnected;
+    m_sseConnected = false;
+    m_statusLink->setText(tr("链路：轮询兜底（SSE 断开）"));
+    if (wasConnected) statusBar()->showMessage(tr("SSE 断开，已回退到轮询，3 秒后重连"), 4000);
+    // 断线重连：3 秒后再订阅一次；轮询仍在跑，界面不会停更
+    QTimer::singleShot(3000, this, [this]() { startEventStream(); });
+}
+
+bool MainWindow::runSseSelfTest(const QString &base, int *revision, QString *error) {
+    m_serviceBase = base;
+    startEventStream();
+    QEventLoop loop;
+    int seenRevision = -1;
+    bool connected = false;
+    bool changed = false;
+    QObject::connect(this, &MainWindow::envelopeRefreshed, &loop, [&](int rev) {
+        if (!connected) {
+            connected = true;
+            seenRevision = rev;
+            return;
+        }
+        if (rev != seenRevision) {
+            changed = true;
+            if (revision) *revision = rev;
+            loop.quit();
+        }
+    });
+    QTimer::singleShot(15'000, &loop, &QEventLoop::quit);
+    // 先无条件读一次，拿到当前版本（SSE 的 hello 也会触发 envelopeRefreshed）
+    loadTree();
+    loop.exec();
+    if (!connected) {
+        if (error) *error = QStringLiteral("15 秒内没有收到任何 revision（SSE 或 GET 都没通）");
+        return false;
+    }
+    if (!changed) {
+        if (error) *error = QStringLiteral("SSE 连上但没收到外部变更事件");
+        return false;
+    }
+    return true;
 }
 
 void MainWindow::loadTree() {

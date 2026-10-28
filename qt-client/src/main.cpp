@@ -42,6 +42,24 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    // SSE 自检：--sse-selftest [--base URL]（外部脚本负责改树，这里只等事件）
+    if (args.contains(QStringLiteral("--sse-selftest"))) {
+        QString base = QStringLiteral("http://127.0.0.1:18080");
+        const int baseIndex = args.indexOf(QStringLiteral("--base"));
+        if (baseIndex >= 0 && baseIndex + 1 < args.size()) base = args.at(baseIndex + 1);
+        MainWindow window;
+        window.setServiceBase(base);
+        window.startAutoRefresh(30'000); // 自检期间把轮询调到很慢，确保刷新来自 SSE 而不是轮询
+        int revision = -1;
+        QString error;
+        if (!window.runSseSelfTest(base, &revision, &error)) {
+            qCritical().noquote() << "FT_QT_SSE_FAIL" << error;
+            return 1;
+        }
+        qInfo().noquote() << QStringLiteral("FT_QT_SSE_OK revision=%1").arg(revision);
+        return 0;
+    }
+
     // 特征操作自检：--feature-ops-selftest [--base URL]
     if (args.contains(QStringLiteral("--feature-ops-selftest"))) {
         QString base = QStringLiteral("http://127.0.0.1:18080");
@@ -117,8 +135,9 @@ int main(int argc, char *argv[]) {
     MainWindow window;
     window.setServiceBase(base);
     window.show();
-    // 普通启动也要真的去读一次树，并开启自动刷新；否则界面永远显示「服务未连接」
+    // 普通启动也要真的去读一次树；SSE 为主、轮询（10s）兜底，断线自动重连
     window.refreshNow();
-    window.startAutoRefresh(1500);
+    window.startEventStream();
+    window.startAutoRefresh(10'000);
     return app.exec();
 }

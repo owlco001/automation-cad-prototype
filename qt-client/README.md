@@ -50,6 +50,8 @@
 | `docs/desktop/screenshots/qt-client-07-3d-rotated.png` | 左键拖动旋转（yaw/pitch），滚轮缩放；旋转后画面确实变了 |
 | `docs/desktop/screenshots/qt-client-08-3d-thicker.png` | 外部把板厚改成 30：1.5s 内重下 STL 重绘，状态栏「版本 r1 · 体积 236,406.5 mm³ · 质量 1.8558 kg · 90×90×30」 |
 | `docs/desktop/screenshots/qt-client-09-ctxmenu.png` | 特征右键菜单：「压缩 / 解除压缩」「删除特征（可撤销）」，都在服务端校验后执行 |
+| `docs/desktop/screenshots/qt-client-11-sse.png` | 状态栏右侧「链路：SSE 已连接」——普通启动就走 `/v1/events` 订阅，10s 轮询只做兜底 |
+| `docs/desktop/screenshots/qt-client-12-sse-pushed.png` | 外部改板厚 20 后 **138ms** 就推过来（自检实测延迟），版本 r1 / 体积 157,384.4 mm³ / 90×90×20 |
 | `docs/desktop/screenshots/qt-client-10-suppressed.png` | 压缩「母件侧沉头孔」后：体积 94,166.8 → 95,966.9 mm³（刚好等于沉头特征去掉的 1,800.1），3D 重下成 2,556 个三角面 |
 
 ## 3D 视口说明（为什么不是 OCCT AIS）
@@ -66,8 +68,10 @@
 ```sh
 # 写链路：读树 → 改 height+1 → 回读校验
 QT_QPA_PLATFORM=offscreen ./build/automationcad-qt --selftest --base http://127.0.0.1:18080
-# 自动刷新：读一次 → 外部改树 → 客户端 1.5s 轮询内刷到新 revision
+# 自动刷新（轮询路径）：读一次 → 外部改树 → 客户端 1.5s 轮询内刷到新 revision
 node ../qt-client/tests/watch.mjs --binary build/automationcad-qt
+# SSE 推送路径：轮询被调成 30s，改树后 2s 内必须刷到（实测 138ms）
+node ../qt-client/tests/sse.mjs --binary build/automationcad-qt
 # 撤销/重做：改 → 撤销 → 重做（要服务端）
 QT_QPA_PLATFORM=offscreen ./build/automationcad-qt --history-selftest --base http://127.0.0.1:18080
 # 特征操作：压缩 → 删除被引用基体必须 409 → 解除压缩（要 sidecar 真几何）

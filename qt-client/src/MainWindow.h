@@ -31,8 +31,12 @@ public:
 
     /// 服务地址（默认 127.0.0.1:18080）
     void setServiceBase(const QString &base);
-    /// 定时拉取 /v1/tree，revision 变化时刷新界面并发出 envelopeRefreshed（等价于 SSE 未接入前的自动刷新）
+    /// 定时拉取 /v1/tree，revision 变化时刷新界面并发出 envelopeRefreshed
     void startAutoRefresh(int intervalMs = 1500);
+    /// 订阅 /v1/events（SSE）；断线自动重连，期间保留轮询兜底
+    void startEventStream();
+    /// SSE 自检：连上后等外部改树，收到变更即打印并退出
+    bool runSseSelfTest(const QString &base, int *revision, QString *error);
     /// 立即读一次
     void refreshNow();
     /// 撤销/重做（走服务端 /v1/undo、/v1/redo，带 expectedRevision）
@@ -45,6 +49,8 @@ signals:
 
 private slots:
     void loadTree();
+    void onEventStreamReadyRead();
+    void onEventStreamFinished();
     void showTreeMenu(const QPoint &pos);
     void onTreeItemSelected(QTreeWidgetItem *item, int column);
     void onPropertyCellChanged(int row, int column);
@@ -68,6 +74,10 @@ private:
     StlViewport *m_viewport;
     QLabel *m_statusRevision;
     QLabel *m_statusGeometry;
+    QLabel *m_statusLink = nullptr;
+    class QNetworkReply *m_eventStream = nullptr;
+    QByteArray m_eventBuffer;
+    bool m_sseConnected = false;
     class QAction *m_undoAction = nullptr;
     class QAction *m_redoAction = nullptr;
     QSplitter *m_splitter;

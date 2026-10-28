@@ -117,6 +117,9 @@ jobs:
       - name: Qt 自动刷新验收（外部改树 → 客户端 1.5s 内刷新）
         timeout-minutes: 5
         run: node qt-client/tests/watch.mjs --binary build-qt/automationcad-qt
+      - name: Qt SSE 推送验收（轮询设 30s，只能靠事件）
+        timeout-minutes: 5
+        run: node qt-client/tests/sse.mjs --binary build-qt/automationcad-qt
 
   featuretree-geometry:
     name: FeatureTree real geometry (build123d)
