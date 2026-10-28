@@ -129,6 +129,10 @@ try {
      JSON.stringify(afterRebuildFail.json.doc.features) === JSON.stringify(beforeAllOff.json.doc.features),
     '重建失败后版本与特征树完全不变');
 
+  // 12.5 没有 sidecar 时导出 STL 要明确 404，不能返回空文件让客户端画出空白
+  const noSidecarStl = await fetch(BASE + '/v1/geometry.stl');
+  ok(noSidecarStl.status === 404, '未接 sidecar 时 /v1/geometry.stl 返回 404', `status=${noSidecarStl.status}`);
+
   // 13. undo → redo：撤回来的那一版必须能原样重做，版本 +1，参数回到撤销前
   const beforeEdit = await req('GET', '/v1/tree');
   const revBeforeEdit = beforeEdit.json.revision;

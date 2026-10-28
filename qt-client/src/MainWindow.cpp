@@ -78,9 +78,15 @@ MainWindow::MainWindow(QWidget *parent)
     m_tree->setHeaderLabel(tr("FeatureManager 设计树"));
     m_tree->setColumnCount(1);
 
-    m_viewportPlaceholder = new QLabel(tr("3D 视口占位\nOCCT AIS Viewer 接入中（后续里程碑）"), this);
-    m_viewportPlaceholder->setAlignment(Qt::AlignCenter);
-    m_viewportPlaceholder->setStyleSheet(QStringLiteral("background:#1c1f26;color:#9aa3b2;font-size:16px;"));
+    // 视口：几何来自服务端 /v1/geometry.stl（build123d 真建实体导出的二进制 STL），
+    // 客户端只负责画，不参与建模。
+    m_viewport = new StlViewport(this);
+    connect(m_viewport, &StlViewport::loaded, this, [this](int triangles) {
+        statusBar()->showMessage(tr("几何已加载：%1 个三角面（服务端 STL）").arg(triangles), 5000);
+    });
+    connect(m_viewport, &StlViewport::failed, this, [this](const QString &message) {
+        statusBar()->showMessage(message, 6000);
+    });
 
     m_panel = new QTableWidget(0, 2, this);
     m_panel->setHorizontalHeaderLabels({tr("参数"), tr("值")});
@@ -94,7 +100,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     m_splitter = new QSplitter(this);
     m_splitter->addWidget(m_tree);
-    m_splitter->addWidget(m_viewportPlaceholder);
+    m_splitter->addWidget(m_viewport);
     m_splitter->addWidget(right);
     m_splitter->setSizes({260, 720, 300});
     setCentralWidget(m_splitter);
@@ -293,19 +299,25 @@ void MainWindow::refreshTree(const QJsonObject &envelope) {
     const int revision = envelope.value(QStringLiteral("revision")).toInt();
     m_statusRevision->setText(tr("版本 r%1").arg(revision));
     // 真实几何（build123d sidecar 算出）：体积/质量/包围盒，没有就如实说没有
-    const QJsonObject geometry = envelope.value(QStringLiteral("geometry")).toObject();
-    if (geometry.isEmpty()) {
+    const QJsonObject geometryInfo = envelope.value(QStringLiteral("geometry")).toObject();
+    if (geometryInfo.isEmpty()) {
         m_statusGeometry->setText(tr("几何：未接 sidecar"));
     } else {
-        const QJsonObject bbox = geometry.value(QStringLiteral("bboxMm")).toObject();
+        const QJsonObject bbox = geometryInfo.value(QStringLiteral("bboxMm")).toObject();
         m_statusGeometry->setText(
             QStringLiteral("体积 %1 mm³ · 质量 %2 kg · %3×%4×%5 mm · %6")
-                .arg(geometry.value(QStringLiteral("volumeMm3")).toDouble(), 0, 'f', 1)
-                .arg(geometry.value(QStringLiteral("massKg")).toDouble(), 0, 'f', 4)
+                .arg(geometryInfo.value(QStringLiteral("volumeMm3")).toDouble(), 0, 'f', 1)
+                .arg(geometryInfo.value(QStringLiteral("massKg")).toDouble(), 0, 'f', 4)
                 .arg(bbox.value(QStringLiteral("x")).toDouble())
                 .arg(bbox.value(QStringLiteral("y")).toDouble())
                 .arg(bbox.value(QStringLiteral("z")).toDouble())
-                .arg(geometry.value(QStringLiteral("kernel")).toString()));
+                .arg(geometryInfo.value(QStringLiteral("kernel")).toString()));
+    }
+    // 几何只在版本变化时重新拉，避免每次 1.5s 轮询都下一遍 STL
+    if (geometryInfo.isEmpty()) {
+        m_viewport->ensureRevision(-1, QString());
+    } else {
+        m_viewport->ensureRevision(revisionFromEnvelope, m_serviceBase + QStringLiteral("/v1/geometry.stl"));
     }
     emit envelopeRefreshed(revision);
 }

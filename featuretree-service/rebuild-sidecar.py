@@ -28,6 +28,7 @@ from build123d import Align, Box, Cylinder, Pos, fillet  # noqa: F401
 BOX_ALIGN = (Align.CENTER, Align.CENTER, Align.MIN)
 
 MAX_OPS = 64
+LAST_SOLID = None  # 最近一次成功重建的实体，供 /stl 导出给客户端渲染
 DEFAULT_DENSITY = 7.85  # g/cm³，结构钢；调用方可以传入别的密度
 
 
@@ -96,6 +97,8 @@ def build(ops, density):
     if solid is None:
         return {"ok": False, "message": "没有任何实体"}
 
+    global LAST_SOLID
+    LAST_SOLID = solid
     volume = float(solid.volume)
     bbox = solid.bounding_box()
     size = bbox.size
@@ -127,6 +130,24 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path == "/stl":
+            # 把最近一次重建的实体导出成二进制 STL，客户端（Qt/OCCT）直接读来显示，
+            # 不在客户端重算几何——几何只有一个来源：服务端 sidecar。
+            if LAST_SOLID is None:
+                self._send(409, {"ok": False, "message": "还没有成功重建过，无几何可导出"})
+                return
+            import tempfile
+            from build123d import export_stl
+            with tempfile.NamedTemporaryFile(suffix=".stl", delete=True) as handle:
+                export_stl(LAST_SOLID, handle.name)
+                handle.seek(0)
+                data = handle.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "model/stl")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if self.path == "/health":
             import build123d
             self._send(200, {"ok": True, "kernel": f"build123d {build123d.__version__}"})

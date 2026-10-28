@@ -46,6 +46,18 @@
 | `docs/desktop/screenshots/qt-client-03-refreshed.png` | 外部客户端把 height 改成 18 后 1.5s 内自动刷新成「版本 r1 / 体积 141,580.0 mm³ / 90×90×18 mm」 |
 | `docs/desktop/screenshots/qt-client-04-undo.png` | Ctrl+Z（走服务端 `/v1/undo`）：撤销成功 → 版本 r2，体积回到 94,166.8 mm³、90×90×12，重做按钮变可用 |
 | `docs/desktop/screenshots/qt-client-05-redo.png` | Ctrl+Shift+Z（`/v1/redo`）：重做成功 → 版本 r3，体积回到 141,580.0 mm³、90×90×18 |
+| `docs/desktop/screenshots/qt-client-06-3d.png` | 真实 3D：视口把服务端 `/v1/geometry.stl`（build123d 导出，6,604 个三角面）画出来，不是占位图 |
+| `docs/desktop/screenshots/qt-client-07-3d-rotated.png` | 左键拖动旋转（yaw/pitch），滚轮缩放；旋转后画面确实变了 |
+| `docs/desktop/screenshots/qt-client-08-3d-thicker.png` | 外部把板厚改成 30：1.5s 内重下 STL 重绘，状态栏「版本 r1 · 体积 236,406.5 mm³ · 质量 1.8558 kg · 90×90×30」 |
+
+## 3D 视口说明（为什么不是 OCCT AIS）
+
+视口用 `QOpenGLWidget` + `#version 330 core` 直接画二进制 STL，几何**只在服务端**生成（build123d），
+客户端不重算体积/质量/孔位。选这条路的原因是本机 Debian 12/13 混源：
+`libocct-data-exchange-dev` / `libocct-visualization-dev` 被 `libfreetype-dev` 版本冲突卡住
+（apt 报 held broken packages），运行时库在但拿不到头文件。
+`StlViewport::ensureRevision(revision, url)` 这层接口与 OCCT 无关，等 dev 包装得上可以整体换成
+`AIS_InteractiveContext`，上层不用改。
 
 ## 自检入口（CI 用）
 

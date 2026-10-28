@@ -109,6 +109,15 @@ try {
     '改后体积与手算一致（h=13）', `actual=${edited.json.geometry?.volumeMm3} expected=${expected13.toFixed(1)}`);
   ok(edited.json.history?.at(-1)?.geometry?.volumeMm3 === edited.json.geometry?.volumeMm3,
     '历史记录里也留了体积（可追溯）');
+
+  // STL 导出：客户端渲染的唯一几何来源（Qt/OCCT 直接读这份，不在客户端重算）
+  const stl = await fetch(`${base}/v1/geometry.stl`);
+  const stlBytes = Buffer.from(await stl.arrayBuffer());
+  ok(stl.status === 200 && stl.headers.get('content-type')?.includes('stl'), 'GET /v1/geometry.stl 返回 STL', `status=${stl.status} type=${stl.headers.get('content-type')}`);
+  ok(stlBytes.length > 1000, 'STL 有实际三角面数据', `bytes=${stlBytes.length}`);
+  // 二进制 STL：前 80 字节是 header，随后 4 字节是三角面个数
+  const triangleCount = stlBytes.length >= 84 ? stlBytes.readUInt32LE(80) : 0;
+  ok(triangleCount > 10 && 84 + triangleCount * 50 === stlBytes.length, 'STL 三角面数与文件长度自洽', `tris=${triangleCount} bytes=${stlBytes.length}`);
 } catch (error) {
   failures += 1;
   console.error('FT_BUILD_TEST_FAIL', error);

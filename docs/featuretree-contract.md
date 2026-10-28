@@ -140,6 +140,8 @@
 > 服务通过 `FT_BUILD_URL` 接上它，把算子的 `{volumeMm3, bboxMm, massKg, densityGPerCm3, kernel}`
 > 写进包络与每条历史（可追溯）。密度是**输入**（默认钢 7.85 g/cm³，`FT_DENSITY` 可改），不是猜出来的。
 > 没接 sidecar 时服务只做「编译 + 指纹」并返回 `geometry:null`；接了但连不上时 `REBUILD_FAILED`（fail-closed）。
+> 客户端渲染用 `GET /v1/geometry.stl`（sidecar 导出的二进制 STL 透传，`model/stl`）；没接 sidecar 时明确 404，
+> 不返回空文件让客户端画出空白。几何只有一个来源：服务端 sidecar，客户端不重算。
 
 - 写操作流程固定为：校验（第 4 节）→ 编译算子（`suppressed` 跳过，现有 `compileOps` / `compileAssembly` 的白名单算子）→ build123d / OCP 重建 BRep → 缓存 BRep 并生成 STEP（如需）→ 发布新版本并通知（第 7 节）。
 - 重建失败时整单回滚：文档停在原 `revision`，错误按 `REBUILD_FAILED` 返回并附带重建方原始错误信息；**不许出现“树已更新、模型还是旧的”这种中间态**。

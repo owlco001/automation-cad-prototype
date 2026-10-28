@@ -3,6 +3,7 @@
 // 否则主窗口状态栏会显示“服务未连接”，这是预期行为，不是崩溃。
 #include "MainWindow.h"
 #include <QApplication>
+#include <QSurfaceFormat>
 #include <QDebug>
 #include <QStringList>
 #include <QTimer>
@@ -11,6 +12,15 @@
 #include <cstdlib>
 
 int main(int argc, char *argv[]) {
+    // QOpenGLWidget + #version 330 core 需要 3.3 core 上下文；不设默认格式会拿到 2.1 兼容上下文
+    QSurfaceFormat format;
+    format.setRenderableType(QSurfaceFormat::OpenGL);
+    format.setVersion(3, 3);
+    format.setProfile(QSurfaceFormat::CoreProfile);
+    format.setDepthBufferSize(24);
+    format.setSamples(4);
+    QSurfaceFormat::setDefaultFormat(format);
+
     QApplication app(argc, argv);
     const QStringList args = QCoreApplication::arguments();
 

@@ -2,6 +2,8 @@
 // Qt 客户端壳子 v0.1：布局 1:1 对齐 SolidWorks 式五区（菜单 / 工具栏 / 特征树 / 视口 / 属性面板 / 状态栏）。
 // 契约：本窗口不持有可独立写回的树副本；一切写操作走 FeatureTree 服务（POST /v1/operations，
 // 带 expectedRevision），成功后以返回的包络全文刷新，409 冲突时提示重新读取，禁止自动覆盖。
+#include "StlViewport.h"
+
 #include <QJsonObject>
 #include <QMainWindow>
 #include <QNetworkAccessManager>
@@ -59,7 +61,7 @@ private:
     QNetworkAccessManager *m_net;
     QTreeWidget *m_tree;
     QTableWidget *m_panel;
-    QLabel *m_viewportPlaceholder;
+    StlViewport *m_viewport;
     QLabel *m_statusRevision;
     QLabel *m_statusGeometry;
     class QAction *m_undoAction = nullptr;
