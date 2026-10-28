@@ -93,8 +93,9 @@ try {
 
   const tools = await rpc('tools/list', {});
   const names = (tools.result?.tools ?? []).map((tool) => tool.name);
-  ok(names.length === 4 && ['ft_get_tree', 'ft_update_params', 'ft_undo', 'ft_list_revisions'].every((n) => names.includes(n)),
-    'tools/list 四个工具', JSON.stringify(names));
+  const expectedTools = ['ft_get_tree', 'ft_update_params', 'ft_set_suppressed', 'ft_delete_feature', 'ft_undo', 'ft_list_revisions'];
+  ok(names.length === expectedTools.length && expectedTools.every((n) => names.includes(n)),
+    'tools/list 六个工具', JSON.stringify(names));
 
   const tree0 = parseToolText(await rpc('tools/call', { name: 'ft_get_tree', arguments: {} }));
   ok(tree0?.revision === 0 && tree0?.features?.length === 4, 'MCP 读到初始树 revision 0 / 4 特征');
@@ -134,6 +135,45 @@ try {
   const resourceText = resource.result?.contents?.[0]?.text ?? '';
   ok(resourceText.includes('"revision":2'), 'resources/read 返回当前 revision');
   const unknown = await rpc('tools/call', { name: 'ft_nope', arguments: {} });
+  // 压缩/删除：都要真走服务端，且删除被引用基体必须把 REFERENCE_IN_USE 原样报出来
+  const beforeSuppress = await rpc('tools/call', { name: 'ft_get_tree', arguments: {} });
+  const beforePayload = JSON.parse(beforeSuppress.result.content[0].text);
+  const currentRevision = beforePayload.revision;
+  const suppressed = await rpc('tools/call', {
+    name: 'ft_set_suppressed',
+    arguments: { featureId: 'f-holes-out', suppressed: true, expectedRevision: currentRevision, agentId: 'mcp-test' }
+  });
+  const suppressedPayload = JSON.parse(suppressed.result.content[0].text);
+  ok(suppressedPayload.ok === true && suppressedPayload.revision === currentRevision + 1,
+    'MCP 压缩孔阵列成功并推进版本', JSON.stringify(suppressedPayload).slice(0, 140));
+  ok(suppressedPayload.features.find((f) => f.id === 'f-holes-out')?.suppressed === true,
+    '压缩状态回读为 true');
+  // 几何需要 sidecar；这个脚本只验协议与并发语义，没接 sidecar 就如实跳过体积断言
+  if (suppressedPayload.geometry) {
+    ok(suppressedPayload.geometry.volumeMm3 > 95000, '压缩后体积变大（真几何）', JSON.stringify(suppressedPayload.geometry));
+  } else {
+    console.log('SKIP: 没接 build123d sidecar，跳过体积断言（协议层已验）');
+  }
+
+  const deleteReferenced = await rpc('tools/call', {
+    name: 'ft_delete_feature',
+    arguments: { featureId: 'f-body', expectedRevision: suppressedPayload.revision, agentId: 'mcp-test' }
+  });
+  const deletePayload = JSON.parse(deleteReferenced.result.content[0].text);
+  ok(deleteReferenced.result.isError === true && deletePayload.code === 'REFERENCE_IN_USE',
+    'MCP 删除被引用基体返回 REFERENCE_IN_USE', JSON.stringify(deletePayload).slice(0, 160));
+  ok(String(deletePayload.hint || '').includes('引用'), '拒绝时给了「先处理引用方」的提示');
+
+  const restored = await rpc('tools/call', {
+    name: 'ft_set_suppressed',
+    arguments: { featureId: 'f-holes-out', suppressed: false, expectedRevision: suppressedPayload.revision, agentId: 'mcp-test' }
+  });
+  const restoredPayload = JSON.parse(restored.result.content[0].text);
+  ok(restoredPayload.ok === true, 'MCP 解除压缩成功');
+  if (restoredPayload.geometry) {
+    ok(Math.abs(restoredPayload.geometry.volumeMm3 - 94166.8) <= 1, 'MCP 解除压缩后体积复原', JSON.stringify(restoredPayload.geometry));
+  }
+
   ok(unknown.error?.code === -32602, '未知工具返回 -32602');
 } catch (error) {
   failures += 1;

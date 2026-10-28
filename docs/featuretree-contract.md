@@ -155,9 +155,9 @@
 > redo 栈空时返回 `409 REDO_EMPTY`，不假装成功。包络里带 `undoDepth` / `redoDepth`，UI 据此启停按钮，
 > 不用客户端自己猜。
 
-> v0.1 实现：`featuretree-service/mcp.mjs`（stdio JSON-RPC）把契约服务暴露成四个 MCP 工具
-> `ft_get_tree` / `ft_update_params` / `ft_undo` / `ft_list_revisions` 与一个只读资源
-> `featuretree://current/tree`。MCP 这一层不复制校验与乐观锁，全部转发给契约服务；
+> v0.1 实现：`featuretree-service/mcp.mjs`（stdio JSON-RPC）把契约服务暴露成六个 MCP 工具
+> `ft_get_tree` / `ft_update_params` / `ft_set_suppressed` / `ft_delete_feature` / `ft_undo` / `ft_list_revisions`
+> 与一个只读资源 `featuretree://current/tree`。MCP 这一层不复制校验与乐观锁，全部转发给契约服务；
 > 写工具必须带 `expectedRevision`，冲突原样回 `CONFLICT_STALE_REVISION` 并提示先重读。
 > 双向验收：`node featuretree-service/mcp-tests.mjs`（11 条断言）。
 

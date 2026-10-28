@@ -34,6 +34,35 @@ const TOOLS = [
     }
   },
   {
+    name: 'ft_set_suppressed',
+    description: '压缩/解除压缩某个特征（写操作，必须带 expectedRevision）。压缩后体积会变，服务端会真重建。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        featureId: { type: 'string', description: '特征 id，如 f-holes-out' },
+        suppressed: { type: 'boolean', description: 'true=压缩，false=解除压缩' },
+        expectedRevision: { type: 'number' },
+        agentId: { type: 'string' }
+      },
+      required: ['featureId', 'suppressed', 'expectedRevision'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'ft_delete_feature',
+    description: '删除特征（写操作，必须带 expectedRevision）。被其他特征引用的基体会被服务端拒绝（REFERENCE_IN_USE），不要重试同样的调用。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        featureId: { type: 'string' },
+        expectedRevision: { type: 'number' },
+        agentId: { type: 'string' }
+      },
+      required: ['featureId', 'expectedRevision'],
+      additionalProperties: false
+    }
+  },
+  {
     name: 'ft_undo',
     description: '撤销最近 N 个版本（写操作，产生新 revision，历史不删除）。',
     inputSchema: {
@@ -109,6 +138,33 @@ async function runTool(name, args) {
       : code === 'UNKNOWN_FIELD'
         ? '该字段不能直接改（服务端只接受 length/width/height/diameter/cbDiameter/cbDepth/radius）。'
         : '写入被拒绝，文档未改变。';
+    return textResult(JSON.stringify({ ok: false, code, message: payload?.message || '', hint }), true);
+  }
+  if (name === 'ft_set_suppressed' || name === 'ft_delete_feature') {
+    const isSuppress = name === 'ft_set_suppressed';
+    const { status, payload } = await callService('POST', '/v1/operations', {
+      documentId: 'demo-adapter',
+      expectedRevision: args.expectedRevision,
+      actor: 'agent',
+      agentId: args.agentId || 'mcp-client',
+      operation: isSuppress ? 'setSuppressed' : 'deleteFeature',
+      featureId: args.featureId,
+      ...(isSuppress ? { suppressed: args.suppressed } : {})
+    });
+    if (status === 200 && payload) {
+      return textResult(JSON.stringify({
+        ok: true,
+        revision: payload.revision,
+        features: payload.doc.features,
+        ...(payload.geometry ? { geometry: payload.geometry } : {})
+      }));
+    }
+    const code = payload?.error || `HTTP_${status}`;
+    const hint = code === 'CONFLICT_STALE_REVISION'
+      ? '版本已过期：请重新 ft_get_tree 后再提交。'
+      : code === 'REFERENCE_IN_USE'
+        ? '该特征被其他特征引用（如孔/沉头依赖基体），先处理引用方再删；不要原样重试。'
+        : '操作被拒绝，文档未改变。';
     return textResult(JSON.stringify({ ok: false, code, message: payload?.message || '', hint }), true);
   }
   if (name === 'ft_undo') {
