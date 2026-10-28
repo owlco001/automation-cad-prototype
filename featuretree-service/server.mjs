@@ -20,18 +20,32 @@ export const seedDoc = {
   updatedAt: '2026-10-28T00:00:00+08:00'
 };
 
-const store = new Store(seedDoc, { dataDir: process.env.FT_DATA_DIR });
-// 有 FT_DATA_DIR 就先恢复存档（版本/历史/快照），再按恢复后的树重建几何；
-// 不设就是一个进程内的内存态（默认行为，契约 §15.1 的持久化方案还没拍板）。
-const restored = await store.restore();
-await store.init();
-if (restored) console.log(`已从存档恢复：${store.dataFile}（版本 r${store.revision}）`);
-if (store.restoreError) console.error(store.restoreError);
+// ── 多文档 ──────────────────────────────────────────────────────────────
+// 一个进程管多份文档：Map<documentId, Store>。默认文档仍是 demo-adapter，
+// 老调用方不带 documentId 时行为完全不变（向后兼容）。
+const dataDir = process.env.FT_DATA_DIR || null;
+const documents = new Map();
 const sseClients = new Set();
-store.onChange((change) => {
+
+function broadcast(change) {
   const line = `data: ${JSON.stringify(change)}\n\n`;
   for (const res of sseClients) { try { res.write(line); } catch { /* ignore */ } }
-});
+}
+
+async function addDocument(documentId, source = seedDoc) {
+  const store = new Store(JSON.parse(JSON.stringify(source)), { dataDir, documentId });
+  const restored = await store.restore();
+  await store.init();
+  if (restored) console.log(`已从存档恢复：${store.dataFile}（版本 r${store.revision}）`);
+  if (store.restoreError) console.error(store.restoreError);
+  store.onChange(broadcast);
+  documents.set(documentId, store);
+  return store;
+}
+
+const DOCUMENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+await addDocument('demo-adapter');
 
 const MAX_BODY_BYTES = 1_000_000;
 
@@ -72,19 +86,63 @@ function send(res, code, obj) {
   res.end(JSON.stringify(obj));
 }
 
+function documentIdOf(url, body) {
+  const fromQuery = url.searchParams.get('documentId');
+  if (fromQuery && fromQuery.trim()) return fromQuery.trim();
+  if (body && typeof body.documentId === 'string' && body.documentId.trim()) return body.documentId.trim();
+  return 'demo-adapter';
+}
+
+/** 取文档；不存在时直接回 404，返回 null 让调用方 return。 */
+function requireDocument(url, body, res) {
+  const id = documentIdOf(url, body);
+  const store = documents.get(id);
+  if (!store) {
+    send(res, 404, { error: 'DOCUMENT_NOT_FOUND', message: `文档不存在：${id}` });
+    return null;
+  }
+  return store;
+}
+
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
   try {
+    if (req.method === 'GET' && url.pathname === '/v1/documents') {
+      return send(res, 200, {
+        documents: [...documents.entries()].map(([documentId, store]) => ({
+          documentId,
+          revision: store.revision,
+          features: store.doc.features.length,
+          material: store.doc.material || 'steel'
+        }))
+      });
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/documents') {
+      const body = await readBody(req);
+      const rawId = typeof body.documentId === 'string' ? body.documentId.trim() : '';
+      const documentId = rawId || `doc-${Date.now().toString(36)}`;
+      if (!DOCUMENT_ID_PATTERN.test(documentId)) {
+        return send(res, 422, { error: 'VALIDATION_FAILED', message: 'documentId 只能包含字母数字与 . _ -，且不超过 64 字符' });
+      }
+      if (documents.has(documentId)) {
+        return send(res, 409, { error: 'DUPLICATE_ID', message: `文档已存在：${documentId}` });
+      }
+      const store = await addDocument(documentId);
+      return send(res, 201, { documentId, revision: store.revision, envelope: store.envelope() });
+    }
     if (req.method === 'GET' && url.pathname === '/v1/tree') {
+      const doc = requireDocument(url, null, res);
+      if (!doc) return undefined;
       // sidecar 晚于服务起来时（build123d 首次 import 慢），这里补一次重建，别让界面永远「没有几何」
-      if (!store.geometry) await store.retryInit();
-      return send(res, 200, store.envelope());
+      if (!doc.geometry) await doc.retryInit();
+      return send(res, 200, doc.envelope());
     }
     if (req.method === 'GET' && url.pathname === '/v1/geometry.stl') {
       // 透传 sidecar 的二进制 STL：客户端只渲染，不参与建模
       const base = process.env.FT_BUILD_URL;
       if (!base) return send(res, 404, { error: 'NOT_FOUND', message: '未配置 FT_BUILD_URL，没有可导出的几何' });
-      const upstream = await fetch(`${base.replace(/\/+$/, '')}/stl`, { signal: AbortSignal.timeout(20_000) });
+      const upstream = await fetch(`${base.replace(/\/+$/, '')}/stl?documentId=${encodeURIComponent(documentIdOf(url, null))}`,
+        { signal: AbortSignal.timeout(20_000) });
       if (!upstream.ok) {
         const detail = await upstream.text().catch(() => '');
         return send(res, upstream.status === 409 ? 409 : 502, { error: 'GEOMETRY_UNAVAILABLE', message: detail.slice(0, 200) });
@@ -93,29 +151,40 @@ const server = createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'model/stl', 'Content-Length': buffer.length });
       return res.end(buffer);
     }
-    if (req.method === 'GET' && url.pathname === '/v1/revisions') return send(res, 200, { documentId: 'demo-adapter', revision: store.revision, history: store.history });
+    if (req.method === 'GET' && url.pathname === '/v1/revisions') {
+      const doc = requireDocument(url, null, res);
+      if (!doc) return undefined;
+      return send(res, 200, { documentId: doc.documentId, revision: doc.revision, history: doc.history });
+    }
     if (req.method === 'GET' && url.pathname === '/v1/events') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
-      res.write(`data: ${JSON.stringify({ documentId: 'demo-adapter', revision: store.revision, hello: true })}\n\n`);
+      const helloDoc = documents.get(documentIdOf(url, null));
+      res.write(`data: ${JSON.stringify({ documentId: helloDoc ? helloDoc.documentId : 'demo-adapter', revision: helloDoc ? helloDoc.revision : 0, hello: true })}\n\n`);
       sseClients.add(res);
       req.on('close', () => sseClients.delete(res));
       return;
     }
     if (req.method === 'POST' && url.pathname === '/v1/operations') {
       const body = await readBody(req);
-      const out = await store.applyOperation(body);
+      const doc = requireDocument(url, body, res);
+      if (!doc) return undefined;
+      const out = await doc.applyOperation(body);
       if (out.error) return send(res, errorStatus(out.error), out);
       return send(res, 200, out);
     }
     if (req.method === 'POST' && url.pathname === '/v1/redo') {
       const body = await readBody(req);
-      const out = await store.redo(body.expectedRevision, body.actor === 'agent' ? `agent:${body.agentId || 'unknown'}` : 'manual', body.steps ?? 1);
+      const doc = requireDocument(url, body, res);
+      if (!doc) return undefined;
+      const out = await doc.redo(body.expectedRevision, body.actor === 'agent' ? `agent:${body.agentId || 'unknown'}` : 'manual', body.steps ?? 1);
       if (out.error) return send(res, errorStatus(out.error), out);
       return send(res, 200, out);
     }
     if (req.method === 'POST' && url.pathname === '/v1/undo') {
       const body = await readBody(req);
-      const out = await store.undo(body.expectedRevision, body.actor === 'agent' ? `agent:${body.agentId || 'unknown'}` : 'manual', body.steps ?? 1);
+      const doc = requireDocument(url, body, res);
+      if (!doc) return undefined;
+      const out = await doc.undo(body.expectedRevision, body.actor === 'agent' ? `agent:${body.agentId || 'unknown'}` : 'manual', body.steps ?? 1);
       if (out.error) return send(res, errorStatus(out.error), out);
       return send(res, 200, out);
     }

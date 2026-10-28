@@ -45,6 +45,9 @@ jobs:
       - name: MCP ↔ 契约服务双向验收
         timeout-minutes: 5
         run: node ../featuretree-service/mcp-tests.mjs
+      - name: 多文档验收（文档隔离 / 列表 / 409 / 404）
+        timeout-minutes: 5
+        run: node ../featuretree-service/multidoc-tests.mjs
       - name: Store 单元验收（不经 HTTP）
         timeout-minutes: 5
         run: node ../featuretree-service/store-tests.mjs

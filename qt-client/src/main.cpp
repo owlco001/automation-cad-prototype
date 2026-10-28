@@ -42,6 +42,23 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    // 多文档自检：--document-selftest [--base URL]
+    if (args.contains(QStringLiteral("--document-selftest"))) {
+        QString base = QStringLiteral("http://127.0.0.1:18080");
+        const int baseIndex = args.indexOf(QStringLiteral("--base"));
+        if (baseIndex >= 0 && baseIndex + 1 < args.size()) base = args.at(baseIndex + 1);
+        MainWindow window;
+        int newRevision = -1;
+        double defaultHeight = -1;
+        QString error;
+        if (!window.runDocumentSelfTest(base, &newRevision, &defaultHeight, &error)) {
+            qCritical().noquote() << "FT_QT_DOCUMENT_FAIL" << error;
+            return 1;
+        }
+        qInfo().noquote() << QStringLiteral("FT_QT_DOCUMENT_OK newRevision=%1 defaultHeight=%2").arg(newRevision).arg(defaultHeight);
+        return 0;
+    }
+
     // SSE 自检：--sse-selftest [--base URL]（外部脚本负责改树，这里只等事件）
     if (args.contains(QStringLiteral("--sse-selftest"))) {
         QString base = QStringLiteral("http://127.0.0.1:18080");
@@ -156,6 +173,11 @@ int main(int argc, char *argv[]) {
     window.refreshNow();
     window.startEventStream();
     window.startAutoRefresh(10'000);
+    // 截图用：AUTOMATIONCAD_QT_DOC=<id> 启动后切到指定文档
+    if (qEnvironmentVariableIsSet("AUTOMATIONCAD_QT_DOC")) {
+        const QString doc = qEnvironmentVariable("AUTOMATIONCAD_QT_DOC");
+        QTimer::singleShot(1500, &window, [&window, doc]() { window.setDocument(doc); window.refreshNow(); });
+    }
     // 截图/自检用：AUTOMATIONCAD_QT_VIEW=0..3 启动后直接切标准视角
     if (qEnvironmentVariableIsSet("AUTOMATIONCAD_QT_VIEW")) {
         bool ok = false;

@@ -9,6 +9,8 @@
 
 #include <QJsonObject>
 #include <QMap>
+
+class QComboBox;
 #include <QMainWindow>
 #include <QNetworkAccessManager>
 
@@ -26,6 +28,9 @@ public:
     /// 无人值守自检：读树 → 改一个参数 → 再读，验证 Qt 侧网络/解析/乐观锁链路。
     /// 成功返回 true 并填 revision/height；失败返回 false 并填 error。
     bool runSelfTest(const QString &base, int *revision, double *height, QString *error);
+
+    /// 多文档自检：建 doc-qt-test → 写入 → 默认文档不受影响 → 切回默认。
+    bool runDocumentSelfTest(const QString &base, int *newRevision, double *defaultHeight, QString *error);
 
     /// 新建特征自检：加一个 Ø4 通孔 → 体积按 πr²t 减少；删掉 → 复原。
     bool runCreateFeatureSelfTest(const QString &base, double *withHole, double *restored, QString *error);
@@ -48,6 +53,9 @@ public:
     void refreshNow();
     /// 0=等轴测 1=正视 2=俯视 3=右视（截图/自检用，和视图菜单同一实现）
     void applyStandardView(int which);
+    /// 当前文档 id（默认 demo-adapter）
+    void setDocument(const QString &documentId);
+    QString documentId() const { return m_documentId; }
     /// 撤销/重做（走服务端 /v1/undo、/v1/redo，带 expectedRevision）
     void undoOnce();
     void redoOnce();
@@ -58,6 +66,8 @@ signals:
 
 private slots:
     void loadTree();
+    void reloadDocuments();
+    void onCreateDocument();
     void onEventStreamReadyRead();
     void onEventStreamFinished();
     void showTreeMenu(const QPoint &pos);
@@ -104,4 +114,7 @@ private:
     QString m_selectedFeatureId;
     bool m_updatingPanel = false;
     QString m_serviceBase = QStringLiteral("http://127.0.0.1:18080");
+    QString m_documentId = QStringLiteral("demo-adapter");
+    class QComboBox *m_documentCombo = nullptr;
+    QString docQuery() const;
 };

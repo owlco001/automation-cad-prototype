@@ -50,7 +50,7 @@ export function nowIso(date = new Date()) {
  * - 没配 sidecar 时只做「编译 + 指纹」，并明确 geometry=null，绝不假装算过体积。
  * - 算子为空（全部压缩）一律失败——契约 §14.5 要求版本停在原处。
  */
-export async function rebuild(doc) {
+export async function rebuild(doc, documentId = 'demo-adapter') {
   const ops = compileOps(doc);
   if (ops.length === 0) {
     return { ok: false, message: '重建失败：没有任何可构建的特征（全部被压缩或缺少实体特征）' };
@@ -64,7 +64,7 @@ export async function rebuild(doc) {
     const response = await fetch(`${sidecar.replace(/\/+$/, '')}/rebuild`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ops, densityGPerCm3: Number(process.env.FT_DENSITY) || materialOf(doc).densityGPerCm3 }),
+      body: JSON.stringify({ ops, documentId, densityGPerCm3: Number(process.env.FT_DENSITY) || materialOf(doc).densityGPerCm3 }),
       signal: AbortSignal.timeout(20_000)
     });
     const payload = await response.json().catch(() => null);
@@ -96,6 +96,7 @@ export class Store {
    * @param options.dataDir 设置后启用落盘（FT_DATA_DIR）；不设就是纯内存态（默认，契约 §15.1 未拍板）
    */
   constructor(initialDoc, options = {}) {
+    this.documentId = options.documentId || 'demo-adapter';
     this.doc = clone(initialDoc);
     this.revision = 0;
     this.history = [];
@@ -105,7 +106,7 @@ export class Store {
     // undo 不是终点：撤回的那一版必须能再“重做”回来。栈上限 50，避免无限长内存。
     this.redoStack = [];
     this.dataDir = options.dataDir || null;
-    this.dataFile = this.dataDir ? join(this.dataDir, 'demo-adapter.json') : null;
+    this.dataFile = this.dataDir ? join(this.dataDir, `${this.documentId}.json`) : null;
     const errs = validateDoc(this.doc);
     if (errs.length) throw new Error('初始文档校验失败：' + errs.join('；'));
   }
@@ -140,7 +141,7 @@ export class Store {
     if (!this.dataFile) return;
     await mkdir(dirname(this.dataFile), { recursive: true });
     const payload = JSON.stringify({
-      documentId: 'demo-adapter',
+      documentId: this.documentId,
       revision: this.revision,
       doc: this.doc,
       history: this.history,
@@ -154,7 +155,7 @@ export class Store {
 
   async init() {
     this.lastInitAttempt = Date.now();
-    const rb = await rebuild(this.doc);
+    const rb = await rebuild(this.doc, this.documentId);
     if (rb.ok) {
       this.geometry = rb.geometry;
       this.fingerprint = rb.fingerprint;
@@ -176,7 +177,7 @@ export class Store {
 
   envelope() {
     return {
-      documentId: 'demo-adapter',
+      documentId: this.documentId,
       kind: 'part',
       revision: this.revision,
       // 给 UI 用：能不能撤销/重做不用客户端自己猜
@@ -200,7 +201,7 @@ export class Store {
     if (opErr) return { error: 'VALIDATION_FAILED', message: opErr };
     const errs = validateDoc(draft);
     if (errs.length) return { error: 'VALIDATION_FAILED', message: errs.join('；') };
-    const rb = await rebuild(draft);
+    const rb = await rebuild(draft, this.documentId);
     if (!rb.ok) return { error: 'REBUILD_FAILED', message: rb.message || '重建失败' };
     const before = this.revision;
     this.doc = draft;
@@ -325,7 +326,7 @@ export class Store {
     const restored = clone(this.snapshots[target]);
     const errs = validateDoc(restored);
     if (errs.length) return { error: 'VALIDATION_FAILED', message: errs.join('；') };
-    const rb = await rebuild(restored);
+    const rb = await rebuild(restored, this.documentId);
     if (!rb.ok) return { error: 'REBUILD_FAILED', message: rb.message || '重建失败' };
     const before = this.revision;
     this.redoStack.push(clone(this.doc));
@@ -360,7 +361,7 @@ export class Store {
     const restored = clone(this.redoStack[this.redoStack.length - count]);
     const errs = validateDoc(restored);
     if (errs.length) return { error: 'VALIDATION_FAILED', message: errs.join('；') };
-    const rb = await rebuild(restored);
+    const rb = await rebuild(restored, this.documentId);
     if (!rb.ok) return { error: 'REBUILD_FAILED', message: rb.message || '重建失败' };
     const before = this.revision;
     this.redoStack.splice(this.redoStack.length - count, count);

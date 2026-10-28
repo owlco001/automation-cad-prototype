@@ -28,11 +28,12 @@ from build123d import Align, Box, Cylinder, Pos, fillet  # noqa: F401
 BOX_ALIGN = (Align.CENTER, Align.CENTER, Align.MIN)
 
 MAX_OPS = 64
-LAST_SOLID = None  # 最近一次成功重建的实体，供 /stl 导出给客户端渲染
+LAST_SOLID = None  # 兼容单文档：最近一次成功重建的实体
+SOLIDS = {}        # 多文档：documentId -> 最近一次成功重建的实体
 DEFAULT_DENSITY = 7.85  # g/cm³，结构钢；调用方可以传入别的密度
 
 
-def build(ops, density):
+def build(ops, density, document_id='demo-adapter'):
     if not isinstance(ops, list) or not ops:
         return {"ok": False, "message": "没有可构建的算子"}
     if len(ops) > MAX_OPS:
@@ -99,6 +100,7 @@ def build(ops, density):
 
     global LAST_SOLID
     LAST_SOLID = solid
+    SOLIDS[str(document_id or 'demo-adapter')] = solid
     volume = float(solid.volume)
     bbox = solid.bounding_box()
     size = bbox.size
@@ -130,16 +132,20 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/stl":
+        if self.path.startswith("/stl"):
             # 把最近一次重建的实体导出成二进制 STL，客户端（Qt/OCCT）直接读来显示，
             # 不在客户端重算几何——几何只有一个来源：服务端 sidecar。
-            if LAST_SOLID is None:
+            from urllib.parse import urlparse, parse_qs
+            query = parse_qs(urlparse(self.path).query)
+            document_id = (query.get('documentId') or ['demo-adapter'])[0]
+            target = SOLIDS.get(document_id) or (LAST_SOLID if document_id == 'demo-adapter' else None)
+            if target is None:
                 self._send(409, {"ok": False, "message": "还没有成功重建过，无几何可导出"})
                 return
             import tempfile
             from build123d import export_stl
             with tempfile.NamedTemporaryFile(suffix=".stl", delete=True) as handle:
-                export_stl(LAST_SOLID, handle.name)
+                export_stl(target, handle.name)
                 handle.seek(0)
                 data = handle.read()
             self.send_response(200)
@@ -169,7 +175,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         density = body.get("densityGPerCm3", DEFAULT_DENSITY)
         try:
-            result = build(body.get("ops") or [], density)
+            result = build(body.get("ops") or [], density, body.get("documentId"))
         except Exception as error:  # noqa: BLE001
             self._send(200, {"ok": False, "message": f"重建失败：{error}"})
             return
