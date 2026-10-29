@@ -247,10 +247,17 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     solid = SOLIDS[f"{assembly_id}#{index}"]
                     offset = member.get("offset") or [0, 0, 0]
-                    # 先绕自身 Z 轴转（度），再平移；顺序固定，避免“转完位置跑掉”
+                    # 顺序写死：先绕自身 X、再 Y、再 Z（degree），最后平移，避免“转完位置跑掉”。
+                    # rotateZ 是只绕 Z 的旧写法；两者同时给会在这里被 reject（服务端已先挡一次）。
+                    rotate = member.get("rotate") or [0, 0, 0]
                     rotate_z = float(member.get("rotateZ") or 0.0)
-                    if rotate_z:
-                        solid = solid.rotate(Axis.Z, rotate_z)
+                    rx, ry, rz = (float(rotate[0]), float(rotate[1]), float(rotate[2])) if rotate else (0.0, 0.0, 0.0)
+                    if rx:
+                        solid = solid.rotate(Axis.X, rx)
+                    if ry:
+                        solid = solid.rotate(Axis.Y, ry)
+                    if rz or rotate_z:
+                        solid = solid.rotate(Axis.Z, rz or rotate_z)
                     moved = solid.translate((float(offset[0]), float(offset[1]), float(offset[2])))
                     combined = moved if combined is None else combined.fuse(moved)
                     per_member.append({"index": index, "volumeMm3": result["volumeMm3"], "offset": offset})

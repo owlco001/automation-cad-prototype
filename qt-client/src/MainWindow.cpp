@@ -8,10 +8,18 @@
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
+#include <QHeaderView>
+#include <QLabel>
+#include <QTableWidget>
+#include <QVBoxLayout>
 #include <QInputDialog>
 #include <QColor>
 #include <QEventLoop>
 #include <QFormLayout>
+#include <QHeaderView>
+#include <QLabel>
+#include <QTableWidget>
+#include <QVBoxLayout>
 #include <QHeaderView>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -100,6 +108,9 @@ MainWindow::MainWindow(QWidget *parent)
     }
     auto *evalMenu = menuBar()->addMenu(tr("评估"));
     QAction *interference = evalMenu->addAction(tr("装配干涉检查"), this, &MainWindow::runInterferenceCheck);
+    interference->setShortcut(QKeySequence(QStringLiteral("Ctrl+I")));
+    QAction *assemblyBom = evalMenu->addAction(tr("装配清单"), this, &MainWindow::runAssemblyBom);
+    assemblyBom->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
     interference->setShortcut(QKeySequence(QStringLiteral("Ctrl+I")));
 
     auto *editMenu = menuBar()->addMenu(tr("编辑"));
@@ -239,20 +250,33 @@ void MainWindow::editAssemblyMember(int memberIndex) {
     auto *x = new QDoubleSpinBox(&dialog);
     auto *y = new QDoubleSpinBox(&dialog);
     auto *z = new QDoubleSpinBox(&dialog);
+    auto *rotX = new QDoubleSpinBox(&dialog);
+    auto *rotY = new QDoubleSpinBox(&dialog);
     auto *rot = new QDoubleSpinBox(&dialog);
-    for (QDoubleSpinBox *box : {x, y, z, rot}) {
+    for (QDoubleSpinBox *box : {x, y, z, rotX, rotY, rot}) {
         box->setRange(-100000.0, 100000.0);
         box->setDecimals(2);
     }
-    rot->setRange(-360.0, 360.0);
-    rot->setSuffix(tr(" °"));
+    for (QDoubleSpinBox *box : {rotX, rotY, rot}) {
+        box->setRange(-360.0, 360.0);
+        box->setSuffix(tr(" °"));
+    }
     x->setValue(offset.at(0).toDouble());
     y->setValue(offset.at(1).toDouble());
     z->setValue(offset.at(2).toDouble());
-    rot->setValue(member.value(QStringLiteral("rotateZ")).toDouble());
+    const QJsonArray rotate = member.value(QStringLiteral("rotate")).toArray();
+    if (rotate.size() == 3) {
+        rotX->setValue(rotate.at(0).toDouble());
+        rotY->setValue(rotate.at(1).toDouble());
+        rot->setValue(rotate.at(2).toDouble());
+    } else {
+        rot->setValue(member.value(QStringLiteral("rotateZ")).toDouble());
+    }
     form->addRow(tr("X 偏移 (mm)"), x);
     form->addRow(tr("Y 偏移 (mm)"), y);
     form->addRow(tr("Z 偏移 (mm)"), z);
+    form->addRow(tr("绕 X 旋转"), rotX);
+    form->addRow(tr("绕 Y 旋转"), rotY);
     form->addRow(tr("绕 Z 旋转"), rot);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     form->addRow(buttons);
@@ -269,9 +293,19 @@ void MainWindow::editAssemblyMember(int memberIndex) {
         entry.insert(QStringLiteral("offset"), i == memberIndex
             ? QJsonArray{x->value(), y->value(), z->value()}
             : oldOffset);
-        entry.insert(QStringLiteral("rotateZ"), i == memberIndex
-            ? rot->value()
-            : existing.value(QStringLiteral("rotateZ")).toDouble());
+        if (i == memberIndex) {
+            // 契约：rotate 与 rotateZ 不能同时给。只绕 Z 时继续用简写 rotateZ，避免历史数据被改变语义
+            const bool anyAxis = rotX->value() != 0.0 || rotY->value() != 0.0;
+            if (anyAxis) {
+                entry.insert(QStringLiteral("rotate"), QJsonArray{rotX->value(), rotY->value(), rot->value()});
+            } else {
+                entry.insert(QStringLiteral("rotateZ"), rot->value());
+            }
+        } else {
+            const QJsonArray oldRotate = existing.value(QStringLiteral("rotate")).toArray();
+            if (oldRotate.size() == 3) entry.insert(QStringLiteral("rotate"), oldRotate);
+            else entry.insert(QStringLiteral("rotateZ"), existing.value(QStringLiteral("rotateZ")).toDouble());
+        }
         updated.append(entry);
     }
     QJsonObject body;
@@ -291,6 +325,67 @@ void MainWindow::editAssemblyMember(int memberIndex) {
         }
         statusBar()->showMessage(tr("成员位姿已更新，正在重新合成几何…"), 5000);
         loadAssembly(m_assemblyId);
+    });
+}
+
+void MainWindow::runAssemblyBom() {
+    if (m_assemblyId.isEmpty()) {
+        QMessageBox::information(this, tr("装配清单"), tr("先打开一个装配，再取清单。"));
+        return;
+    }
+    QNetworkRequest req{QUrl(m_serviceBase + QStringLiteral("/v1/assemblies/") +
+                             QString::fromUtf8(QUrl::toPercentEncoding(m_assemblyId)) + QStringLiteral("/bom"))};
+    req.setTransferTimeout(20'000);
+    QNetworkReply *reply = m_net->get(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        const QJsonObject result = readReply(reply);
+        if (reply->error() != QNetworkReply::NoError || result.contains(QStringLiteral("error"))) {
+            QMessageBox::warning(this, tr("装配清单失败"),
+                result.value(QStringLiteral("message")).toString(reply->errorString()));
+            return;
+        }
+        const QJsonArray members = result.value(QStringLiteral("members")).toArray();
+        QDialog dialog(this);
+        dialog.setWindowTitle(tr("装配清单：%1").arg(m_assemblyId));
+        auto *layout = new QVBoxLayout(&dialog);
+        auto *table = new QTableWidget(members.size(), 5, &dialog);
+        table->setHorizontalHeaderLabels({tr("成员"), tr("材质"), tr("单件质量"), tr("数量"), tr("小计")});
+        table->verticalHeader()->setVisible(false);
+        table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        table->horizontalHeader()->setStretchLastSection(true);
+        double total = 0.0;
+        bool complete = true;
+        for (int row = 0; row < members.size(); ++row) {
+            const QJsonObject member = members.at(row).toObject();
+            const int count = member.value(QStringLiteral("count")).toInt(1);
+            const QJsonValue mass = member.value(QStringLiteral("massKg"));
+            table->setItem(row, 0, new QTableWidgetItem(member.value(QStringLiteral("documentId")).toString()));
+            table->setItem(row, 1, new QTableWidgetItem(member.value(QStringLiteral("materialLabel")).toString()));
+            if (mass.isDouble()) {
+                table->setItem(row, 2, new QTableWidgetItem(tr("%1 kg").arg(mass.toDouble(), 0, 'f', 4)));
+                table->setItem(row, 3, new QTableWidgetItem(QString::number(count)));
+                table->setItem(row, 4, new QTableWidgetItem(tr("%1 kg").arg(mass.toDouble() * count, 0, 'f', 4)));
+                total += mass.toDouble() * count;
+            } else {
+                // 没重建过几何的成员不编质量，标“待重建”
+                table->setItem(row, 2, new QTableWidgetItem(tr("待重建")));
+                table->setItem(row, 3, new QTableWidgetItem(QString::number(count)));
+                table->setItem(row, 4, new QTableWidgetItem(tr("—")));
+                complete = false;
+            }
+        }
+        table->resizeColumnsToContents();
+        layout->addWidget(table);
+        auto *summary = new QLabel(complete
+            ? tr("合计 %1 件 · %2 kg").arg(result.value(QStringLiteral("count")).toInt()).arg(total, 0, 'f', 4)
+            : tr("合计 %1 件 · 质量未齐（有成员未重建几何）").arg(result.value(QStringLiteral("count")).toInt()), &dialog);
+        layout->addWidget(summary);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        layout->addWidget(buttons);
+        dialog.resize(620, 320);
+        dialog.exec();
     });
 }
 
@@ -716,13 +811,18 @@ void MainWindow::loadAssembly(const QString &assemblyId) {
             ++memberIndex;
             const QJsonObject member = entry.toObject();
             const QJsonArray offset = member.value(QStringLiteral("offset")).toArray();
-            const double rotateZ = member.value(QStringLiteral("rotateZ")).toDouble();
+            const QJsonArray rotate = member.value(QStringLiteral("rotate")).toArray();
+            const bool hasRotate = rotate.size() == 3 && (rotate.at(0).toDouble() || rotate.at(1).toDouble() || rotate.at(2).toDouble());
+            const double rotateZ = hasRotate ? rotate.at(2).toDouble() : member.value(QStringLiteral("rotateZ")).toDouble();
+            const QString rotateText = hasRotate
+                ? tr(" · 转 X%1° Y%2° Z%3°").arg(rotate.at(0).toDouble()).arg(rotate.at(1).toDouble()).arg(rotate.at(2).toDouble())
+                : (rotateZ != 0.0 ? tr(" · 绕 Z 转 %1°").arg(rotateZ) : QString());
             auto *item = new QTreeWidgetItem(root, {
                 tr("%1（r%2） @ %3, %4, %5 mm%6")
                     .arg(member.value(QStringLiteral("documentId")).toString())
                     .arg(member.value(QStringLiteral("revision")).toInt())
                     .arg(offset.at(0).toDouble()).arg(offset.at(1).toDouble()).arg(offset.at(2).toDouble())
-                    .arg(rotateZ != 0.0 ? tr(" · 绕 Z 转 %1°").arg(rotateZ) : QString())
+                    .arg(rotateText)
             });
             item->setData(0, Qt::UserRole, memberIndex);
             item->setToolTip(0, tr("双击改这个成员的偏移与转角"));

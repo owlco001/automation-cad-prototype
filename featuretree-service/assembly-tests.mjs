@@ -155,6 +155,37 @@ try {
   ok(rotatedBox && Math.abs(rotatedBox.y - 120) <= 2,
     '旋转 90° 后 Y 方向变成 120（未旋转时是 90）', JSON.stringify(rotatedBox));
 
+  // 3.6b) 任意轴：绕 X 转 90°，90×90×12 的板厚度方向换到 Y（12）与 Z（90）
+  const tilted = await http('POST', '/v1/assemblies', {
+    documentId: 'asm-tilted',
+    members: [
+      { documentId: 'demo-adapter', rotate: [90, 0, 0] },
+      { documentId: 'doc-asm-b', offset: [200, 0, 0] }
+    ]
+  });
+  ok(tilted.status === 201, '带 rotate [90,0,0] 的装配创建成功', JSON.stringify(tilted.json).slice(0, 120));
+  const tiltedBox = tilted.json.geometry?.bboxMm;
+  // 注意：第二块板本身 Y 方向就是 90，所以只能看 Z（未旋转时 Z 只有 12）
+  ok(tiltedBox && Math.abs(tiltedBox.z - 90) <= 1,
+    '绕 X 转 90° 后 Z 方向从 12 变 90（第二块板 Y 本身 90，不能拿 Y 判）', JSON.stringify(tiltedBox));
+  ok(Math.abs((tilted.json.geometry?.volumeMm3 ?? 0) - stackedVolume) <= 2,
+    '纯旋转不改体积', `expect=${stackedVolume} got=${tilted.json.geometry?.volumeMm3}`);
+
+  const bothRotate = await http('POST', '/v1/assemblies', {
+    documentId: 'asm-both-rotate',
+    members: [
+      { documentId: 'demo-adapter', rotate: [0, 0, 45], rotateZ: 30 },
+      { documentId: 'doc-asm-b' }
+    ]
+  });
+  ok(bothRotate.status === 422, 'rotate 与 rotateZ 同时给 → 422（避免顺序歧义）', `status=${bothRotate.status}`);
+
+  const shortRotate = await http('POST', '/v1/assemblies', {
+    documentId: 'asm-short-rotate',
+    members: [{ documentId: 'demo-adapter', rotate: [0, 45] }, { documentId: 'doc-asm-b' }]
+  });
+  ok(shortRotate.status === 422, 'rotate 只给两个分量 → 422', `status=${shortRotate.status}`);
+
   const badRotate = await http('POST', '/v1/assemblies', {
     documentId: 'asm-bad-rot',
     members: [{ documentId: 'doc-wide', rotateZ: '90' }, { documentId: 'demo-adapter' }]
@@ -183,6 +214,19 @@ try {
     members: [{ documentId: 'demo-adapter' }, { documentId: 'doc-asm-b' }]
   });
   ok(putMissing.status === 404, 'PUT 不存在的装配 → 404', `status=${putMissing.status}`);
+
+  // 3.8) 装配清单（BOM）：同一文档引用两次要合并成一行 count=2，合计质量 = 单件×数量
+  const bom = await http('GET', '/v1/assemblies/asm-stacked/bom');
+  ok(bom.status === 200, '装配清单可取', `status=${bom.status} ${JSON.stringify(bom.json).slice(0, 100)}`);
+  ok(bom.json.count === 2, '清单件数 = 成员数 2', `count=${bom.json.count}`);
+  ok(Array.isArray(bom.json.members) && bom.json.members.length === 2, '两行成员', `rows=${bom.json.rows}`);
+  const first = bom.json.members?.[0] || {};
+  ok(typeof first.massKg === 'number' && first.material === 'steel', '成员带材质与质量', JSON.stringify(first).slice(0, 120));
+  const expectedMass = Math.round(((bom.json.members || []).reduce((sum, row) => sum + (row.massKg || 0) * row.count, 0)) * 10000) / 10000;
+  ok(Math.abs((bom.json.totalMassKg ?? -1) - expectedMass) < 0.001, '合计质量 = Σ(单件质量×数量)',
+    `total=${bom.json.totalMassKg} expected=${expectedMass}`);
+  const dupBom = await http('GET', '/v1/assemblies/no-such-asm/bom');
+  ok(dupBom.status === 404, '不存在的装配取清单 → 404', `status=${dupBom.status}`);
 
   // 4) 错误路径
   const tooFew = await http('POST', '/v1/assemblies', { documentId: 'asm-bad', members: [{ documentId: 'demo-adapter' }] });

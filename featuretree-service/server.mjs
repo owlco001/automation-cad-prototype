@@ -6,7 +6,7 @@
 //   POST /v1/undo          { documentId, expectedRevision, actor?, steps? }
 //   GET  /v1/events?documentId=demo-adapter   (SSE，变更时推送)
 import { createServer } from 'node:http';
-import { Store } from './store.mjs';
+import { Store, materialOf } from './store.mjs';
 import { compileOps } from './validate.mjs';
 
 export const seedDoc = {
@@ -58,7 +58,12 @@ async function buildAssembly(assemblyId, members) {
     if (!store) return { ok: false, message: `成员文档不存在：${member.documentId}` };
     const ops = compileOps(store.doc);
     if (!ops.length) return { ok: false, message: `成员文档没有可构建几何：${member.documentId}` };
-    payload.push({ ops, offset: member.offset || [0, 0, 0], rotateZ: member.rotateZ || 0 });
+    payload.push({
+      ops,
+      offset: member.offset || [0, 0, 0],
+      rotate: member.rotate || [0, 0, 0],
+      rotateZ: member.rotateZ || 0
+    });
   }
   const response = await fetch(`${base.replace(/\/+$/, '')}/assemble`, {
     method: 'POST',
@@ -188,6 +193,14 @@ const server = createServer(async (req, res) => {
         if (member.rotateZ !== undefined && typeof member.rotateZ !== 'number') {
           return send(res, 422, { error: 'VALIDATION_FAILED', message: '成员 rotateZ 必须是角度数字（度，绕自身 Z 轴）' });
         }
+        if (member.rotate !== undefined) {
+          if (!Array.isArray(member.rotate) || member.rotate.length !== 3 || member.rotate.some((v) => typeof v !== 'number')) {
+            return send(res, 422, { error: 'VALIDATION_FAILED', message: '成员 rotate 必须是 [rx, ry, rz] 三个角度数字（度）' });
+          }
+          if (member.rotateZ) {
+            return send(res, 422, { error: 'VALIDATION_FAILED', message: 'rotate 与 rotateZ 不能同时给（避免顺序歧义），只绕 Z 时用 rotateZ' });
+          }
+        }
       }
       const built = await buildAssembly(assemblyId, members);
       if (!built.ok) return send(res, 422, { error: 'REBUILD_FAILED', message: built.message });
@@ -197,6 +210,7 @@ const server = createServer(async (req, res) => {
           documentId: member.documentId,
           revision: documents.get(member.documentId).revision,
           offset: member.offset || [0, 0, 0],
+          rotate: member.rotate || [0, 0, 0],
           rotateZ: member.rotateZ || 0
         })),
         geometry: {
@@ -212,6 +226,49 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === 'GET' && url.pathname.startsWith('/v1/assemblies/')) {
       const rest = url.pathname.slice('/v1/assemblies/'.length);
+      if (rest.endsWith('/bom')) {
+        const assemblyId = decodeURIComponent(rest.slice(0, -'/bom'.length));
+        const record = assemblies.get(assemblyId);
+        if (!record) return send(res, 404, { error: 'NOT_FOUND', message: `装配不存在：${assemblyId}` });
+        // 成员清单：同一文档被引用多次合并成一行并累加数量（装配里重复用同一块板是常态）
+        const rows = new Map();
+        for (const member of record.members) {
+          const store = documents.get(member.documentId);
+          if (!store) continue;
+          const material = materialOf(store.doc);
+          const geometry = store.geometry || {};
+          const entry = rows.get(member.documentId) || {
+            documentId: member.documentId,
+            revision: store.revision,
+            material: material.key,
+            materialLabel: material.label,
+            densityGPerCm3: material.densityGPerCm3,
+            volumeMm3: typeof geometry.volumeMm3 === 'number' ? geometry.volumeMm3 : null,
+            massKg: typeof geometry.massKg === 'number' ? geometry.massKg : null,
+            count: 0
+          };
+          entry.count += 1;
+          entry.revision = store.revision;
+          rows.set(member.documentId, entry);
+        }
+        const members = [...rows.values()];
+        const allHaveVolume = members.length > 0 && members.every((row) => typeof row.volumeMm3 === 'number');
+        const allHaveMass = members.length > 0 && members.every((row) => typeof row.massKg === 'number');
+        return send(res, 200, {
+          assemblyId,
+          count: members.reduce((sum, row) => sum + row.count, 0),
+          rows: members.length,
+          members,
+          totalVolumeMm3: allHaveVolume
+            ? Math.round(members.reduce((sum, row) => sum + row.volumeMm3 * row.count, 0) * 10) / 10
+            : null,
+          totalMassKg: allHaveMass
+            ? Math.round(members.reduce((sum, row) => sum + row.massKg * row.count, 0) * 10000) / 10000
+            : null,
+          // 有成员还没重建过几何时只能说“未齐”，不能拿 partial 当真值
+          complete: allHaveMass
+        });
+      }
       if (rest.endsWith('/geometry.stl')) {
         const assemblyId = decodeURIComponent(rest.slice(0, -'/geometry.stl'.length));
         if (!assemblies.has(assemblyId)) return send(res, 404, { error: 'NOT_FOUND', message: `装配不存在：${assemblyId}` });
@@ -239,7 +296,12 @@ const server = createServer(async (req, res) => {
       for (const member of record.members) {
         const store = documents.get(member.documentId);
         if (!store) return send(res, 422, { error: 'VALIDATION_FAILED', message: `成员文档已不存在：${member.documentId}` });
-        members.push({ ops: compileOps(store.doc), offset: member.offset, rotateZ: member.rotateZ || 0 });
+        members.push({
+          ops: compileOps(store.doc),
+          offset: member.offset,
+          rotate: member.rotate,
+          rotateZ: member.rotateZ || 0
+        });
       }
       const response = await fetch(`${base.replace(/\/+$/, '')}/interfere`, {
         method: 'POST',

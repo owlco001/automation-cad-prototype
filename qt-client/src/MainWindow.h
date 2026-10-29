@@ -70,6 +70,7 @@ private slots:
     void loadTree();
     void reloadDocuments();
     void runInterferenceCheck();
+    void runAssemblyBom();
     void onCreateDocument();
     void onEventStreamReadyRead();
     void onEventStreamFinished();
