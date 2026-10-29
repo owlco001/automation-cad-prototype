@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { buildMachineCase } from '../src/machine/case.ts';
 import { generateMachineGeometry } from '../src/machine/geometry.ts';
+import { screenInterference } from '../src/machine/interference.ts';
 
 const args = process.argv.slice(2);
 const flag = (name, fallback) => {
@@ -38,6 +39,8 @@ const { caseData, design } = buildMachineCase({
 if (withGeometry) {
   // 概念占位体（geometryFidelity='conceptual-estimate'）：给客户端画“示意装配”，不是制造几何
   caseData.geometry = generateMachineGeometry(design.config, {});
+  // 干涉初筛（AABB）：只是「疑似」，不是布尔交集；结构件共位是正常装配
+  caseData.geometry.interference = screenInterference(caseData.geometry);
 }
 
 const json = `${JSON.stringify(caseData, null, 2)}\n`;

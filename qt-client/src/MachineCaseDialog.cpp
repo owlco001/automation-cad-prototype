@@ -13,6 +13,7 @@
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QTabWidget>
+#include <QWidget>
 #include <QMessageBox>
 #include <QVBoxLayout>
 
@@ -196,6 +197,45 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
     }
     ioTable->resizeColumnsToContents();
     m_tabs->addTab(ioTable, QStringLiteral("IO（%1）").arg(rows.size()));
+
+    // 干涉初筛：AABB，只是「疑似」。必须把口径写在页签里，否则很容易被当成真实干涉体积
+    const QJsonObject interference = document.value(QStringLiteral("geometry")).toObject()
+                                         .value(QStringLiteral("interference")).toObject();
+    if (!interference.isEmpty()) {
+        const QJsonArray pairs = interference.value(QStringLiteral("pairs")).toArray();
+        auto *conflictTable = makeTable({QStringLiteral("零件 A"), QStringLiteral("零件 B"),
+                                         QStringLiteral("AABB 重叠体积"), QStringLiteral("重叠盒")}, this);
+        for (const QJsonValue &value : pairs) {
+            const QJsonObject pair = value.toObject();
+            const QJsonArray box = pair.value(QStringLiteral("overlapBox")).toArray();
+            appendRow(conflictTable, {
+                pair.value(QStringLiteral("aName")).toString(),
+                pair.value(QStringLiteral("bName")).toString(),
+                QStringLiteral("%1 mm³").arg(pair.value(QStringLiteral("overlapMm3")).toDouble(), 0, 'f', 1),
+                QStringLiteral("%1 × %2 × %3").arg(box.at(0).toDouble(), 0, 'f', 1)
+                    .arg(box.at(1).toDouble(), 0, 'f', 1).arg(box.at(2).toDouble(), 0, 'f', 1)
+            });
+        }
+        conflictTable->resizeColumnsToContents();
+        auto *page = new QWidget(this);
+        auto *pageLayout = new QVBoxLayout(page);
+        pageLayout->addWidget(conflictTable, 1);
+        QString verdict;
+        if (pairs.isEmpty()) {
+            verdict = QStringLiteral("未发现 AABB 重叠（%1 个零件两两初筛）").arg(interference.value(QStringLiteral("partCount")).toInt());
+        } else if (interference.value(QStringLiteral("structuralOnly")).toBool()) {
+            verdict = QStringLiteral("%1 对疑似重叠，全部是**结构件共位**（立柱/横梁交接），装配上正常；"
+                                     "这不是布尔交集结果，要真实体积请在装配视图里跑干涉检查")
+                          .arg(pairs.size());
+        } else {
+            verdict = QStringLiteral("%1 对疑似重叠，其中有非结构件参与——需要人工确认（AABB 初筛不等于真实干涉）")
+                          .arg(pairs.size());
+        }
+        auto *note = new QLabel(verdict, page);
+        note->setWordWrap(true);
+        pageLayout->addWidget(note);
+        m_tabs->addTab(page, QStringLiteral("干涉初筛（%1）").arg(pairs.size()));
+    }
 
     auto *boundary = new QLabel(
         QStringLiteral("这是方案级结果：没有 3D 几何、没有工程图、没有公差；节拍为估算，成本按已接入价格簿计算，"
