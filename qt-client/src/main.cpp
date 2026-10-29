@@ -42,7 +42,12 @@ int main(int argc, char *argv[]) {
         std::fprintf(stderr, "%s\n", message.toUtf8().constData());
         std::fflush(stderr);
     });
+    QApplication::setApplicationVersion(QStringLiteral(AUTOMATIONCAD_VERSION));
     const QStringList args = QCoreApplication::arguments();
+    if (args.contains(QStringLiteral("--version"))) {
+        qInfo().noquote() << QStringLiteral("FT_QT_VERSION_OK version=%1").arg(QStringLiteral(AUTOMATIONCAD_VERSION));
+        return 0;
+    }
 
     // 无人值守自检：--selftest [--base http://127.0.0.1:PORT]
     // 用于 CI / 脚本验证「Qt 客户端 ↔ 契约服务」链路，不需要人去点界面。

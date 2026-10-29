@@ -77,6 +77,8 @@
   `Graphic3d_ClipPlane`——本机实测 `AddClipPlane` 之后画面一个像素都没变（121951 → 121962），
   即标志位成功而实际没裁；改成 `BRepAlgoAPI_Cut` 逐件切，实测体积 87374 → 71438（千 mm³），**切掉 18.2%**。
   自检 `--clip-selftest "brief" [z]`；无 OCCT 构建明确报「剖切不可用」。
+- **版本自检**：`automationcad-qt --version` → `FT_QT_VERSION_OK version=0.5.0`（CMake `project(VERSION)` 与桌面端 0.5.0 对齐；之前写的是 0.1.0，纯属没同步）。
+- **Windows 端**：老王 2026-10-29 在 Windows 环境验证通过（本人确认，不是 CI 证据；仓库里仍无 Windows 自动构建产物）。
 - **仍未做**：OCCT 原生选择面（`AIS_InteractiveContext::SelectDetected`
   在本机 `Aspect_NeutralWindow` 下段错误，现用逐件射线求交替代，框选/拓扑拾取未打通）；
   复核结论只能显示、不能一键触发重排（按钮已在 2026-10-29 夜补上，见下条）。

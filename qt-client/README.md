@@ -301,6 +301,9 @@ CI 的 Qt job 现在会拿仓库里的 fixture（`docs/desktop/eval/layout-case.
 suspect，不能靠猜；被跳过的数量会写进结果 `ignoredPairs`，否则数字会莫名比上次好看。
 `--ignore-pairs` 不带 `--layout-compliance` 直接退出 2，不允许静默吞掉。
 
+**版本**：`automationcad-qt --version` 打印 `FT_QT_VERSION_OK version=0.5.0`（CMake 里从 0.1.0 补齐到 0.5.0，
+之前两处版本号各写各的）；Windows 端由老王在 2026-10-29 实机验证通过（人验，不是 CI 产物）。
+
 **剖切**：视图 → 剖切（沿 Z）…，输入 Z 后只保留下方（取消剖切可还原）。
 实现是**布尔切**（`BRepAlgoAPI_Cut` 逐件切），不是 `Graphic3d_ClipPlane`——后者在本机实测
 `AddClipPlane` 后画面一个像素都没变（121951 → 121962），属于「标志位成功、实际没裁」，不能当证据。

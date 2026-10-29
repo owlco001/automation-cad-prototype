@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(AutomationCAD-QtClient VERSION 0.1.0 LANGUAGES CXX)
+project(AutomationCAD-QtClient VERSION 0.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,6 +11,8 @@ set(CMAKE_AUTORCC ON)
 # 需在装有 Qt6（Widgets + Network）的 Windows / Linux 机器上构建验证。
 # 视口 v1 为占位 QWidget；OCCT AIS Viewer 接入是后续里程碑，不在本壳子里假装已接。
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network OpenGLWidgets)
+
+add_compile_definitions(AUTOMATIONCAD_VERSION="${PROJECT_VERSION}")
 
 add_executable(automationcad-qt
     src/main.cpp
