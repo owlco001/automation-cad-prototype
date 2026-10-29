@@ -342,6 +342,13 @@ int main(int argc, char *argv[]) {
             }
             qInfo().noquote() << QStringLiteral("FT_QT_MOVE_PART_OK part=%1 to=%2,%3 parts=%4")
                                      .arg(args.at(index + 2)).arg(args.at(index + 3)).arg(args.at(index + 4)).arg(count);
+            // 拖动也要能撤回：撤一次应回到拖动前的文档
+            int undoParts = 0;
+            if (!window.undoLastInsert(&undoParts, &error)) {
+                qCritical().noquote() << "FT_QT_MOVE_PART_FAIL 撤销失败" << error;
+                return 1;
+            }
+            qInfo().noquote() << QStringLiteral("FT_QT_MOVE_UNDO_OK parts=%1").arg(undoParts);
             return 0;
         }
     }

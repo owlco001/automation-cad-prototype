@@ -173,9 +173,40 @@ MainWindow::MainWindow(QWidget *parent)
     // 构件库（停靠面板）：条目可拖到 3D 视口；数据来自 desktop --catalog
 #ifdef AUTOMATIONCAD_HAVE_OCCT
     if (m_occtViewport) {
+        connect(m_occtViewport, &OcctViewport::partDragMove, this, [this](const QString &partId, double x, double y) {
+            // 拖已有零件时也要有预览：尺寸取它自己的包围盒，判定重叠时把自己排除
+            for (const QJsonValue &boundValue : m_partBounds) {
+                const QJsonObject bound = boundValue.toObject();
+                if (bound.value(QStringLiteral("id")).toString() != partId) continue;
+                const QJsonArray min = bound.value(QStringLiteral("min")).toArray();
+                const QJsonArray max = bound.value(QStringLiteral("max")).toArray();
+                if (min.size() != 3 || max.size() != 3) break;
+                const double sx = max.at(0).toDouble() - min.at(0).toDouble();
+                const double sy = max.at(1).toDouble() - min.at(1).toDouble();
+                const double sz = max.at(2).toDouble() - min.at(2).toDouble();
+                int state = 0;
+                for (const QJsonValue &otherValue : m_partBounds) {
+                    const QJsonObject other = otherValue.toObject();
+                    if (other.value(QStringLiteral("id")).toString() == partId) continue;
+                    const QJsonArray omin = other.value(QStringLiteral("min")).toArray();
+                    const QJsonArray omax = other.value(QStringLiteral("max")).toArray();
+                    if (omin.size() != 3 || omax.size() != 3) continue;
+                    const double cx[3] = {x - sx / 2, y - sy / 2, 0.0};
+                    const double cxx[3] = {x + sx / 2, y + sy / 2, sz};
+                    bool hit = true;
+                    for (int axis = 0; axis < 3; ++axis) {
+                        if (omin.at(axis).toDouble() >= cxx[axis] || omax.at(axis).toDouble() <= cx[axis]) { hit = false; break; }
+                    }
+                    if (hit) { state = 2; break; }
+                }
+                m_occtViewport->showPreviewBox(sx, sy, sz, x, y, state);
+                break;
+            }
+        });
         connect(m_occtViewport, &OcctViewport::partDragFinished, this, [this](const QString &partId, double x, double y) {
             int count = 0;
             QString error;
+            if (m_occtViewport) m_occtViewport->clearPreviewBox();
             if (!movePartTo(partId, x, y, &count, &error)) {
                 statusBar()->showMessage(tr("拖动未提交：%1").arg(error), 12000);
                 return;
@@ -1425,6 +1456,7 @@ bool MainWindow::movePartTo(const QString &partId, double x, double y, int *part
         *error = tr("位移太小（0 mm），没有提交");
         return false;
     }
+    if (!m_lastDocument.isEmpty()) m_insertHistory.append(m_lastDocument);   // 拖动同样可撤销
     QStringList moves = m_lastMoves;
     moves << QStringLiteral("%1:%2,%3,0").arg(partId).arg(dx, 0, 'f', 1).arg(dy, 0, 'f', 1);
     QJsonObject document;
