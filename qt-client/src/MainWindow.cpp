@@ -7,18 +7,28 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QEventLoop>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QHeaderView>
 #include <QLabel>
+#include <QPushButton>
 #include <QTableWidget>
+#include <QTextStream>
 #include <QVBoxLayout>
 #include <QInputDialog>
 #include <QColor>
 #include <QEventLoop>
+#include <QEventLoop>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QHeaderView>
 #include <QLabel>
+#include <QPushButton>
 #include <QTableWidget>
+#include <QTextStream>
 #include <QVBoxLayout>
 #include <QHeaderView>
 #include <QJsonArray>
@@ -32,7 +42,9 @@
 #include <QSet>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QPushButton>
 #include <QTableWidget>
+#include <QTextStream>
 #include <QTimer>
 #include <QToolBar>
 #include <QTreeWidget>
@@ -72,6 +84,8 @@ MainWindow::MainWindow(QWidget *parent)
         if (ok && !id.trimmed().isEmpty()) openAssembly(id.trimmed());
     });
     fileMenu->addAction(tr("退出装配视图"), this, [this]() { m_assemblyId.clear(); refreshNow(); });
+    fileMenu->addSeparator();
+    fileMenu->addAction(tr("导出 STL…"), this, &MainWindow::exportStlDialog);
     auto *viewMenu = menuBar()->addMenu(tr("视图"));
     viewMenu->addAction(tr("等轴测"), this, [this]() { setViewportStandardView(0); });
     viewMenu->addAction(tr("正视"), this, [this]() { setViewportStandardView(1); });
@@ -328,6 +342,73 @@ void MainWindow::editAssemblyMember(int memberIndex) {
     });
 }
 
+bool MainWindow::fetchGeometryStl(QByteArray *bytes, QString *error) {
+    const QString url = m_assemblyId.isEmpty()
+        ? m_serviceBase + QStringLiteral("/v1/geometry.stl")
+        : m_serviceBase + QStringLiteral("/v1/assemblies/") +
+              QString::fromUtf8(QUrl::toPercentEncoding(m_assemblyId)) + QStringLiteral("/geometry.stl");
+    QNetworkRequest req{QUrl(url)};
+    req.setTransferTimeout(60'000);
+    QNetworkReply *reply = m_net->get(req);
+    QEventLoop loop;
+    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    loop.exec();
+    reply->deleteLater();
+    if (reply->error() != QNetworkReply::NoError) {
+        *error = tr("取几何失败：%1").arg(reply->errorString());
+        return false;
+    }
+    const QByteArray data = reply->readAll();
+    // 服务端没 sidecar 时回 404 JSON；这里再挡一层，避免把错误文本当 STL 存成文件
+    if (!data.startsWith("solid") && data.size() < 84) {
+        *error = tr("服务端没有返回 STL（%1 字节）").arg(data.size());
+        return false;
+    }
+    *bytes = data;
+    return true;
+}
+
+bool MainWindow::exportStl(const QString &path, int *bytes, QString *error) {
+    QByteArray stl;
+    if (!fetchGeometryStl(&stl, error)) return false;
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        *error = tr("写文件失败：%1").arg(file.errorString());
+        return false;
+    }
+    const qint64 written = file.write(stl);
+    file.close();
+    if (written != stl.size()) {
+        *error = tr("只写入 %1/%2 字节").arg(written).arg(stl.size());
+        return false;
+    }
+    *bytes = static_cast<int>(stl.size());
+    return true;
+}
+
+void MainWindow::exportStlDialog() {
+    const QString suggested = m_assemblyId.isEmpty()
+        ? m_documentId + QStringLiteral(".stl")
+        : m_assemblyId + QStringLiteral(".stl");
+    const QString path = QFileDialog::getSaveFileName(this, tr("导出 STL"), suggested, tr("STL 文件 (*.stl)"));
+    if (path.isEmpty()) return;
+    QByteArray stl;
+    QString error;
+    if (!fetchGeometryStl(&stl, &error)) {
+        QMessageBox::warning(this, tr("导出失败"), error);
+        return;
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        QMessageBox::warning(this, tr("导出失败"), tr("写文件失败：%1").arg(file.errorString()));
+        return;
+    }
+    file.write(stl);
+    file.close();
+    const int triangles = stl.size() >= 84 ? (stl.size() - 84) / 50 : 0;
+    statusBar()->showMessage(tr("已导出 %1 · %2 字节 · %3 三角面").arg(QFileInfo(path).fileName()).arg(stl.size()).arg(triangles), 10000);
+}
+
 void MainWindow::runAssemblyBom() {
     if (m_assemblyId.isEmpty()) {
         QMessageBox::information(this, tr("装配清单"), tr("先打开一个装配，再取清单。"));
@@ -382,6 +463,36 @@ void MainWindow::runAssemblyBom() {
             : tr("合计 %1 件 · 质量未齐（有成员未重建几何）").arg(result.value(QStringLiteral("count")).toInt()), &dialog);
         layout->addWidget(summary);
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+        QPushButton *exportCsv = buttons->addButton(tr("导出 CSV…"), QDialogButtonBox::ActionRole);
+        connect(exportCsv, &QPushButton::clicked, &dialog, [this, members, total, complete, &dialog]() {
+            const QString path = QFileDialog::getSaveFileName(&dialog, tr("导出装配清单"), m_assemblyId + QStringLiteral("-bom.csv"), tr("CSV 文件 (*.csv)"));
+            if (path.isEmpty()) return;
+            QFile file(path);
+            if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                QMessageBox::warning(&dialog, tr("导出失败"), file.errorString());
+                return;
+            }
+            QTextStream out(&file);
+            out.setEncoding(QStringConverter::Utf8);
+            out << "\xEF\xBB\xBF";  // BOM：Excel 打开中文不乱码
+            out << "成员,材质,单件质量(kg),数量,小计(kg)\n";
+            for (const QJsonValue &value : members) {
+                const QJsonObject member = value.toObject();
+                const int count = member.value(QStringLiteral("count")).toInt(1);
+                const QJsonValue mass = member.value(QStringLiteral("massKg"));
+                out << member.value(QStringLiteral("documentId")).toString() << ','
+                    << member.value(QStringLiteral("materialLabel")).toString() << ',';
+                if (mass.isDouble()) {
+                    out << QString::number(mass.toDouble(), 'f', 4) << ',' << count << ','
+                        << QString::number(mass.toDouble() * count, 'f', 4) << '\n';
+                } else {
+                    out << "待重建," << count << ",—\n";
+                }
+            }
+            out << "合计,,,," << (complete ? QString::number(total, 'f', 4) : QStringLiteral("未齐")) << '\n';
+            file.close();
+            statusBar()->showMessage(tr("已导出清单 %1").arg(QFileInfo(path).fileName()), 8000);
+        });
         connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
         layout->addWidget(buttons);
         dialog.resize(620, 320);

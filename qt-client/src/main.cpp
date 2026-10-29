@@ -129,6 +129,29 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    // 导出 STL 自检：--export-selftest --out <path> [--base URL] [assembly=DOC]
+    if (args.contains(QStringLiteral("--export-selftest"))) {
+        QString base = QStringLiteral("http://127.0.0.1:18781");
+        const int baseIndex = args.indexOf(QStringLiteral("--base"));
+        if (baseIndex >= 0 && baseIndex + 1 < args.size()) base = args.at(baseIndex + 1);
+        const int outIndex = args.indexOf(QStringLiteral("--out"));
+        const QString out = outIndex >= 0 && outIndex + 1 < args.size()
+            ? args.at(outIndex + 1) : QStringLiteral("/tmp/export-selftest.stl");
+        MainWindow window;
+        window.setServiceBase(base);
+        const QString assemblyId = qEnvironmentVariable("AUTOMATIONCAD_QT_ASSEMBLY");
+        if (!assemblyId.isEmpty()) window.openAssembly(assemblyId);
+        int bytes = 0;
+        QString error;
+        if (!window.exportStl(out, &bytes, &error)) {
+            qCritical().noquote() << "FT_QT_EXPORT_FAIL" << error;
+            return 1;
+        }
+        qInfo().noquote() << QStringLiteral("FT_QT_EXPORT_OK path=%1 bytes=%2 triangles=%3")
+                                 .arg(out).arg(bytes).arg((bytes - 84) / 50);
+        return 0;
+    }
+
     // 装配清单自检：--bom-selftest [--base URL]，直接把 Ctrl+B 的窗口弹出来（人肉截图/核对用）
     if (args.contains(QStringLiteral("--bom-selftest"))) {
         QString base = QStringLiteral("http://127.0.0.1:18781");

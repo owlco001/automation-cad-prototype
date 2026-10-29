@@ -63,6 +63,9 @@ public:
     void redoOnce();
     /// 装配清单（Ctrl+B 的同一入口，也给 --bom-selftest 用）
     void runAssemblyBom();
+    /// 导出当前零件/装配的 STL（几何来自服务端，客户端不重算）
+    void exportStlDialog();
+    bool exportStl(const QString &path, int *bytes, QString *error);
 
 signals:
     /// 每次成功读到包络后发出（首次加载与后续变化都会发）
@@ -123,6 +126,7 @@ private:
     QString m_assemblyId;
     QJsonObject m_assemblyRecord;
     void editAssemblyMember(int memberIndex);
+    bool fetchGeometryStl(QByteArray *bytes, QString *error);
     void loadAssembly(const QString &assemblyId);
     class QComboBox *m_documentCombo = nullptr;
     QString docQuery() const;
