@@ -67,6 +67,8 @@ public:
     void exportStlDialog();
     void exportMachineStlDialog();
     bool exportStl(const QString &path, int *bytes, QString *error);
+    /// 剖切自检用：抓剖切前后的非背景像素数（真看图，不看标志位）
+    bool clipTestMetrics(double z, int *beforePixels, int *afterPixels, QString *error);
     /// 调 desktop 整机管线（node scripts/machine-design-cli.mjs）把一句话变成方案 JSON
     bool designMachineFromBrief(const QString &brief, QJsonObject *document, QString *error,
                                 const QStringList &moves = {}, bool resolveAll = false,

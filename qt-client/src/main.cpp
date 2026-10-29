@@ -314,6 +314,46 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 剖切自检：--clip-selftest "一句话" [z]
+    // 断言「剖掉之后画出来的像素变少」，不是只看标志位（标志位 true 但没裁掉东西是最容易骗人的）
+    if (args.contains(QStringLiteral("--clip-selftest"))) {
+        const int index = args.indexOf(QStringLiteral("--clip-selftest"));
+        if (index + 1 >= args.size()) {
+            qCritical().noquote() << "FT_QT_CLIP_FAIL 用法：--clip-selftest \"brief\" [z]";
+            return 2;
+        }
+        MainWindow window;
+        window.resize(1200, 800);
+        window.show();
+        QJsonObject document;
+        QString error;
+        if (!window.designMachineFromBrief(args.at(index + 1), &document, &error)) {
+            qCritical().noquote() << "FT_QT_CLIP_FAIL" << error;
+            return 1;
+        }
+        int shapes = 0;
+        if (!window.renderMachineGeometry(document, &shapes, &error)) {
+            qCritical().noquote() << "FT_QT_CLIP_FAIL" << error;
+            return 1;
+        }
+        QCoreApplication::processEvents();
+        const double z = index + 2 < args.size() ? args.at(index + 2).toDouble() : 500.0;
+        int before = 0;
+        int after = 0;
+        if (!window.clipTestMetrics(z, &before, &after, &error)) {
+            qCritical().noquote() << "FT_QT_CLIP_FAIL" << error;
+            return 1;
+        }
+        if (after >= before) {
+            qCritical().noquote() << "FT_QT_CLIP_FAIL 剖切后像素没减少" << before << "->" << after;
+            return 1;
+        }
+        qInfo().noquote() << QStringLiteral("FT_QT_CLIP_OK z=%1 before=%2 after=%3 cut=%4%")
+                                 .arg(z).arg(before).arg(after)
+                                 .arg(before > 0 ? (100.0 * (before - after) / before) : 0.0, 0, 'f', 1);
+        return 0;
+    }
+
     // 整机示意 3D 自检：--geometry-selftest "一句话"（要 node + OCCT 视口）
     if (args.contains(QStringLiteral("--geometry-selftest")) && args.indexOf(QStringLiteral("--geometry-selftest")) + 1 < args.size()) {
         const int geoIndex = args.indexOf(QStringLiteral("--geometry-selftest"));

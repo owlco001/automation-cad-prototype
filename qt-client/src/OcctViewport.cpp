@@ -15,6 +15,10 @@
 #include <WNT_Window.hxx>
 #else
 #include <Aspect_NeutralWindow.hxx>
+#include <BRepAlgoAPI_Cut.hxx>
+#include <BRepBndLib.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <Bnd_Box.hxx>
 #endif
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
@@ -224,6 +228,9 @@ bool OcctViewport::showMachineGeometry(const QJsonObject &geometry, int *shapeCo
         if (!color.isValid()) color = QColor(QStringLiteral("#8a949c"));
         shapeHandle->SetColor(Quantity_Color(color.redF(), color.greenF(), color.blueF(), Quantity_TOC_sRGB));
         shapeHandle->SetMaterial(Graphic3d_NOM_PLASTIC);
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+        m_machineSolids.append(shapeHandle->Shape());
+#endif
         m_context->Display(shapeHandle, AIS_Shaded, -1, false);
         m_shapes.append(shapeHandle);
         m_shapePartIds.append(part.value(QStringLiteral("id")).toString());
@@ -420,6 +427,9 @@ void OcctViewport::startRequest(const QString &url) {
 void OcctViewport::displayShape(const TopoDS_Shape &shape) {
     initializeView();
     if (!m_viewReady) return;
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    m_fullShape = shape;   // 留一份原始几何，剖切可还原
+#endif
     m_context->RemoveAll(false);
     m_shape = new AIS_Shape(shape);
     m_shape->SetColor(Quantity_Color(0.64, 0.70, 0.80, Quantity_TOC_sRGB));
@@ -433,6 +443,94 @@ void OcctViewport::displayShape(const TopoDS_Shape &shape) {
     m_view->MustBeResized();   // 先按当前控件尺寸校正投影，再缩放
     m_view->FitAll(0.02, false);
     m_view->Redraw();
+}
+
+double OcctViewport::displayedVolumeMm3() const {
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    double total = 0.0;
+    for (const Handle(AIS_Shape) &shape : m_shapes) {
+        if (shape.IsNull()) continue;
+        GProp_GProps props;
+        BRepGProp::VolumeProperties(shape->Shape(), props);
+        total += props.Mass();
+    }
+    return total;
+#else
+    return 0.0;
+#endif
+}
+
+bool OcctViewport::setClipZ(double positionMm, QString *error) {
+#ifndef AUTOMATIONCAD_HAVE_OCCT
+    if (error) *error = QStringLiteral("这个构建没有 OCCT（-DAUTOMATIONCAD_OCCT=OFF），剖切不可用");
+    Q_UNUSED(positionMm);
+    return false;
+#else
+    if (!m_viewReady) {
+        if (error) *error = QStringLiteral("视口还没建好，剖切无从下手");
+        return false;
+    }
+    if (m_machineSolids.isEmpty()) {
+        *error = QStringLiteral("视口里没有整机示意几何（剖切目前只对整机方案生效）");
+        return false;
+    }
+    Bnd_Box box;
+    for (const TopoDS_Shape &solid : m_machineSolids) BRepBndLib::Add(solid, box);
+    double xmin = 0, ymin = 0, zmin = 0, xmax = 0, ymax = 0, zmax = 0;
+    box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+    const double pad = 50.0;
+    const double height = positionMm - (zmin - pad);
+    if (height <= 0) {
+        *error = QStringLiteral("剖切位置 %1 mm 低于模型底面 %2 mm，切完什么都不剩").arg(positionMm).arg(zmin);
+        return false;
+    }
+    // 用布尔切，不用 Graphic3d_ClipPlane：本机实测 AddClipPlane 之后画面一个像素都没变
+    //（121951 → 121962），属于「标志位成功、实际没裁」，宁可慢也要真裁掉。
+    const TopoDS_Shape cutter = BRepPrimAPI_MakeBox(gp_Pnt(xmin - pad, ymin - pad, zmin - pad),
+                                                   (xmax - xmin) + 2 * pad, (ymax - ymin) + 2 * pad, height).Shape();
+    m_context->RemoveAll(false);
+    m_shapes.clear();
+    int kept = 0;
+    for (int i = 0; i < m_machineSolids.size(); ++i) {
+        const TopoDS_Shape clipped = BRepAlgoAPI_Cut(m_machineSolids.at(i), cutter).Shape();
+        if (clipped.IsNull()) continue;   // 整个件都在切掉的那一半
+        Handle(AIS_Shape) handle = new AIS_Shape(clipped);
+        const QColor color = i < m_shapeColors.size() ? m_shapeColors.at(i) : QColor(QStringLiteral("#8a949c"));
+        handle->SetColor(Quantity_Color(color.redF(), color.greenF(), color.blueF(), Quantity_TOC_sRGB));
+        handle->SetMaterial(Graphic3d_NOM_PLASTIC);
+        m_context->Display(handle, AIS_Shaded, -1, false);
+        m_shapes.append(handle);
+        ++kept;
+    }
+    if (kept == 0) {
+        *error = QStringLiteral("剖切后没有任何零件剩下");
+        return false;
+    }
+    m_clipActive = true;
+    m_clipZ = positionMm;
+    m_view->FitAll(0.02, false);
+    m_view->Redraw();
+    return true;
+#endif
+}
+
+void OcctViewport::clearClip() {
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    if (m_clipActive && !m_machineSolids.isEmpty()) {
+        m_context->RemoveAll(false);
+        m_shapes.clear();
+        for (int i = 0; i < m_machineSolids.size(); ++i) {
+            Handle(AIS_Shape) handle = new AIS_Shape(m_machineSolids.at(i));
+            const QColor color = i < m_shapeColors.size() ? m_shapeColors.at(i) : QColor(QStringLiteral("#8a949c"));
+            handle->SetColor(Quantity_Color(color.redF(), color.greenF(), color.blueF(), Quantity_TOC_sRGB));
+            handle->SetMaterial(Graphic3d_NOM_PLASTIC);
+            m_context->Display(handle, AIS_Shaded, -1, false);
+            m_shapes.append(handle);
+        }
+        if (m_viewReady) { m_view->FitAll(0.02, false); m_view->Redraw(); }
+    }
+#endif
+    m_clipActive = false;
 }
 
 void OcctViewport::fitView() {

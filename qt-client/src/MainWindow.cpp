@@ -26,21 +26,18 @@
 #include <QTableWidget>
 #include <QTextStream>
 #include <QVBoxLayout>
-#include <QInputDialog>
 #include <QKeyEvent>
 #include <QColor>
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDir>
 #include <QEventLoop>
-#include <QInputDialog>
 #include <QKeyEvent>
 #include <QProcess>
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDir>
 #include <QEventLoop>
-#include <QInputDialog>
 #include <QKeyEvent>
 #include <QProcess>
 #include <QFileDialog>
@@ -138,6 +135,36 @@ MainWindow::MainWindow(QWidget *parent)
     viewMenu->addAction(tr("右视"), this, [this]() { setViewportStandardView(3); });
     viewMenu->addSeparator();
     viewMenu->addAction(tr("适合视图"), this, [this]() { fitViewport(); });
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    viewMenu->addSeparator();
+    viewMenu->addAction(tr("剖切（沿 Z）…"), this, [this]() {
+        if (!m_occtViewport) {
+            QMessageBox::information(this, tr("剖切"), tr("这个构建没有 OCCT AIS 视口，剖切不可用"));
+            return;
+        }
+        bool ok = false;
+        const double z = QInputDialog::getDouble(this, tr("剖切"),
+                                                 tr("切在 Z = ?（mm，保留下方，切掉上方）"),
+                                                 m_occtViewport->clipActive() ? m_occtViewport->clipZ() : 600.0,
+                                                 -100000.0, 100000.0, 1, &ok);
+        if (!ok) return;
+        QString error;
+        if (!m_occtViewport->setClipZ(z, &error)) {
+            QMessageBox::warning(this, tr("剖切失败"), error);
+            return;
+        }
+        qInfo().noquote() << "FT_QT_CLIP" << "z=" << z;
+        statusBar()->showMessage(tr("已剖切：Z = %1 mm（保留下方）").arg(z), 15000);
+    });
+    viewMenu->addAction(tr("取消剖切"), this, [this]() {
+        if (m_occtViewport) m_occtViewport->clearClip();
+        statusBar()->showMessage(tr("已取消剖切"), 10000);
+    });
+#else
+    viewMenu->addSeparator();
+    auto *clipUnavailable = viewMenu->addAction(tr("剖切（需 OCCT 构建）"));
+    clipUnavailable->setEnabled(false);
+#endif
     auto *insertMenu = menuBar()->addMenu(tr("插入"));
     QAction *newFeature = insertMenu->addAction(tr("新建特征…"), this, &MainWindow::createFeatureDialog);
     newFeature->setShortcut(QKeySequence::New);
@@ -548,6 +575,31 @@ bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *docum
         m_lastCompliance = object.value(QStringLiteral("compliance")).toObject();
     }
     return true;
+}
+
+bool MainWindow::clipTestMetrics(double z, int *beforePixels, int *afterPixels, QString *error) {
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    if (!m_occtViewport) {
+        *error = tr("这个构建没有 OCCT AIS 视口，剖切不可用");
+        return false;
+    }
+    // 用「显示集合的实体体积」当判据：像素数会被底色/抗锯齿淹没，体积不会
+    const double before = m_occtViewport->displayedVolumeMm3();
+    if (before <= 0.0) {
+        *error = tr("视口里没有可测体积的几何");
+        return false;
+    }
+    if (!m_occtViewport->setClipZ(z, error)) return false;
+    const double after = m_occtViewport->displayedVolumeMm3();
+    // 以 mm³ 的整数部分传出（签名沿用 int，够表达四工位 1.2e8 级）
+    *beforePixels = static_cast<int>(before / 1000.0);
+    *afterPixels = static_cast<int>(after / 1000.0);
+    return true;
+#else
+    Q_UNUSED(z); Q_UNUSED(beforePixels); Q_UNUSED(afterPixels);
+    *error = tr("这个构建没有 OCCT（-DAUTOMATIONCAD_OCCT=OFF），剖切不可用");
+    return false;
+#endif
 }
 
 bool MainWindow::renderMachineGeometry(const QJsonObject &document, int *shapeCount, QString *error) {

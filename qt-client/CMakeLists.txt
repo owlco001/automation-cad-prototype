@@ -59,7 +59,7 @@ if(AUTOMATIONCAD_OCCT AND OCCT_INCLUDE_FOUNDATION AND OCCT_INCLUDE_AIS)
     message(STATUS "OCCT STL 库：未找到 TKSTL/TKDESTL，跳过 STL 导出链接")
   endif()
   target_link_libraries(automationcad-qt PRIVATE
-      TKOpenGl TKV3d TKService TKMath TKBRep TKTopAlgo TKPrim ${OCCT_STL_LIB} TKernel TKG3d TKGeomBase)
+      TKOpenGl TKV3d TKService TKMath TKBRep TKTopAlgo TKPrim TKBO ${OCCT_STL_LIB} TKernel TKG3d TKGeomBase)
 else()
   message(STATUS "OCCT AIS 视口：未启用（缺头文件），回退到 OpenGL STL 视口")
 endif()

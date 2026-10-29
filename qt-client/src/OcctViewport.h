@@ -48,6 +48,15 @@ public:
     void ensureRevision(int revision, const QString &url);
     void loadFromUrl(const QString &url);
     void startRequest(const QString &url);
+    /// 剖切：沿 Z 在 z=position 处切开（只看 z 以下）。position 由调用方给，客户端不自己猜。
+    /// 返回 false 表示这个构建没有 OCCT（`-DAUTOMATIONCAD_OCCT=OFF`）。
+    bool setClipZ(double positionMm, QString *error);
+    void clearClip();
+    /// 当前显示集合的实体体积（mm³）——剖切是否真裁掉东西，用这个量，不靠像素猜
+    double displayedVolumeMm3() const;
+    bool clipActive() const { return m_clipActive; }
+    double clipZ() const { return m_clipZ; }
+
     void fitView();
     void setStandardView(int which);
     int triangleCount() const { return m_triangles; }
@@ -83,6 +92,13 @@ private:
     Handle(V3d_Viewer) m_viewer;
     Handle(V3d_View) m_view;
     Handle(AIS_InteractiveContext) m_context;
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    /// 剖切要能「切完再还原」：整机每个零件的原始实体必须留住（整机是多件显示，不是单 compound）
+    QVector<TopoDS_Shape> m_machineSolids;
+    TopoDS_Shape m_fullShape;
+#endif
+    bool m_clipActive = false;
+    double m_clipZ = 0.0;
     Handle(Aspect_Window) m_window;
     Handle(AIS_Shape) m_shape;
     QVector<Handle(AIS_Shape)> m_shapes;
