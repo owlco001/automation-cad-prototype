@@ -439,9 +439,19 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
             qInfo().noquote() << "FT_QT_BRIEF_UI_OPEN" << MachineCaseDialog::summarize(document);
-            MachineCaseDialog dialog(document, nullptr, [](const QStringList &ids) {
-                qInfo().noquote() << "FT_QT_PAIR_HIGHLIGHT" << ids.join(QStringLiteral(","));
-            });
+            MachineCaseDialog dialog(
+                document, nullptr,
+                [](const QStringList &ids) {
+                    qInfo().noquote() << "FT_QT_PAIR_HIGHLIGHT" << ids.join(QStringLiteral(","));
+                },
+                std::function<void(const QString &, int, double)>{},
+                std::function<void()>{}, std::function<void()>{}, std::function<void()>{},
+                std::function<void(int)>{}, -1,
+                std::function<void()>{}, std::function<void(int)>{},
+                std::function<void(const QString &, double, const QString &)>{},
+                [](const QStringList &keys) {
+                    qInfo().noquote() << "FT_QT_SKIP_KEYS" << keys.join(QStringLiteral(","));
+                });
             dialog.exec();
             return 0;
         }
@@ -1168,9 +1178,19 @@ int main(int argc, char *argv[]) {
             }
             MainWindow window;
             window.show();
-            MachineCaseDialog dialog(document, nullptr, [](const QStringList &ids) {
-                qInfo().noquote() << "FT_QT_PAIR_HIGHLIGHT" << ids.join(QStringLiteral(","));
-            });
+            MachineCaseDialog dialog(
+                document, nullptr,
+                [](const QStringList &ids) {
+                    qInfo().noquote() << "FT_QT_PAIR_HIGHLIGHT" << ids.join(QStringLiteral(","));
+                },
+                std::function<void(const QString &, int, double)>{},
+                std::function<void()>{}, std::function<void()>{}, std::function<void()>{},
+                std::function<void(int)>{}, -1,
+                std::function<void()>{}, std::function<void(int)>{},
+                std::function<void(const QString &, double, const QString &)>{},
+                [](const QStringList &keys) {
+                    qInfo().noquote() << "FT_QT_SKIP_KEYS" << keys.join(QStringLiteral(","));
+                });
             qInfo().noquote() << "FT_QT_MACHINECASE_UI_OPEN" << MachineCaseDialog::summarize(document);
             dialog.exec();
             return 0;

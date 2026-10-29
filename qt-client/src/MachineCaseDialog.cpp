@@ -624,6 +624,50 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
         auto *note = new QLabel(verdict, page);
         note->setWordWrap(true);
         pageLayout->addWidget(note);
+
+        // 真实布尔复核结论（只有跑过 --boolean-recheck 才有）：把「疑似」和「真撞」分开说
+        const QJsonObject recheck = document.value(QStringLiteral("geometry")).toObject()
+                                        .value(QStringLiteral("booleanRecheck")).toObject();
+        if (!recheck.isEmpty()) {
+            QString recheckText;
+            const int suspects = recheck.value(QStringLiteral("suspects")).toInt();
+            if (suspects == 0) {
+                recheckText = QStringLiteral("真实布尔复核：无需复核（0 处疑似）");
+            } else if (!recheck.value(QStringLiteral("available")).toBool(true)) {
+                recheckText = QStringLiteral("真实布尔复核：未复核 —— %1")
+                                  .arg(recheck.value(QStringLiteral("message")).toString());
+            } else {
+                recheckText = QStringLiteral("真实布尔复核：确认 %1 处 / AABB 误报 %2 处 / 复核不了 %3 处（共 %4 处疑似）")
+                                  .arg(recheck.value(QStringLiteral("confirmed")).toInt())
+                                  .arg(recheck.value(QStringLiteral("misreported")).toInt())
+                                  .arg(recheck.value(QStringLiteral("unchecked")).toInt())
+                                  .arg(suspects);
+                const QString note = recheck.value(QStringLiteral("message")).toString();
+                if (!note.isEmpty()) recheckText += QStringLiteral("　").append(note);
+            }
+            auto *recheckLabel = new QLabel(recheckText, page);
+            recheckLabel->setWordWrap(true);
+            // 插到页首：之前 addWidget 加在表格和按钮行之后，被窗口高度挤到看不见的地方
+            pageLayout->insertWidget(0, recheckLabel);
+
+            // 「误报」不只是告知：把复核结论直接变成忽略名单，省掉手抄 jointKey
+            if (onSkipMisreports && recheck.value(QStringLiteral("misreported")).toInt() > 0) {
+                QStringList keys;
+                for (const QJsonValue &entry : recheck.value(QStringLiteral("pairs")).toArray()) {
+                    const QJsonObject pair = entry.toObject();
+                    if (pair.value(QStringLiteral("verdict")).toString() != QStringLiteral("misreported")) continue;
+                    const QString left = pair.value(QStringLiteral("a")).toString();
+                    const QString right = pair.value(QStringLiteral("b")).toString();
+                    keys << (left < right ? left + QLatin1Char('|') + right : right + QLatin1Char('|') + left);
+                }
+                auto *skipButton = new QPushButton(
+                    QStringLiteral("按复核结论重排（跳过 %1 处误报）…").arg(keys.size()), page);
+                skipButton->setToolTip(QStringLiteral("只跳过真实布尔确认过不相交的对；其余疑似照旧算重叠"));
+                connect(skipButton, &QPushButton::clicked, page, [onSkipMisreports, keys]() { onSkipMisreports(keys); });
+                pageLayout->insertWidget(1, skipButton);
+            }
+        }
+
         const QJsonObject clearance = document.value(QStringLiteral("geometry")).toObject()
                                           .value(QStringLiteral("clearance")).toObject();
         if (!clearance.isEmpty()) {
@@ -731,48 +775,6 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
             }
             applyRow->addStretch(1);
             pageLayout->addLayout(applyRow);
-        }
-
-        // 真实布尔复核结论（只有跑过 --boolean-recheck 才有）：把「疑似」和「真撞」分开说
-        const QJsonObject recheck = document.value(QStringLiteral("geometry")).toObject()
-                                        .value(QStringLiteral("booleanRecheck")).toObject();
-        if (!recheck.isEmpty()) {
-            QString recheckText;
-            const int suspects = recheck.value(QStringLiteral("suspects")).toInt();
-            if (suspects == 0) {
-                recheckText = QStringLiteral("真实布尔复核：无需复核（0 处疑似）");
-            } else if (!recheck.value(QStringLiteral("available")).toBool(true)) {
-                recheckText = QStringLiteral("真实布尔复核：未复核 —— %1")
-                                  .arg(recheck.value(QStringLiteral("message")).toString());
-            } else {
-                recheckText = QStringLiteral("真实布尔复核：确认 %1 处 / AABB 误报 %2 处 / 复核不了 %3 处（共 %4 处疑似）")
-                                  .arg(recheck.value(QStringLiteral("confirmed")).toInt())
-                                  .arg(recheck.value(QStringLiteral("misreported")).toInt())
-                                  .arg(recheck.value(QStringLiteral("unchecked")).toInt())
-                                  .arg(suspects);
-                const QString note = recheck.value(QStringLiteral("message")).toString();
-                if (!note.isEmpty()) recheckText += QStringLiteral("　").append(note);
-            }
-            auto *recheckLabel = new QLabel(recheckText, page);
-            recheckLabel->setWordWrap(true);
-            pageLayout->addWidget(recheckLabel);
-
-            // 「误报」不只是告知：把复核结论直接变成忽略名单，省掉手抄 jointKey
-            if (onSkipMisreports && recheck.value(QStringLiteral("misreported")).toInt() > 0) {
-                QStringList keys;
-                for (const QJsonValue &entry : recheck.value(QStringLiteral("pairs")).toArray()) {
-                    const QJsonObject pair = entry.toObject();
-                    if (pair.value(QStringLiteral("verdict")).toString() != QStringLiteral("misreported")) continue;
-                    const QString left = pair.value(QStringLiteral("a")).toString();
-                    const QString right = pair.value(QStringLiteral("b")).toString();
-                    keys << (left < right ? left + QLatin1Char('|') + right : right + QLatin1Char('|') + left);
-                }
-                auto *skipButton = new QPushButton(
-                    QStringLiteral("按复核结论重排（跳过 %1 处误报）…").arg(keys.size()), page);
-                skipButton->setToolTip(QStringLiteral("只跳过真实布尔确认过不相交的对；其余疑似照旧算重叠"));
-                connect(skipButton, &QPushButton::clicked, page, [onSkipMisreports, keys]() { onSkipMisreports(keys); });
-                pageLayout->addWidget(skipButton);
-            }
         }
 
         m_tabs->addTab(page, QStringLiteral("干涉初筛（%1）").arg(pairs.size()));
