@@ -26,12 +26,16 @@ target_link_libraries(automationcad-qt PRIVATE Qt6::Widgets Qt6::Network Qt6::Op
 # 本机 Debian 12/13 混源时 libocct-{data-exchange,visualization}-dev 被 libfreetype-dev
 # 版本冲突卡住，可以把这两个 dev 包的头文件解到 /usr/local/include/opencascade。
 # 只有找到 Standard.hxx + AIS_InteractiveContext.hxx 才启用，否则回退到 OpenGL STL 视口。
+# -DAUTOMATIONCAD_OCCT=OFF 可以强制走「没有 OCCT」的构建路径，
+# 用来在本机复现 CI（CI 只装 Qt，没有 OCCT 头文件）。
+option(AUTOMATIONCAD_OCCT "启用 OCCT AIS 视口（找不到头文件时自动回退）" ON)
+
 find_path(OCCT_INCLUDE_FOUNDATION NAMES Standard.hxx
     PATHS /usr/include/opencascade /usr/local/include/opencascade)
 find_path(OCCT_INCLUDE_AIS NAMES AIS_InteractiveContext.hxx
     PATHS /usr/local/include/opencascade /usr/include/opencascade)
 
-if(OCCT_INCLUDE_FOUNDATION AND OCCT_INCLUDE_AIS)
+if(AUTOMATIONCAD_OCCT AND OCCT_INCLUDE_FOUNDATION AND OCCT_INCLUDE_AIS)
   message(STATUS "OCCT AIS 视口：启用（${OCCT_INCLUDE_FOUNDATION}; ${OCCT_INCLUDE_AIS}）")
   target_sources(automationcad-qt PRIVATE src/OcctViewport.cpp src/OcctViewport.h)
   target_include_directories(automationcad-qt PRIVATE ${OCCT_INCLUDE_FOUNDATION} ${OCCT_INCLUDE_AIS})

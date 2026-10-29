@@ -143,6 +143,9 @@ CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI �
   并且 UI 路径用 `QTimer::singleShot` 等窗口真正显示。
 - 70 个零件合成一个 `TopoDS_Compound` 会变成一坨同色实体，看不出结构 → 改为逐件 `AIS_Shape` + 各自颜色。
 
+CI 只装 Qt、没有 OCCT 头文件，所以这条路径必须能在「没有视口」时编过：
+`-DAUTOMATIONCAD_OCCT=OFF` 可以在本机复现该构建（这次 CI 红就是因为本地没跑这条）。
+
 已知未解决：无窗口管理器环境下 `windowclose` 不生效（关窗退出未验证）；外部 SIGTERM 强杀进程时
 OCCT 清理偶发段错误（正常关窗路径没复现到）。
 

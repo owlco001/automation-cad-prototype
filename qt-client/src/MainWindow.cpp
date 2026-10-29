@@ -486,12 +486,18 @@ bool MainWindow::renderMachineGeometry(const QJsonObject &document, int *shapeCo
         *error = tr("方案里没有 geometry（管线需 --with-geometry）");
         return false;
     }
-    if (!m_occtViewport) {
-        *error = tr("当前没有 3D 视口（编译时未启用 OCCT）");
-        return false;
-    }
+#ifndef AUTOMATIONCAD_HAVE_OCCT
+    *error = tr("这个构建没有 OCCT AIS 视口（CMake 未找到 OCCT 头文件），整机示意 3D 不可用");
+    return false;
+#endif
+#ifdef AUTOMATIONCAD_HAVE_OCCT
     if (m_occtViewport->isHidden()) m_occtViewport->show();
     if (!m_occtViewport->showMachineGeometry(geometry, shapeCount, error)) return false;
+#else
+    // CI 只装 Qt、没有 OCCT 头文件；这条路径要在「没有视口」时也能编过并给出可操作原因
+    *error = tr("这个构建没有 OCCT AIS 视口（CMake 未找到 OCCT 头文件），整机示意 3D 不可用");
+    return false;
+#endif
     const QJsonArray envelope = geometry.value(QStringLiteral("envelope")).toArray();
     if (envelope.size() == 3) {
         statusBar()->showMessage(tr("整机示意装配：%1 个占位体 · 包络 %2×%3×%4 mm · 精度=概念估算")
