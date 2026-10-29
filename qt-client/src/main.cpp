@@ -385,6 +385,31 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 调整清单导出自检：--resolve-csv-selftest <case.json> --out <csv>
+    {
+        const int index = args.indexOf(QStringLiteral("--resolve-csv-selftest"));
+        if (index >= 0 && index + 1 < args.size()) {
+            const int outIndex = args.indexOf(QStringLiteral("--out"));
+            if (outIndex < 0 || outIndex + 1 >= args.size()) {
+                qCritical().noquote() << "FT_QT_RESOLVECSV_FAIL" << "缺 --out <csv>";
+                return 1;
+            }
+            QJsonObject document;
+            QString error;
+            if (!MachineCaseDialog::loadFile(args.at(index + 1), &document, &error)) {
+                qCritical().noquote() << "FT_QT_RESOLVECSV_FAIL" << error;
+                return 1;
+            }
+            int rows = 0;
+            if (!MachineCaseDialog::writeResolutionCsv(document, args.at(outIndex + 1), &rows, &error)) {
+                qCritical().noquote() << "FT_QT_RESOLVECSV_FAIL" << error;
+                return 1;
+            }
+            qInfo().noquote() << QStringLiteral("FT_QT_RESOLVECSV_OK rows=%1").arg(rows);
+            return 0;
+        }
+    }
+
     // 整机 BOM 导出自检：--machine-bom-selftest <case.json> --out <csv>
     {
         const int bomIndex = args.indexOf(QStringLiteral("--machine-bom-selftest"));

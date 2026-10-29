@@ -15,6 +15,9 @@ export interface ResolveMove {
   delta: number;
   /** 应用这条之后还剩多少个 suspect */
   remainingAfter: number;
+  /** 挪动前后的中心坐标（mm）——工程师照着改模型用，别只给增量 */
+  from: number[];
+  to: number[];
 }
 
 export interface ResolveResult {
@@ -81,10 +84,14 @@ export function resolveConflicts(geometry: any, options: ResolveOptions = {}): R
     if (!Number.isFinite(delta) || delta === 0) {
       return { parts, moves, before, after: result.suspects, iterations, converged: false, stopReason: '建议位移为 0，无法推进' };
     }
+    const movedPart = parts.find((part: any) => String(part.id) === partId) as any;
+    const from = [...((movedPart?.center as number[]) ?? [0, 0, 0])];
     parts = applyMove(parts, partId, axis, delta);
+    const afterPart = parts.find((part: any) => String(part.id) === partId) as any;
+    const to = [...((afterPart?.center as number[]) ?? [0, 0, 0])];
     iterations += 1;
     const after = screenInterference({ ...geometry, parts, joints });
-    moves.push({ partId, axis, delta, remainingAfter: after.suspects });
+    moves.push({ partId, axis, delta, remainingAfter: after.suspects, from, to });
     if (after.suspects >= result.suspects) {
       // 挪了一件但某个数没降（可能把别处推到一起了）——继续试，但要有上限
       if (iterations >= maxIterations) {

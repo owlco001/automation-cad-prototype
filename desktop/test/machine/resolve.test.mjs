@@ -75,3 +75,21 @@ test('不修改传入的 parts（纯函数）', () => {
   resolveConflicts({ parts });
   assert.equal(JSON.stringify(parts), snapshot);
 });
+
+
+test('每条调整都带挪动前后的中心坐标（工程师要照着改模型）', () => {
+  const geometry = {
+    parts: [box('a', [0, 0, 0], [100, 100, 100]), box('b', [30, 0, 0], [100, 100, 100])]
+  };
+  const result = resolveConflicts(geometry);
+  assert.equal(result.moves.length, 1);
+  const move = result.moves[0];
+  assert.equal(move.from.length, 3);
+  assert.equal(move.to.length, 3);
+  assert.notDeepEqual(move.from, move.to, '挪完坐标必须变化');
+  const axisIndex = ['x', 'y', 'z'].indexOf(move.axis);
+  assert.ok(Math.abs(move.to[axisIndex] - move.from[axisIndex] - move.delta) < 1e-6, 'from→to 的差必须等于 delta');
+  // 两块体积相同，实现按「先出现的那件」当移动件；只断言 from 是它自己的原始中心
+  const expected = geometry.parts.find((part) => part.id === move.partId).center;
+  assert.deepEqual(move.from, expected, 'from 必须是该件原始中心');
+});

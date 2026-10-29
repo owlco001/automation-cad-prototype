@@ -30,6 +30,9 @@ public:
     /// 把 BOM 写成 CSV（UTF-8 BOM + 合计行）；返回写入行数，失败时 error 给原因
     static bool writeBomCsv(const QJsonObject &document, const QString &path, int *rows, QString *error);
 
+    /// 把「批量解重叠」的调整清单写成 CSV（零件/轴/位移/原坐标/新坐标/解后剩余）
+    static bool writeResolutionCsv(const QJsonObject &document, const QString &path, int *rows, QString *error);
+
 private:
     QLabel *m_brief = nullptr;
     QTabWidget *m_tabs = nullptr;

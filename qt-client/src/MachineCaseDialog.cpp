@@ -133,6 +133,46 @@ bool MachineCaseDialog::writeBomCsv(const QJsonObject &document, const QString &
     return true;
 }
 
+bool MachineCaseDialog::writeResolutionCsv(const QJsonObject &document, const QString &path, int *rows, QString *error) {
+    const QJsonObject resolution = document.value(QStringLiteral("geometry")).toObject()
+                                       .value(QStringLiteral("resolution")).toObject();
+    if (resolution.isEmpty()) {
+        *error = QStringLiteral("这个方案没有批量解重叠的结果（管线需 --resolve）");
+        return false;
+    }
+    const QJsonArray moves = resolution.value(QStringLiteral("moves")).toArray();
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        *error = QStringLiteral("写文件失败：%1").arg(file.errorString());
+        return false;
+    }
+    QTextStream out(&file);
+    out.setEncoding(QStringConverter::Utf8);
+    out << "\xEF\xBB\xBF";
+    out << "零件,轴,位移(mm),原中心X,原中心Y,原中心Z,新中心X,新中心Y,新中心Z,解后剩余\n";
+    for (const QJsonValue &value : moves) {
+        const QJsonObject move = value.toObject();
+        const QJsonArray from = move.value(QStringLiteral("from")).toArray();
+        const QJsonArray to = move.value(QStringLiteral("to")).toArray();
+        out << move.value(QStringLiteral("partId")).toString() << ','
+            << move.value(QStringLiteral("axis")).toString() << ','
+            << QString::number(move.value(QStringLiteral("delta")).toDouble(), 'f', 1);
+        for (int axis = 0; axis < 3; ++axis) {
+            out << ',' << QString::number(from.at(axis).toDouble(), 'f', 1);
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            out << ',' << QString::number(to.at(axis).toDouble(), 'f', 1);
+        }
+        out << ',' << move.value(QStringLiteral("remainingAfter")).toInt() << '\n';
+    }
+    out << "合计,,,,,,,,,"
+        << resolution.value(QStringLiteral("before")).toInt() << "→"
+        << resolution.value(QStringLiteral("after")).toInt() << '\n';
+    file.close();
+    *rows = moves.size();
+    return true;
+}
+
 MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *parent,
                                      std::function<void(const QStringList &)> onHighlight,
                                      std::function<void(const QString &, int, double)> onApplyMove,
@@ -280,6 +320,8 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
         auto *note = new QLabel(verdict, page);
         note->setWordWrap(true);
         pageLayout->addWidget(note);
+        const QJsonObject resolutionForUi = document.value(QStringLiteral("geometry")).toObject()
+                                                .value(QStringLiteral("resolution")).toObject();
         if (onApplyMove) {
             auto *applyRow = new QHBoxLayout();
             auto *applyButton = new QPushButton(QStringLiteral("按建议挪这一对…"), page);
@@ -302,6 +344,23 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                             suggestion.value(QStringLiteral("delta")).toDouble());
             });
             applyRow->addWidget(applyButton);
+            if (!resolutionForUi.isEmpty()) {
+                auto *exportResolution = new QPushButton(QStringLiteral("导出调整清单 CSV…"), page);
+                connect(exportResolution, &QPushButton::clicked, page, [this, document]() {
+                    const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("导出调整清单"),
+                                                                      QStringLiteral("machine-resolve.csv"),
+                                                                      QStringLiteral("CSV 文件 (*.csv)"));
+                    if (path.isEmpty()) return;
+                    int rows = 0;
+                    QString error;
+                    if (!writeResolutionCsv(document, path, &rows, &error)) {
+                        QMessageBox::warning(this, QStringLiteral("导出失败"), error);
+                        return;
+                    }
+                    setWindowTitle(windowTitle() + QStringLiteral(" · 已导出 %1 行调整").arg(rows));
+                });
+                applyRow->addWidget(exportResolution);
+            }
             if (onResolveAll) {
                 auto *resolveButton = new QPushButton(QStringLiteral("批量解开未声明的重叠…"), page);
                 resolveButton->setToolTip(QStringLiteral("逐轮挪动最小的那一处并重算，直到没有未声明重叠"));
