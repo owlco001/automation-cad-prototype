@@ -114,6 +114,8 @@ MainWindow::MainWindow(QWidget *parent)
             QMessageBox::warning(this, tr("打不开整机方案"), error);
             return;
         }
+        m_lastBrief = document.value(QStringLiteral("brief")).toString();
+        m_lastMoves.clear();
         statusBar()->showMessage(tr("整机方案：%1").arg(MachineCaseDialog::summarize(document)), 15000);
         int shapes = 0;
         QString geometryError;
@@ -160,6 +162,7 @@ MainWindow::MainWindow(QWidget *parent)
     auto *evalMenu = menuBar()->addMenu(tr("评估"));
     QAction *interference = evalMenu->addAction(tr("装配干涉检查"), this, &MainWindow::runInterferenceCheck);
     interference->setShortcut(QKeySequence(QStringLiteral("Ctrl+I")));
+    evalMenu->addAction(tr("试摆位（移动零件重算干涉）…"), this, &MainWindow::tunePlacementDialog);
     QAction *assemblyBom = evalMenu->addAction(tr("装配清单"), this, &MainWindow::runAssemblyBom);
     assemblyBom->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
     interference->setShortcut(QKeySequence(QStringLiteral("Ctrl+I")));
@@ -423,7 +426,8 @@ bool MainWindow::exportStl(const QString &path, int *bytes, QString *error) {
     return true;
 }
 
-bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *document, QString *error) {
+bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *document, QString *error,
+                                        const QStringList &moves) {
     if (brief.trimmed().isEmpty()) {
         *error = tr("brief 不能为空");
         return false;
@@ -451,8 +455,9 @@ bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *docum
 
     QProcess process;
     process.setProcessChannelMode(QProcess::SeparateChannels);
-    process.start(QStringLiteral("node"),
-                  {script, QStringLiteral("--brief"), brief, QStringLiteral("--with-geometry")});
+    QStringList arguments{script, QStringLiteral("--brief"), brief, QStringLiteral("--with-geometry")};
+    for (const QString &move : moves) arguments << QStringLiteral("--move") << move;
+    process.start(QStringLiteral("node"), arguments);
     if (!process.waitForStarted(10'000)) {
         *error = tr("启动 node 失败：%1").arg(process.errorString());
         return false;
@@ -542,6 +547,88 @@ void MainWindow::designMachineDialog() {
     }
     MachineCaseDialog dialog(document, this);
     dialog.exec();
+}
+
+void MainWindow::tunePlacementDialog() {
+    if (m_lastBrief.trimmed().isEmpty()) {
+        QMessageBox::information(this, tr("试摆位"),
+                                 tr("先「从 brief 生成整机方案」或「打开整机方案」，才知道要挪哪台机器。"));
+        return;
+    }
+    QJsonObject document;
+    QString error;
+    if (!designMachineFromBrief(m_lastBrief, &document, &error, m_lastMoves)) {
+        // 重新生成失败时不阻塞：直接拿上一次结果里的零件列表
+        document = m_lastDocument;
+    }
+    const QJsonArray parts = document.value(QStringLiteral("geometry")).toObject()
+                                 .value(QStringLiteral("parts")).toArray();
+    if (parts.isEmpty()) {
+        QMessageBox::information(this, tr("试摆位"), tr("当前方案没有几何，先「从 brief 生成整机方案」。"));
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("试摆位（移动一个零件后重算干涉）"));
+    auto *form = new QFormLayout(&dialog);
+    auto *combo = new QComboBox(&dialog);
+    for (const QJsonValue &value : parts) {
+        const QJsonObject part = value.toObject();
+        combo->addItem(tr("%1（%2）").arg(part.value(QStringLiteral("name")).toString(),
+                                         part.value(QStringLiteral("id")).toString()),
+                       part.value(QStringLiteral("id")).toString());
+    }
+    auto *dx = new QDoubleSpinBox(&dialog);
+    auto *dy = new QDoubleSpinBox(&dialog);
+    auto *dz = new QDoubleSpinBox(&dialog);
+    for (QDoubleSpinBox *box : {dx, dy, dz}) {
+        box->setRange(-5000.0, 5000.0);
+        box->setDecimals(1);
+        box->setSuffix(tr(" mm"));
+    }
+    form->addRow(tr("零件"), combo);
+    form->addRow(tr("X 位移"), dx);
+    form->addRow(tr("Y 位移"), dy);
+    form->addRow(tr("Z 位移"), dz);
+    auto *hint = new QLabel(tr("增量叠加：这次挪 10，下次在这个基础上再挪。只动中心点，不改尺寸/旋转。"), &dialog);
+    hint->setWordWrap(true);
+    form->addRow(hint);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) return;
+    if (dx->value() == 0.0 && dy->value() == 0.0 && dz->value() == 0.0) {
+        statusBar()->showMessage(tr("位移全是 0，没有重算"), 6000);
+        return;
+    }
+
+    QStringList moves = m_lastMoves;
+    moves << QStringLiteral("%1:%2,%3,%4").arg(combo->currentData().toString())
+                                               .arg(dx->value()).arg(dy->value()).arg(dz->value());
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    QJsonObject updated;
+    const bool ok = designMachineFromBrief(m_lastBrief, &updated, &error, moves);
+    QApplication::restoreOverrideCursor();
+    if (!ok) {
+        QMessageBox::warning(this, tr("试摆位失败"), error);
+        return;
+    }
+    m_lastDocument = updated;
+    int shapes = 0;
+    QString geometryError;
+    if (!renderMachineGeometry(updated, &shapes, &geometryError)) {
+        statusBar()->showMessage(tr("已重算，但 3D 没画出来：%1").arg(geometryError), 15000);
+    }
+    const QJsonObject interference = updated.value(QStringLiteral("geometry")).toObject()
+                                        .value(QStringLiteral("interference")).toObject();
+    statusBar()->showMessage(tr("试摆位后：%1 对重叠（需确认 %2 / 已声明 %3）")
+                                 .arg(interference.value(QStringLiteral("count")).toInt())
+                                 .arg(interference.value(QStringLiteral("suspects")).toInt())
+                                 .arg(interference.value(QStringLiteral("declared")).toInt()), 20000);
+    MachineCaseDialog refreshed(updated, this);
+    refreshed.exec();
 }
 
 bool MainWindow::exportMachineStlForTest(const QString &path, int *bytes, QString *error) {

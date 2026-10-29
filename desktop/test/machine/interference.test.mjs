@@ -111,3 +111,11 @@ test('外部 geometry 没有 joints 字段时退回命名规则，并标 jointSo
   assert.equal(result.declared, 1);
   assert.equal(result.pairs[0].reason, '立柱插横梁');
 });
+
+test('圆柱绕 Z 转不放大包围盒（按方块算会凭空多出 √2 倍）', () => {
+  const straight = partBounds({ shape: { type: 'cylinder', radius: 50, length: 40, axis: 'z' }, center: [0, 0, 0], rotationZDeg: 0 });
+  const turned = partBounds({ shape: { type: 'cylinder', radius: 50, length: 40, axis: 'z' }, center: [0, 0, 0], rotationZDeg: 60 });
+  assert.equal(straight.max[0], 50);
+  assert.equal(turned.max[0], 50, '旋转后 X 半宽仍应是半径');
+  assert.equal(turned.max[1], 50, '旋转后 Y 半宽仍应是半径');
+});

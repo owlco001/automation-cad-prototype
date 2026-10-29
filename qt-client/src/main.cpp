@@ -163,6 +163,40 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 试摆位自检：--tune-selftest "brief" --move id:dx,dy,dz（可重复），打印挪之前/之后的重叠数
+    if (args.contains(QStringLiteral("--tune-selftest"))) {
+        const int briefIndex = args.indexOf(QStringLiteral("--tune-selftest"));
+        if (briefIndex + 1 < args.size()) {
+            const QString brief = args.at(briefIndex + 1);
+            QStringList moves;
+            for (int i = 0; i < args.size(); ++i) {
+                if (args.at(i) == QStringLiteral("--move") && i + 1 < args.size()) moves << args.at(i + 1);
+            }
+            MainWindow window;
+            QJsonObject before;
+            QJsonObject after;
+            QString error;
+            if (!window.designMachineFromBrief(brief, &before, &error)) {
+                qCritical().noquote() << "FT_QT_TUNE_FAIL" << error;
+                return 1;
+            }
+            if (!window.designMachineFromBrief(brief, &after, &error, moves)) {
+                qCritical().noquote() << "FT_QT_TUNE_FAIL" << error;
+                return 1;
+            }
+            const auto counts = [](const QJsonObject &document) {
+                const QJsonObject interference = document.value(QStringLiteral("geometry")).toObject()
+                                                     .value(QStringLiteral("interference")).toObject();
+                return QStringLiteral("count=%1 suspects=%2 declared=%3")
+                    .arg(interference.value(QStringLiteral("count")).toInt())
+                    .arg(interference.value(QStringLiteral("suspects")).toInt())
+                    .arg(interference.value(QStringLiteral("declared")).toInt());
+            };
+            qInfo().noquote() << "FT_QT_TUNE_OK before" << counts(before) << "| after" << counts(after);
+            return 0;
+        }
+    }
+
     // 整机示意 3D 自检：--geometry-selftest "一句话"（要 node + OCCT 视口）
     if (args.contains(QStringLiteral("--geometry-selftest")) && args.indexOf(QStringLiteral("--geometry-selftest")) + 1 < args.size()) {
         const int geoIndex = args.indexOf(QStringLiteral("--geometry-selftest"));

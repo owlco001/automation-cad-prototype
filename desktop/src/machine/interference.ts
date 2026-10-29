@@ -62,8 +62,11 @@ export function partBounds(part: any): { min: Vec3; max: Vec3 } {
   const rad = ((Number(part.rotationZDeg) || 0) * Math.PI) / 180;
   const cos = Math.abs(Math.cos(rad));
   const sin = Math.abs(Math.sin(rad));
-  const ex = hx * cos + hy * sin;
-  const ey = hx * sin + hy * cos;
+  const isCylinder = part?.shape?.type === 'cylinder';
+  // 圆柱绕自身 Z 轴转，包围盒不变。按「旋转的方块」算会把半径方向放大到 √2 倍，
+  // 从而凭空造出一堆假重叠（实测六工位机里 12 对就是这么来的）。
+  const ex = isCylinder ? hx : hx * cos + hy * sin;
+  const ey = isCylinder ? hy : hx * sin + hy * cos;
   const center = part.center as Vec3;
   return {
     min: [center[0] - ex, center[1] - ey, center[2] - hz],

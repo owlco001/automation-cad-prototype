@@ -68,7 +68,10 @@ public:
     void exportMachineStlDialog();
     bool exportStl(const QString &path, int *bytes, QString *error);
     /// 调 desktop 整机管线（node scripts/machine-design-cli.mjs）把一句话变成方案 JSON
-    bool designMachineFromBrief(const QString &brief, QJsonObject *document, QString *error);
+    bool designMachineFromBrief(const QString &brief, QJsonObject *document, QString *error,
+                                const QStringList &moves = {});
+    /// 试摆位：在已生成的方案上挪一个零件，重跑管线并重算干涉
+    void tunePlacementDialog();
     void designMachineDialog();
     /// 把方案里的示意几何画到 3D 视口（占位体拼装，客户端只摆位）
     bool renderMachineGeometry(const QJsonObject &document, int *shapeCount, QString *error);
@@ -132,6 +135,9 @@ private:
     QString m_serviceBase = QStringLiteral("http://127.0.0.1:18080");
     QString m_documentId = QStringLiteral("demo-adapter");
     QString m_assemblyId;
+    QString m_lastBrief;               // 最近一次生成/打开的方案 brief（试摆位要用）
+    QStringList m_lastMoves;
+    QJsonObject m_lastDocument;        // 最近一次生成的整机方案（试摆位/导出用）           // 累计的 --move 参数，多次试挪会叠加
     QJsonObject m_assemblyRecord;
     void editAssemblyMember(int memberIndex);
     bool fetchGeometryStl(QByteArray *bytes, QString *error);

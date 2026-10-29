@@ -36,10 +36,37 @@ const { caseData, design } = buildMachineCase({
   pricingAssumptions: ['命令行未读取 userData/machine-pricing.json，使用工程默认系数与工时单价。']
 });
 
+// --move <partId>:<dx>,<dy>,<dz>：试摆位用。可重复；只改中心点，不改尺寸/旋转。
+const moves = [];
+for (let i = 0; i < args.length; i += 1) {
+  if (args[i] !== '--move') continue;
+  const raw = args[i + 1] || '';
+  const [id, delta] = raw.split(':');
+  const parts = String(delta || '').split(',').map(Number);
+  if (!id || parts.length !== 3 || parts.some((v) => !Number.isFinite(v))) {
+    console.error(`FT_MACHINE_CLI_BAD_MOVE 需要 <partId>:<dx>,<dy>,<dz>，收到 ${raw}`);
+    process.exit(2);
+  }
+  moves.push({ id, delta: parts });
+}
+
 if (withGeometry) {
   // 概念占位体（geometryFidelity='conceptual-estimate'）：给客户端画“示意装配”，不是制造几何
   caseData.geometry = generateMachineGeometry(design.config, {});
   // 干涉初筛（AABB）：只是「疑似」，不是布尔交集；结构件共位是正常装配
+  if (moves.length > 0) {
+    const byId = new Map(caseData.geometry.parts.map((part) => [part.id, part]));
+    for (const move of moves) {
+      const part = byId.get(move.id);
+      if (!part) {
+        console.error(`FT_MACHINE_CLI_UNKNOWN_PART ${move.id}`);
+        process.exit(2);
+      }
+      part.center = [part.center[0] + move.delta[0], part.center[1] + move.delta[1], part.center[2] + move.delta[2]];
+      part.movedBy = move.delta;
+    }
+    caseData.geometry.moves = moves;
+  }
   caseData.geometry.interference = screenInterference(caseData.geometry);
 }
 

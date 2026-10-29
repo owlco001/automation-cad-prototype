@@ -160,6 +160,13 @@ CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI �
 实测四工位点胶机：2 对重叠 → 全部 `declared`（立柱插横梁，各 96,000 mm³），`suspects=0`，
 声明表共 138 对连接。
 
+**试摆位（改完立刻重算干涉）**：`评估 → 试摆位（移动零件重算干涉）…`，选零件 + 三轴位移 →
+带 `--move <id>:<dx>,<dy>,<dz>` 重跑管线 → 3D 与干涉页一起刷新。位移是**增量叠加**的，
+只改中心点不改尺寸/旋转；`--tune-selftest "brief" --move ...` 是无人值守版本。
+
+实测四工位：`before count=2 suspects=0 declared=2 | after count=0 suspects=0 declared=0`
+（把两根下横梁各下移 1000 mm）。
+
 **导出整机 BOM CSV**：方案窗口底部按钮（或 `--machine-bom-selftest <case.json> --out x.csv`）。
 实测 `machine-case.json` → 12 行 + 表头 + 合计 = 14 行 5 列，来源文案里有逗号所以加了引号转义，
 `csv.reader` 解析回来每行都是 5 列；合计 `34489.91` 固定两位小数（默认流输出会印成 `34489.9`）。
