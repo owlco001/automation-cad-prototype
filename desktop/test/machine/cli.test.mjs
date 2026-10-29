@@ -153,6 +153,22 @@ test('--insert-part 配 --part-size：零件按新尺寸落地，底面仍贴地
   assert.equal(inserted.center[2], 600, '中心 z = 高度/2，底面贴地');
 });
 
+test('--insert-part 会给出新件最近邻居与间隙（重叠时 0）', { timeout: 180_000 }, () => {
+  const read = (spec) => {
+    const stdout = execFileSync(process.execPath,
+      [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--insert-part', spec],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+    return JSON.parse(stdout).geometry.inserted;
+  };
+  const hit = read('gripper@-870,-330,0');
+  assert.equal(hit.nearGapMm, 0, '压在立柱上，间隙必须是 0');
+  assert.equal(hit.nearPart, 'frame-leg-1');
+
+  const free = read('gripper@0,0,0');
+  assert.ok(free.nearGapMm > 100, `原点附近应当离得远，实际 ${free.nearGapMm}`);
+  assert.ok(typeof free.nearPart === 'string' && free.nearPart.length > 0);
+});
+
 test('--with-geometry 输出 bounds，且与 parts 一一对应（Qt 拖动预览靠它本地判重叠）', { timeout: 120_000 }, () => {
   const stdout = execFileSync(process.execPath,
     [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry'],

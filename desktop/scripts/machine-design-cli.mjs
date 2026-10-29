@@ -228,6 +228,23 @@ if (withGeometry) {
     id: part.id,
     ...partBounds(part)
   }));
+  // 新件视角：离谁最近、差多少（CI 要守住这条，不能只在 Qt 日志里）
+  if (caseData.geometry.inserted) {
+    const selfId = caseData.geometry.inserted.partId;
+    const self = caseData.geometry.bounds.find((entry) => entry.id === selfId);
+    if (self) {
+      let best = Number.POSITIVE_INFINITY;
+      let bestId;
+      for (const other of caseData.geometry.bounds) {
+        if (other.id === selfId) continue;
+        const gaps = [0, 1, 2].map((axis) => Math.max(0, other.min[axis] - self.max[axis], self.min[axis] - other.max[axis]));
+        const gap = Math.hypot(gaps[0], gaps[1], gaps[2]);
+        if (gap < best) { best = gap; bestId = other.id; }
+      }
+      caseData.geometry.inserted.nearPart = bestId;
+      caseData.geometry.inserted.nearGapMm = Number.isFinite(best) ? Math.round(best * 10) / 10 : null;
+    }
+  }
 }
 
 const json = `${JSON.stringify(caseData, null, 2)}\n`;
