@@ -625,7 +625,8 @@ void MainWindow::showMachineCase(const QJsonObject &document) {
             [this]() { m_pendingResolveAll = true; },
             [this]() { m_pendingResolveClearance = true; },
             [this]() { m_pendingLayoutCompliance = true; },
-            [this](int thresholdMm) { m_pendingClearanceMm = thresholdMm; });
+            [this](int thresholdMm) { m_pendingClearanceMm = thresholdMm; },
+            m_clearanceMm);
         dialog.exec();
         if (m_pendingResolveAll && !m_lastBrief.trimmed().isEmpty()) {
             m_pendingResolveAll = false;

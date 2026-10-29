@@ -1,7 +1,7 @@
 // 「一键排布合规」的守卫：交替两段、收敛判据是「重叠=0 且间距=0」，达不到必须如实说。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveLayout } from '../../src/machine/layout.ts';
+import { resolveLayout, complianceStamp } from '../../src/machine/layout.ts';
 import { screenInterference } from '../../src/machine/interference.ts';
 import { screenClearance } from '../../src/machine/clearance.ts';
 
@@ -69,4 +69,22 @@ test('收敛的案例不带建议（建议只为「放不下」服务）', () =>
     { clearanceMm: 20 });
   assert.equal(result.converged, true);
   assert.equal(result.advice, undefined);
+});
+
+
+test('合规戳：只抄结论和阈值，字段与 layout 结果一致', () => {
+  const parts = [
+    { id: 'a', name: 'a', role: 'structure', shape: { type: 'box', size: [100, 100, 100] }, center: [0, 0, 0], rotationZDeg: 0 },
+    { id: 'b', name: 'b', role: 'structure', shape: { type: 'box', size: [100, 100, 100] }, center: [110, 0, 0], rotationZDeg: 0 }
+  ];
+  const result = resolveLayout({ parts }, { clearanceMm: 20 });
+  const stamp = complianceStamp(result);
+  assert.equal(stamp.clearanceMm, 20);
+  assert.equal(stamp.converged, result.converged);
+  assert.equal(stamp.suspects, result.suspects);
+  assert.equal(stamp.clearance, result.clearance);
+  assert.equal(stamp.rounds, result.rounds.length);
+  assert.equal(stamp.moves, result.moves.length);
+  // 戳里不该出现时间戳这类每次都变的东西
+  assert.equal(Object.keys(stamp).some((key) => /time|date|checkedAt/i.test(key)), false);
 });

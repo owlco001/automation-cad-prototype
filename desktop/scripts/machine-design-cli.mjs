@@ -8,7 +8,7 @@ import { buildMachineCase } from '../src/machine/case.ts';
 import { generateMachineGeometry } from '../src/machine/geometry.ts';
 import { screenInterference } from '../src/machine/interference.ts';
 import { resolveConflicts, resolveClearance } from '../src/machine/resolve.ts';
-import { resolveLayout } from '../src/machine/layout.ts';
+import { resolveLayout, complianceStamp } from '../src/machine/layout.ts';
 import { screenClearance } from '../src/machine/clearance.ts';
 
 const args = process.argv.slice(2);
@@ -115,6 +115,8 @@ if (withGeometry) {
       ...(layout.stopReason ? { stopReason: layout.stopReason } : {}),
       ...(layout.advice ? { advice: layout.advice } : {})
     };
+    // 同时把结论写到文档顶层：打开方案时不用翻 geometry 也知道「按多少 mm 检查过、结论如何」
+    caseData.compliance = complianceStamp(layout);
   }
   const clearanceResolveIndex = args.indexOf('--resolve-clearance');
   if (clearanceResolveIndex >= 0) {

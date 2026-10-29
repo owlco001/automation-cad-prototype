@@ -192,3 +192,20 @@ test('排布合规：阈值大到放不下时提前停并说明原因，不空�
   assert.ok(st1.pairs.length >= 1 && st1.pairs.length <= 5);
   for (const item of layout.advice) assert.ok(item.shortByMm > 0);
 });
+
+
+test('--layout-compliance 会把合规结论写成文档顶层的 compliance 戳（与 details 一致）', { timeout: 240_000 }, () => {
+  const stdout = execFileSync(process.execPath,
+    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--layout-compliance', '20'],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const document = JSON.parse(stdout);
+  const stamp = document.compliance;
+  const details = document.geometry.layoutCompliance;
+  assert.ok(stamp, '文档顶层必须有 compliance');
+  assert.equal(stamp.clearanceMm, 20);
+  assert.equal(stamp.converged, details.converged);
+  assert.equal(stamp.rounds, details.rounds.length);
+  assert.equal(stamp.moves, details.moves.length);
+  assert.equal(stamp.suspects, details.suspects);
+  assert.equal(stamp.clearance, details.clearance);
+});

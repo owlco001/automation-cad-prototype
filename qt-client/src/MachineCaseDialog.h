@@ -22,7 +22,8 @@ public:
                                std::function<void()> onResolveAll = {},
                                std::function<void()> onResolveClearance = {},
                                std::function<void()> onLayoutCompliance = {},
-                               std::function<void(int)> onClearanceThreshold = {});
+                               std::function<void(int)> onClearanceThreshold = {},
+                               int uiClearanceMm = -1);
 
     /// 读文件并校验 kind/schemaVersion；失败时 error 给出可操作原因
     static bool loadFile(const QString &path, QJsonObject *document, QString *error);

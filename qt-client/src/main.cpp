@@ -12,6 +12,8 @@
 #include <QJsonObject>
 #include <QStringList>
 #include <QSpinBox>
+#include <QTableWidget>
+#include <QTableWidgetItem>
 #include <QAbstractButton>
 #include <QTimer>
 
@@ -449,6 +451,49 @@ int main(int argc, char *argv[]) {
                                  .arg(push.value(QStringLiteral("moves")).toArray().size())
                                  .arg(push.value(QStringLiteral("converged")).toBool() ? 1 : 0);
         return 0;
+    }
+
+    // 合规戳自检：--compliance-stamp-selftest <case.json> [界面阈值]
+    {
+        const int index = args.indexOf(QStringLiteral("--compliance-stamp-selftest"));
+        if (index >= 0 && index + 1 < args.size()) {
+            int uiThreshold = 20;
+            if (index + 2 < args.size() && !args.at(index + 2).startsWith(QStringLiteral("--"))) {
+                uiThreshold = args.at(index + 2).toInt();
+            }
+            QJsonObject document;
+            QString error;
+            if (!MachineCaseDialog::loadFile(args.at(index + 1), &document, &error)) {
+                qCritical().noquote() << "FT_QT_STAMP_FAIL" << error;
+                return 1;
+            }
+            const QJsonObject stamp = document.value(QStringLiteral("compliance")).toObject();
+            if (stamp.isEmpty()) {
+                qCritical().noquote() << "FT_QT_STAMP_FAIL" << "文档没有 compliance 戳（管线需 --layout-compliance）";
+                return 1;
+            }
+            // 概览页必须真的把这一行显示出来，而不是只有 JSON 里有
+            MachineCaseDialog dialog(document, nullptr, {}, {}, {}, {}, {}, {}, uiThreshold);
+            QString shown;
+            for (QTableWidget *table : dialog.findChildren<QTableWidget *>()) {
+                for (int row = 0; row < table->rowCount(); ++row) {
+                    if (table->item(row, 0) && table->item(row, 0)->text() == QStringLiteral("排布合规")) {
+                        shown = table->item(row, 1) ? table->item(row, 1)->text() : QString();
+                    }
+                }
+            }
+            if (shown.isEmpty()) {
+                qCritical().noquote() << "FT_QT_STAMP_FAIL" << "概览页没有「排布合规」这一行";
+                return 1;
+            }
+            qInfo().noquote() << QStringLiteral("FT_QT_STAMP_OK mm=%1 converged=%2 rounds=%3 moves=%4 shown=%5")
+                                     .arg(stamp.value(QStringLiteral("clearanceMm")).toInt())
+                                     .arg(stamp.value(QStringLiteral("converged")).toBool() ? 1 : 0)
+                                     .arg(stamp.value(QStringLiteral("rounds")).toInt())
+                                     .arg(stamp.value(QStringLiteral("moves")).toInt())
+                                     .arg(shown);
+            return 0;
+        }
     }
 
     // 排布位移导出自检：--layout-csv-selftest <case.json> --out <csv>

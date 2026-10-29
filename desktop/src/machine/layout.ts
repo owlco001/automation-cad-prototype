@@ -163,3 +163,28 @@ function buildAdvice(geometry: any, clearanceMm: number): LayoutAdvice[] {
   }
   return [...byScope.values()].sort((left, right) => right.shortByMm - left.shortByMm);
 }
+
+
+// 方案文件里的「合规戳」：把「按多少 mm 检查过、结论是什么」写进文档本身。
+// 只写结论和阈值，不写时间戳——时间戳会让 golden 文件每次都不一样。
+export interface ComplianceStamp {
+  clearanceMm: number;
+  converged: boolean;
+  suspects: number;
+  clearance: number;
+  rounds: number;
+  moves: number;
+  advice?: LayoutAdvice[];
+}
+
+export function complianceStamp(result: LayoutResult): ComplianceStamp {
+  return {
+    clearanceMm: result.clearanceMm,
+    converged: result.converged,
+    suspects: result.suspects,
+    clearance: result.clearance,
+    rounds: result.rounds.length,
+    moves: result.moves.length,
+    ...(result.advice ? { advice: result.advice } : {})
+  };
+}

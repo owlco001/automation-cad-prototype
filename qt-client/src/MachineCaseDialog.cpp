@@ -223,7 +223,8 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                                      std::function<void()> onResolveAll,
                                      std::function<void()> onResolveClearance,
                                      std::function<void()> onLayoutCompliance,
-                                     std::function<void(int)> onClearanceThreshold)
+                                     std::function<void(int)> onClearanceThreshold,
+                                     int uiClearanceMm)
     : QDialog(parent) {
     setWindowTitle(QStringLiteral("整机方案（只读）"));
     resize(760, 520);
@@ -253,6 +254,26 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
     appendRow(overview, {QStringLiteral("设计功率（W）"), number(valueAt(electrical, QStringLiteral("totalDesignW")), 1)});
     appendRow(overview, {QStringLiteral("成本合计"), number(valueAt(cost, QStringLiteral("total")), 2)});
     appendRow(overview, {QStringLiteral("无价格项"), QString::number(cost.value(QStringLiteral("missingCount")).toInt())});
+
+    // 合规戳：方案文件自带「按多少 mm 检查过、结论如何」。
+    // 界面当前阈值和它不一致时要说出来——否则用户会以为这份方案是按当前阈值查过的。
+    const QJsonObject stamp = document.value(QStringLiteral("compliance")).toObject();
+    if (!stamp.isEmpty()) {
+        const int stampMm = stamp.value(QStringLiteral("clearanceMm")).toInt();
+        const bool stampConverged = stamp.value(QStringLiteral("converged")).toBool();
+        QString stampText = QStringLiteral("按 %1 mm：%2（%3 轮 / %4 次位移）")
+                                .arg(stampMm)
+                                .arg(stampConverged ? QStringLiteral("已合规") : QStringLiteral("未收敛"))
+                                .arg(stamp.value(QStringLiteral("rounds")).toInt())
+                                .arg(stamp.value(QStringLiteral("moves")).toInt());
+        if (uiClearanceMm > 0 && uiClearanceMm != stampMm) {
+            stampText += QStringLiteral("　⚠ 界面当前阈值是 %1 mm，与这份方案的检查值不同，需重新计算")
+                             .arg(uiClearanceMm);
+        }
+        appendRow(overview, {QStringLiteral("排布合规"), stampText});
+    } else {
+        appendRow(overview, {QStringLiteral("排布合规"), QStringLiteral("未检查（没有按间距阈值跑过排布合规）")});
+    }
     overview->resizeColumnsToContents();
     m_tabs->addTab(overview, QStringLiteral("概览"));
 
