@@ -10,6 +10,7 @@ import { screenInterference } from '../src/machine/interference.ts';
 import { resolveConflicts, resolveClearance } from '../src/machine/resolve.ts';
 import { resolveLayout, complianceStamp, maxFeasibleClearance } from '../src/machine/layout.ts';
 import { minWidening } from '../src/machine/widen.ts';
+import { recheckPairs } from '../src/machine/recheck.ts';
 import { screenClearance } from '../src/machine/clearance.ts';
 
 const args = process.argv.slice(2);
@@ -96,6 +97,18 @@ if (withGeometry) {
       converged: resolution.converged,
       ...(resolution.stopReason ? { stopReason: resolution.stopReason } : {})
     };
+  }
+  const recheckIndex = args.indexOf('--boolean-recheck');
+  if (recheckIndex >= 0) {
+    const url = args[recheckIndex + 1];
+    if (!url || url.startsWith('--')) {
+      process.stderr.write('--boolean-recheck 需要 sidecar 地址（如 http://127.0.0.1:18151）\n');
+      process.exit(2);
+    }
+    const screen = screenInterference(caseData.geometry);
+    const suspects = screen.pairs.filter((pair) => pair.kind === 'suspect').map((pair) => ({ a: pair.a, b: pair.b }));
+    // 复核失败也必须落盘：要能看出「没复核」和「复核过没问题」的区别
+    caseData.geometry.booleanRecheck = { suspects: suspects.length, ...(await recheckPairs(caseData.geometry.parts, suspects, { buildUrl: url })) };
   }
   const wideningIndex = args.indexOf('--min-widening');
   if (wideningIndex >= 0) {

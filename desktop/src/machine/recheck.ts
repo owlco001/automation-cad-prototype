@@ -90,6 +90,10 @@ export async function recheckPairs(
   const limit = options.limit ?? 40;
   const timeoutMs = options.timeoutMs ?? 30_000;
   const picked = suspects.slice(0, limit);
+  if (picked.length === 0) {
+    // 没有疑似对：既不是「复核过没问题」，也不是「复核不了」——如实说「不需要」
+    return { checked: 0, confirmed: 0, misreported: 0, unchecked: 0, pairs: [], available: true, message: '没有疑似干涉，无需复核' };
+  }
   const results: RecheckPairResult[] = [];
   const empty = { checked: 0, confirmed: 0, misreported: 0, unchecked: 0 };
 

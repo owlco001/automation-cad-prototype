@@ -731,6 +731,32 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
             applyRow->addStretch(1);
             pageLayout->addLayout(applyRow);
         }
+
+        // 真实布尔复核结论（只有跑过 --boolean-recheck 才有）：把「疑似」和「真撞」分开说
+        const QJsonObject recheck = document.value(QStringLiteral("geometry")).toObject()
+                                        .value(QStringLiteral("booleanRecheck")).toObject();
+        if (!recheck.isEmpty()) {
+            QString recheckText;
+            const int suspects = recheck.value(QStringLiteral("suspects")).toInt();
+            if (suspects == 0) {
+                recheckText = QStringLiteral("真实布尔复核：无需复核（0 处疑似）");
+            } else if (!recheck.value(QStringLiteral("available")).toBool(true)) {
+                recheckText = QStringLiteral("真实布尔复核：未复核 —— %1")
+                                  .arg(recheck.value(QStringLiteral("message")).toString());
+            } else {
+                recheckText = QStringLiteral("真实布尔复核：确认 %1 处 / AABB 误报 %2 处 / 复核不了 %3 处（共 %4 处疑似）")
+                                  .arg(recheck.value(QStringLiteral("confirmed")).toInt())
+                                  .arg(recheck.value(QStringLiteral("misreported")).toInt())
+                                  .arg(recheck.value(QStringLiteral("unchecked")).toInt())
+                                  .arg(suspects);
+                const QString note = recheck.value(QStringLiteral("message")).toString();
+                if (!note.isEmpty()) recheckText += QStringLiteral("　").append(note);
+            }
+            auto *recheckLabel = new QLabel(recheckText, page);
+            recheckLabel->setWordWrap(true);
+            pageLayout->addWidget(recheckLabel);
+        }
+
         m_tabs->addTab(page, QStringLiteral("干涉初筛（%1）").arg(pairs.size()));
     }
 

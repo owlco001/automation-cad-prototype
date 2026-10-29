@@ -131,6 +131,16 @@ test('--clearance 取值不合法时退出码 2（不带 --with-geometry 也不�
 });
 
 
+test('--boolean-recheck：连不上 sidecar 时如实标「未复核」，不冒充没问题', { timeout: 120_000 }, () => {
+  const stdout = execFileSync(process.execPath,
+    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--boolean-recheck', 'http://127.0.0.1:1'],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const recheck = JSON.parse(stdout).geometry.booleanRecheck;
+  assert.equal(recheck.suspects, 0, '排布合规后的样机没有疑似对');
+  assert.equal(recheck.checked, 0);
+  assert.match(recheck.message, /无需复核/, '0 处疑似要说「不需要」，不能说「已复核」');
+});
+
 test('线体加宽：CLI 把结论写进 geometry.widening，不可行时给带数字的原因', { timeout: 240_000 }, () => {
   const stdout = execFileSync(process.execPath,
     [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--min-widening', '40'],
