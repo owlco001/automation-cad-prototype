@@ -131,6 +131,20 @@ test('--clearance 取值不合法时退出码 2（不带 --with-geometry 也不�
 });
 
 
+test('线体加宽：CLI 把结论写进 geometry.widening，不可行时给带数字的原因', { timeout: 240_000 }, () => {
+  const stdout = execFileSync(process.execPath,
+    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--min-widening', '40'],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const widening = JSON.parse(stdout).geometry.widening;
+  assert.equal(widening.targetClearanceMm, 40);
+  assert.equal(widening.reachable, false, '四工位 40 mm 加宽到上限仍不收敛');
+  assert.equal(widening.extraMm, widening.maxExtraMm);
+  assert.ok(widening.probes.length >= 2, '至少探测 0 与上限两点');
+  assert.equal(widening.probes[0].extraMm, 0);
+  assert.match(widening.remaining.reason, /重叠|工位内部|跨工位/);
+  assert.match(widening.remaining.reason, /\d+/, '原因要落到具体处数，不能只说「不行」');
+});
+
 test('--resolve-clearance 20 把间距推到阈值之上（不是只算建议，要真的合规）', { timeout: 180_000 }, () => {
   const stdout = execFileSync(process.execPath,
     [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry',
