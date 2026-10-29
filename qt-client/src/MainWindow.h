@@ -76,6 +76,7 @@ public:
     void tunePlacementDialog();
     /// 方向键微调选中零件（3D 里点选后用）
     void nudgeSelectedPart(int dx, int dy, int dz);
+    void saveMachineCaseDialog();
     /// 整站挪：同一前缀（st2-…）的所有零件一起平移
     void nudgeStation(const QString &scope, int dx, int dy, int dz);
 public:

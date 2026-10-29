@@ -3,6 +3,7 @@
 #include <QDialogButtonBox>
 #include <QFile>
 #include <QFileDialog>
+#include <QSaveFile>
 #include <QPushButton>
 #include <QMessageBox>
 #include <QTextStream>
@@ -48,6 +49,27 @@ void appendRow(QTableWidget *table, const QStringList &cells) {
 }
 
 }  // namespace
+
+bool MachineCaseDialog::saveFile(const QJsonObject &document, const QString &path, int *bytes, QString *error) {
+    const QJsonDocument doc(document);
+    const QByteArray payload = doc.toJson(QJsonDocument::Indented);
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        *error = QStringLiteral("打不开目标文件：%1（%2）").arg(path, file.errorString());
+        return false;
+    }
+    if (file.write(payload) != payload.size()) {
+        *error = QStringLiteral("写入不完整：%1").arg(file.errorString());
+        file.cancelWriting();
+        return false;
+    }
+    if (!file.commit()) {
+        *error = QStringLiteral("提交失败：%1").arg(file.errorString());
+        return false;
+    }
+    if (bytes) *bytes = payload.size();
+    return true;
+}
 
 bool MachineCaseDialog::loadFile(const QString &path, QJsonObject *document, QString *error) {
     QFile file(path);

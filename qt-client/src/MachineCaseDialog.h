@@ -29,6 +29,9 @@ public:
     /// 读文件并校验 kind/schemaVersion；失败时 error 给出可操作原因
     static bool loadFile(const QString &path, QJsonObject *document, QString *error);
 
+    /// 写回方案 JSON（缩进 2、UTF-8），写完与 loadFile 互逆
+    static bool saveFile(const QJsonObject &document, const QString &path, int *bytes, QString *error);
+
     /// 摘要一行，供自检/状态栏输出
     static QString summarize(const QJsonObject &document);
 

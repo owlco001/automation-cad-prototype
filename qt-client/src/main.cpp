@@ -7,6 +7,7 @@
 #include <QSurfaceFormat>
 #include <QDebug>
 #include <QDir>
+#include <QFile>
 #include <QStandardPaths>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -451,6 +452,50 @@ int main(int argc, char *argv[]) {
                                  .arg(push.value(QStringLiteral("moves")).toArray().size())
                                  .arg(push.value(QStringLiteral("converged")).toBool() ? 1 : 0);
         return 0;
+    }
+
+    // 方案存取往返自检：--case-save-selftest <case.json>（存→读→比对关键字段）
+    {
+        const int index = args.indexOf(QStringLiteral("--case-save-selftest"));
+        if (index >= 0 && index + 1 < args.size()) {
+            QJsonObject original;
+            QString error;
+            if (!MachineCaseDialog::loadFile(args.at(index + 1), &original, &error)) {
+                qCritical().noquote() << "FT_QT_CASE_RT_FAIL" << error;
+                return 1;
+            }
+            const QString outPath = QDir::tempPath() + QStringLiteral("/automationcad-roundtrip.json");
+            int bytes = 0;
+            if (!MachineCaseDialog::saveFile(original, outPath, &bytes, &error)) {
+                qCritical().noquote() << "FT_QT_CASE_RT_FAIL" << error;
+                return 1;
+            }
+            QJsonObject reloaded;
+            if (!MachineCaseDialog::loadFile(outPath, &reloaded, &error)) {
+                qCritical().noquote() << "FT_QT_CASE_RT_FAIL 回读失败：" << error;
+                return 1;
+            }
+            const auto partsOf = [](const QJsonObject &document) {
+                return document.value(QStringLiteral("geometry")).toObject()
+                    .value(QStringLiteral("parts")).toArray().size();
+            };
+            const QJsonObject originalStamp = original.value(QStringLiteral("compliance")).toObject();
+            const QJsonObject reloadedStamp = reloaded.value(QStringLiteral("compliance")).toObject();
+            if (partsOf(original) != partsOf(reloaded)
+                || original.value(QStringLiteral("brief")).toString() != reloaded.value(QStringLiteral("brief")).toString()
+                || originalStamp.value(QStringLiteral("clearanceMm")).toInt() != reloadedStamp.value(QStringLiteral("clearanceMm")).toInt()
+                || originalStamp.value(QStringLiteral("moves")).toInt() != reloadedStamp.value(QStringLiteral("moves")).toInt()) {
+                qCritical().noquote() << "FT_QT_CASE_RT_FAIL 往返后字段不一致";
+                return 1;
+            }
+            QFile cleanup(outPath);
+            cleanup.remove();
+            qInfo().noquote() << QStringLiteral("FT_QT_CASE_RT_OK bytes=%1 parts=%2 stampMm=%3 moves=%4")
+                                     .arg(bytes).arg(partsOf(reloaded))
+                                     .arg(reloadedStamp.value(QStringLiteral("clearanceMm")).toInt())
+                                     .arg(reloadedStamp.value(QStringLiteral("moves")).toInt());
+            return 0;
+        }
     }
 
     // 整站挪自检：--station-move-selftest "brief"（按前缀成组 + 整组平移 + 别的不动）

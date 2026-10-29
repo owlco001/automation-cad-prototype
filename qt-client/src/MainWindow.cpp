@@ -110,6 +110,7 @@ MainWindow::MainWindow(QWidget *parent)
     fileMenu->addAction(tr("导出 STL…"), this, &MainWindow::exportStlDialog);
     fileMenu->addAction(tr("导出整机示意 STL…"), this, &MainWindow::exportMachineStlDialog);
     fileMenu->addAction(tr("从 brief 生成整机方案…"), this, &MainWindow::designMachineDialog);
+    fileMenu->addAction(tr("保存整机方案…"), this, &MainWindow::saveMachineCaseDialog);
     fileMenu->addAction(tr("打开整机方案…"), this, [this]() {
         const QString path = QFileDialog::getOpenFileName(this, tr("打开整机方案"), QString(),
                                                           tr("整机方案 (*.json)"));
@@ -856,6 +857,27 @@ QStringList MainWindow::partsOfScope(const QJsonObject &document, const QString 
     return members;
 }
 
+void MainWindow::saveMachineCaseDialog() {
+    if (m_lastDocument.isEmpty()) {
+        statusBar()->showMessage(tr("还没有整机方案可存：先「从 brief 生成整机方案」或「打开整机方案」"), 12000);
+        return;
+    }
+    const QString path = QFileDialog::getSaveFileName(this, tr("保存整机方案"),
+                                                      QStringLiteral("machine-case.json"),
+                                                      tr("整机方案 (*.json)"));
+    if (path.isEmpty()) return;
+    int bytes = 0;
+    QString error;
+    if (!MachineCaseDialog::saveFile(m_lastDocument, path, &bytes, &error)) {
+        QMessageBox::warning(this, tr("保存整机方案失败"), error);
+        return;
+    }
+    qInfo().noquote() << "FT_QT_CASE_SAVED path=" << path << "bytes=" << bytes
+                      << "moves=" << m_lastMoves.size();
+    statusBar()->showMessage(tr("已保存整机方案：%1（%2 字节，含 %3 次手工调整）")
+                                 .arg(path).arg(bytes).arg(m_lastMoves.size()), 15000);
+}
+
 void MainWindow::nudgeStation(const QString &scope, int dx, int dy, int dz) {
     if (m_lastBrief.trimmed().isEmpty()) {
         statusBar()->showMessage(tr("需要先用 brief 生成方案，才知道怎么重算"), 8000);
@@ -889,9 +911,12 @@ void MainWindow::nudgeStation(const QString &scope, int dx, int dy, int dz) {
     qInfo().noquote() << "FT_QT_STATION_MOVE scope=" << scope << "members=" << members.size()
                       << "d=" << dx << dy << dz
                       << "overlaps=" << interference.value(QStringLiteral("count")).toInt();
-    statusBar()->showMessage(tr("整站挪 %1（%2 件）(%3,%4,%5) · 重叠 %6 对")
+    const QJsonObject clearance = updated.value(QStringLiteral("geometry")).toObject()
+                                      .value(QStringLiteral("clearance")).toObject();
+    statusBar()->showMessage(tr("整站挪 %1（%2 件）(%3,%4,%5) · 重叠 %6 对 · 间距不足 %7 处")
                                  .arg(scope).arg(members.size()).arg(dx).arg(dy).arg(dz)
-                                 .arg(interference.value(QStringLiteral("count")).toInt()), 15000);
+                                 .arg(interference.value(QStringLiteral("count")).toInt())
+                                 .arg(clearance.value(QStringLiteral("count")).toInt()), 15000);
 }
 
 void MainWindow::nudgeSelectedPart(int dx, int dy, int dz) {
