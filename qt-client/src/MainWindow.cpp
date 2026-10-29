@@ -1464,6 +1464,31 @@ bool MainWindow::loadCatalog(QJsonArray *catalog, QString *error) {
     return true;
 }
 
+QVector3D MainWindow::lastUserPartSize() const {
+    const QJsonArray parts = m_lastDocument.value(QStringLiteral("geometry")).toObject()
+                                 .value(QStringLiteral("parts")).toArray();
+    for (const QJsonValue &entry : parts) {
+        const QJsonObject part = entry.toObject();
+        if (!part.value(QStringLiteral("id")).toString().startsWith(QStringLiteral("user-"))) continue;
+        const QJsonArray size = part.value(QStringLiteral("shape")).toObject().value(QStringLiteral("size")).toArray();
+        if (size.size() == 3) {
+            return QVector3D(static_cast<float>(size.at(0).toDouble()),
+                             static_cast<float>(size.at(1).toDouble()),
+                             static_cast<float>(size.at(2).toDouble()));
+        }
+    }
+    return QVector3D();
+}
+
+bool MainWindow::documentHasUserPart() const {
+    const QJsonArray parts = m_lastDocument.value(QStringLiteral("geometry")).toObject()
+                                 .value(QStringLiteral("parts")).toArray();
+    for (const QJsonValue &entry : parts) {
+        if (entry.toObject().value(QStringLiteral("id")).toString().startsWith(QStringLiteral("user-"))) return true;
+    }
+    return false;
+}
+
 bool MainWindow::movePartTo(const QString &partId, double x, double y, int *partCount, QString *error) {
     if (m_lastBrief.trimmed().isEmpty()) {
         *error = tr("还没有整机方案");

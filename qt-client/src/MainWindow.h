@@ -85,6 +85,9 @@ public:
     /// 把已有零件拖到地面坐标 (x,y)：算出相对位移后走管线 --move，几何由 desktop 重算
     bool movePartTo(const QString &partId, double x, double y, int *partCount, QString *error);
     int insertHistoryDepth() const { return m_insertHistory.size(); }
+    /// 自检用：当前文档里 user-* 零件的尺寸（找不到返回空）
+    QVector3D lastUserPartSize() const;
+    bool documentHasUserPart() const;
     bool exportStl(const QString &path, int *bytes, QString *error);
     /// 剖切自检用：抓剖切前后的非背景像素数（真看图，不看标志位）
     bool clipTestMetrics(double z, int *beforePixels, int *afterPixels, QString *error);

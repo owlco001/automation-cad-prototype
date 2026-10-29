@@ -319,6 +319,54 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 尺寸 + 撤销自检：--size-undo-selftest "brief" <type> <WxHxL>
+    {
+        const int index = args.indexOf(QStringLiteral("--size-undo-selftest"));
+        if (index >= 0 && index + 3 < args.size()) {
+            MainWindow window;
+            window.resize(1200, 800);
+            window.show();
+            QJsonObject document;
+            QString error;
+            int shapes = 0;
+            if (!window.designMachineFromBrief(args.at(index + 1), &document, &error)
+                || !window.renderMachineGeometry(document, &shapes, &error)) {
+                qCritical().noquote() << "FT_QT_SIZE_UNDO_FAIL" << error;
+                return 1;
+            }
+            // 问的尺寸直接按 "长x宽x高" 传，不走界面弹窗
+            const QStringList bits = args.at(index + 3).toLower().split(QLatin1Char('x'), Qt::SkipEmptyParts);
+            if (bits.size() != 3) {
+                qCritical().noquote() << "FT_QT_SIZE_UNDO_FAIL 尺寸格式要 长x宽x高";
+                return 1;
+            }
+            const QVector3D size(bits.at(0).toFloat(), bits.at(1).toFloat(), bits.at(2).toFloat());
+            int count = 0;
+            if (!window.insertPartFromCatalog(args.at(index + 2), QVector3D(0, 0, 0), &count, &error, size)) {
+                qCritical().noquote() << "FT_QT_SIZE_UNDO_FAIL" << error;
+                return 1;
+            }
+            const QVector3D inserted = window.lastUserPartSize();
+            if (std::abs(inserted.x() - size.x()) > 0.5 || std::abs(inserted.y() - size.y()) > 0.5
+                || std::abs(inserted.z() - size.z()) > 0.5) {
+                qCritical().noquote() << "FT_QT_SIZE_UNDO_FAIL 插入后尺寸不符" << inserted;
+                return 1;
+            }
+            int undone = 0;
+            if (!window.undoLastInsert(&undone, &error)) {
+                qCritical().noquote() << "FT_QT_SIZE_UNDO_FAIL 撤销失败" << error;
+                return 1;
+            }
+            if (window.documentHasUserPart()) {
+                qCritical().noquote() << "FT_QT_SIZE_UNDO_FAIL 撤销后仍留着 user-* 零件";
+                return 1;
+            }
+            qInfo().noquote() << QStringLiteral("FT_QT_SIZE_UNDO_OK size=%1x%2x%3 parts=%4")
+                                     .arg(inserted.x()).arg(inserted.y()).arg(inserted.z()).arg(undone);
+            return 0;
+        }
+    }
+
     // 多步撤销自检：--undo-stack-selftest "brief" <partId>
     {
         const int index = args.indexOf(QStringLiteral("--undo-stack-selftest"));
