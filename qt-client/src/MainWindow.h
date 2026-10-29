@@ -146,7 +146,13 @@ private:
     QString m_lastBrief;               // 最近一次生成/打开的方案 brief（试摆位要用）
     QStringList m_lastMoves;
     QJsonObject m_lastDocument;        // 最近一次生成的整机方案（试摆位/导出用）
-    QString m_selectedPartId;          // 3D 里点选的零件           // 累计的 --move 参数，多次试挪会叠加
+    QString m_selectedPartId;          // 3D 里点选的零件
+    /// 方案窗口里点「按建议挪」时的待处理位移（由 showMachineCase 的循环消费）
+    QString m_pendingMovePartId;
+    int m_pendingMoveAxis = -1;
+    double m_pendingMoveDelta = 0.0;
+    /// 打开方案窗口并支持「按建议挪 → 重算 → 重新打开」的循环
+    void showMachineCase(const QJsonObject &document);           // 累计的 --move 参数，多次试挪会叠加
     QJsonObject m_assemblyRecord;
     void editAssemblyMember(int memberIndex);
     bool fetchGeometryStl(QByteArray *bytes, QString *error);

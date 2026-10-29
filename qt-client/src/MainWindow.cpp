@@ -126,17 +126,7 @@ MainWindow::MainWindow(QWidget *parent)
         if (!renderMachineGeometry(document, &shapes, &geometryError)) {
             statusBar()->showMessage(tr("方案已打开，但 3D 示意没画出来：%1").arg(geometryError), 20000);
         }
-        MachineCaseDialog dialog(document, this, [this](const QStringList &ids) {
-#ifdef AUTOMATIONCAD_HAVE_OCCT
-            if (ids.isEmpty()) m_occtViewport->highlightPart(QString());
-            else m_occtViewport->highlightParts(ids);
-#endif
-            if (!ids.isEmpty()) {
-                qInfo().noquote() << "FT_QT_PAIR_HIGHLIGHT" << ids.join(QStringLiteral(","));
-                statusBar()->showMessage(tr("干涉对：%1").arg(ids.join(QStringLiteral(" × "))), 15000);
-            }
-        });
-        dialog.exec();
+        showMachineCase(document);
     });
     auto *viewMenu = menuBar()->addMenu(tr("视图"));
     viewMenu->addAction(tr("等轴测"), this, [this]() { setViewportStandardView(0); });
@@ -575,17 +565,67 @@ void MainWindow::designMachineDialog() {
     if (!renderMachineGeometry(document, &shapes, &geometryError)) {
         statusBar()->showMessage(tr("整机方案已生成，但 3D 示意没画出来：%1").arg(geometryError), 20000);
     }
-    MachineCaseDialog dialog(document, this, [this](const QStringList &ids) {
+    showMachineCase(document);
+}
+
+void MainWindow::showMachineCase(const QJsonObject &document) {
+    QJsonObject current = document;
+    while (true) {
+        m_pendingMovePartId.clear();
+        m_pendingMoveAxis = -1;
+        m_pendingMoveDelta = 0.0;
+        MachineCaseDialog dialog(
+            current, this,
+            [this](const QStringList &ids) {
+                if (ids.isEmpty()) {
 #ifdef AUTOMATIONCAD_HAVE_OCCT
-        if (ids.isEmpty()) m_occtViewport->highlightPart(QString());
-        else m_occtViewport->highlightParts(ids);
+                    if (m_occtViewport) m_occtViewport->highlightPart(QString());
 #endif
-        if (!ids.isEmpty()) {
-            qInfo().noquote() << "FT_QT_PAIR_HIGHLIGHT" << ids.join(QStringLiteral(","));
-            statusBar()->showMessage(tr("干涉对：%1").arg(ids.join(QStringLiteral(" × "))), 15000);
+                    return;
+                }
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+                if (m_occtViewport) m_occtViewport->highlightParts(ids);
+#endif
+                qInfo().noquote() << "FT_QT_PAIR_HIGHLIGHT" << ids.join(QStringLiteral(","));
+                statusBar()->showMessage(tr("干涉对：%1").arg(ids.join(QStringLiteral(" × "))), 15000);
+            },
+            [this](const QString &partId, int axis, double delta) {
+                m_pendingMovePartId = partId;
+                m_pendingMoveAxis = axis;
+                m_pendingMoveDelta = delta;
+            });
+        dialog.exec();
+        if (m_pendingMovePartId.isEmpty() || m_lastBrief.trimmed().isEmpty()) return;
+
+        QStringList moves = m_lastMoves;
+        moves << QStringLiteral("%1:%2,%3,%4")
+                     .arg(m_pendingMovePartId)
+                     .arg(m_pendingMoveAxis == 0 ? m_pendingMoveDelta : 0.0)
+                     .arg(m_pendingMoveAxis == 1 ? m_pendingMoveDelta : 0.0)
+                     .arg(m_pendingMoveAxis == 2 ? m_pendingMoveDelta : 0.0);
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        QJsonObject updated;
+        QString error;
+        const bool ok = designMachineFromBrief(m_lastBrief, &updated, &error, moves);
+        QApplication::restoreOverrideCursor();
+        if (!ok) {
+            QMessageBox::warning(this, tr("按建议挪失败"), error);
+            return;
         }
-    });
-    dialog.exec();
+        m_lastDocument = updated;
+        int shapes = 0;
+        QString geometryError;
+        renderMachineGeometry(updated, &shapes, &geometryError);
+        const QJsonObject interference = updated.value(QStringLiteral("geometry")).toObject()
+                                            .value(QStringLiteral("interference")).toObject();
+        qInfo().noquote() << "FT_QT_APPLY_HINT part=" << m_pendingMovePartId
+                          << "count=" << interference.value(QStringLiteral("count")).toInt();
+        statusBar()->showMessage(tr("已按建议挪 %1 · 重叠 %2 对（需确认 %3）")
+                                     .arg(m_pendingMovePartId)
+                                     .arg(interference.value(QStringLiteral("count")).toInt())
+                                     .arg(interference.value(QStringLiteral("suspects")).toInt()), 15000);
+        current = updated;
+    }
 }
 
 void MainWindow::keyPressEvent(QKeyEvent *event) {
@@ -727,17 +767,7 @@ void MainWindow::tunePlacementDialog() {
                                  .arg(interference.value(QStringLiteral("count")).toInt())
                                  .arg(interference.value(QStringLiteral("suspects")).toInt())
                                  .arg(interference.value(QStringLiteral("declared")).toInt()), 20000);
-    MachineCaseDialog refreshed(updated, this, [this](const QStringList &ids) {
-#ifdef AUTOMATIONCAD_HAVE_OCCT
-        if (ids.isEmpty()) m_occtViewport->highlightPart(QString());
-        else m_occtViewport->highlightParts(ids);
-#endif
-        if (!ids.isEmpty()) {
-            qInfo().noquote() << "FT_QT_PAIR_HIGHLIGHT" << ids.join(QStringLiteral(","));
-            statusBar()->showMessage(tr("干涉对：%1").arg(ids.join(QStringLiteral(" × "))), 15000);
-        }
-    });
-    refreshed.exec();
+    showMachineCase(updated);
 }
 
 bool MainWindow::exportMachineStlForTest(const QString &path, int *bytes, QString *error) {

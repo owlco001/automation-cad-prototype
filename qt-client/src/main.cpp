@@ -163,6 +163,56 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 按建议挪自检：--apply-hint-selftest "brief"，取第一对的 suggestion 应用后重算
+    if (args.contains(QStringLiteral("--apply-hint-selftest"))) {
+        const int briefIndex = args.indexOf(QStringLiteral("--apply-hint-selftest"));
+        if (briefIndex + 1 >= args.size()) {
+            qCritical().noquote() << "FT_QT_APPLY_HINT_FAIL 用法：--apply-hint-selftest \"brief\"";
+            return 2;
+        }
+        MainWindow window;
+        QJsonObject before;
+        QString error;
+        if (!window.designMachineFromBrief(args.at(briefIndex + 1), &before, &error)) {
+            qCritical().noquote() << "FT_QT_APPLY_HINT_FAIL" << error;
+            return 1;
+        }
+        const auto counts = [](const QJsonObject &document) {
+            return document.value(QStringLiteral("geometry")).toObject()
+                .value(QStringLiteral("interference")).toObject();
+        };
+        const QJsonObject beforeInterference = counts(before);
+        const QJsonArray pairs = beforeInterference.value(QStringLiteral("pairs")).toArray();
+        if (pairs.isEmpty()) {
+            qInfo().noquote() << "FT_QT_APPLY_HINT_OK count=0 没有重叠对";
+            return 0;
+        }
+        const QJsonObject suggestion = pairs.at(0).toObject().value(QStringLiteral("suggestion")).toObject();
+        if (suggestion.isEmpty()) {
+            qCritical().noquote() << "FT_QT_APPLY_HINT_FAIL 第一对没有 suggestion";
+            return 1;
+        }
+        const QString axis = suggestion.value(QStringLiteral("axis")).toString();
+        const double delta = suggestion.value(QStringLiteral("delta")).toDouble();
+        const QStringList moves{QStringLiteral("%1:%2,%3,%4")
+                                    .arg(suggestion.value(QStringLiteral("partId")).toString())
+                                    .arg(axis == QStringLiteral("x") ? delta : 0.0)
+                                    .arg(axis == QStringLiteral("y") ? delta : 0.0)
+                                    .arg(axis == QStringLiteral("z") ? delta : 0.0)};
+        QJsonObject after;
+        if (!window.designMachineFromBrief(args.at(briefIndex + 1), &after, &error, moves)) {
+            qCritical().noquote() << "FT_QT_APPLY_HINT_FAIL" << error;
+            return 1;
+        }
+        const QJsonObject afterInterference = counts(after);
+        qInfo().noquote() << QStringLiteral("FT_QT_APPLY_HINT_OK part=%1 axis=%2 delta=%3 before=%4 after=%5")
+                                 .arg(suggestion.value(QStringLiteral("partId")).toString(), axis)
+                                 .arg(delta, 0, 'f', 1)
+                                 .arg(beforeInterference.value(QStringLiteral("count")).toInt())
+                                 .arg(afterInterference.value(QStringLiteral("count")).toInt());
+        return 0;
+    }
+
     // 方向键微调自检：--nudge-selftest "brief" --part <id> --delta dx,dy,dz
     if (args.contains(QStringLiteral("--nudge-selftest"))) {
         const int briefIndex = args.indexOf(QStringLiteral("--nudge-selftest"));

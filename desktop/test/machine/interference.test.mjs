@@ -119,3 +119,34 @@ test('圆柱绕 Z 转不放大包围盒（按方块算会凭空多出 √2 倍�
   assert.equal(turned.max[0], 50, '旋转后 X 半宽仍应是半径');
   assert.equal(turned.max[1], 50, '旋转后 Y 半宽仍应是半径');
 });
+
+
+test('给出的建议位移真的能分开这一对（按建议挪完就不再重叠）', () => {
+  const parts = [
+    box('frame-leg-1', [0, 0, 0], [60, 60, 800], 0, 'frame'),
+    box('frame-stringer-front', [0, -20, 150], [400, 40, 40], 0, 'frame')
+  ];
+  const before = screenInterference({ parts });
+  assert.equal(before.count, 1);
+  const suggestion = before.pairs[0].suggestion;
+  assert.ok(suggestion, '重叠对必须给建议位移');
+  const moved = parts.map((part) =>
+    part.id === suggestion.partId
+      ? { ...part, center: part.center.map((value, index) => (suggestion.axis === ['x', 'y', 'z'][index] ? value + suggestion.delta : value)) }
+      : part
+  );
+  const after = screenInterference({ parts: moved });
+  assert.equal(after.count, 0, `按建议挪 ${suggestion.partId} ${suggestion.axis}=${suggestion.delta} 后仍然重叠`);
+});
+
+test('位移不能直接用重叠量：40mm 重叠可能要挪更多才真的分开', () => {
+  // 真实几何的形态：立柱 60 深（-360..-300）、下横梁 40 深（-350..-310），中心重合 → AABB 重叠 40；
+  // 但要让横梁完全离开立柱，得挪到 -360 之下，即 51（含 1mm 间隙）而不是 40
+  const parts = [
+    box('frame-leg-1', [0, -330, 415], [60, 60, 830], 0, 'frame'),
+    box('frame-stringer-front', [0, -330, 150], [400, 40, 40], 0, 'frame')
+  ];
+  const result = screenInterference({ parts });
+  const suggestion = result.pairs[0].suggestion;
+  assert.ok(Math.abs(suggestion.delta) > 40, `建议位移 ${suggestion.delta} 不应等于重叠量 40`);
+});

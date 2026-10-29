@@ -15,8 +15,10 @@ class MachineCaseDialog : public QDialog {
     Q_OBJECT
 public:
     /// onHighlight：选中干涉对时通知外面在 3D 里点亮两端（空列表 = 取消）
+    /// onApplyMove：按建议位移挪零件（partId, axis 0/1/2, deltaMm）
     explicit MachineCaseDialog(const QJsonObject &document, QWidget *parent = nullptr,
-                               std::function<void(const QStringList &)> onHighlight = {});
+                               std::function<void(const QStringList &)> onHighlight = {},
+                               std::function<void(const QString &, int, double)> onApplyMove = {});
 
     /// 读文件并校验 kind/schemaVersion；失败时 error 给出可操作原因
     static bool loadFile(const QString &path, QJsonObject *document, QString *error);

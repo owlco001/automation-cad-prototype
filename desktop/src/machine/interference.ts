@@ -19,6 +19,8 @@ export interface ScreenPair {
   kind: ScreenKind;
   /** declared 时给出原因（如「立柱插横梁」） */
   reason?: string;
+  /** 让这一对分开的最小轴向外移建议（谁动、往哪动、多少 mm） */
+  suggestion?: { partId: string; axis: 'x' | 'y' | 'z'; delta: number };
   /** AABB 重叠体积（mm³），只作排序/量级参考 */
   overlapMm3: number;
   overlapBox: [number, number, number];
@@ -42,6 +44,9 @@ export interface ScreenResult {
 }
 
 type Vec3 = [number, number, number];
+
+/** 建议位移里预留给「刚好贴住」之外的间隙（mm） */
+const GAP = 1;
 
 function halfExtents(part: any): Vec3 {
   const shape = part.shape || {};
@@ -74,6 +79,11 @@ export function partBounds(part: any): { min: Vec3; max: Vec3 } {
   };
 }
 
+function extentVolume(part: any): number {
+  const [hx, hy, hz] = halfExtents(part);
+  return hx * hy * hz * 8;
+}
+
 export function screenInterference(geometry: any): ScreenResult {
   const parts = Array.isArray(geometry?.parts) ? geometry.parts : [];
   const boxes = parts.map((part: any) => ({ part, bounds: partBounds(part) }));
@@ -100,6 +110,48 @@ export function screenInterference(geometry: any): ScreenResult {
       const dz = Math.min(a.max[2], b.max[2]) - Math.max(a.min[2], b.min[2]);
       if (dx <= EPS || dy <= EPS || dz <= EPS) continue;
       const reason = declared.get(jointKey(String(boxes[i].part.id), String(boxes[j].part.id)));
+      // 分开代价最小的方案：逐轴算「往 + / 往 -」各自要挪多远，取全局最小。
+      // 注意不能直接拿重叠量当位移：移动件一旦越过对方边界，所需位移会比重叠量更大
+      //（实测下横梁 40mm 重叠却要挪 51mm 才真的分开）。
+      const iPart = boxes[i].part;
+      const jPart = boxes[j].part;
+      const iVolume = extentVolume(iPart);
+      const jVolume = extentVolume(jPart);
+      const mover = iVolume <= jVolume ? iPart : jPart;
+      const other = iVolume <= jVolume ? jPart : iPart;
+      const moverBounds = partBounds(mover);
+      const otherBounds = partBounds(other);
+      // 逐个下标取用会命中 noUncheckedIndexedAccess（number | undefined），摊平成数组再索引
+      const moverMin: number[] = [...moverBounds.min];
+      const moverMax: number[] = [...moverBounds.max];
+      const otherMin: number[] = [...otherBounds.min];
+      const otherMax: number[] = [...otherBounds.max];
+      let bestAxis: 'x' | 'y' | 'z' = 'x';
+      let bestDelta = Number.POSITIVE_INFINITY;
+      (['x', 'y', 'z'] as const).forEach((axis, index) => {
+        const plus = (otherMax[index] ?? 0) - (moverMin[index] ?? 0) + GAP;
+        const minus = (moverMax[index] ?? 0) - (otherMin[index] ?? 0) + GAP;
+        if (plus < bestDelta) {
+          bestDelta = plus;
+          bestAxis = axis;
+        }
+        if (minus < bestDelta) {
+          bestDelta = minus;
+          bestAxis = axis;
+        }
+      });
+      const axisIndex = bestAxis === 'x' ? 0 : bestAxis === 'y' ? 1 : 2;
+      // 方向：优先「往远离对方中心的那一侧」
+      const centerGap = Number(mover.center[axisIndex]) - Number(other.center[axisIndex]);
+      const sign = centerGap > 0 ? 1 : centerGap < 0 ? -1 : 1;
+      const plusNeed = (otherMax[axisIndex] ?? 0) - (moverMin[axisIndex] ?? 0) + GAP;
+      const minusNeed = (moverMax[axisIndex] ?? 0) - (otherMin[axisIndex] ?? 0) + GAP;
+      const delta = sign > 0 ? plusNeed : -minusNeed;
+      const suggestion = {
+        partId: String(mover.id),
+        axis: bestAxis,
+        delta: Math.round(delta * 10) / 10
+      };
       pairs.push({
         kind: reason ? 'declared' : 'suspect',
         ...(reason ? { reason } : {}),
@@ -109,6 +161,7 @@ export function screenInterference(geometry: any): ScreenResult {
         bName: boxes[j].part.name,
         aRole: boxes[i].part.role,
         bRole: boxes[j].part.role,
+        suggestion,
         overlapMm3: Math.round(dx * dy * dz * 10) / 10,
         overlapBox: [Math.round(dx * 100) / 100, Math.round(dy * 100) / 100, Math.round(dz * 100) / 100]
       });

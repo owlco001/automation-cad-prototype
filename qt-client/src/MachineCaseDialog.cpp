@@ -4,6 +4,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QPushButton>
+#include <QMessageBox>
 #include <QTextStream>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -15,6 +16,7 @@
 #include <QTabWidget>
 #include <QWidget>
 #include <QMessageBox>
+#include <QHBoxLayout>
 #include <QVBoxLayout>
 
 namespace {
@@ -132,7 +134,8 @@ bool MachineCaseDialog::writeBomCsv(const QJsonObject &document, const QString &
 }
 
 MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *parent,
-                                     std::function<void(const QStringList &)> onHighlight)
+                                     std::function<void(const QStringList &)> onHighlight,
+                                     std::function<void(const QString &, int, double)> onApplyMove)
     : QDialog(parent) {
     setWindowTitle(QStringLiteral("整机方案（只读）"));
     resize(760, 520);
@@ -206,10 +209,19 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
     if (!interference.isEmpty()) {
         const QJsonArray pairs = interference.value(QStringLiteral("pairs")).toArray();
         auto *conflictTable = makeTable({QStringLiteral("判定"), QStringLiteral("零件 A"), QStringLiteral("零件 B"),
-                                         QStringLiteral("AABB 重叠体积"), QStringLiteral("重叠盒")}, this);
+                                         QStringLiteral("AABB 重叠体积"), QStringLiteral("重叠盒"),
+                                         QStringLiteral("建议位移")}, this);
         for (const QJsonValue &value : pairs) {
             const QJsonObject pair = value.toObject();
             const QJsonArray box = pair.value(QStringLiteral("overlapBox")).toArray();
+            const QJsonObject suggestion = pair.value(QStringLiteral("suggestion")).toObject();
+            const QString axisName = suggestion.value(QStringLiteral("axis")).toString().toUpper();
+            const QString advice = suggestion.isEmpty()
+                ? QStringLiteral("—")
+                : QStringLiteral("挪 %1 %2 %3%4 mm")
+                      .arg(suggestion.value(QStringLiteral("partId")).toString(), axisName,
+                           suggestion.value(QStringLiteral("delta")).toDouble() > 0 ? QStringLiteral("+") : QString(),
+                           QString::number(suggestion.value(QStringLiteral("delta")).toDouble(), 'f', 1));
             appendRow(conflictTable, {
                 pair.value(QStringLiteral("kind")).toString() == QStringLiteral("suspect")
                     ? QStringLiteral("需确认")
@@ -218,7 +230,8 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                 pair.value(QStringLiteral("bName")).toString(),
                 QStringLiteral("%1 mm³").arg(pair.value(QStringLiteral("overlapMm3")).toDouble(), 0, 'f', 1),
                 QStringLiteral("%1 × %2 × %3").arg(box.at(0).toDouble(), 0, 'f', 1)
-                    .arg(box.at(1).toDouble(), 0, 'f', 1).arg(box.at(2).toDouble(), 0, 'f', 1)
+                    .arg(box.at(1).toDouble(), 0, 'f', 1).arg(box.at(2).toDouble(), 0, 'f', 1),
+                advice
             });
         }
         conflictTable->resizeColumnsToContents();
@@ -266,6 +279,31 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
         auto *note = new QLabel(verdict, page);
         note->setWordWrap(true);
         pageLayout->addWidget(note);
+        if (onApplyMove) {
+            auto *applyRow = new QHBoxLayout();
+            auto *applyButton = new QPushButton(QStringLiteral("按建议挪这一对…"), page);
+            applyButton->setToolTip(QStringLiteral("把「建议位移」应用到选中的那一对，然后重算几何与干涉"));
+            connect(applyButton, &QPushButton::clicked, page, [conflictTable, pairs, onApplyMove, page]() {
+                const int row = conflictTable->currentRow();
+                if (row < 0 || row >= pairs.size()) {
+                    QMessageBox::information(page, QStringLiteral("按建议挪"),
+                                             QStringLiteral("先在表里选一行，再按这个按钮。"));
+                    return;
+                }
+                const QJsonObject suggestion = pairs.at(row).toObject().value(QStringLiteral("suggestion")).toObject();
+                if (suggestion.isEmpty()) {
+                    QMessageBox::information(page, QStringLiteral("按建议挪"), QStringLiteral("这一对没有建议位移。"));
+                    return;
+                }
+                const QString axis = suggestion.value(QStringLiteral("axis")).toString();
+                const int index = axis == QStringLiteral("x") ? 0 : axis == QStringLiteral("y") ? 1 : 2;
+                onApplyMove(suggestion.value(QStringLiteral("partId")).toString(), index,
+                            suggestion.value(QStringLiteral("delta")).toDouble());
+            });
+            applyRow->addWidget(applyButton);
+            applyRow->addStretch(1);
+            pageLayout->addLayout(applyRow);
+        }
         m_tabs->addTab(page, QStringLiteral("干涉初筛（%1）").arg(pairs.size()));
     }
 
