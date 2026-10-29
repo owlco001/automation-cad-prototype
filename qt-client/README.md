@@ -272,6 +272,15 @@ CI 的 Qt job 现在会拿仓库里的 fixture（`docs/desktop/eval/layout-case.
 `--compliance-stamp-selftest` 与 `--layout-csv-selftest`，并校验 CSV 是 **60 行**（58 位移 + 表头 + 合计）——
 防「JSON 里有、界面读不出来」这类回归，且这一步不需要 node。fixture 与算法漂移会被 unit job 的守卫抓到。
 
+「这台机器要不要加宽」也有直接答案：`desktop/src/machine/widen.ts` 的 `widenMachine(geometry, extra)`
+把工位按序号沿 X 拉开，**同时把机架/输送线的 X 位置和尺寸按同一比例放大**（只挪工位不动机架，
+工位会走到框外去——上一版实测 800 mm 也不收敛）。`minWidening` 在此之上二分。
+
+实测四工位目标 40 mm：`target 40 extra 800 reachable=false probes [(0,false),(800,false)]`，
+结论是「加宽救不了：加宽到 +800 mm 仍有 **3 处重叠**——加宽只解决间距，重叠要改布局或减件」。
+这条结论要说清是**在当前求解器 + 示意几何下**，不是物理上的不可能。
+概览页会显示这一行（截图 `qt-client-50-widening.png`）。
+
 不知道该怎么定阈值时，干涉页有「测最大可行间距…」：在 5–60 mm 之间二分，
 返回「这台机器还能排得开的最大间距」。实测四工位 → **25 mm**（探测 7 次：5 通过、60 不通过、33 不通过、
 19 通过、26 不通过、23 通过、25 通过），界面概览显示「最大可行间距：25 mm（二分探测 7 次，5–60 mm 区间）」。

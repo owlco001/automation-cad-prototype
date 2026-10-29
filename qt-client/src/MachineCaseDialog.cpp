@@ -282,6 +282,25 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
 
     // 合规戳：方案文件自带「按多少 mm 检查过、结论如何」。
     // 界面当前阈值和它不一致时要说出来——否则用户会以为这份方案是按当前阈值查过的。
+    // 线体加宽结论（只在跑过 --min-widening 时出现）
+    const QJsonObject widening = document.value(QStringLiteral("geometry")).toObject()
+                                     .value(QStringLiteral("widening")).toObject();
+    if (!widening.isEmpty()) {
+        QString widenText;
+        if (widening.value(QStringLiteral("reachable")).toBool()) {
+            const int extra = widening.value(QStringLiteral("extraMm")).toInt();
+            widenText = extra == 0
+                ? QStringLiteral("无需加宽（当前布局已满足 %1 mm 间距）")
+                      .arg(widening.value(QStringLiteral("targetClearanceMm")).toInt())
+                : QStringLiteral("每档加宽 %1 mm（目标 %2 mm 间距）")
+                      .arg(extra).arg(widening.value(QStringLiteral("targetClearanceMm")).toInt());
+        } else {
+            const QJsonObject remaining = widening.value(QStringLiteral("remaining")).toObject();
+            widenText = QStringLiteral("加宽救不了：%1").arg(remaining.value(QStringLiteral("reason")).toString());
+        }
+        appendRow(overview, {QStringLiteral("线体加宽"), widenText});
+    }
+
     const QJsonObject stamp = document.value(QStringLiteral("compliance")).toObject();
     if (!stamp.isEmpty()) {
         const int stampMm = stamp.value(QStringLiteral("clearanceMm")).toInt();

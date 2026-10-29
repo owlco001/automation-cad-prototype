@@ -9,6 +9,7 @@ import { generateMachineGeometry } from '../src/machine/geometry.ts';
 import { screenInterference } from '../src/machine/interference.ts';
 import { resolveConflicts, resolveClearance } from '../src/machine/resolve.ts';
 import { resolveLayout, complianceStamp, maxFeasibleClearance } from '../src/machine/layout.ts';
+import { minWidening } from '../src/machine/widen.ts';
 import { screenClearance } from '../src/machine/clearance.ts';
 
 const args = process.argv.slice(2);
@@ -95,6 +96,15 @@ if (withGeometry) {
       converged: resolution.converged,
       ...(resolution.stopReason ? { stopReason: resolution.stopReason } : {})
     };
+  }
+  const wideningIndex = args.indexOf('--min-widening');
+  if (wideningIndex >= 0) {
+    const target = Number(args[wideningIndex + 1]);
+    if (!Number.isFinite(target) || target <= 0) {
+      process.stderr.write('--min-widening 需要一个正数（目标间距 mm）\n');
+      process.exit(2);
+    }
+    caseData.geometry.widening = minWidening(caseData.geometry, { clearanceMm: target });
   }
   if (args.includes('--max-clearance')) {
     // 二分找「还能排开的最大间距」，口径与排布合规一致
