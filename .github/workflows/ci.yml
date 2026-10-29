@@ -176,6 +176,12 @@ jobs:
         run: |
           . .venv-ft/bin/activate
           FT_PYTHON="$PWD/.venv-ft/bin/python" node featuretree-service/build-tests.mjs
+      # AABB 初筛 vs 真实布尔：量出「把圆柱当方块」与「看不见孔」两种误差方向
+      - name: AABB 初筛与真实布尔的误差
+        timeout-minutes: 10
+        run: |
+          . .venv-ft/bin/activate
+          FT_PYTHON="$PWD/.venv-ft/bin/python" node featuretree-service/aabb-vs-boolean.mjs
 
   smoke:
     name: Electron smoke (xvfb)
