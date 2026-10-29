@@ -135,7 +135,8 @@ bool MachineCaseDialog::writeBomCsv(const QJsonObject &document, const QString &
 
 MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *parent,
                                      std::function<void(const QStringList &)> onHighlight,
-                                     std::function<void(const QString &, int, double)> onApplyMove)
+                                     std::function<void(const QString &, int, double)> onApplyMove,
+                                     std::function<void()> onResolveAll)
     : QDialog(parent) {
     setWindowTitle(QStringLiteral("整机方案（只读）"));
     resize(760, 520);
@@ -301,6 +302,12 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                             suggestion.value(QStringLiteral("delta")).toDouble());
             });
             applyRow->addWidget(applyButton);
+            if (onResolveAll) {
+                auto *resolveButton = new QPushButton(QStringLiteral("批量解开未声明的重叠…"), page);
+                resolveButton->setToolTip(QStringLiteral("逐轮挪动最小的那一处并重算，直到没有未声明重叠"));
+                connect(resolveButton, &QPushButton::clicked, page, [onResolveAll]() { onResolveAll(); });
+                applyRow->addWidget(resolveButton);
+            }
             applyRow->addStretch(1);
             pageLayout->addLayout(applyRow);
         }

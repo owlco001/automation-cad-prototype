@@ -163,6 +163,30 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 批量解重叠自检：--resolve-selftest "brief"，与界面「批量解开未声明的重叠」同一条路径
+    if (args.contains(QStringLiteral("--resolve-selftest"))) {
+        const int briefIndex = args.indexOf(QStringLiteral("--resolve-selftest"));
+        if (briefIndex + 1 >= args.size()) {
+            qCritical().noquote() << "FT_QT_RESOLVE_FAIL 用法：--resolve-selftest \"brief\"";
+            return 2;
+        }
+        MainWindow window;
+        QJsonObject resolved;
+        QString error;
+        if (!window.designMachineFromBrief(args.at(briefIndex + 1), &resolved, &error, {}, true)) {
+            qCritical().noquote() << "FT_QT_RESOLVE_FAIL" << error;
+            return 1;
+        }
+        const QJsonObject resolution = resolved.value(QStringLiteral("geometry")).toObject()
+                                           .value(QStringLiteral("resolution")).toObject();
+        qInfo().noquote() << QStringLiteral("FT_QT_RESOLVE_OK before=%1 after=%2 moves=%3 converged=%4")
+                                 .arg(resolution.value(QStringLiteral("before")).toInt())
+                                 .arg(resolution.value(QStringLiteral("after")).toInt())
+                                 .arg(resolution.value(QStringLiteral("moves")).toArray().size())
+                                 .arg(resolution.value(QStringLiteral("converged")).toBool() ? 1 : 0);
+        return 0;
+    }
+
     // 按建议挪自检：--apply-hint-selftest "brief"，取第一对的 suggestion 应用后重算
     if (args.contains(QStringLiteral("--apply-hint-selftest"))) {
         const int briefIndex = args.indexOf(QStringLiteral("--apply-hint-selftest"));

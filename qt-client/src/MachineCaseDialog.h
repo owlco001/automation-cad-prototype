@@ -18,7 +18,8 @@ public:
     /// onApplyMove：按建议位移挪零件（partId, axis 0/1/2, deltaMm）
     explicit MachineCaseDialog(const QJsonObject &document, QWidget *parent = nullptr,
                                std::function<void(const QStringList &)> onHighlight = {},
-                               std::function<void(const QString &, int, double)> onApplyMove = {});
+                               std::function<void(const QString &, int, double)> onApplyMove = {},
+                               std::function<void()> onResolveAll = {});
 
     /// 读文件并校验 kind/schemaVersion；失败时 error 给出可操作原因
     static bool loadFile(const QString &path, QJsonObject *document, QString *error);

@@ -69,7 +69,7 @@ public:
     bool exportStl(const QString &path, int *bytes, QString *error);
     /// 调 desktop 整机管线（node scripts/machine-design-cli.mjs）把一句话变成方案 JSON
     bool designMachineFromBrief(const QString &brief, QJsonObject *document, QString *error,
-                                const QStringList &moves = {});
+                                const QStringList &moves = {}, bool resolveAll = false);
     /// 试摆位：在已生成的方案上挪一个零件，重跑管线并重算干涉
     void tunePlacementDialog();
     /// 方向键微调选中零件（3D 里点选后用）
@@ -151,6 +151,7 @@ private:
     QString m_pendingMovePartId;
     int m_pendingMoveAxis = -1;
     double m_pendingMoveDelta = 0.0;
+    bool m_pendingResolveAll = false;
     /// 打开方案窗口并支持「按建议挪 → 重算 → 重新打开」的循环
     void showMachineCase(const QJsonObject &document);           // 累计的 --move 参数，多次试挪会叠加
     QJsonObject m_assemblyRecord;

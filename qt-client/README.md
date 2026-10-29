@@ -171,6 +171,15 @@ CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI �
 实测：点中 `conveyor-frame` → 两次 Shift+Right → 状态栏「已挪 conveyor-frame (10,0,0) · 重叠 2 对（需确认 0）」，
 日志 `FT_QT_PICK part= conveyor-frame` / `FT_QT_NUDGE part= conveyor-frame delta= 10 0 0 count= 2`。
 
+**批量解开未声明的重叠**：干涉页「批量解开未声明的重叠…」→ 管线带 `--resolve` 跑
+`resolveConflicts`：**只动 suspect**（declared 是设计上该相接的，动它等于改设计），
+每轮只应用位移最小的那一条再整机重算（一次挪多个会互相影响，必须逐轮验证），
+有轮数上限与「没进展就停」两条保险，收敛不了返回 `converged:false` 并说明原因。
+
+实测六工位（8 处未声明）：`FT_QT_RESOLVE_OK before=8 after=0 moves=8 converged=1`，
+逐轮剩 `7→6→5→4→3→2…`，挪的是治具 5 mm、转台 −9.9 mm 这类小幅位移。
+四工位没有未声明重叠时 `before=0 after=0 moves=0`——不会为了「有动作」去动已声明连接。
+
 **干涉对给「建议位移」并一键应用**：每对算「往哪挪、挪多少才能分开」——逐轴比较「+ / −」两个方向的
 最小所需位移取全局最小（**不能直接拿重叠量当位移**：移动件一旦越过对方边界，所需位移会比重叠量更大，
 实测 40 mm 重叠要挪 51 mm 才真的分开），谁动取体积较小的一件。表里显示「挪 frame-stringer-front Y +51 mm」，

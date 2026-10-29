@@ -444,7 +444,7 @@ bool MainWindow::exportStl(const QString &path, int *bytes, QString *error) {
 }
 
 bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *document, QString *error,
-                                        const QStringList &moves) {
+                                        const QStringList &moves, bool resolveAll) {
     if (brief.trimmed().isEmpty()) {
         *error = tr("brief 不能为空");
         return false;
@@ -474,6 +474,7 @@ bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *docum
     process.setProcessChannelMode(QProcess::SeparateChannels);
     QStringList arguments{script, QStringLiteral("--brief"), brief, QStringLiteral("--with-geometry")};
     for (const QString &move : moves) arguments << QStringLiteral("--move") << move;
+    if (resolveAll) arguments << QStringLiteral("--resolve");
     process.start(QStringLiteral("node"), arguments);
     if (!process.waitForStarted(10'000)) {
         *error = tr("启动 node 失败：%1").arg(process.errorString());
@@ -593,8 +594,39 @@ void MainWindow::showMachineCase(const QJsonObject &document) {
                 m_pendingMovePartId = partId;
                 m_pendingMoveAxis = axis;
                 m_pendingMoveDelta = delta;
-            });
+            },
+            [this]() { m_pendingResolveAll = true; });
         dialog.exec();
+        if (m_pendingResolveAll && !m_lastBrief.trimmed().isEmpty()) {
+            m_pendingResolveAll = false;
+            QApplication::setOverrideCursor(Qt::WaitCursor);
+            QJsonObject resolved;
+            QString resolveError;
+            const bool ok = designMachineFromBrief(m_lastBrief, &resolved, &resolveError, m_lastMoves, true);
+            QApplication::restoreOverrideCursor();
+            if (!ok) {
+                QMessageBox::warning(this, tr("批量解重叠失败"), resolveError);
+                return;
+            }
+            m_lastDocument = resolved;
+            int resolvedShapes = 0;
+            QString resolveGeometryError;
+            renderMachineGeometry(resolved, &resolvedShapes, &resolveGeometryError);
+            const QJsonObject resolution = resolved.value(QStringLiteral("geometry")).toObject()
+                                               .value(QStringLiteral("resolution")).toObject();
+            qInfo().noquote() << "FT_QT_RESOLVE_ALL before=" << resolution.value(QStringLiteral("before")).toInt()
+                              << "after=" << resolution.value(QStringLiteral("after")).toInt()
+                              << "moves=" << resolution.value(QStringLiteral("moves")).toArray().size()
+                              << "converged=" << resolution.value(QStringLiteral("converged")).toBool();
+            statusBar()->showMessage(tr("批量解重叠：%1 → %2 处（挪了 %3 件，%4）")
+                                         .arg(resolution.value(QStringLiteral("before")).toInt())
+                                         .arg(resolution.value(QStringLiteral("after")).toInt())
+                                         .arg(resolution.value(QStringLiteral("moves")).toArray().size())
+                                         .arg(resolution.value(QStringLiteral("converged")).toBool()
+                                                  ? tr("已收敛") : tr("未收敛")), 20000);
+            current = resolved;
+            continue;
+        }
         if (m_pendingMovePartId.isEmpty() || m_lastBrief.trimmed().isEmpty()) return;
 
         QStringList moves = m_lastMoves;

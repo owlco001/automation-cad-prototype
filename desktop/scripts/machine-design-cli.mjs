@@ -7,6 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { buildMachineCase } from '../src/machine/case.ts';
 import { generateMachineGeometry } from '../src/machine/geometry.ts';
 import { screenInterference } from '../src/machine/interference.ts';
+import { resolveConflicts } from '../src/machine/resolve.ts';
 
 const args = process.argv.slice(2);
 const flag = (name, fallback) => {
@@ -66,6 +67,19 @@ if (withGeometry) {
       part.movedBy = move.delta;
     }
     caseData.geometry.moves = moves;
+  }
+  if (args.includes('--resolve')) {
+    // 批量解开未声明的重叠：逐轮挪一件再重算，收敛不了要如实写进 resolution
+    const resolution = resolveConflicts(caseData.geometry);
+    caseData.geometry.parts = resolution.parts;
+    caseData.geometry.resolution = {
+      before: resolution.before,
+      after: resolution.after,
+      moves: resolution.moves,
+      iterations: resolution.iterations,
+      converged: resolution.converged,
+      ...(resolution.stopReason ? { stopReason: resolution.stopReason } : {})
+    };
   }
   caseData.geometry.interference = screenInterference(caseData.geometry);
 }
