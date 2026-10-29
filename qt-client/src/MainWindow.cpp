@@ -334,14 +334,20 @@ MainWindow::MainWindow(QWidget *parent)
     m_undoAction->setShortcut(QKeySequence::Undo);
     m_redoAction = editMenu->addAction(tr("重做"), this, &MainWindow::redoOnce);
     editMenu->addSeparator();
-    editMenu->addAction(tr("撤销最后一次插入"), this, [this]() {
+    auto *undoEditAction = editMenu->addAction(tr("撤销上一次编辑"), this, [this]() {
         int count = 0;
         QString error;
         if (!undoLastInsert(&count, &error)) {
             statusBar()->showMessage(tr("没有可撤销的插入"), 8000);
             return;
         }
-        statusBar()->showMessage(tr("已撤销插入，回到 %1 个零件").arg(count), 15000);
+        statusBar()->showMessage(tr("已撤销：回到 %1 个零件（还可撤 %2 步）").arg(count).arg(insertHistoryDepth()), 15000);
+    });
+    // 菜单文字反映真实可撤步数，不做「看起来能撤」的空菜单
+    connect(editMenu, &QMenu::aboutToShow, this, [this, undoEditAction]() {
+        const int depth = insertHistoryDepth();
+        undoEditAction->setEnabled(depth > 0);
+        undoEditAction->setText(depth > 0 ? tr("撤销上一次编辑（可撤 %1 步）").arg(depth) : tr("撤销上一次编辑"));
     });
     m_redoAction->setShortcut(QKeySequence::Redo);
     m_undoAction->setEnabled(false);

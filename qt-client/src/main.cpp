@@ -319,6 +319,43 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 多步撤销自检：--undo-stack-selftest "brief" <partId>
+    {
+        const int index = args.indexOf(QStringLiteral("--undo-stack-selftest"));
+        if (index >= 0 && index + 2 < args.size()) {
+            MainWindow window;
+            window.resize(1200, 800);
+            window.show();
+            QJsonObject document;
+            QString error;
+            int shapes = 0;
+            if (!window.designMachineFromBrief(args.at(index + 1), &document, &error)
+                || !window.renderMachineGeometry(document, &shapes, &error)) {
+                qCritical().noquote() << "FT_QT_UNDO_STACK_FAIL" << error;
+                return 1;
+            }
+            int count = 0;
+            if (!window.movePartTo(args.at(index + 2), -800.0, -300.0, &count, &error)
+                || !window.movePartTo(args.at(index + 2), -700.0, -300.0, &count, &error)) {
+                qCritical().noquote() << "FT_QT_UNDO_STACK_FAIL" << error;
+                return 1;
+            }
+            const int depthAfterTwo = window.insertHistoryDepth();
+            int undone = 0;
+            if (!window.undoLastInsert(&undone, &error) || !window.undoLastInsert(&undone, &error)) {
+                qCritical().noquote() << "FT_QT_UNDO_STACK_FAIL 第二次撤销失败：" << error;
+                return 1;
+            }
+            if (window.undoLastInsert(&undone, &error)) {
+                qCritical().noquote() << "FT_QT_UNDO_STACK_FAIL 撤到底了还能继续撤";
+                return 1;
+            }
+            qInfo().noquote() << QStringLiteral("FT_QT_UNDO_STACK_OK depth=%1 parts=%2 耗尽后拒绝撤销")
+                                     .arg(depthAfterTwo).arg(undone);
+            return 0;
+        }
+    }
+
     // 拖动已有零件自检：--move-part-selftest "brief" <partId> <x> <y>
     {
         const int index = args.indexOf(QStringLiteral("--move-part-selftest"));
