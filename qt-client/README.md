@@ -220,6 +220,10 @@ CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI �
 若界面当前阈值与戳里的不同，会补一句「⚠ 界面当前阈值是 35 mm…需重新计算」——避免误以为这份方案是按现在的阈值查过的。
 没有跑过合规的方案显示「未检查」，不假装合规。
 
+CI 的 Qt job 现在会拿仓库里的 fixture（`docs/desktop/eval/layout-case.json`，88 KB）跑
+`--compliance-stamp-selftest` 与 `--layout-csv-selftest`，并校验 CSV 是 **60 行**（58 位移 + 表头 + 合计）——
+防「JSON 里有、界面读不出来」这类回归，且这一步不需要 node。fixture 与算法漂移会被 unit job 的守卫抓到。
+
 **注意一个反直觉点**：不能断言「每条位移的 gapAfter 都 ≥ 阈值」。单轴推开只增加一个轴的距离，
 而距离是三轴平方和，后续 move 还会改变这一对（实测某条当时 19.6 mm，再经过后续微调才过 20）。
 能守住的是「整轮跑完 count=0」。

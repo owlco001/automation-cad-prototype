@@ -1,0 +1,3776 @@
+{
+  "schemaVersion": 1,
+  "kind": "machine-case",
+  "brief": "四工位点胶机，节拍 25 件/分钟",
+  "parsed": {
+    "process": "dispense",
+    "stations": 4,
+    "cyclePerMin": 25,
+    "layout": "parallel",
+    "processes": [
+      "点胶"
+    ],
+    "actuators": [],
+    "sensors": [],
+    "brand": null,
+    "voltage": null,
+    "notes": [
+      "布局推断：单一工艺「点胶」按同工序并行，按同工序并行估算"
+    ]
+  },
+  "design": {
+    "config": {
+      "id": "design-dispense-4st",
+      "name": "4 工位点胶机（方案草案）",
+      "stations": [
+        "工位1",
+        "工位2",
+        "工位3",
+        "工位4"
+      ],
+      "actuators": [
+        {
+          "id": "st1-rotary-1",
+          "name": "工位1旋转轴1",
+          "kind": "rotary",
+          "station": "工位1",
+          "durationMs": 700,
+          "rotationRangeDeg": 90,
+          "point": "ST1-ROT-A1",
+          "position": [
+            0.76,
+            0.65,
+            0.35
+          ]
+        },
+        {
+          "id": "st2-rotary-1",
+          "name": "工位2旋转轴1",
+          "kind": "rotary",
+          "station": "工位2",
+          "durationMs": 700,
+          "rotationRangeDeg": 90,
+          "point": "ST2-ROT-A1",
+          "position": [
+            0.76,
+            0.65,
+            0.35
+          ]
+        },
+        {
+          "id": "st3-rotary-1",
+          "name": "工位3旋转轴1",
+          "kind": "rotary",
+          "station": "工位3",
+          "durationMs": 700,
+          "rotationRangeDeg": 90,
+          "point": "ST3-ROT-A1",
+          "position": [
+            0.76,
+            0.65,
+            0.35
+          ]
+        },
+        {
+          "id": "st4-rotary-1",
+          "name": "工位4旋转轴1",
+          "kind": "rotary",
+          "station": "工位4",
+          "durationMs": 700,
+          "rotationRangeDeg": 90,
+          "point": "ST4-ROT-A1",
+          "position": [
+            0.76,
+            0.65,
+            0.35
+          ]
+        }
+      ],
+      "sensors": [
+        {
+          "point": "ST1-PRS-S1",
+          "station": "工位1",
+          "part": "st1-rotary-1"
+        },
+        {
+          "point": "ST2-PRS-S1",
+          "station": "工位2",
+          "part": "st2-rotary-1"
+        },
+        {
+          "point": "ST3-PRS-S1",
+          "station": "工位3",
+          "part": "st3-rotary-1"
+        },
+        {
+          "point": "ST4-PRS-S1",
+          "station": "工位4",
+          "part": "st4-rotary-1"
+        }
+      ]
+    },
+    "points": [
+      "ST1-ROT-A1",
+      "ST1-PRS-S1",
+      "ST2-ROT-A1",
+      "ST2-PRS-S1",
+      "ST3-ROT-A1",
+      "ST3-PRS-S1",
+      "ST4-ROT-A1",
+      "ST4-PRS-S1"
+    ],
+    "cycle": {
+      "mode": "parallel",
+      "perMin": 25,
+      "secondsPerPiece": 2.4,
+      "stationSeconds": 3.1,
+      "throughputPerMin": 77.42,
+      "partsPerMinute": 77.42,
+      "estimatedSecondsPerPiece": 3.1,
+      "baseSeconds": 2.4,
+      "slowestStation": 1,
+      "slowestActionSeconds": 0.7,
+      "requiredParallelStations": 2,
+      "requiredTotalStations": 2,
+      "meetsTarget": true,
+      "bottleneck": "单工位 3.10 秒/件，4 工位并行 → 77.42 件/分钟（工艺固定 2.40s + 旋转轴 0.70s；目标 25 件/分钟，余量 3.10 倍）"
+    },
+    "power": {
+      "va": 434,
+      "totalVa": 434,
+      "totalKw": 0.391,
+      "byGroup": [
+        {
+          "name": "旋转轴",
+          "count": 4,
+          "ratedW": 800,
+          "va": 414.815
+        },
+        {
+          "name": "传感器",
+          "count": 4,
+          "ratedW": 12,
+          "va": 6.222
+        },
+        {
+          "name": "PLC",
+          "count": 1,
+          "ratedW": 25,
+          "va": 12.963
+        }
+      ],
+      "currentA": 0.659,
+      "breakerSuggestion": {
+        "rating": 6,
+        "poles": 3,
+        "margin": 9.099
+      },
+      "assumptions": [
+        "命令行未读取 userData/machine-pricing.json，使用工程默认系数与工时单价。",
+        "同时系数 Ks=0.7：多负载不会同时达到额定功率，按此系数折减。",
+        "负载率 Kf=0.6：设备实际轴功率按额定功率的此比例估算。",
+        "效率 η=0.9：由机械输出折算到电输入，P_in = ΣP_rated × Ks × Kf ÷ η。",
+        "功率因数 cosφ=0.9：视在功率 S = P_in ÷ cosφ，电流按此计算。",
+        "断路器按计算电流 × 1.25 向上取标准值（6/10/16/20/25/32/40/50/63 A），极数按 380VAC 取 3P。",
+        "额定功率缺失时使用类别默认值：旋转轴 4 件按 200 W、传感器 4 件按 3 W、PLC 1 件按 25 W。默认值仅用于方案阶段粗估。",
+        "24 VDC 回路按连接负载 37 W 统计，电源容量 350 W；余量 89.4%，负载超过额定 70% 时告警。",
+        "整机连接负载 837 W；经系数折算为输入有功 390.6 W。"
+      ],
+      "warnings": [
+        "旋转轴缺少额定功率（无 partId/型号 × 1），按类别默认 200 W/件估算。",
+        "旋转轴缺少额定功率（无 partId/型号 × 1），按类别默认 200 W/件估算。",
+        "旋转轴缺少额定功率（无 partId/型号 × 1），按类别默认 200 W/件估算。",
+        "旋转轴缺少额定功率（无 partId/型号 × 1），按类别默认 200 W/件估算。",
+        "传感器缺少额定功率（smc-cn:D-M9B × 1），按类别默认 3 W/件估算。",
+        "传感器缺少额定功率（smc-cn:D-M9B × 1），按类别默认 3 W/件估算。",
+        "传感器缺少额定功率（smc-cn:D-M9B × 1），按类别默认 3 W/件估算。",
+        "传感器缺少额定功率（smc-cn:D-M9B × 1），按类别默认 3 W/件估算。",
+        "PLC缺少额定功率（iec-cn:CP1E-N40DR-A × 1），按类别默认 25 W/件估算。",
+        "已选总进线断路器 16 A 对计算电流 0.659 A 余量 2326.5% 超过 60%，可评估降一档。"
+      ],
+      "voltage": "380VAC",
+      "cosPhi": 0.9,
+      "simultaneity": 0.7,
+      "loadFactor": 0.6,
+      "efficiency": 0.9,
+      "dc24": {
+        "loadW": 37,
+        "supplyW": 350,
+        "marginPct": 89.4
+      }
+    },
+    "cost": {
+      "material": 0,
+      "electrical": 1106.15,
+      "labor": 9072,
+      "total": 10178.15,
+      "missingCount": 1,
+      "priceMeta": {
+        "coveragePct": 83.3,
+        "pricedCount": 5,
+        "totalCount": 6,
+        "missing": [
+          {
+            "partId": "CP1E-N40DR-A",
+            "name": "PLC"
+          }
+        ],
+        "stale": [],
+        "unknownSource": []
+      },
+      "byCategory": [
+        {
+          "category": "机械件",
+          "subtotal": 0,
+          "count": 0,
+          "missing": 0
+        },
+        {
+          "category": "电气件",
+          "subtotal": 1106.15,
+          "count": 6,
+          "missing": 1
+        }
+      ],
+      "assumptions": [
+        "方案阶段粗估：用于方案比较与预算区间，不替代正式报价。",
+        "机械件 = 价格簿单价 × 数量；价格簿未命中时使用元件库参考价，仍无价则计入缺价。",
+        "电气件 = 元件库/价格簿单价 × 数量；伺服按驱动器 + 电机成对计价，缺一件时按同数量补齐。",
+        "人工/调试 = 4 工位 × (机械 8 h + 电气 6 h + 调试 4 h) × 形态系数 1.05（parallel）× 120 元/h = 9072 元。",
+        "缺价行不猜价格、不计入合计；missingCount 为缺价 BOM 行数，需补价格簿或询价。",
+        "命令行未读取 userData/machine-pricing.json，使用工程默认系数与工时单价。"
+      ],
+      "warnings": [
+        "有 1 行缺价，未计入合计：PLC（CP1E-N40DR-A） × 1"
+      ],
+      "lines": [
+        {
+          "name": "PLC",
+          "model": "CP1E-N40DR-A",
+          "partId": "CP1E-N40DR-A",
+          "category": "电气件",
+          "qty": 1,
+          "unit": 0,
+          "subtotal": 0,
+          "priceSource": "缺失"
+        },
+        {
+          "name": "安全继电器",
+          "model": "PNOZ s3 750103",
+          "partId": "PNOZ-s3-750103",
+          "category": "电气件",
+          "qty": 1,
+          "unit": 660,
+          "subtotal": 660,
+          "priceSource": "价格簿"
+        },
+        {
+          "name": "24 V 开关电源",
+          "model": "LRS-350-24",
+          "partId": "LRS-350-24",
+          "category": "电气件",
+          "qty": 1,
+          "unit": 152.86,
+          "subtotal": 152.86,
+          "priceSource": "价格簿"
+        },
+        {
+          "name": "伺服支路断路器",
+          "model": "iC65N 1P C6",
+          "partId": "iC65N-C6-1P",
+          "category": "电气件",
+          "qty": 4,
+          "unit": 36.9,
+          "subtotal": 147.6,
+          "priceSource": "价格簿"
+        },
+        {
+          "name": "总进线断路器",
+          "model": "5SY63 3P C16",
+          "partId": "5SY63-C16",
+          "category": "电气件",
+          "qty": 1,
+          "unit": 108.79,
+          "subtotal": 108.79,
+          "priceSource": "价格簿"
+        },
+        {
+          "name": "开关电源支路断路器",
+          "model": "iC65N 1P C6",
+          "partId": "iC65N-C6-1P",
+          "category": "电气件",
+          "qty": 1,
+          "unit": 36.9,
+          "subtotal": 36.9,
+          "priceSource": "价格簿"
+        }
+      ],
+      "laborDetail": {
+        "stations": 4,
+        "hourlyRate": 120,
+        "hoursPerStation": 18,
+        "formFactor": 1.05,
+        "hours": 75.60000000000001
+      },
+      "boundary": "方案阶段粗估：不含报价加成、税率、运费、线缆/线槽与端子接线工时，不替代 cost/engine.ts 的正式报价计算。"
+    },
+    "form": {
+      "id": "gantry-4",
+      "name": "龙门四工位",
+      "rationale": "四个独立龙门头各压一个工位，横梁只需跨单件，大件不必在工位间搬动；点胶/锁螺丝换头即可切换，适合尺寸大、节拍中等的工件。",
+      "layout": "parallel",
+      "stationRange": [
+        4,
+        4
+      ],
+      "defaultStations": 4,
+      "maxStations": 4,
+      "geometry": {
+        "kind": "gantry",
+        "heads": 4,
+        "axes": 3
+      },
+      "score": 96.5,
+      "alternatives": [
+        {
+          "id": "dual-lane",
+          "name": "双轨并行线",
+          "difference": "占地约小 21%；成本接近；换型需从龙门四工位切到双轨并行线。"
+        },
+        {
+          "id": "cell-4",
+          "name": "单元式四工位",
+          "difference": "占地约小 29%；成本略低；换型需从龙门四工位切到单元式四工位。"
+        }
+      ]
+    },
+    "warnings": [],
+    "assumptions": [
+      "整机形态：龙门四工位（gantry-4）——四个独立龙门头各压一个工位，横梁只需跨单件，大件不必在工位间搬动；点胶/锁螺丝换头即可切换，适合尺寸大、节拍中等的工件。",
+      "功率按 power.ts 统一模型估算：优先取元件库额定功率，同时系数/负载率/效率/功率因数逐条写入 assumptions；不是实测功率或短路计算。",
+      "成本按 cost-model.ts 做方案阶段粗估：机械/电气/人工分项，缺价行不进入合计，不替代正式报价。",
+      "节拍按 evaluateFlow 模型估算（single / linear / dial / parallel / cell），由工位、工序时间与布局公式求值；均未计入上下料、通讯、人工干预与调试损失。",
+      "三维几何由配置按规则生成标准件外形（机架、工位底板、门架、气缸/夹爪/旋转台、传感器、输送线或分度转盘，单位 mm），不包含结构强度、干涉与真实运动学校核。",
+      "布局按同工序并行估算（parallel）：4 个工位执行同一工艺「点胶」，整机产能 = 工位数 / 单工位时间 × 60。",
+      "未指定执行机构，按 点胶 模板补全（每工位：旋转轴）。",
+      "未指定传感器，按 点胶 模板补全（每工位：压力传感器）。"
+    ],
+    "bomDraft": {
+      "items": [
+        {
+          "kind": "electrical",
+          "name": "PLC",
+          "qty": 1,
+          "model": "CP1E-N40DR-A",
+          "note": "来源包：iec-cn · id=CP1E-N40DR-A · 24 DI / 16 DO，覆盖 19 点位",
+          "partId": "CP1E-N40DR-A",
+          "role": "plc",
+          "packId": "iec-cn"
+        },
+        {
+          "kind": "electrical",
+          "name": "安全继电器",
+          "qty": 1,
+          "model": "PNOZ s3 750103",
+          "note": "来源包：iec-cn · id=PNOZ-s3-750103 · 光栅/安全门监控",
+          "partId": "PNOZ-s3-750103",
+          "role": "other",
+          "packId": "iec-cn"
+        },
+        {
+          "kind": "electrical",
+          "name": "24 V 开关电源",
+          "qty": 1,
+          "model": "LRS-350-24",
+          "note": "来源包：iec-cn · id=LRS-350-24 · 350 W / 14.6 A",
+          "partId": "LRS-350-24",
+          "role": "psu",
+          "ratedW": 350,
+          "packId": "iec-cn"
+        },
+        {
+          "kind": "electrical",
+          "name": "伺服支路断路器",
+          "qty": 4,
+          "model": "iC65N 1P C6",
+          "note": "来源包：iec-cn · id=iC65N-C6-1P · 计算 4.456 A，额定 6 A",
+          "partId": "iC65N-C6-1P",
+          "role": "other",
+          "packId": "iec-cn"
+        },
+        {
+          "kind": "electrical",
+          "name": "总进线断路器",
+          "qty": 1,
+          "model": "5SY63 3P C16",
+          "note": "来源包：iec-cn · id=5SY63-C16 · 计算 6.115 A，额定 16 A",
+          "partId": "5SY63-C16",
+          "role": "other",
+          "packId": "iec-cn"
+        },
+        {
+          "kind": "electrical",
+          "name": "开关电源支路断路器",
+          "qty": 1,
+          "model": "iC65N 1P C6",
+          "note": "来源包：iec-cn · id=iC65N-C6-1P · 计算 2.08 A，额定 6 A",
+          "partId": "iC65N-C6-1P",
+          "role": "other",
+          "packId": "iec-cn"
+        }
+      ]
+    }
+  },
+  "cycleAnalysis": {
+    "mode": "parallel",
+    "targetPerMin": 25,
+    "targetSecondsPerPiece": 2.4,
+    "stationSeconds": 3.1,
+    "throughputPerMin": 77.42,
+    "estimatedSecondsPerPiece": 3.1,
+    "baseSeconds": 2.4,
+    "slowestStation": 1,
+    "slowestActionSeconds": 0.7,
+    "meetsTarget": true,
+    "requiredParallelStations": 2,
+    "requiredTotalStations": 2,
+    "verdict": "当前方案按同工序并行满足目标节拍：单工位 3.1 秒/件 × 4 工位 ≈ 77.42 件/分钟",
+    "bottleneck": "单工位 3.10 秒/件，4 工位并行 → 77.42 件/分钟（工艺固定 2.40s + 旋转轴 0.70s；目标 25 件/分钟，余量 3.10 倍）"
+  },
+  "stations": [
+    {
+      "station": "工位1",
+      "actuators": [
+        {
+          "id": "st1-rotary-1",
+          "kind": "rotary",
+          "name": "工位1旋转轴1",
+          "points": [
+            "ST1-ROT-A1"
+          ]
+        }
+      ],
+      "sensors": [
+        {
+          "point": "ST1-PRS-S1",
+          "part": "st1-rotary-1"
+        }
+      ]
+    },
+    {
+      "station": "工位2",
+      "actuators": [
+        {
+          "id": "st2-rotary-1",
+          "kind": "rotary",
+          "name": "工位2旋转轴1",
+          "points": [
+            "ST2-ROT-A1"
+          ]
+        }
+      ],
+      "sensors": [
+        {
+          "point": "ST2-PRS-S1",
+          "part": "st2-rotary-1"
+        }
+      ]
+    },
+    {
+      "station": "工位3",
+      "actuators": [
+        {
+          "id": "st3-rotary-1",
+          "kind": "rotary",
+          "name": "工位3旋转轴1",
+          "points": [
+            "ST3-ROT-A1"
+          ]
+        }
+      ],
+      "sensors": [
+        {
+          "point": "ST3-PRS-S1",
+          "part": "st3-rotary-1"
+        }
+      ]
+    },
+    {
+      "station": "工位4",
+      "actuators": [
+        {
+          "id": "st4-rotary-1",
+          "kind": "rotary",
+          "name": "工位4旋转轴1",
+          "points": [
+            "ST4-ROT-A1"
+          ]
+        }
+      ],
+      "sensors": [
+        {
+          "point": "ST4-PRS-S1",
+          "part": "st4-rotary-1"
+        }
+      ]
+    }
+  ],
+  "bom": {
+    "items": [
+      {
+        "kind": "electrical",
+        "name": "PLC",
+        "qty": 1,
+        "model": "CP1E-N40DR-A",
+        "note": "来源包：iec-cn · id=CP1E-N40DR-A · 24 DI / 16 DO，覆盖 19 点位",
+        "partId": "CP1E-N40DR-A",
+        "role": "plc",
+        "packId": "iec-cn"
+      },
+      {
+        "kind": "electrical",
+        "name": "安全继电器",
+        "qty": 1,
+        "model": "PNOZ s3 750103",
+        "note": "来源包：iec-cn · id=PNOZ-s3-750103 · 光栅/安全门监控",
+        "partId": "PNOZ-s3-750103",
+        "role": "other",
+        "packId": "iec-cn"
+      },
+      {
+        "kind": "electrical",
+        "name": "24 V 开关电源",
+        "qty": 1,
+        "model": "LRS-350-24",
+        "note": "来源包：iec-cn · id=LRS-350-24 · 350 W / 14.6 A",
+        "partId": "LRS-350-24",
+        "role": "psu",
+        "ratedW": 350,
+        "packId": "iec-cn"
+      },
+      {
+        "kind": "electrical",
+        "name": "伺服支路断路器",
+        "qty": 4,
+        "model": "iC65N 1P C6",
+        "note": "来源包：iec-cn · id=iC65N-C6-1P · 计算 4.456 A，额定 6 A",
+        "partId": "iC65N-C6-1P",
+        "role": "other",
+        "packId": "iec-cn"
+      },
+      {
+        "kind": "electrical",
+        "name": "总进线断路器",
+        "qty": 1,
+        "model": "5SY63 3P C16",
+        "note": "来源包：iec-cn · id=5SY63-C16 · 计算 6.115 A，额定 16 A",
+        "partId": "5SY63-C16",
+        "role": "other",
+        "packId": "iec-cn"
+      },
+      {
+        "kind": "electrical",
+        "name": "开关电源支路断路器",
+        "qty": 1,
+        "model": "iC65N 1P C6",
+        "note": "来源包：iec-cn · id=iC65N-C6-1P · 计算 2.08 A，额定 6 A",
+        "partId": "iC65N-C6-1P",
+        "role": "other",
+        "packId": "iec-cn"
+      }
+    ],
+    "pending": [],
+    "notices": [],
+    "sourcePacks": [
+      "iec-cn"
+    ],
+    "realPartCount": 6,
+    "pendingCount": 0
+  },
+  "electrical": {
+    "assumptions": [
+      "总进线按 380 V 三相四线估算，伺服支路取相电压 220 V。",
+      "cosφ=0.85、效率 η=0.9，功率因数为工程估算，需按实际电机/驱动数据复核。",
+      "所有断路器与开关电源按计算电流/功率的 1.25 倍以上选取；额定值来自元件包 specs。",
+      "安全光栅未选到型号，未参与具体电气参数校核，仅按每套 15 W 预留。"
+    ],
+    "auxLoadBreakdown": [
+      {
+        "name": "PLC",
+        "qty": 1,
+        "watts": 25
+      },
+      {
+        "name": "安全继电器",
+        "qty": 1,
+        "watts": 5
+      },
+      {
+        "name": "伺服驱动控制",
+        "qty": 4,
+        "watts": 40
+      },
+      {
+        "name": "预留",
+        "qty": 1,
+        "watts": 9
+      }
+    ],
+    "totalServoW": 3000,
+    "totalAuxW": 79,
+    "totalDesignW": 3079,
+    "calculations": [
+      {
+        "id": "main-current",
+        "name": "总进线计算电流",
+        "formula": "I = P / (√3 × U × cosφ × η)",
+        "inputs": {
+          "totalDesignW": 3079,
+          "voltage": 380,
+          "phases": 3,
+          "cosPhi": 0.85,
+          "efficiency": 0.9
+        },
+        "loadA": 6.115,
+        "requiredA": 7.644,
+        "ratedA": 16,
+        "margin": 2.616
+      },
+      {
+        "id": "servo-branch-current",
+        "name": "单轴伺服支路计算电流",
+        "formula": "I = 750 W / (U × cosφ × η)",
+        "inputs": {
+          "powerW": 750,
+          "voltage": 220,
+          "cosPhi": 0.85,
+          "efficiency": 0.9
+        },
+        "loadA": 4.456,
+        "requiredA": 5.57,
+        "ratedA": 6,
+        "margin": 1.346
+      },
+      {
+        "id": "psu-ac-current",
+        "name": "开关电源进线计算电流",
+        "formula": "I = 350 W / (U × cosφ × η)",
+        "inputs": {
+          "powerW": 350,
+          "voltage": 220,
+          "cosPhi": 0.85,
+          "efficiency": 0.9
+        },
+        "loadA": 2.08,
+        "requiredA": 2.6,
+        "ratedA": 6,
+        "margin": 2.885
+      },
+      {
+        "id": "psu-dc-output",
+        "name": "24 V 电源输出余量",
+        "formula": "Iout = Paux / 24 V",
+        "inputs": {
+          "auxLoadW": 79,
+          "voltage": 24
+        },
+        "loadA": 3.292,
+        "requiredA": 4.115,
+        "ratedA": 14.6,
+        "margin": 4.435
+      }
+    ]
+  },
+  "cost": {
+    "material": 0,
+    "electrical": 1106.15,
+    "labor": 9072,
+    "total": 10178.15,
+    "missingCount": 1,
+    "priceMeta": {
+      "coveragePct": 83.3,
+      "pricedCount": 5,
+      "totalCount": 6,
+      "missing": [
+        {
+          "partId": "CP1E-N40DR-A",
+          "name": "PLC"
+        }
+      ],
+      "stale": [],
+      "unknownSource": []
+    },
+    "byCategory": [
+      {
+        "category": "机械件",
+        "subtotal": 0,
+        "count": 0,
+        "missing": 0
+      },
+      {
+        "category": "电气件",
+        "subtotal": 1106.15,
+        "count": 6,
+        "missing": 1
+      }
+    ],
+    "assumptions": [
+      "方案阶段粗估：用于方案比较与预算区间，不替代正式报价。",
+      "机械件 = 价格簿单价 × 数量；价格簿未命中时使用元件库参考价，仍无价则计入缺价。",
+      "电气件 = 元件库/价格簿单价 × 数量；伺服按驱动器 + 电机成对计价，缺一件时按同数量补齐。",
+      "人工/调试 = 4 工位 × (机械 8 h + 电气 6 h + 调试 4 h) × 形态系数 1.05（parallel）× 120 元/h = 9072 元。",
+      "缺价行不猜价格、不计入合计；missingCount 为缺价 BOM 行数，需补价格簿或询价。",
+      "命令行未读取 userData/machine-pricing.json，使用工程默认系数与工时单价。"
+    ],
+    "warnings": [
+      "有 1 行缺价，未计入合计：PLC（CP1E-N40DR-A） × 1"
+    ],
+    "lines": [
+      {
+        "name": "PLC",
+        "model": "CP1E-N40DR-A",
+        "partId": "CP1E-N40DR-A",
+        "category": "电气件",
+        "qty": 1,
+        "unit": 0,
+        "subtotal": 0,
+        "priceSource": "缺失"
+      },
+      {
+        "name": "安全继电器",
+        "model": "PNOZ s3 750103",
+        "partId": "PNOZ-s3-750103",
+        "category": "电气件",
+        "qty": 1,
+        "unit": 660,
+        "subtotal": 660,
+        "priceSource": "价格簿"
+      },
+      {
+        "name": "24 V 开关电源",
+        "model": "LRS-350-24",
+        "partId": "LRS-350-24",
+        "category": "电气件",
+        "qty": 1,
+        "unit": 152.86,
+        "subtotal": 152.86,
+        "priceSource": "价格簿"
+      },
+      {
+        "name": "伺服支路断路器",
+        "model": "iC65N 1P C6",
+        "partId": "iC65N-C6-1P",
+        "category": "电气件",
+        "qty": 4,
+        "unit": 36.9,
+        "subtotal": 147.6,
+        "priceSource": "价格簿"
+      },
+      {
+        "name": "总进线断路器",
+        "model": "5SY63 3P C16",
+        "partId": "5SY63-C16",
+        "category": "电气件",
+        "qty": 1,
+        "unit": 108.79,
+        "subtotal": 108.79,
+        "priceSource": "价格簿"
+      },
+      {
+        "name": "开关电源支路断路器",
+        "model": "iC65N 1P C6",
+        "partId": "iC65N-C6-1P",
+        "category": "电气件",
+        "qty": 1,
+        "unit": 36.9,
+        "subtotal": 36.9,
+        "priceSource": "价格簿"
+      }
+    ],
+    "laborDetail": {
+      "stations": 4,
+      "hourlyRate": 120,
+      "hoursPerStation": 18,
+      "formFactor": 1.05,
+      "hours": 75.60000000000001
+    },
+    "boundary": "方案阶段粗估：不含报价加成、税率、运费、线缆/线槽与端子接线工时，不替代 cost/engine.ts 的正式报价计算。"
+  },
+  "ioMap": {
+    "rowCount": 8,
+    "rows": [
+      {
+        "point": "ST1-PRS-S1",
+        "address": "I0.0",
+        "direction": "输入",
+        "ownerType": "传感器",
+        "owner": "工位1旋转轴1",
+        "type": "压力传感器",
+        "station": "工位1",
+        "comment": "输入 ST1-PRS-S1；工位1旋转轴1 到位"
+      },
+      {
+        "point": "ST2-PRS-S1",
+        "address": "I0.1",
+        "direction": "输入",
+        "ownerType": "传感器",
+        "owner": "工位2旋转轴1",
+        "type": "压力传感器",
+        "station": "工位2",
+        "comment": "输入 ST2-PRS-S1；工位2旋转轴1 到位"
+      },
+      {
+        "point": "ST3-PRS-S1",
+        "address": "I0.2",
+        "direction": "输入",
+        "ownerType": "传感器",
+        "owner": "工位3旋转轴1",
+        "type": "压力传感器",
+        "station": "工位3",
+        "comment": "输入 ST3-PRS-S1；工位3旋转轴1 到位"
+      },
+      {
+        "point": "ST4-PRS-S1",
+        "address": "I0.3",
+        "direction": "输入",
+        "ownerType": "传感器",
+        "owner": "工位4旋转轴1",
+        "type": "压力传感器",
+        "station": "工位4",
+        "comment": "输入 ST4-PRS-S1；工位4旋转轴1 到位"
+      },
+      {
+        "point": "ST1-ROT-A1",
+        "address": "Q0.0",
+        "direction": "输出",
+        "ownerType": "执行机构",
+        "owner": "工位1旋转轴1",
+        "type": "旋转轴·旋转",
+        "station": "工位1",
+        "comment": "输出 ST1-ROT-A1；工位1旋转轴1 旋转"
+      },
+      {
+        "point": "ST2-ROT-A1",
+        "address": "Q0.1",
+        "direction": "输出",
+        "ownerType": "执行机构",
+        "owner": "工位2旋转轴1",
+        "type": "旋转轴·旋转",
+        "station": "工位2",
+        "comment": "输出 ST2-ROT-A1；工位2旋转轴1 旋转"
+      },
+      {
+        "point": "ST3-ROT-A1",
+        "address": "Q0.2",
+        "direction": "输出",
+        "ownerType": "执行机构",
+        "owner": "工位3旋转轴1",
+        "type": "旋转轴·旋转",
+        "station": "工位3",
+        "comment": "输出 ST3-ROT-A1；工位3旋转轴1 旋转"
+      },
+      {
+        "point": "ST4-ROT-A1",
+        "address": "Q0.3",
+        "direction": "输出",
+        "ownerType": "执行机构",
+        "owner": "工位4旋转轴1",
+        "type": "旋转轴·旋转",
+        "station": "工位4",
+        "comment": "输出 ST4-ROT-A1；工位4旋转轴1 旋转"
+      }
+    ],
+    "csv": "﻿点位,地址,方向,归属类型,归属,类型,工位,说明\r\nST1-PRS-S1,I0.0,输入,传感器,工位1旋转轴1,压力传感器,工位1,输入 ST1-PRS-S1；工位1旋转轴1 到位\r\nST2-PRS-S1,I0.1,输入,传感器,工位2旋转轴1,压力传感器,工位2,输入 ST2-PRS-S1；工位2旋转轴1 到位\r\nST3-PRS-S1,I0.2,输入,传感器,工位3旋转轴1,压力传感器,工位3,输入 ST3-PRS-S1；工位3旋转轴1 到位\r\nST4-PRS-S1,I0.3,输入,传感器,工位4旋转轴1,压力传感器,工位4,输入 ST4-PRS-S1；工位4旋转轴1 到位\r\nST1-ROT-A1,Q0.0,输出,执行机构,工位1旋转轴1,旋转轴·旋转,工位1,输出 ST1-ROT-A1；工位1旋转轴1 旋转\r\nST2-ROT-A1,Q0.1,输出,执行机构,工位2旋转轴1,旋转轴·旋转,工位2,输出 ST2-ROT-A1；工位2旋转轴1 旋转\r\nST3-ROT-A1,Q0.2,输出,执行机构,工位3旋转轴1,旋转轴·旋转,工位3,输出 ST3-ROT-A1；工位3旋转轴1 旋转\r\nST4-ROT-A1,Q0.3,输出,执行机构,工位4旋转轴1,旋转轴·旋转,工位4,输出 ST4-ROT-A1；工位4旋转轴1 旋转"
+  },
+  "screenshotValidation": null,
+  "geometry": {
+    "schemaVersion": 1,
+    "kind": "machine-geometry",
+    "machineId": "design-dispense-4st",
+    "name": "4 工位点胶机（方案草案）",
+    "units": "mm",
+    "upAxis": "z",
+    "geometryFidelity": "conceptual-estimate",
+    "process": "dispense",
+    "layout": "linear",
+    "envelope": [
+      1820,
+      740,
+      1177
+    ],
+    "bounds": {
+      "min": [
+        -910,
+        -370,
+        0
+      ],
+      "max": [
+        910,
+        370,
+        1177
+      ]
+    },
+    "tableHeight": 850,
+    "stations": [
+      {
+        "id": "st1",
+        "name": "工位1",
+        "index": 0,
+        "origin": [
+          -570,
+          160,
+          865
+        ],
+        "rotationZDeg": 0,
+        "plateSize": [
+          320,
+          300,
+          15
+        ],
+        "workPoint": [
+          -570,
+          160,
+          865
+        ],
+        "footprint": {
+          "stationId": "st1",
+          "center": [
+            -570,
+            160
+          ],
+          "half": [
+            160,
+            150
+          ],
+          "rotationZDeg": 0
+        },
+        "actuatorIds": [
+          "st1-rotary-1"
+        ],
+        "sensorPoints": [
+          "ST1-PRS-S1"
+        ]
+      },
+      {
+        "id": "st2",
+        "name": "工位2",
+        "index": 1,
+        "origin": [
+          -190,
+          160,
+          865
+        ],
+        "rotationZDeg": 0,
+        "plateSize": [
+          320,
+          300,
+          15
+        ],
+        "workPoint": [
+          -190,
+          160,
+          865
+        ],
+        "footprint": {
+          "stationId": "st2",
+          "center": [
+            -190,
+            160
+          ],
+          "half": [
+            160,
+            150
+          ],
+          "rotationZDeg": 0
+        },
+        "actuatorIds": [
+          "st2-rotary-1"
+        ],
+        "sensorPoints": [
+          "ST2-PRS-S1"
+        ]
+      },
+      {
+        "id": "st3",
+        "name": "工位3",
+        "index": 2,
+        "origin": [
+          190,
+          160,
+          865
+        ],
+        "rotationZDeg": 0,
+        "plateSize": [
+          320,
+          300,
+          15
+        ],
+        "workPoint": [
+          190,
+          160,
+          865
+        ],
+        "footprint": {
+          "stationId": "st3",
+          "center": [
+            190,
+            160
+          ],
+          "half": [
+            160,
+            150
+          ],
+          "rotationZDeg": 0
+        },
+        "actuatorIds": [
+          "st3-rotary-1"
+        ],
+        "sensorPoints": [
+          "ST3-PRS-S1"
+        ]
+      },
+      {
+        "id": "st4",
+        "name": "工位4",
+        "index": 3,
+        "origin": [
+          570,
+          160,
+          865
+        ],
+        "rotationZDeg": 0,
+        "plateSize": [
+          320,
+          300,
+          15
+        ],
+        "workPoint": [
+          570,
+          160,
+          865
+        ],
+        "footprint": {
+          "stationId": "st4",
+          "center": [
+            570,
+            160
+          ],
+          "half": [
+            160,
+            150
+          ],
+          "rotationZDeg": 0
+        },
+        "actuatorIds": [
+          "st4-rotary-1"
+        ],
+        "sensorPoints": [
+          "ST4-PRS-S1"
+        ]
+      }
+    ],
+    "joints": [
+      {
+        "a": "frame-leg-1",
+        "b": "frame-top",
+        "reason": "立柱接台面"
+      },
+      {
+        "a": "frame-leg-1",
+        "b": "frame-stringer-front",
+        "reason": "立柱插横梁"
+      },
+      {
+        "a": "frame-leg-1",
+        "b": "frame-stringer-back",
+        "reason": "立柱插横梁"
+      },
+      {
+        "a": "frame-leg-1",
+        "b": "frame-cross-left",
+        "reason": "立柱插下横梁"
+      },
+      {
+        "a": "frame-leg-1",
+        "b": "frame-cross-right",
+        "reason": "立柱插下横梁"
+      },
+      {
+        "a": "frame-leg-2",
+        "b": "frame-top",
+        "reason": "立柱接台面"
+      },
+      {
+        "a": "frame-leg-2",
+        "b": "frame-stringer-front",
+        "reason": "立柱插横梁"
+      },
+      {
+        "a": "frame-leg-2",
+        "b": "frame-stringer-back",
+        "reason": "立柱插横梁"
+      },
+      {
+        "a": "frame-leg-2",
+        "b": "frame-cross-left",
+        "reason": "立柱插下横梁"
+      },
+      {
+        "a": "frame-leg-2",
+        "b": "frame-cross-right",
+        "reason": "立柱插下横梁"
+      },
+      {
+        "a": "frame-leg-3",
+        "b": "frame-top",
+        "reason": "立柱接台面"
+      },
+      {
+        "a": "frame-leg-3",
+        "b": "frame-stringer-front",
+        "reason": "立柱插横梁"
+      },
+      {
+        "a": "frame-leg-3",
+        "b": "frame-stringer-back",
+        "reason": "立柱插横梁"
+      },
+      {
+        "a": "frame-leg-3",
+        "b": "frame-cross-left",
+        "reason": "立柱插下横梁"
+      },
+      {
+        "a": "frame-leg-3",
+        "b": "frame-cross-right",
+        "reason": "立柱插下横梁"
+      },
+      {
+        "a": "frame-leg-4",
+        "b": "frame-top",
+        "reason": "立柱接台面"
+      },
+      {
+        "a": "frame-leg-4",
+        "b": "frame-stringer-front",
+        "reason": "立柱插横梁"
+      },
+      {
+        "a": "frame-leg-4",
+        "b": "frame-stringer-back",
+        "reason": "立柱插横梁"
+      },
+      {
+        "a": "frame-leg-4",
+        "b": "frame-cross-left",
+        "reason": "立柱插下横梁"
+      },
+      {
+        "a": "frame-leg-4",
+        "b": "frame-cross-right",
+        "reason": "立柱插下横梁"
+      },
+      {
+        "a": "frame-leg-5",
+        "b": "frame-top",
+        "reason": "立柱接台面"
+      },
+      {
+        "a": "frame-leg-5",
+        "b": "frame-stringer-front",
+        "reason": "立柱插横梁"
+      },
+      {
+        "a": "frame-leg-5",
+        "b": "frame-stringer-back",
+        "reason": "立柱插横梁"
+      },
+      {
+        "a": "frame-leg-5",
+        "b": "frame-cross-left",
+        "reason": "立柱插下横梁"
+      },
+      {
+        "a": "frame-leg-5",
+        "b": "frame-cross-right",
+        "reason": "立柱插下横梁"
+      },
+      {
+        "a": "frame-leg-6",
+        "b": "frame-top",
+        "reason": "立柱接台面"
+      },
+      {
+        "a": "frame-leg-6",
+        "b": "frame-stringer-front",
+        "reason": "立柱插横梁"
+      },
+      {
+        "a": "frame-leg-6",
+        "b": "frame-stringer-back",
+        "reason": "立柱插横梁"
+      },
+      {
+        "a": "frame-leg-6",
+        "b": "frame-cross-left",
+        "reason": "立柱插下横梁"
+      },
+      {
+        "a": "frame-leg-6",
+        "b": "frame-cross-right",
+        "reason": "立柱插下横梁"
+      },
+      {
+        "a": "frame-stringer-front",
+        "b": "frame-cross-left",
+        "reason": "下横梁交汇"
+      },
+      {
+        "a": "frame-stringer-front",
+        "b": "frame-cross-right",
+        "reason": "下横梁交汇"
+      },
+      {
+        "a": "frame-stringer-front",
+        "b": "frame-top",
+        "reason": "横梁接台面"
+      },
+      {
+        "a": "frame-stringer-back",
+        "b": "frame-cross-left",
+        "reason": "下横梁交汇"
+      },
+      {
+        "a": "frame-stringer-back",
+        "b": "frame-cross-right",
+        "reason": "下横梁交汇"
+      },
+      {
+        "a": "frame-stringer-back",
+        "b": "frame-top",
+        "reason": "横梁接台面"
+      }
+    ],
+    "parts": [
+      {
+        "id": "frame-top",
+        "name": "机架台面 1820×740×20",
+        "role": "frame",
+        "shape": {
+          "type": "box",
+          "size": [
+            1820,
+            740,
+            20
+          ]
+        },
+        "center": [
+          0,
+          0,
+          840
+        ],
+        "rotationZDeg": 0,
+        "color": "#8a949c",
+        "material": "Q235 磨床板",
+        "bomGroup": "structure",
+        "estimated": true
+      },
+      {
+        "id": "frame-leg-1",
+        "name": "机架立腿 1（60×60×830）",
+        "role": "frame",
+        "shape": {
+          "type": "box",
+          "size": [
+            60,
+            60,
+            830
+          ]
+        },
+        "center": [
+          -870,
+          -330,
+          415
+        ],
+        "rotationZDeg": 0,
+        "color": "#5c646b",
+        "material": "Q235 方管",
+        "bomGroup": "structure",
+        "estimated": true
+      },
+      {
+        "id": "frame-leg-2",
+        "name": "机架立腿 2（60×60×830）",
+        "role": "frame",
+        "shape": {
+          "type": "box",
+          "size": [
+            60,
+            60,
+            830
+          ]
+        },
+        "center": [
+          0,
+          -330,
+          415
+        ],
+        "rotationZDeg": 0,
+        "color": "#5c646b",
+        "material": "Q235 方管",
+        "bomGroup": "structure",
+        "estimated": true
+      },
+      {
+        "id": "frame-leg-3",
+        "name": "机架立腿 3（60×60×830）",
+        "role": "frame",
+        "shape": {
+          "type": "box",
+          "size": [
+            60,
+            60,
+            830
+          ]
+        },
+        "center": [
+          870,
+          -330,
+          415
+        ],
+        "rotationZDeg": 0,
+        "color": "#5c646b",
+        "material": "Q235 方管",
+        "bomGroup": "structure",
+        "estimated": true
+      },
+      {
+        "id": "frame-leg-4",
+        "name": "机架立腿 4（60×60×830）",
+        "role": "frame",
+        "shape": {
+          "type": "box",
+          "size": [
+            60,
+            60,
+            830
+          ]
+        },
+        "center": [
+          -870,
+          330,
+          415
+        ],
+        "rotationZDeg": 0,
+        "color": "#5c646b",
+        "material": "Q235 方管",
+        "bomGroup": "structure",
+        "estimated": true
+      },
+      {
+        "id": "frame-leg-5",
+        "name": "机架立腿 5（60×60×830）",
+        "role": "frame",
+        "shape": {
+          "type": "box",
+          "size": [
+            60,
+            60,
+            830
+          ]
+        },
+        "center": [
+          0,
+          330,
+          415
+        ],
+        "rotationZDeg": 0,
+        "color": "#5c646b",
+        "material": "Q235 方管",
+        "bomGroup": "structure",
+        "estimated": true
+      },
+      {
+        "id": "frame-leg-6",
+        "name": "机架立腿 6（60×60×830）",
+        "role": "frame",
+        "shape": {
+          "type": "box",
+          "size": [
+            60,
+            60,
+            830
+          ]
+        },
+        "center": [
+          870,
+          330,
+          415
+        ],
+        "rotationZDeg": 0,
+        "color": "#5c646b",
+        "material": "Q235 方管",
+        "bomGroup": "structure",
+        "estimated": true
+      },
+      {
+        "id": "frame-stringer-front",
+        "name": "机架下横梁（前）",
+        "role": "frame",
+        "shape": {
+          "type": "box",
+          "size": [
+            1680,
+            40,
+            40
+          ]
+        },
+        "center": [
+          0,
+          -330,
+          150
+        ],
+        "rotationZDeg": 0,
+        "color": "#5c646b",
+        "material": "Q235 方管",
+        "bomGroup": "structure",
+        "estimated": true
+      },
+      {
+        "id": "frame-stringer-back",
+        "name": "机架下横梁（后）",
+        "role": "frame",
+        "shape": {
+          "type": "box",
+          "size": [
+            1680,
+            40,
+            40
+          ]
+        },
+        "center": [
+          0,
+          330,
+          150
+        ],
+        "rotationZDeg": 0,
+        "color": "#5c646b",
+        "material": "Q235 方管",
+        "bomGroup": "structure",
+        "estimated": true
+      },
+      {
+        "id": "frame-cross-left",
+        "name": "机架下横梁（左）",
+        "role": "frame",
+        "shape": {
+          "type": "box",
+          "size": [
+            40,
+            600,
+            40
+          ]
+        },
+        "center": [
+          -878.26,
+          0,
+          150
+        ],
+        "rotationZDeg": 0,
+        "color": "#5c646b",
+        "material": "Q235 方管",
+        "bomGroup": "structure",
+        "estimated": true,
+        "movedBy": [
+          -8.259999999999998,
+          0,
+          0
+        ]
+      },
+      {
+        "id": "frame-cross-right",
+        "name": "机架下横梁（右）",
+        "role": "frame",
+        "shape": {
+          "type": "box",
+          "size": [
+            40,
+            600,
+            40
+          ]
+        },
+        "center": [
+          878.26,
+          0,
+          150
+        ],
+        "rotationZDeg": 0,
+        "color": "#5c646b",
+        "material": "Q235 方管",
+        "bomGroup": "structure",
+        "estimated": true,
+        "movedBy": [
+          8.259999999999998,
+          0,
+          0
+        ]
+      },
+      {
+        "id": "st1-plate",
+        "name": "工位1 底板",
+        "role": "plate",
+        "shape": {
+          "type": "box",
+          "size": [
+            320,
+            300,
+            15
+          ]
+        },
+        "color": "#b7c0c7",
+        "material": "AL6061",
+        "bomGroup": "structure",
+        "stationId": "st1",
+        "center": [
+          -570,
+          160,
+          857.5
+        ],
+        "rotationZDeg": 0,
+        "estimated": true
+      },
+      {
+        "id": "st1-upright-l",
+        "name": "工位1 门架立柱左",
+        "role": "structure",
+        "shape": {
+          "type": "box",
+          "size": [
+            50,
+            50,
+            312
+          ]
+        },
+        "color": "#6f7a83",
+        "material": "AL6063-T5 型材",
+        "bomGroup": "structure",
+        "stationId": "st1",
+        "center": [
+          -705,
+          160,
+          1027
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          6
+        ]
+      },
+      {
+        "id": "st1-upright-r",
+        "name": "工位1 门架立柱右",
+        "role": "structure",
+        "shape": {
+          "type": "box",
+          "size": [
+            50,
+            50,
+            312
+          ]
+        },
+        "color": "#6f7a83",
+        "material": "AL6063-T5 型材",
+        "bomGroup": "structure",
+        "stationId": "st1",
+        "center": [
+          -435,
+          160,
+          1027
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          6
+        ]
+      },
+      {
+        "id": "st1-beam",
+        "name": "工位1 门架横梁",
+        "role": "structure",
+        "shape": {
+          "type": "box",
+          "size": [
+            220,
+            50,
+            50
+          ]
+        },
+        "color": "#6f7a83",
+        "material": "AL6063-T5 型材",
+        "bomGroup": "structure",
+        "stationId": "st1",
+        "center": [
+          -570,
+          160,
+          1152
+        ],
+        "rotationZDeg": 0,
+        "estimated": true
+      },
+      {
+        "id": "st1-rotary-1-base",
+        "name": "工位1旋转轴1 底座",
+        "role": "actuator",
+        "shape": {
+          "type": "cylinder",
+          "radius": 55,
+          "length": 40,
+          "axis": "z"
+        },
+        "color": "#59636b",
+        "material": "铸铝壳体",
+        "bomGroup": "actuator:rotary",
+        "stationId": "st1",
+        "actuatorId": "st1-rotary-1",
+        "center": [
+          -570,
+          160,
+          906
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          21
+        ]
+      },
+      {
+        "id": "st1-rotary-1-table",
+        "name": "工位1旋转轴1 台面 Ø140",
+        "role": "actuator",
+        "shape": {
+          "type": "cylinder",
+          "radius": 70,
+          "length": 12,
+          "axis": "z"
+        },
+        "color": "#f59e0b",
+        "material": "AL6061 阳极",
+        "bomGroup": "actuator:rotary",
+        "moving": true,
+        "stationId": "st1",
+        "actuatorId": "st1-rotary-1",
+        "center": [
+          -570,
+          160,
+          953
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          42
+        ]
+      },
+      {
+        "id": "st1-rotary-1-fixture",
+        "name": "工位1旋转轴1 治具",
+        "role": "fixture",
+        "shape": {
+          "type": "box",
+          "size": [
+            60,
+            30,
+            30
+          ]
+        },
+        "color": "#3b82f6",
+        "material": "POM",
+        "bomGroup": "structure",
+        "moving": true,
+        "stationId": "st1",
+        "actuatorId": "st1-rotary-1",
+        "center": [
+          -540,
+          160,
+          995
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          63
+        ]
+      },
+      {
+        "id": "sensor-st1-prs-s1-bracket",
+        "name": "ST1-PRS-S1 支架",
+        "role": "structure",
+        "shape": {
+          "type": "box",
+          "size": [
+            30,
+            10,
+            70
+          ]
+        },
+        "color": "#7c8790",
+        "material": "SPCC",
+        "bomGroup": "structure",
+        "stationId": "st1",
+        "sensorPoint": "ST1-PRS-S1",
+        "center": [
+          -570,
+          25,
+          921
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          21
+        ]
+      },
+      {
+        "id": "sensor-st1-prs-s1",
+        "name": "ST1-PRS-S1 压力传感器",
+        "role": "sensor",
+        "shape": {
+          "type": "cylinder",
+          "radius": 16,
+          "length": 30,
+          "axis": "y"
+        },
+        "color": "#5d666e",
+        "material": "不锈钢",
+        "bomGroup": "sensor:pressure",
+        "stationId": "st1",
+        "sensorPoint": "ST1-PRS-S1",
+        "center": [
+          -570,
+          45,
+          915
+        ],
+        "rotationZDeg": 0,
+        "estimated": true
+      },
+      {
+        "id": "st2-plate",
+        "name": "工位2 底板",
+        "role": "plate",
+        "shape": {
+          "type": "box",
+          "size": [
+            320,
+            300,
+            15
+          ]
+        },
+        "color": "#b7c0c7",
+        "material": "AL6061",
+        "bomGroup": "structure",
+        "stationId": "st2",
+        "center": [
+          -190,
+          160,
+          857.5
+        ],
+        "rotationZDeg": 0,
+        "estimated": true
+      },
+      {
+        "id": "st2-upright-l",
+        "name": "工位2 门架立柱左",
+        "role": "structure",
+        "shape": {
+          "type": "box",
+          "size": [
+            50,
+            50,
+            312
+          ]
+        },
+        "color": "#6f7a83",
+        "material": "AL6063-T5 型材",
+        "bomGroup": "structure",
+        "stationId": "st2",
+        "center": [
+          -325,
+          160,
+          1027
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          6
+        ]
+      },
+      {
+        "id": "st2-upright-r",
+        "name": "工位2 门架立柱右",
+        "role": "structure",
+        "shape": {
+          "type": "box",
+          "size": [
+            50,
+            50,
+            312
+          ]
+        },
+        "color": "#6f7a83",
+        "material": "AL6063-T5 型材",
+        "bomGroup": "structure",
+        "stationId": "st2",
+        "center": [
+          -55,
+          160,
+          1027
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          6
+        ]
+      },
+      {
+        "id": "st2-beam",
+        "name": "工位2 门架横梁",
+        "role": "structure",
+        "shape": {
+          "type": "box",
+          "size": [
+            220,
+            50,
+            50
+          ]
+        },
+        "color": "#6f7a83",
+        "material": "AL6063-T5 型材",
+        "bomGroup": "structure",
+        "stationId": "st2",
+        "center": [
+          -190,
+          160,
+          1152
+        ],
+        "rotationZDeg": 0,
+        "estimated": true
+      },
+      {
+        "id": "st2-rotary-1-base",
+        "name": "工位2旋转轴1 底座",
+        "role": "actuator",
+        "shape": {
+          "type": "cylinder",
+          "radius": 55,
+          "length": 40,
+          "axis": "z"
+        },
+        "color": "#59636b",
+        "material": "铸铝壳体",
+        "bomGroup": "actuator:rotary",
+        "stationId": "st2",
+        "actuatorId": "st2-rotary-1",
+        "center": [
+          -190,
+          160,
+          906
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          21
+        ]
+      },
+      {
+        "id": "st2-rotary-1-table",
+        "name": "工位2旋转轴1 台面 Ø140",
+        "role": "actuator",
+        "shape": {
+          "type": "cylinder",
+          "radius": 70,
+          "length": 12,
+          "axis": "z"
+        },
+        "color": "#f59e0b",
+        "material": "AL6061 阳极",
+        "bomGroup": "actuator:rotary",
+        "moving": true,
+        "stationId": "st2",
+        "actuatorId": "st2-rotary-1",
+        "center": [
+          -190,
+          160,
+          953
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          42
+        ]
+      },
+      {
+        "id": "st2-rotary-1-fixture",
+        "name": "工位2旋转轴1 治具",
+        "role": "fixture",
+        "shape": {
+          "type": "box",
+          "size": [
+            60,
+            30,
+            30
+          ]
+        },
+        "color": "#3b82f6",
+        "material": "POM",
+        "bomGroup": "structure",
+        "moving": true,
+        "stationId": "st2",
+        "actuatorId": "st2-rotary-1",
+        "center": [
+          -160,
+          160,
+          995
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          63
+        ]
+      },
+      {
+        "id": "sensor-st2-prs-s1-bracket",
+        "name": "ST2-PRS-S1 支架",
+        "role": "structure",
+        "shape": {
+          "type": "box",
+          "size": [
+            30,
+            10,
+            70
+          ]
+        },
+        "color": "#7c8790",
+        "material": "SPCC",
+        "bomGroup": "structure",
+        "stationId": "st2",
+        "sensorPoint": "ST2-PRS-S1",
+        "center": [
+          -190,
+          25,
+          921
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          21
+        ]
+      },
+      {
+        "id": "sensor-st2-prs-s1",
+        "name": "ST2-PRS-S1 压力传感器",
+        "role": "sensor",
+        "shape": {
+          "type": "cylinder",
+          "radius": 16,
+          "length": 30,
+          "axis": "y"
+        },
+        "color": "#5d666e",
+        "material": "不锈钢",
+        "bomGroup": "sensor:pressure",
+        "stationId": "st2",
+        "sensorPoint": "ST2-PRS-S1",
+        "center": [
+          -190,
+          45,
+          915
+        ],
+        "rotationZDeg": 0,
+        "estimated": true
+      },
+      {
+        "id": "st3-plate",
+        "name": "工位3 底板",
+        "role": "plate",
+        "shape": {
+          "type": "box",
+          "size": [
+            320,
+            300,
+            15
+          ]
+        },
+        "color": "#b7c0c7",
+        "material": "AL6061",
+        "bomGroup": "structure",
+        "stationId": "st3",
+        "center": [
+          190,
+          160,
+          857.5
+        ],
+        "rotationZDeg": 0,
+        "estimated": true
+      },
+      {
+        "id": "st3-upright-l",
+        "name": "工位3 门架立柱左",
+        "role": "structure",
+        "shape": {
+          "type": "box",
+          "size": [
+            50,
+            50,
+            312
+          ]
+        },
+        "color": "#6f7a83",
+        "material": "AL6063-T5 型材",
+        "bomGroup": "structure",
+        "stationId": "st3",
+        "center": [
+          55,
+          160,
+          1027
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          6
+        ]
+      },
+      {
+        "id": "st3-upright-r",
+        "name": "工位3 门架立柱右",
+        "role": "structure",
+        "shape": {
+          "type": "box",
+          "size": [
+            50,
+            50,
+            312
+          ]
+        },
+        "color": "#6f7a83",
+        "material": "AL6063-T5 型材",
+        "bomGroup": "structure",
+        "stationId": "st3",
+        "center": [
+          325,
+          160,
+          1027
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          6
+        ]
+      },
+      {
+        "id": "st3-beam",
+        "name": "工位3 门架横梁",
+        "role": "structure",
+        "shape": {
+          "type": "box",
+          "size": [
+            220,
+            50,
+            50
+          ]
+        },
+        "color": "#6f7a83",
+        "material": "AL6063-T5 型材",
+        "bomGroup": "structure",
+        "stationId": "st3",
+        "center": [
+          190,
+          160,
+          1152
+        ],
+        "rotationZDeg": 0,
+        "estimated": true
+      },
+      {
+        "id": "st3-rotary-1-base",
+        "name": "工位3旋转轴1 底座",
+        "role": "actuator",
+        "shape": {
+          "type": "cylinder",
+          "radius": 55,
+          "length": 40,
+          "axis": "z"
+        },
+        "color": "#59636b",
+        "material": "铸铝壳体",
+        "bomGroup": "actuator:rotary",
+        "stationId": "st3",
+        "actuatorId": "st3-rotary-1",
+        "center": [
+          190,
+          160,
+          906
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          21
+        ]
+      },
+      {
+        "id": "st3-rotary-1-table",
+        "name": "工位3旋转轴1 台面 Ø140",
+        "role": "actuator",
+        "shape": {
+          "type": "cylinder",
+          "radius": 70,
+          "length": 12,
+          "axis": "z"
+        },
+        "color": "#f59e0b",
+        "material": "AL6061 阳极",
+        "bomGroup": "actuator:rotary",
+        "moving": true,
+        "stationId": "st3",
+        "actuatorId": "st3-rotary-1",
+        "center": [
+          190,
+          160,
+          953
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          42
+        ]
+      },
+      {
+        "id": "st3-rotary-1-fixture",
+        "name": "工位3旋转轴1 治具",
+        "role": "fixture",
+        "shape": {
+          "type": "box",
+          "size": [
+            60,
+            30,
+            30
+          ]
+        },
+        "color": "#3b82f6",
+        "material": "POM",
+        "bomGroup": "structure",
+        "moving": true,
+        "stationId": "st3",
+        "actuatorId": "st3-rotary-1",
+        "center": [
+          220,
+          160,
+          995
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          63
+        ]
+      },
+      {
+        "id": "sensor-st3-prs-s1-bracket",
+        "name": "ST3-PRS-S1 支架",
+        "role": "structure",
+        "shape": {
+          "type": "box",
+          "size": [
+            30,
+            10,
+            70
+          ]
+        },
+        "color": "#7c8790",
+        "material": "SPCC",
+        "bomGroup": "structure",
+        "stationId": "st3",
+        "sensorPoint": "ST3-PRS-S1",
+        "center": [
+          190,
+          25,
+          921
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          21
+        ]
+      },
+      {
+        "id": "sensor-st3-prs-s1",
+        "name": "ST3-PRS-S1 压力传感器",
+        "role": "sensor",
+        "shape": {
+          "type": "cylinder",
+          "radius": 16,
+          "length": 30,
+          "axis": "y"
+        },
+        "color": "#5d666e",
+        "material": "不锈钢",
+        "bomGroup": "sensor:pressure",
+        "stationId": "st3",
+        "sensorPoint": "ST3-PRS-S1",
+        "center": [
+          190,
+          45,
+          915
+        ],
+        "rotationZDeg": 0,
+        "estimated": true
+      },
+      {
+        "id": "st4-plate",
+        "name": "工位4 底板",
+        "role": "plate",
+        "shape": {
+          "type": "box",
+          "size": [
+            320,
+            300,
+            15
+          ]
+        },
+        "color": "#b7c0c7",
+        "material": "AL6061",
+        "bomGroup": "structure",
+        "stationId": "st4",
+        "center": [
+          570,
+          160,
+          857.5
+        ],
+        "rotationZDeg": 0,
+        "estimated": true
+      },
+      {
+        "id": "st4-upright-l",
+        "name": "工位4 门架立柱左",
+        "role": "structure",
+        "shape": {
+          "type": "box",
+          "size": [
+            50,
+            50,
+            312
+          ]
+        },
+        "color": "#6f7a83",
+        "material": "AL6063-T5 型材",
+        "bomGroup": "structure",
+        "stationId": "st4",
+        "center": [
+          435,
+          160,
+          1027
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          6
+        ]
+      },
+      {
+        "id": "st4-upright-r",
+        "name": "工位4 门架立柱右",
+        "role": "structure",
+        "shape": {
+          "type": "box",
+          "size": [
+            50,
+            50,
+            312
+          ]
+        },
+        "color": "#6f7a83",
+        "material": "AL6063-T5 型材",
+        "bomGroup": "structure",
+        "stationId": "st4",
+        "center": [
+          705,
+          160,
+          1027
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          6
+        ]
+      },
+      {
+        "id": "st4-beam",
+        "name": "工位4 门架横梁",
+        "role": "structure",
+        "shape": {
+          "type": "box",
+          "size": [
+            220,
+            50,
+            50
+          ]
+        },
+        "color": "#6f7a83",
+        "material": "AL6063-T5 型材",
+        "bomGroup": "structure",
+        "stationId": "st4",
+        "center": [
+          570,
+          160,
+          1152
+        ],
+        "rotationZDeg": 0,
+        "estimated": true
+      },
+      {
+        "id": "st4-rotary-1-base",
+        "name": "工位4旋转轴1 底座",
+        "role": "actuator",
+        "shape": {
+          "type": "cylinder",
+          "radius": 55,
+          "length": 40,
+          "axis": "z"
+        },
+        "color": "#59636b",
+        "material": "铸铝壳体",
+        "bomGroup": "actuator:rotary",
+        "stationId": "st4",
+        "actuatorId": "st4-rotary-1",
+        "center": [
+          570,
+          160,
+          906
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          21
+        ]
+      },
+      {
+        "id": "st4-rotary-1-table",
+        "name": "工位4旋转轴1 台面 Ø140",
+        "role": "actuator",
+        "shape": {
+          "type": "cylinder",
+          "radius": 70,
+          "length": 12,
+          "axis": "z"
+        },
+        "color": "#f59e0b",
+        "material": "AL6061 阳极",
+        "bomGroup": "actuator:rotary",
+        "moving": true,
+        "stationId": "st4",
+        "actuatorId": "st4-rotary-1",
+        "center": [
+          570,
+          160,
+          953
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          42
+        ]
+      },
+      {
+        "id": "st4-rotary-1-fixture",
+        "name": "工位4旋转轴1 治具",
+        "role": "fixture",
+        "shape": {
+          "type": "box",
+          "size": [
+            60,
+            30,
+            30
+          ]
+        },
+        "color": "#3b82f6",
+        "material": "POM",
+        "bomGroup": "structure",
+        "moving": true,
+        "stationId": "st4",
+        "actuatorId": "st4-rotary-1",
+        "center": [
+          600,
+          160,
+          995
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          63
+        ]
+      },
+      {
+        "id": "sensor-st4-prs-s1-bracket",
+        "name": "ST4-PRS-S1 支架",
+        "role": "structure",
+        "shape": {
+          "type": "box",
+          "size": [
+            30,
+            10,
+            70
+          ]
+        },
+        "color": "#7c8790",
+        "material": "SPCC",
+        "bomGroup": "structure",
+        "stationId": "st4",
+        "sensorPoint": "ST4-PRS-S1",
+        "center": [
+          570,
+          25,
+          921
+        ],
+        "rotationZDeg": 0,
+        "estimated": true,
+        "movedBy": [
+          0,
+          0,
+          21
+        ]
+      },
+      {
+        "id": "sensor-st4-prs-s1",
+        "name": "ST4-PRS-S1 压力传感器",
+        "role": "sensor",
+        "shape": {
+          "type": "cylinder",
+          "radius": 16,
+          "length": 30,
+          "axis": "y"
+        },
+        "color": "#5d666e",
+        "material": "不锈钢",
+        "bomGroup": "sensor:pressure",
+        "stationId": "st4",
+        "sensorPoint": "ST4-PRS-S1",
+        "center": [
+          570,
+          45,
+          915
+        ],
+        "rotationZDeg": 0,
+        "estimated": true
+      },
+      {
+        "id": "conveyor-frame",
+        "name": "输送线机架 1700×140",
+        "role": "transfer",
+        "shape": {
+          "type": "box",
+          "size": [
+            1700,
+            140,
+            70
+          ]
+        },
+        "center": [
+          0,
+          -120,
+          885
+        ],
+        "rotationZDeg": 0,
+        "color": "#4b5563",
+        "material": "AL6063-T5 型材",
+        "bomGroup": "structure",
+        "estimated": true
+      },
+      {
+        "id": "conveyor-belt",
+        "name": "输送皮带 宽 110",
+        "role": "transfer",
+        "shape": {
+          "type": "box",
+          "size": [
+            1660,
+            110,
+            6
+          ]
+        },
+        "center": [
+          0,
+          -120,
+          923
+        ],
+        "rotationZDeg": 0,
+        "color": "#1f2937",
+        "material": "PVC",
+        "bomGroup": "structure",
+        "estimated": true
+      },
+      {
+        "id": "conveyor-motor",
+        "name": "输送线减速电机",
+        "role": "transfer",
+        "shape": {
+          "type": "cylinder",
+          "radius": 40,
+          "length": 120,
+          "axis": "y"
+        },
+        "center": [
+          790,
+          -256,
+          911
+        ],
+        "rotationZDeg": 0,
+        "color": "#59636b",
+        "material": "电机",
+        "bomGroup": "structure",
+        "estimated": true,
+        "movedBy": [
+          0,
+          -6,
+          16
+        ]
+      }
+    ],
+    "moving": [
+      {
+        "actuatorId": "st1-rotary-1",
+        "stationId": "st1",
+        "kind": "rotary",
+        "partIds": [
+          "st1-rotary-1-table",
+          "st1-rotary-1-fixture"
+        ],
+        "strokeMm": 0,
+        "rangeDeg": 90,
+        "home": "zero",
+        "durationMs": 700,
+        "points": {
+          "point": "ST1-ROT-A1"
+        },
+        "axis": [
+          0,
+          0,
+          1
+        ],
+        "pivot": [
+          -570,
+          160,
+          905
+        ]
+      },
+      {
+        "actuatorId": "st2-rotary-1",
+        "stationId": "st2",
+        "kind": "rotary",
+        "partIds": [
+          "st2-rotary-1-table",
+          "st2-rotary-1-fixture"
+        ],
+        "strokeMm": 0,
+        "rangeDeg": 90,
+        "home": "zero",
+        "durationMs": 700,
+        "points": {
+          "point": "ST2-ROT-A1"
+        },
+        "axis": [
+          0,
+          0,
+          1
+        ],
+        "pivot": [
+          -190,
+          160,
+          905
+        ]
+      },
+      {
+        "actuatorId": "st3-rotary-1",
+        "stationId": "st3",
+        "kind": "rotary",
+        "partIds": [
+          "st3-rotary-1-table",
+          "st3-rotary-1-fixture"
+        ],
+        "strokeMm": 0,
+        "rangeDeg": 90,
+        "home": "zero",
+        "durationMs": 700,
+        "points": {
+          "point": "ST3-ROT-A1"
+        },
+        "axis": [
+          0,
+          0,
+          1
+        ],
+        "pivot": [
+          190,
+          160,
+          905
+        ]
+      },
+      {
+        "actuatorId": "st4-rotary-1",
+        "stationId": "st4",
+        "kind": "rotary",
+        "partIds": [
+          "st4-rotary-1-table",
+          "st4-rotary-1-fixture"
+        ],
+        "strokeMm": 0,
+        "rangeDeg": 90,
+        "home": "zero",
+        "durationMs": 700,
+        "points": {
+          "point": "ST4-ROT-A1"
+        },
+        "axis": [
+          0,
+          0,
+          1
+        ],
+        "pivot": [
+          570,
+          160,
+          905
+        ]
+      }
+    ],
+    "structureBom": [
+      {
+        "name": "机架台面",
+        "spec": "1820×740×20 mm",
+        "qty": 1,
+        "material": "Q235 磨床板"
+      },
+      {
+        "name": "机架立腿",
+        "spec": "60×60×830 mm",
+        "qty": 6,
+        "material": "Q235 方管"
+      },
+      {
+        "name": "机架下横梁",
+        "spec": "40×40 mm",
+        "qty": 4,
+        "material": "Q235 方管"
+      },
+      {
+        "name": "工位底板",
+        "spec": "320×300×15 mm",
+        "qty": 4,
+        "material": "AL6061"
+      },
+      {
+        "name": "门架立柱",
+        "spec": "50×50 型材",
+        "qty": 8,
+        "material": "AL6063-T5"
+      },
+      {
+        "name": "门架横梁",
+        "spec": "50×50 型材",
+        "qty": 4,
+        "material": "AL6063-T5"
+      },
+      {
+        "name": "治具（占位）",
+        "spec": "按产品定制",
+        "qty": 4,
+        "material": "POM"
+      },
+      {
+        "name": "皮带输送线",
+        "spec": "宽 110 mm",
+        "qty": 1,
+        "material": "型材 + PVC"
+      }
+    ],
+    "assumptions": [
+      "CAD 几何精度：概念估算占位体（所有输出零件均标记 estimated），不是型号级 STEP/制造几何；不可作为安装、干涉定论或加工依据。",
+      "元件库 dims 仅定义本体外形 w×h×d（mm），未定义本生成器所需的安装基准、朝向、孔位与运动件拆分；本次不把该外形框冒充装配几何，也未载入 asset。",
+      "机架、工位结构、执行机构与传感器按规则摆放的典型尺寸估算，不含强度、刚度、精确干涉求解与紧固件/钣金细节。",
+      "台面高度 850 mm；工位底板 15 mm 厚、深 300 mm，宽度按执行机构槽位累加（最小 320 mm）。",
+      "气缸按缸径 Ø32、竖直下压、缩回位建模；夹爪按张开位建模；旋转台按 0° 位建模。",
+      "旋转轴分度角（方案/系统估算）：工位1·工位1旋转轴1 90°；工位2·工位2旋转轴1 90°；工位3·工位3旋转轴1 90°；工位4·工位4旋转轴1 90°。未填写时默认 90°；仅驱动概念估算占位体的旋转运动预览，不代表具体旋转台型号、安装或制造数据。",
+      "直线布局：4 工位沿 X 排开、间距 60 mm，操作侧输送线 1700 mm；输送线驱动未接入点位。"
+    ],
+    "warnings": [
+      "三维模型为估算占位几何；请勿据此确认型号包络、安装空间、运动干涉或制造尺寸。",
+      "旋转轴分度角为方案/系统估算值（待核验）：工位1·工位1旋转轴1 90°；工位2·工位2旋转轴1 90°；工位3·工位3旋转轴1 90°；工位4·工位4旋转轴1 90°；请按机构工艺与选定型号复核；整机仍为概念估算占位体，不代表旋转台型号、安装或制造数据。"
+    ],
+    "layoutCompliance": {
+      "clearanceMm": 20,
+      "rounds": [
+        {
+          "round": 1,
+          "suspectsBefore": 0,
+          "clearanceBefore": 26,
+          "overlapMoves": 0,
+          "clearanceMoves": 42,
+          "suspectsAfter": 4,
+          "clearanceAfter": 0
+        },
+        {
+          "round": 2,
+          "suspectsBefore": 4,
+          "clearanceBefore": 0,
+          "overlapMoves": 4,
+          "clearanceMoves": 4,
+          "suspectsAfter": 4,
+          "clearanceAfter": 0
+        },
+        {
+          "round": 3,
+          "suspectsBefore": 4,
+          "clearanceBefore": 0,
+          "overlapMoves": 4,
+          "clearanceMoves": 4,
+          "suspectsAfter": 0,
+          "clearanceAfter": 0
+        }
+      ],
+      "moves": [
+        {
+          "partId": "conveyor-motor",
+          "axis": "z",
+          "delta": 16,
+          "from": [
+            790,
+            -250,
+            895
+          ],
+          "to": [
+            790,
+            -250,
+            911
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st1-rotary-1-fixture",
+          "axis": "z",
+          "delta": 9,
+          "from": [
+            -540,
+            160,
+            932
+          ],
+          "to": [
+            -540,
+            160,
+            941
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st1-rotary-1-fixture",
+          "axis": "z",
+          "delta": 12,
+          "from": [
+            -540,
+            160,
+            941
+          ],
+          "to": [
+            -540,
+            160,
+            953
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st2-rotary-1-fixture",
+          "axis": "z",
+          "delta": 9,
+          "from": [
+            -160,
+            160,
+            932
+          ],
+          "to": [
+            -160,
+            160,
+            941
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st2-rotary-1-fixture",
+          "axis": "z",
+          "delta": 12,
+          "from": [
+            -160,
+            160,
+            941
+          ],
+          "to": [
+            -160,
+            160,
+            953
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st3-rotary-1-fixture",
+          "axis": "z",
+          "delta": 9,
+          "from": [
+            220,
+            160,
+            932
+          ],
+          "to": [
+            220,
+            160,
+            941
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st3-rotary-1-fixture",
+          "axis": "z",
+          "delta": 12,
+          "from": [
+            220,
+            160,
+            941
+          ],
+          "to": [
+            220,
+            160,
+            953
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st4-rotary-1-fixture",
+          "axis": "z",
+          "delta": 9,
+          "from": [
+            600,
+            160,
+            932
+          ],
+          "to": [
+            600,
+            160,
+            941
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st4-rotary-1-fixture",
+          "axis": "z",
+          "delta": 12,
+          "from": [
+            600,
+            160,
+            941
+          ],
+          "to": [
+            600,
+            160,
+            953
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "frame-cross-left",
+          "axis": "x",
+          "delta": -6.859999999999999,
+          "from": [
+            -870,
+            0,
+            150
+          ],
+          "to": [
+            -876.86,
+            0,
+            150
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "frame-cross-right",
+          "axis": "x",
+          "delta": 6.859999999999999,
+          "from": [
+            870,
+            0,
+            150
+          ],
+          "to": [
+            876.86,
+            0,
+            150
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st1-upright-l",
+          "axis": "z",
+          "delta": 6,
+          "from": [
+            -705,
+            160,
+            1021
+          ],
+          "to": [
+            -705,
+            160,
+            1027
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st1-upright-r",
+          "axis": "z",
+          "delta": 6,
+          "from": [
+            -435,
+            160,
+            1021
+          ],
+          "to": [
+            -435,
+            160,
+            1027
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st1-rotary-1-base",
+          "axis": "z",
+          "delta": 6,
+          "from": [
+            -570,
+            160,
+            885
+          ],
+          "to": [
+            -570,
+            160,
+            891
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st1-rotary-1-base",
+          "axis": "z",
+          "delta": 15,
+          "from": [
+            -570,
+            160,
+            891
+          ],
+          "to": [
+            -570,
+            160,
+            906
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st1-rotary-1-fixture",
+          "axis": "z",
+          "delta": 9,
+          "from": [
+            -540,
+            160,
+            953
+          ],
+          "to": [
+            -540,
+            160,
+            962
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "sensor-st1-prs-s1-bracket",
+          "axis": "z",
+          "delta": 6,
+          "from": [
+            -570,
+            25,
+            900
+          ],
+          "to": [
+            -570,
+            25,
+            906
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "sensor-st1-prs-s1-bracket",
+          "axis": "z",
+          "delta": 15,
+          "from": [
+            -570,
+            25,
+            906
+          ],
+          "to": [
+            -570,
+            25,
+            921
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st2-upright-l",
+          "axis": "z",
+          "delta": 6,
+          "from": [
+            -325,
+            160,
+            1021
+          ],
+          "to": [
+            -325,
+            160,
+            1027
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st2-upright-r",
+          "axis": "z",
+          "delta": 6,
+          "from": [
+            -55,
+            160,
+            1021
+          ],
+          "to": [
+            -55,
+            160,
+            1027
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st2-rotary-1-base",
+          "axis": "z",
+          "delta": 6,
+          "from": [
+            -190,
+            160,
+            885
+          ],
+          "to": [
+            -190,
+            160,
+            891
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st2-rotary-1-base",
+          "axis": "z",
+          "delta": 15,
+          "from": [
+            -190,
+            160,
+            891
+          ],
+          "to": [
+            -190,
+            160,
+            906
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st2-rotary-1-fixture",
+          "axis": "z",
+          "delta": 9,
+          "from": [
+            -160,
+            160,
+            953
+          ],
+          "to": [
+            -160,
+            160,
+            962
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "sensor-st2-prs-s1-bracket",
+          "axis": "z",
+          "delta": 6,
+          "from": [
+            -190,
+            25,
+            900
+          ],
+          "to": [
+            -190,
+            25,
+            906
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "sensor-st2-prs-s1-bracket",
+          "axis": "z",
+          "delta": 15,
+          "from": [
+            -190,
+            25,
+            906
+          ],
+          "to": [
+            -190,
+            25,
+            921
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st3-upright-l",
+          "axis": "z",
+          "delta": 6,
+          "from": [
+            55,
+            160,
+            1021
+          ],
+          "to": [
+            55,
+            160,
+            1027
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st3-upright-r",
+          "axis": "z",
+          "delta": 6,
+          "from": [
+            325,
+            160,
+            1021
+          ],
+          "to": [
+            325,
+            160,
+            1027
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st3-rotary-1-base",
+          "axis": "z",
+          "delta": 6,
+          "from": [
+            190,
+            160,
+            885
+          ],
+          "to": [
+            190,
+            160,
+            891
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st3-rotary-1-base",
+          "axis": "z",
+          "delta": 15,
+          "from": [
+            190,
+            160,
+            891
+          ],
+          "to": [
+            190,
+            160,
+            906
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st3-rotary-1-fixture",
+          "axis": "z",
+          "delta": 9,
+          "from": [
+            220,
+            160,
+            953
+          ],
+          "to": [
+            220,
+            160,
+            962
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "sensor-st3-prs-s1-bracket",
+          "axis": "z",
+          "delta": 6,
+          "from": [
+            190,
+            25,
+            900
+          ],
+          "to": [
+            190,
+            25,
+            906
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "sensor-st3-prs-s1-bracket",
+          "axis": "z",
+          "delta": 15,
+          "from": [
+            190,
+            25,
+            906
+          ],
+          "to": [
+            190,
+            25,
+            921
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st4-upright-l",
+          "axis": "z",
+          "delta": 6,
+          "from": [
+            435,
+            160,
+            1021
+          ],
+          "to": [
+            435,
+            160,
+            1027
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st4-upright-r",
+          "axis": "z",
+          "delta": 6,
+          "from": [
+            705,
+            160,
+            1021
+          ],
+          "to": [
+            705,
+            160,
+            1027
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st4-rotary-1-base",
+          "axis": "z",
+          "delta": 6,
+          "from": [
+            570,
+            160,
+            885
+          ],
+          "to": [
+            570,
+            160,
+            891
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st4-rotary-1-base",
+          "axis": "z",
+          "delta": 15,
+          "from": [
+            570,
+            160,
+            891
+          ],
+          "to": [
+            570,
+            160,
+            906
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st4-rotary-1-fixture",
+          "axis": "z",
+          "delta": 9,
+          "from": [
+            600,
+            160,
+            953
+          ],
+          "to": [
+            600,
+            160,
+            962
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "sensor-st4-prs-s1-bracket",
+          "axis": "z",
+          "delta": 6,
+          "from": [
+            570,
+            25,
+            900
+          ],
+          "to": [
+            570,
+            25,
+            906
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "sensor-st4-prs-s1-bracket",
+          "axis": "z",
+          "delta": 15,
+          "from": [
+            570,
+            25,
+            906
+          ],
+          "to": [
+            570,
+            25,
+            921
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "conveyor-motor",
+          "axis": "y",
+          "delta": -6,
+          "from": [
+            790,
+            -250,
+            911
+          ],
+          "to": [
+            790,
+            -256,
+            911
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "frame-cross-left",
+          "axis": "x",
+          "delta": -1.3999999999999986,
+          "from": [
+            -876.86,
+            0,
+            150
+          ],
+          "to": [
+            -878.26,
+            0,
+            150
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "frame-cross-right",
+          "axis": "x",
+          "delta": 1.3999999999999986,
+          "from": [
+            876.86,
+            0,
+            150
+          ],
+          "to": [
+            878.26,
+            0,
+            150
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st1-rotary-1-table",
+          "axis": "z",
+          "delta": 22,
+          "from": [
+            -570,
+            160,
+            911
+          ],
+          "to": [
+            -570,
+            160,
+            933
+          ],
+          "kind": "overlap"
+        },
+        {
+          "partId": "st2-rotary-1-table",
+          "axis": "z",
+          "delta": 22,
+          "from": [
+            -190,
+            160,
+            911
+          ],
+          "to": [
+            -190,
+            160,
+            933
+          ],
+          "kind": "overlap"
+        },
+        {
+          "partId": "st3-rotary-1-table",
+          "axis": "z",
+          "delta": 22,
+          "from": [
+            190,
+            160,
+            911
+          ],
+          "to": [
+            190,
+            160,
+            933
+          ],
+          "kind": "overlap"
+        },
+        {
+          "partId": "st4-rotary-1-table",
+          "axis": "z",
+          "delta": 22,
+          "from": [
+            570,
+            160,
+            911
+          ],
+          "to": [
+            570,
+            160,
+            933
+          ],
+          "kind": "overlap"
+        },
+        {
+          "partId": "st1-rotary-1-table",
+          "axis": "z",
+          "delta": 20,
+          "from": [
+            -570,
+            160,
+            933
+          ],
+          "to": [
+            -570,
+            160,
+            953
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st2-rotary-1-table",
+          "axis": "z",
+          "delta": 20,
+          "from": [
+            -190,
+            160,
+            933
+          ],
+          "to": [
+            -190,
+            160,
+            953
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st3-rotary-1-table",
+          "axis": "z",
+          "delta": 20,
+          "from": [
+            190,
+            160,
+            933
+          ],
+          "to": [
+            190,
+            160,
+            953
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st4-rotary-1-table",
+          "axis": "z",
+          "delta": 20,
+          "from": [
+            570,
+            160,
+            933
+          ],
+          "to": [
+            570,
+            160,
+            953
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st1-rotary-1-fixture",
+          "axis": "z",
+          "delta": 13,
+          "from": [
+            -540,
+            160,
+            962
+          ],
+          "to": [
+            -540,
+            160,
+            975
+          ],
+          "kind": "overlap"
+        },
+        {
+          "partId": "st2-rotary-1-fixture",
+          "axis": "z",
+          "delta": 13,
+          "from": [
+            -160,
+            160,
+            962
+          ],
+          "to": [
+            -160,
+            160,
+            975
+          ],
+          "kind": "overlap"
+        },
+        {
+          "partId": "st3-rotary-1-fixture",
+          "axis": "z",
+          "delta": 13,
+          "from": [
+            220,
+            160,
+            962
+          ],
+          "to": [
+            220,
+            160,
+            975
+          ],
+          "kind": "overlap"
+        },
+        {
+          "partId": "st4-rotary-1-fixture",
+          "axis": "z",
+          "delta": 13,
+          "from": [
+            600,
+            160,
+            962
+          ],
+          "to": [
+            600,
+            160,
+            975
+          ],
+          "kind": "overlap"
+        },
+        {
+          "partId": "st1-rotary-1-fixture",
+          "axis": "z",
+          "delta": 20,
+          "from": [
+            -540,
+            160,
+            975
+          ],
+          "to": [
+            -540,
+            160,
+            995
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st2-rotary-1-fixture",
+          "axis": "z",
+          "delta": 20,
+          "from": [
+            -160,
+            160,
+            975
+          ],
+          "to": [
+            -160,
+            160,
+            995
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st3-rotary-1-fixture",
+          "axis": "z",
+          "delta": 20,
+          "from": [
+            220,
+            160,
+            975
+          ],
+          "to": [
+            220,
+            160,
+            995
+          ],
+          "kind": "clearance"
+        },
+        {
+          "partId": "st4-rotary-1-fixture",
+          "axis": "z",
+          "delta": 20,
+          "from": [
+            600,
+            160,
+            975
+          ],
+          "to": [
+            600,
+            160,
+            995
+          ],
+          "kind": "clearance"
+        }
+      ],
+      "suspects": 0,
+      "clearance": 0,
+      "converged": true
+    },
+    "interference": {
+      "mode": "aabb",
+      "partCount": 50,
+      "pairs": [
+        {
+          "kind": "declared",
+          "reason": "立柱插横梁",
+          "a": "frame-leg-2",
+          "b": "frame-stringer-front",
+          "aName": "机架立腿 2（60×60×830）",
+          "bName": "机架下横梁（前）",
+          "aRole": "frame",
+          "bRole": "frame",
+          "suggestion": {
+            "partId": "frame-stringer-front",
+            "axis": "y",
+            "delta": 51
+          },
+          "overlapMm3": 96000,
+          "overlapBox": [
+            60,
+            40,
+            40
+          ]
+        },
+        {
+          "kind": "declared",
+          "reason": "立柱插横梁",
+          "a": "frame-leg-5",
+          "b": "frame-stringer-back",
+          "aName": "机架立腿 5（60×60×830）",
+          "bName": "机架下横梁（后）",
+          "aRole": "frame",
+          "bRole": "frame",
+          "suggestion": {
+            "partId": "frame-stringer-back",
+            "axis": "y",
+            "delta": 51
+          },
+          "overlapMm3": 96000,
+          "overlapBox": [
+            60,
+            40,
+            40
+          ]
+        }
+      ],
+      "count": 2,
+      "declared": 2,
+      "suspects": 0,
+      "declaredJoints": 124,
+      "jointSource": "generator",
+      "structuralOnly": true
+    }
+  },
+  "compliance": {
+    "clearanceMm": 20,
+    "converged": true,
+    "suspects": 0,
+    "clearance": 0,
+    "rounds": 3,
+    "moves": 58
+  }
+}

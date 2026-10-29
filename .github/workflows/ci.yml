@@ -77,6 +77,18 @@ jobs:
           cmake --build build-qt -j4
       - name: 可执行文件存在
         run: test -x build-qt/automationcad-qt
+      # 方案窗口的「合规戳 / 排布明细」读的是方案文件本身，不需要 node：
+      # 直接用提交在仓库里的 fixture 验，防「JSON 里有、界面读不出来」这类回归。
+      - name: 方案窗口读取合规戳与排布明细
+        timeout-minutes: 5
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          export QT_QPA_PLATFORM=offscreen
+          ./build-qt/automationcad-qt --compliance-stamp-selftest docs/desktop/eval/layout-case.json 20
+          ./build-qt/automationcad-qt --layout-csv-selftest docs/desktop/eval/layout-case.json --out /tmp/layout.csv
+          ROWS=$(wc -l < /tmp/layout.csv)
+          # 58 条位移 + 表头 + 合计行 = 60
+          test "$ROWS" = "60" || { echo "排布 CSV 行数不对：$ROWS"; exit 1; }
       - name: Qt 客户端 ↔ 契约服务自检
         timeout-minutes: 5
         run: |

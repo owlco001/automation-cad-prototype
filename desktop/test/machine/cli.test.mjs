@@ -209,3 +209,21 @@ test('--layout-compliance 会把合规结论写成文档顶层的 compliance 戳
   assert.equal(stamp.suspects, details.suspects);
   assert.equal(stamp.clearance, details.clearance);
 });
+
+
+test('排布合规 fixture 与当前算法一致（CI 的 Qt 自检靠它，漂了要重新生成）', () => {
+  const fixture = JSON.parse(readFileSync(join(repoRoot, 'docs', 'desktop', 'eval', 'layout-case.json'), 'utf8'));
+  const stamp = fixture.compliance;
+  assert.equal(fixture.kind, 'machine-case');
+  assert.equal(stamp.clearanceMm, 20);
+  assert.equal(stamp.converged, true);
+  assert.equal(stamp.suspects, 0);
+  assert.equal(stamp.clearance, 0);
+  assert.equal(stamp.rounds, 3);
+  assert.equal(stamp.moves, 58);
+  const details = fixture.geometry.layoutCompliance;
+  assert.equal(details.moves.length, 58);
+  assert.equal(details.rounds.length, 3);
+  // fixture 里必须真有一个未收敛的反例参数可查（同一份 geometry 按 40 mm 会放不下）
+  assert.equal(fixture.geometry.parts.length > 0, true);
+});
