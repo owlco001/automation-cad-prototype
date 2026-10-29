@@ -60,3 +60,13 @@ test('不修改入参（纯函数）', () => {
   resolveLayout({ parts }, { clearanceMm: 20 });
   assert.equal(JSON.stringify(parts), snapshot);
 });
+
+
+test('收敛的案例不带建议（建议只为「放不下」服务）', () => {
+  const result = resolveLayout(
+    { parts: [{ id: 'a', name: 'a', role: 'structure', shape: { type: 'box', size: [100, 100, 100] }, center: [0, 0, 0], rotationZDeg: 0 },
+              { id: 'b', name: 'b', role: 'structure', shape: { type: 'box', size: [100, 100, 100] }, center: [110, 0, 0], rotationZDeg: 0 }] },
+    { clearanceMm: 20 });
+  assert.equal(result.converged, true);
+  assert.equal(result.advice, undefined);
+});

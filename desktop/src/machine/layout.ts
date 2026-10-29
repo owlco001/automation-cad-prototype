@@ -18,6 +18,16 @@ export interface LayoutRound {
   clearanceAfter: number;
 }
 
+/** 放不下时的补救建议：按「工位/部件族」汇总还差多少间距 */
+export interface LayoutAdvice {
+  /** 工位或部件族前缀，如 st2 / frame / conveyor */
+  scope: string;
+  /** 该 scope 里最紧的一对还差多少 mm 才到阈值 */
+  shortByMm: number;
+  /** 涉及的零件对（最多列 5 对，避免刷屏） */
+  pairs: Array<{ a: string; b: string; gapMm: number }>;
+}
+
 export interface LayoutResult {
   parts: any[];
   rounds: LayoutRound[];
@@ -29,6 +39,8 @@ export interface LayoutResult {
   clearanceMm: number;
   converged: boolean;
   stopReason?: string;
+  /** 没收敛时给「还差多少、要动哪个工位」，收敛时为空 */
+  advice?: LayoutAdvice[];
 }
 
 export interface LayoutOptions {
@@ -95,7 +107,8 @@ export function resolveLayout(geometry: any, options: LayoutOptions): LayoutResu
         clearanceMm: options.clearanceMm,
         converged: false,
         stopReason: `连续 ${stallRounds} 轮没有进展（仍有 ${suspectsAfter} 处重叠、${clearanceAfter} 处间距不足）：`
-                    + `这个 ${options.clearanceMm} mm 间距在当前布局下放不下，需要加宽工位或减少零件`
+                    + `这个 ${options.clearanceMm} mm 间距在当前布局下放不下，需要加宽工位或减少零件`,
+        advice: buildAdvice(finalWorking, options.clearanceMm)
       };
     }
 
@@ -119,5 +132,34 @@ export function resolveLayout(geometry: any, options: LayoutOptions): LayoutResu
   const base = { parts, rounds, moves, suspects, clearance, clearanceMm: options.clearanceMm, converged };
   return converged
     ? base
-    : { ...base, stopReason: `交替 ${maxRounds} 轮后仍有 ${suspects} 处重叠、${clearance} 处间距不足` };
+    : { ...base,
+        stopReason: `交替 ${maxRounds} 轮后仍有 ${suspects} 处重叠、${clearance} 处间距不足`,
+        advice: buildAdvice(finalWorking, options.clearanceMm) };
+}
+
+
+// 把「还差多少」落到具体工位上：零件 id 形如 st2-gripper-1-nest / frame-top / conveyor-motor，
+// 取第一段作为 scope（st2 / frame / conveyor）。同一对跨两个 scope 时算到两个 scope 都行——
+// 用户要的是「动哪一片」，不是精确归属。
+function scopeOf(partId: string): string {
+  const head = partId.split('-')[0] ?? partId;
+  return head;
+}
+
+function buildAdvice(geometry: any, clearanceMm: number): LayoutAdvice[] {
+  const screen = screenClearance(geometry, { thresholdMm: clearanceMm });
+  const byScope = new Map<string, LayoutAdvice>();
+  for (const pair of screen.pairs) {
+    const shortByMm = Math.round((clearanceMm - pair.gapMm) * 100) / 100;
+    for (const scope of new Set([scopeOf(pair.a), scopeOf(pair.b)])) {
+      const existing = byScope.get(scope);
+      if (!existing) {
+        byScope.set(scope, { scope, shortByMm, pairs: [{ a: pair.a, b: pair.b, gapMm: pair.gapMm }] });
+        continue;
+      }
+      existing.shortByMm = Math.max(existing.shortByMm, shortByMm);
+      if (existing.pairs.length < 5) existing.pairs.push({ a: pair.a, b: pair.b, gapMm: pair.gapMm });
+    }
+  }
+  return [...byScope.values()].sort((left, right) => right.shortByMm - left.shortByMm);
 }

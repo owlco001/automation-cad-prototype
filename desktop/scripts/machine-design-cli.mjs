@@ -112,7 +112,8 @@ if (withGeometry) {
       suspects: layout.suspects,
       clearance: layout.clearance,
       converged: layout.converged,
-      ...(layout.stopReason ? { stopReason: layout.stopReason } : {})
+      ...(layout.stopReason ? { stopReason: layout.stopReason } : {}),
+      ...(layout.advice ? { advice: layout.advice } : {})
     };
   }
   const clearanceResolveIndex = args.indexOf('--resolve-clearance');

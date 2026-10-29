@@ -182,4 +182,13 @@ test('排布合规：阈值大到放不下时提前停并说明原因，不空�
   assert.match(layout.stopReason ?? '', /没有进展/);
   assert.ok(layout.rounds.length < 4, `应当提前停，实际跑了 ${layout.rounds.length} 轮`);
   assert.ok(layout.moves.length < 700, `不应空转出上千次位移，实际 ${layout.moves.length}`);
+
+  // 建议要落到具体工位：st1 / st4 各还差 37 mm（40 − 实测 3 mm），按还差从大到小排
+  assert.ok(Array.isArray(layout.advice) && layout.advice.length > 0, '放不下必须给建议');
+  const scopes = layout.advice.map((item) => item.scope);
+  assert.ok(scopes.includes('st1') && scopes.includes('st4'), `建议工位不对：${scopes.join(',')}`);
+  const st1 = layout.advice.find((item) => item.scope === 'st1');
+  assert.equal(st1.shortByMm, 37, `st1 还差 ${st1.shortByMm}`);
+  assert.ok(st1.pairs.length >= 1 && st1.pairs.length <= 5);
+  for (const item of layout.advice) assert.ok(item.shortByMm > 0);
 });

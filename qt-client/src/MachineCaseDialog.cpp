@@ -337,6 +337,24 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                       .arg(layoutInfo.value(QStringLiteral("suspects")).toInt())
                       .arg(layoutInfo.value(QStringLiteral("clearance")).toInt()),
             layoutPage);
+        const QJsonArray advice = layoutInfo.value(QStringLiteral("advice")).toArray();
+        if (!converged && !advice.isEmpty()) {
+            QStringList lines;
+            for (const QJsonValue &value : advice) {
+                const QJsonObject item = value.toObject();
+                const QJsonArray itemPairs = item.value(QStringLiteral("pairs")).toArray();
+                const QString first = itemPairs.isEmpty()
+                    ? QString()
+                    : QStringLiteral("（%1 × %2）")
+                          .arg(itemPairs.at(0).toObject().value(QStringLiteral("a")).toString(),
+                               itemPairs.at(0).toObject().value(QStringLiteral("b")).toString());
+                lines << QStringLiteral("· %1 还差 %2 mm 才到阈值%3")
+                             .arg(item.value(QStringLiteral("scope")).toString())
+                             .arg(QString::number(item.value(QStringLiteral("shortByMm")).toDouble(), 'f', 1))
+                             .arg(first);
+            }
+            verdict->setText(verdict->text() + QStringLiteral("\n\n建议：\n") + lines.join(QStringLiteral("\n")));
+        }
         verdict->setWordWrap(true);
         verdict->setStyleSheet(converged ? QStringLiteral("color:#2e7d32;") : QStringLiteral("color:#b3261e;"));
         layoutPageLayout->addWidget(verdict);
@@ -371,6 +389,9 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
         preview->resizeColumnsToContents();
         layoutPageLayout->addWidget(preview, 1);
         m_tabs->addTab(layoutPage, QStringLiteral("位移明细（%1）").arg(preview->rowCount()));
+        if (qEnvironmentVariable("AUTOMATIONCAD_TAB") == QStringLiteral("advice")) {
+            m_tabs->setCurrentWidget(layoutPage);
+        }
         qInfo().noquote() << "FT_QT_LAYOUT_PAGE rounds=" << rounds.size()
                           << "moves=" << preview->rowCount()
                           << "converged=" << converged;
