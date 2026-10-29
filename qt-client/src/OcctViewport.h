@@ -45,6 +45,9 @@ public:
     /// 注意：这是**摆位后的概念占位体**，不是制造几何。
     bool exportMachineStl(const QString &path, int *bytes, QString *error);
 
+    void dragEnterEvent(QDragEnterEvent *event) override;
+    void dropEvent(QDropEvent *event) override;
+
     void ensureRevision(int revision, const QString &url);
     void loadFromUrl(const QString &url);
     void startRequest(const QString &url);
@@ -57,12 +60,17 @@ public:
     bool clipActive() const { return m_clipActive; }
     double clipZ() const { return m_clipZ; }
 
+    /// 屏幕坐标 → 地面(z=0)世界坐标；取不到返回 false（视口没准备好/射线平行地面）
+    bool screenToGround(int x, int y, double *worldX, double *worldY);
+
     void fitView();
     void setStandardView(int which);
     int triangleCount() const { return m_triangles; }
     bool ready() const { return m_viewReady; }
 
 signals:
+    /// 构件库拖进来的构件：已换算成地面落点（mm）
+    void partDropped(const QString &type, double x, double y);
     void loaded(int triangles);
     void failed(const QString &message);
     /// 选中面/边/点的测量结果

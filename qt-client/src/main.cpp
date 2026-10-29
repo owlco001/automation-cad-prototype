@@ -319,6 +319,50 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 拖放落点自检：--drop-selftest "brief" <type> [sx sy]
+    // 验证「屏幕点 → 地面世界坐标 → 10mm 吸附 → 插入」这条链，Qt 的拖拽事件本身是标准件不另测
+    {
+        const int index = args.indexOf(QStringLiteral("--drop-selftest"));
+        if (index >= 0 && index + 2 < args.size()) {
+            MainWindow window;
+            window.resize(1200, 800);
+            window.show();
+            QJsonObject document;
+            QString error;
+            if (!window.designMachineFromBrief(args.at(index + 1), &document, &error)) {
+                qCritical().noquote() << "FT_QT_DROP_FAIL" << error;
+                return 1;
+            }
+            int shapes = 0;
+            if (!window.renderMachineGeometry(document, &shapes, &error)) {
+                qCritical().noquote() << "FT_QT_DROP_FAIL" << error;
+                return 1;
+            }
+            QCoreApplication::processEvents();
+            const int sx = index + 4 < args.size() ? args.at(index + 3).toInt() : 640;
+            const int sy = index + 4 < args.size() ? args.at(index + 4).toInt() : 400;
+            double wx = 0, wy = 0;
+            if (!window.screenPointToGroundForTest(sx, sy, &wx, &wy)) {
+                qCritical().noquote() << "FT_QT_DROP_FAIL 地面求交失败";
+                return 1;
+            }
+            const double snappedX = std::round(wx / 10.0) * 10.0;
+            const double snappedY = std::round(wy / 10.0) * 10.0;
+            int count = 0;
+            if (!window.insertPartFromCatalog(args.at(index + 2),
+                                              QVector3D(static_cast<float>(snappedX), static_cast<float>(snappedY), 0),
+                                              &count, &error)) {
+                qCritical().noquote() << "FT_QT_DROP_FAIL" << error;
+                return 1;
+            }
+            qInfo().noquote() << QStringLiteral("FT_QT_DROP_OK type=%1 screen=%2,%3 ground=%4,%5 snapped=%6,%7 parts=%8")
+                                     .arg(args.at(index + 2)).arg(sx).arg(sy)
+                                     .arg(wx, 0, 'f', 1).arg(wy, 0, 'f', 1)
+                                     .arg(snappedX).arg(snappedY).arg(count);
+            return 0;
+        }
+    }
+
     // 插入构件自检：--insert-selftest "brief" <type> [x y z]
     {
         const int index = args.indexOf(QStringLiteral("--insert-selftest"));

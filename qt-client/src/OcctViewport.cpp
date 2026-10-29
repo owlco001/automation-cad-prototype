@@ -2,6 +2,9 @@
 
 #include <QDebug>
 #include <QDir>
+#include <QDragEnterEvent>
+#include <QDropEvent>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -424,6 +427,31 @@ void OcctViewport::startRequest(const QString &url) {
     });
 }
 
+void OcctViewport::dragEnterEvent(QDragEnterEvent *event) {
+    if (event->mimeData()->hasFormat(QStringLiteral("application/x-cad-part"))) event->acceptProposedAction();
+}
+
+void OcctViewport::dropEvent(QDropEvent *event) {
+    if (!event->mimeData()->hasFormat(QStringLiteral("application/x-cad-part"))) return;
+    const QString type = QString::fromUtf8(event->mimeData()->data(QStringLiteral("application/x-cad-part")));
+    const QPoint pos = event->position().toPoint();
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    double wx = 0, wy = 0;
+    if (!screenToGround(pos.x(), pos.y(), &wx, &wy)) {
+        qInfo().noquote() << "FT_QT_DROP_REJECT reason=no-ground-hit";
+        return;
+    }
+    const double snappedX = std::round(wx / 10.0) * 10.0;   // 10 mm 网格吸附
+    const double snappedY = std::round(wy / 10.0) * 10.0;
+    qInfo().noquote() << "FT_QT_DROP type=" << type << "ground=" << wx << wy
+                      << "snapped=" << snappedX << snappedY;
+    emit partDropped(type, snappedX, snappedY);
+    event->acceptProposedAction();
+#else
+    Q_UNUSED(type); Q_UNUSED(pos);
+#endif
+}
+
 void OcctViewport::displayShape(const TopoDS_Shape &shape) {
     initializeView();
     if (!m_viewReady) return;
@@ -531,6 +559,23 @@ void OcctViewport::clearClip() {
     }
 #endif
     m_clipActive = false;
+}
+
+bool OcctViewport::screenToGround(int x, int y, double *worldX, double *worldY) {
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    if (!m_viewReady) return false;
+    Standard_Real px = 0, py = 0, pz = 0, vx = 0, vy = 0, vz = 0;
+    m_view->ConvertWithProj(x, y, px, py, pz, vx, vy, vz);
+    if (std::abs(vz) < 1e-9) return false;   // 视线与地面平行
+    const double t = -pz / vz;
+    if (t <= 0) return false;                // 地面在相机背后
+    *worldX = px + vx * t;
+    *worldY = py + vy * t;
+    return true;
+#else
+    Q_UNUSED(x); Q_UNUSED(y); Q_UNUSED(worldX); Q_UNUSED(worldY);
+    return false;
+#endif
 }
 
 void OcctViewport::fitView() {

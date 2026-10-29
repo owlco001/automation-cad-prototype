@@ -17,7 +17,12 @@
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QProcess>
+#include <QDrag>
+#include <QDockWidget>
 #include <QFileDialog>
+#include <QListWidget>
+#include <QMimeData>
+#include <QTimer>
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QHeaderView>
@@ -165,6 +170,50 @@ MainWindow::MainWindow(QWidget *parent)
     auto *clipUnavailable = viewMenu->addAction(tr("剖切（需 OCCT 构建）"));
     clipUnavailable->setEnabled(false);
 #endif
+    // 构件库（停靠面板）：条目可拖到 3D 视口；数据来自 desktop --catalog
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    if (m_occtViewport) {
+        connect(m_occtViewport, &OcctViewport::partDropped, this, [this](const QString &type, double x, double y) {
+            int count = 0;
+            QString error;
+            if (!insertPartFromCatalog(type, QVector3D(static_cast<float>(x), static_cast<float>(y), 0), &count, &error)) {
+                QMessageBox::warning(this, tr("插入构件失败"), error);
+                return;
+            }
+            statusBar()->showMessage(tr("已插入 %1 于 (%2, %3)，共 %4 个零件").arg(type).arg(x).arg(y).arg(count), 20000);
+        });
+    }
+#endif
+
+    auto *catalogDock = new QDockWidget(tr("构件库"), this);
+    auto *catalogList = new QListWidget(catalogDock);
+    catalogList->setDragEnabled(true);
+    catalogList->setDragDropMode(QAbstractItemView::DragOnly);
+    catalogDock->setWidget(catalogList);
+    addDockWidget(Qt::LeftDockWidgetArea, catalogDock);
+    QJsonArray catalogCache;
+    QTimer::singleShot(600, this, [this, catalogList]() {
+        QJsonArray catalog;
+        QString error;
+        if (!loadCatalog(&catalog, &error)) {
+            catalogList->addItem(tr("（读取构件库失败：%1）").arg(error));
+            return;
+        }
+        for (const QJsonValue &entry : catalog) {
+            const QJsonObject item = entry.toObject();
+            auto *row = new QListWidgetItem(item.value(QStringLiteral("label")).toString(), catalogList);
+            row->setData(Qt::UserRole, item.value(QStringLiteral("type")).toString());
+            row->setToolTip(tr("拖到 3D 视口即可插入（落点按 10 mm 网格吸附、底面贴地）"));
+        }
+    });
+    connect(catalogList, &QListWidget::itemPressed, this, [catalogList](QListWidgetItem *item) {
+        QMimeData *mime = new QMimeData();
+        mime->setData(QStringLiteral("application/x-cad-part"), item->data(Qt::UserRole).toString().toUtf8());
+        auto *drag = new QDrag(catalogList);
+        drag->setMimeData(mime);
+        drag->exec(Qt::CopyAction);
+    });
+
     auto *insertMenu = menuBar()->addMenu(tr("插入"));
     insertMenu->addAction(tr("插入构件…"), this, [this]() {
         QJsonArray catalog;
@@ -1312,6 +1361,16 @@ bool MainWindow::loadCatalog(QJsonArray *catalog, QString *error) {
     }
     *catalog = parsed.object().value(QStringLiteral("catalog")).toArray();
     return true;
+}
+
+bool MainWindow::screenPointToGroundForTest(int x, int y, double *worldX, double *worldY) {
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    if (!m_occtViewport) return false;
+    return m_occtViewport->screenToGround(x, y, worldX, worldY);
+#else
+    Q_UNUSED(x); Q_UNUSED(y); Q_UNUSED(worldX); Q_UNUSED(worldY);
+    return false;
+#endif
 }
 
 bool MainWindow::insertPartFromCatalog(const QString &type, const QVector3D &at, int *partCount, QString *error) {

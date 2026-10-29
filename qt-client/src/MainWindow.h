@@ -70,6 +70,8 @@ public:
     bool loadCatalog(QJsonArray *catalog, QString *error);
     /// 插入一个构件实例：走管线 --insert-part，几何由 desktop 重算
     bool insertPartFromCatalog(const QString &type, const QVector3D &at, int *partCount, QString *error);
+    /// 拖放自检：屏幕点转地面世界坐标
+    bool screenPointToGroundForTest(int x, int y, double *worldX, double *worldY);
     bool exportStl(const QString &path, int *bytes, QString *error);
     /// 剖切自检用：抓剖切前后的非背景像素数（真看图，不看标志位）
     bool clipTestMetrics(double z, int *beforePixels, int *afterPixels, QString *error);
