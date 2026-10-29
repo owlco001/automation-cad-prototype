@@ -39,42 +39,36 @@ test('绕 Z 转 45° 的长条，包围盒按旋转后外接尺寸算', () => {
   assert.ok(Math.abs(bounds.max[0] - expected) < 1e-6, `max.x=${bounds.max[0]} expected=${expected}`);
 });
 
-test('结构件互撞标 joint，含运动件标 suspect，且 suspect 排前面', () => {
+test('声明过的连接（立柱插横梁）标 declared 并给原因，未声明的结构重叠仍然是 suspect', () => {
   const result = screenInterference({
     parts: [
-      box('leg', [0, 0, 0], [40, 40, 400], 0, 'frame'),
-      box('beam', [10, 0, 100], [200, 40, 40], 0, 'frame'),
-      box('cyl', [10, 0, 150], [60, 60, 120], 0, 'actuator')
+      box('frame-leg-1', [0, 0, 0], [40, 40, 400], 0, 'frame'),
+      box('frame-stringer-front', [10, 0, 100], [200, 40, 40], 0, 'frame'),
+      box('st1-plate', [10, 0, 110], [120, 120, 10], 0, 'plate')  // 跟横梁、立柱都重叠
     ]
   });
-  assert.equal(result.count, 3);
-  assert.equal(result.joints, 1);      // leg × beam
-  assert.equal(result.suspects, 2);    // cyl 撞 leg / 撞 beam
-  assert.equal(result.pairs[0].kind, 'suspect', '需人工确认的要排最前');
+  const declaredPair = result.pairs.find((pair) => pair.kind === 'declared');
+  assert.ok(declaredPair, '立柱×横梁应被判为已声明');
+  assert.equal(declaredPair.reason, '立柱插横梁');
+  // 横梁 × 工位底板：结构件之间，但没声明过 → 必须报出来，不能因为「都是结构件」就放行
+  const suspect = result.pairs.find((pair) => pair.a === 'frame-stringer-front' && pair.b === 'st1-plate');
+  assert.ok(suspect, '未声明的结构重叠要出现');
+  assert.equal(suspect.kind, 'suspect');
+  assert.equal(result.declared, 1);
+  assert.ok(result.suspects >= 1, `suspects=${result.suspects}`);
   assert.equal(result.structuralOnly, false);
+  assert.ok(result.declaredJoints >= 1);
 });
 
-test('全是结构件的疑似对要标 structuralOnly（避免被当成设计缺陷）', () => {
+test('执行机构撞到台面时一定不是 declared（这种才要看）', () => {
   const result = screenInterference({
     parts: [
-      box('leg', [0, 0, 0], [50, 50, 500], 0, 'frame'),
-      box('stringer', [20, 0, 200], [200, 40, 40], 0, 'frame')
-    ]
-  });
-  assert.equal(result.count, 1);
-  assert.equal(result.structuralOnly, true);
-  assert.equal(result.joints, 1);
-  assert.equal(result.suspects, 0);
-});
-
-test('执行机构撞到台面时 structuralOnly=false（这种才要看）', () => {
-  const result = screenInterference({
-    parts: [
-      box('table', [0, 0, 0], [500, 500, 20], 0, 'frame'),
-      box('cylinder', [0, 0, 5], [60, 60, 120], 0, 'actuator')
+      box('frame-top', [0, 0, 0], [500, 500, 20], 0, 'frame'),
+      box('st1-gripper-1-body', [0, 0, 5], [60, 60, 120], 0, 'actuator')
     ]
   });
   assert.equal(result.count, 1);
   assert.equal(result.structuralOnly, false);
+  assert.equal(result.suspects, 1);
   assert.equal(result.pairs[0].bRole, 'actuator');
 });

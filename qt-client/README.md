@@ -144,11 +144,17 @@ CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI �
 
 实测四工位点胶机：70 个零件两两初筛 → **2 对疑似**，都是 `frame-leg-2 × frame-stringer-front` 与
 `frame-leg-5 × frame-stringer-back`，各 96,000 mm³（重叠盒 60×40×40），`structuralOnly=true`。
-每对再判 `joint`（结构件互撞）/`suspect`（有执行机构/传感器参与）：**需确认的排在最前**，
-页面顶部直接写「N 对需人工确认 + M 对结构共位」，结构共位不再淹没真正要看的那几对。
+每对再判 `declared`（在 `desktop/src/machine/joints.ts` 里显式声明过的结构连接，带原因，如「立柱插横梁」）
+或 `suspect`（没声明 → 需人工确认），**需确认的排在最前**，页面顶部写「N 对未声明 + M 对已声明连接」。
 
-口径守卫在 `desktop/test/machine/interference.test.mjs`（7 条：重叠/贴面不算/挪开后消失/旋转 45° 外接盒/
-joint 与 suspect 拆分与排序/结构件全对标记/执行机构撞台面时不标结构件）。
+关键口径：**只放行声明过的连接**。早期版本按「都是结构件 → 算共位」放行，那真正的结构撞车会被一起放行；
+现在没声明的结构重叠照样报 suspect。
+
+口径守卫在 `desktop/test/machine/interference.test.mjs`（6 条：重叠体积/贴面不算/挪开后消失/
+旋转 45° 外接盒/已声明连接带原因且未声明结构重叠仍报 suspect/执行机构撞台面必为 suspect）。
+
+实测四工位点胶机：2 对重叠 → 全部 `declared`（立柱插横梁，各 96,000 mm³），`suspects=0`，
+声明表共 138 对连接。
 
 **导出整机 BOM CSV**：方案窗口底部按钮（或 `--machine-bom-selftest <case.json> --out x.csv`）。
 实测 `machine-case.json` → 12 行 + 表头 + 合计 = 14 行 5 列，来源文案里有逗号所以加了引号转义，
