@@ -1658,6 +1658,48 @@ bool MainWindow::insertPartFromCatalog(const QString &type, const QVector3D &at,
     const QJsonArray parts = geometry.value(QStringLiteral("parts")).toArray();
     *partCount = parts.size();
     // 插入后顺带跑一次**整机**间距初筛（不是只看新构件：最紧的一对可能跟它无关，这里如实报整机口径）
+    // 新件视角：它离谁最近、差多少（整机间距总数回答不了这个问题）
+    QString insertedId;
+    for (const QJsonValue &entry : parts) {
+        const QString id = entry.toObject().value(QStringLiteral("id")).toString();
+        if (id.startsWith(QStringLiteral("user-"))) insertedId = id;
+    }
+    const QJsonArray bounds = geometry.value(QStringLiteral("bounds")).toArray();
+    if (!insertedId.isEmpty() && !bounds.isEmpty()) {
+        QJsonArray selfMin, selfMax;
+        for (const QJsonValue &boundValue : bounds) {
+            const QJsonObject bound = boundValue.toObject();
+            if (bound.value(QStringLiteral("id")).toString() != insertedId) continue;
+            selfMin = bound.value(QStringLiteral("min")).toArray();
+            selfMax = bound.value(QStringLiteral("max")).toArray();
+            break;
+        }
+        double best = 1e9;
+        QString bestId;
+        if (selfMin.size() == 3 && selfMax.size() == 3) {
+            for (const QJsonValue &boundValue : bounds) {
+                const QJsonObject bound = boundValue.toObject();
+                if (bound.value(QStringLiteral("id")).toString() == insertedId) continue;
+                const QJsonArray omin = bound.value(QStringLiteral("min")).toArray();
+                const QJsonArray omax = bound.value(QStringLiteral("max")).toArray();
+                if (omin.size() != 3 || omax.size() != 3) continue;
+                double sum = 0.0;
+                for (int axis = 0; axis < 3; ++axis) {
+                    const double gap = std::max({0.0, omin.at(axis).toDouble() - selfMax.at(axis).toDouble(),
+                                                 selfMin.at(axis).toDouble() - omax.at(axis).toDouble()});
+                    sum += gap * gap;
+                }
+                const double gap = std::sqrt(sum);
+                if (gap < best) { best = gap; bestId = bound.value(QStringLiteral("id")).toString(); }
+            }
+        }
+        m_lastInsertNearest = bestId.isEmpty()
+            ? tr("新件周围没有其他零件")
+            : (best <= 0.0 ? tr("新件与 %1 重叠").arg(bestId)
+                           : tr("新件离 %1 最近，差 %2 mm").arg(bestId).arg(best, 0, 'f', 1));
+        qInfo().noquote() << "FT_QT_INSERT_NEAREST" << insertedId << bestId << best;
+    }
+
     const QJsonObject clearance = geometry.value(QStringLiteral("clearance")).toObject();
     const QJsonArray gapPairs = clearance.value(QStringLiteral("pairs")).toArray();
     if (!gapPairs.isEmpty()) {

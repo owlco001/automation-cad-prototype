@@ -564,9 +564,11 @@ int main(int argc, char *argv[]) {
                 qCritical().noquote() << "FT_QT_INSERT_FAIL" << error;
                 return 1;
             }
-            const QVector3D at(index + 5 < args.size() ? args.at(index + 3).toDouble() : 0.0,
-                               index + 5 < args.size() ? args.at(index + 4).toDouble() : 0.0,
-                               index + 5 < args.size() ? args.at(index + 5).toDouble() : 0.0);
+            // 三个坐标各自判断，别用同一个条件——之前写成一个条件，只给 x y 时会被整体当成 0,0,0
+            const double ax = index + 3 < args.size() ? args.at(index + 3).toDouble() : 0.0;
+            const double ay = index + 4 < args.size() ? args.at(index + 4).toDouble() : 0.0;
+            const double az = index + 5 < args.size() ? args.at(index + 5).toDouble() : 0.0;
+            const QVector3D at(ax, ay, az);
             int count = 0;
             const QString sizeText = index + 6 < args.size() ? args.at(index + 6) : QString();
             QVector3D sizeMm;
@@ -578,7 +580,8 @@ int main(int argc, char *argv[]) {
                 qCritical().noquote() << "FT_QT_INSERT_FAIL" << error;
                 return 1;
             }
-            qInfo().noquote() << QStringLiteral("FT_QT_INSERT_OK type=%1 parts=%2").arg(args.at(index + 2)).arg(count);
+            qInfo().noquote() << QStringLiteral("FT_QT_INSERT_OK type=%1 parts=%2 nearest=%3")
+                                     .arg(args.at(index + 2)).arg(count).arg(window.lastInsertNearestForTest());
             return 0;
         }
     }
