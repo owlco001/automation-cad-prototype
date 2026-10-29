@@ -200,6 +200,9 @@ MainWindow::MainWindow(QWidget *parent)
                     if (hit) { state = 2; break; }
                 }
                 m_occtViewport->showPreviewBox(sx, sy, sz, x, y, state);
+                m_previewNearest = state == 2 ? tr("与已有零件重叠（拖动中未算精确体积）")
+                                              : tr("预览按包围盒判断，未做真实布尔");
+                statusBar()->showMessage(m_previewNearest, 0);
                 break;
             }
         });
@@ -207,6 +210,7 @@ MainWindow::MainWindow(QWidget *parent)
             int count = 0;
             QString error;
             if (m_occtViewport) m_occtViewport->clearPreviewBox();
+            statusBar()->clearMessage();
             if (!movePartTo(partId, x, y, &count, &error)) {
                 statusBar()->showMessage(tr("拖动未提交：%1").arg(error), 12000);
                 return;
@@ -220,8 +224,9 @@ MainWindow::MainWindow(QWidget *parent)
                 const QJsonObject shape = item.value(QStringLiteral("shape")).toObject();
                 const QJsonArray size = shape.value(QStringLiteral("size")).toArray();
                 if (size.size() == 3) {
-                    m_occtViewport->showPreviewBox(size.at(0).toDouble(), size.at(1).toDouble(),
-                                                   size.at(2).toDouble(), x, y);
+                    QString previewError;   // 不能传 nullptr：previewForTest 失败时会往里写
+                    previewForTest(type, x, y, &previewError);   // 复用同一套判定：三色 + 最近零件提示
+                    statusBar()->showMessage(m_previewNearest, 0);
                 }
                 break;
             }
@@ -1580,6 +1585,7 @@ bool MainWindow::previewForTest(const QString &type, double x, double y, QString
         const double gapMm = 20.0;
         double nearestGap = 1e9;
         bool overlaps = false;
+        QString nearestId;
         for (const QJsonValue &boundValue : m_partBounds) {
             const QJsonObject bound = boundValue.toObject();
             const QJsonArray min = bound.value(QStringLiteral("min")).toArray();
@@ -1597,9 +1603,14 @@ bool MainWindow::previewForTest(const QString &type, double x, double y, QString
                 if (gap <= 0.0) continue;
                 hit = false;
             }
-            if (hit) { overlaps = true; break; }
-            nearestGap = std::min(nearestGap, std::sqrt(dx * dx + dy * dy + dz * dz));
+            if (hit) { overlaps = true; nearestId = bound.value(QStringLiteral("id")).toString(); nearestGap = 0.0; break; }
+            const double gap = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (gap < nearestGap) { nearestGap = gap; nearestId = bound.value(QStringLiteral("id")).toString(); }
         }
+        m_previewNearest = nearestId.isEmpty()
+            ? tr("周围没有零件")
+            : (overlaps ? tr("会撞上 %1").arg(nearestId)
+                        : tr("最近 %1，差 %2 mm").arg(nearestId).arg(nearestGap, 0, 'f', 1));
         const int state = overlaps ? 2 : (nearestGap < gapMm ? 1 : 0);
         m_previewState = state;
         m_occtViewport->showPreviewBox(sx, sy, sz, x, y, state);

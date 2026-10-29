@@ -498,9 +498,10 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
             const bool shown = window.previewVisibleForTest();
-            qInfo().noquote() << QStringLiteral("FT_QT_PREVIEW_OK type=%1 at=%2,%3 state=%4 shown=%5")
+            qInfo().noquote() << QStringLiteral("FT_QT_PREVIEW_OK type=%1 at=%2,%3 state=%4 shown=%5 hint=%6")
                                      .arg(args.at(index + 2)).arg(px).arg(py)
-                                     .arg(window.previewStateForTest()).arg(shown ? 1 : 0);
+                                     .arg(window.previewStateForTest()).arg(shown ? 1 : 0)
+                                     .arg(window.previewNearestForTest());
             if (!shown) return 1;
             return 0;
         }

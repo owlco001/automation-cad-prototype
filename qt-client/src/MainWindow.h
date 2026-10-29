@@ -79,6 +79,8 @@ public:
     bool previewForTest(const QString &type, double x, double y, QString *error);
     /// 预览状态：0 绿 / 1 黄 / 2 红（用文档里的 bounds 本地判，不问求解器）
     int previewStateForTest() const { return m_previewState; }
+    /// 预览时最近的零件与间隙（拖到哪、差多少，状态栏直接给人看）
+    QString previewNearestForTest() const { return m_previewNearest; }
     bool previewVisibleForTest() const;
     /// 撤销最后一次插入：返回撤销后零件数，没有可撤销的返回 false
     bool undoLastInsert(int *partCount, QString *error);
@@ -212,6 +214,7 @@ private:        // 最近一次生成的整机方案（试摆位/导出用）
     QVector<QJsonObject> m_insertHistory;
     QJsonArray m_partBounds;
     int m_previewState = 0;
+    QString m_previewNearest;
     bool m_pendingRecomputeCompliance = false;
     int m_pendingRecomputeMm = 20;
     bool m_pendingShiftScope = false;
