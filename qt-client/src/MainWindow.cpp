@@ -452,7 +452,7 @@ bool MainWindow::exportStl(const QString &path, int *bytes, QString *error) {
 
 bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *document, QString *error,
                                         const QStringList &moves, bool resolveAll, int clearanceResolveMm,
-                                        bool layoutCompliance) {
+                                        bool layoutCompliance, int clearanceMm) {
     if (brief.trimmed().isEmpty()) {
         *error = tr("brief 不能为空");
         return false;
@@ -497,8 +497,9 @@ bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *docum
     if (layoutCompliance) {
         arguments << QStringLiteral("--layout-compliance") << QStringLiteral("20");
     }
-    // 间距初筛固定 20 mm：只读诊断，给干涉页显示「太近但没撞」的零件对
-    arguments << QStringLiteral("--clearance") << QStringLiteral("20");
+    // 间距初筛阈值可由干涉页调整；默认 20 mm。只读诊断，不改变几何
+    arguments << QStringLiteral("--clearance")
+              << QString::number(clearanceMm > 0 ? clearanceMm : m_clearanceMm);
     process.start(QStringLiteral("node"), arguments);
     if (!process.waitForStarted(10'000)) {
         *error = tr("启动 node 失败：%1").arg(process.errorString());
@@ -621,7 +622,8 @@ void MainWindow::showMachineCase(const QJsonObject &document) {
             },
             [this]() { m_pendingResolveAll = true; },
             [this]() { m_pendingResolveClearance = true; },
-            [this]() { m_pendingLayoutCompliance = true; });
+            [this]() { m_pendingLayoutCompliance = true; },
+            [this](int thresholdMm) { m_pendingClearanceMm = thresholdMm; });
         dialog.exec();
         if (m_pendingResolveAll && !m_lastBrief.trimmed().isEmpty()) {
             m_pendingResolveAll = false;
@@ -651,6 +653,34 @@ void MainWindow::showMachineCase(const QJsonObject &document) {
                                          .arg(resolution.value(QStringLiteral("converged")).toBool()
                                                   ? tr("已收敛") : tr("未收敛")), 20000);
             current = resolved;
+            continue;
+        }
+        if (m_pendingClearanceMm > 0 && !m_lastBrief.trimmed().isEmpty()) {
+            const int nextThreshold = m_pendingClearanceMm;
+            m_pendingClearanceMm = 0;
+            QApplication::setOverrideCursor(Qt::WaitCursor);
+            QJsonObject rescreened;
+            QString rescreenError;
+            const bool ok = designMachineFromBrief(m_lastBrief, &rescreened, &rescreenError, m_lastMoves,
+                                                   false, 0, false, nextThreshold);
+            QApplication::restoreOverrideCursor();
+            if (!ok) {
+                QMessageBox::warning(this, tr("按新阈值重算失败"), rescreenError);
+                return;
+            }
+            m_clearanceMm = nextThreshold;
+            m_lastDocument = rescreened;
+            int rescreenShapes = 0;
+            QString rescreenGeometryError;
+            renderMachineGeometry(rescreened, &rescreenShapes, &rescreenGeometryError);
+            const QJsonObject clearance = rescreened.value(QStringLiteral("geometry")).toObject()
+                                              .value(QStringLiteral("clearance")).toObject();
+            qInfo().noquote() << "FT_QT_CLEARANCE_THRESHOLD threshold=" << nextThreshold
+                              << "count=" << clearance.value(QStringLiteral("count")).toInt();
+            statusBar()->showMessage(tr("间距阈值改为 %1 mm：%2 处间距不足")
+                                         .arg(nextThreshold)
+                                         .arg(clearance.value(QStringLiteral("count")).toInt()), 20000);
+            current = rescreened;
             continue;
         }
         if (m_pendingLayoutCompliance && !m_lastBrief.trimmed().isEmpty()) {

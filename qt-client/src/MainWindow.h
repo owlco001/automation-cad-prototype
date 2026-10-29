@@ -70,7 +70,8 @@ public:
     /// 调 desktop 整机管线（node scripts/machine-design-cli.mjs）把一句话变成方案 JSON
     bool designMachineFromBrief(const QString &brief, QJsonObject *document, QString *error,
                                 const QStringList &moves = {}, bool resolveAll = false,
-                                int clearanceResolveMm = 0, bool layoutCompliance = false);
+                                int clearanceResolveMm = 0, bool layoutCompliance = false,
+                                int clearanceMm = -1);
     /// 试摆位：在已生成的方案上挪一个零件，重跑管线并重算干涉
     void tunePlacementDialog();
     /// 方向键微调选中零件（3D 里点选后用）
@@ -155,6 +156,9 @@ private:
     bool m_pendingResolveAll = false;
     bool m_pendingResolveClearance = false;
     bool m_pendingLayoutCompliance = false;
+    /// 间距初筛阈值（mm），可在干涉页改；默认 20
+    int m_clearanceMm = 20;
+    int m_pendingClearanceMm = 0;
     /// 打开方案窗口并支持「按建议挪 → 重算 → 重新打开」的循环
     void showMachineCase(const QJsonObject &document);           // 累计的 --move 参数，多次试挪会叠加
     QJsonObject m_assemblyRecord;

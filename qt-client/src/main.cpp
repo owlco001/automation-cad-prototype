@@ -11,6 +11,8 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QStringList>
+#include <QSpinBox>
+#include <QAbstractButton>
 #include <QTimer>
 
 #include <cstdio>
@@ -466,6 +468,54 @@ int main(int argc, char *argv[]) {
             qInfo().noquote() << QStringLiteral("FT_QT_LAYOUTCSV_OK rows=%1").arg(rows);
             return 0;
         }
+    }
+
+    // 间距阈值可改自检：--threshold-selftest "brief"（20 与 40 两档，次数必须不同）
+    if (args.contains(QStringLiteral("--threshold-selftest"))) {
+        const int index = args.indexOf(QStringLiteral("--threshold-selftest"));
+        if (index + 1 >= args.size()) {
+            qCritical().noquote() << "FT_QT_THRESHOLD_FAIL 用法：--threshold-selftest \"brief\"";
+            return 2;
+        }
+        MainWindow window;
+        QJsonObject tight;
+        QJsonObject loose;
+        QString error;
+        if (!window.designMachineFromBrief(args.at(index + 1), &tight, &error, {}, false, 0, false, 20)) {
+            qCritical().noquote() << "FT_QT_THRESHOLD_FAIL" << error;
+            return 1;
+        }
+        if (!window.designMachineFromBrief(args.at(index + 1), &loose, &error, {}, false, 0, false, 40)) {
+            qCritical().noquote() << "FT_QT_THRESHOLD_FAIL" << error;
+            return 1;
+        }
+        const auto countOf = [](const QJsonObject &document) {
+            return document.value(QStringLiteral("geometry")).toObject()
+                .value(QStringLiteral("clearance")).toObject()
+                .value(QStringLiteral("count")).toInt();
+        };
+        const int tightCount = countOf(tight);
+        const int looseCount = countOf(loose);
+        if (!(looseCount > tightCount)) {
+            qCritical().noquote() << "FT_QT_THRESHOLD_FAIL 阈值放大到 40 后间距问题反而没变多"
+                                  << tightCount << looseCount;
+            return 1;
+        }
+        // 界面侧真有一行「阈值 + 按此阈值重算」：只靠状态栏日志证不出来，直接数控件
+        MachineCaseDialog dialog(tight, nullptr, {}, {}, {}, {}, {}, [](int) {});
+        const int spinCount = dialog.findChildren<QSpinBox *>().size();
+        int thresholdButtons = 0;
+        for (QAbstractButton *button : dialog.findChildren<QAbstractButton *>()) {
+            if (button->text().startsWith(QStringLiteral("按此阈值重算"))) thresholdButtons += 1;
+        }
+        if (spinCount < 1 || thresholdButtons < 1) {
+            qCritical().noquote() << "FT_QT_THRESHOLD_UI_FAIL spins=" << spinCount
+                                  << "buttons=" << thresholdButtons;
+            return 1;
+        }
+        qInfo().noquote() << QStringLiteral("FT_QT_THRESHOLD_OK at20=%1 at40=%2 spins=%3 buttons=%4")
+                                 .arg(tightCount).arg(looseCount).arg(spinCount).arg(thresholdButtons);
+        return 0;
     }
 
     // 间距初筛自检：--clearance-selftest <case.json>

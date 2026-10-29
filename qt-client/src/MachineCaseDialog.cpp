@@ -17,6 +17,7 @@
 #include <QWidget>
 #include <QMessageBox>
 #include <QHBoxLayout>
+#include <QSpinBox>
 #include <QVBoxLayout>
 
 namespace {
@@ -221,7 +222,8 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                                      std::function<void(const QString &, int, double)> onApplyMove,
                                      std::function<void()> onResolveAll,
                                      std::function<void()> onResolveClearance,
-                                     std::function<void()> onLayoutCompliance)
+                                     std::function<void()> onLayoutCompliance,
+                                     std::function<void(int)> onClearanceThreshold)
     : QDialog(parent) {
     setWindowTitle(QStringLiteral("整机方案（只读）"));
     resize(760, 520);
@@ -469,7 +471,21 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                     .arg(tightest), page);
             clearanceLabel->setWordWrap(true);
             clearanceLabel->setStyleSheet(QStringLiteral("color:#8a6d3b;"));
-            pageLayout->insertWidget(0, clearanceLabel);
+            auto *thresholdRow = new QHBoxLayout();
+            thresholdRow->addWidget(clearanceLabel, 1);
+            if (onClearanceThreshold) {
+                auto *spin = new QSpinBox(page);
+                spin->setRange(1, 500);
+                spin->setSuffix(QStringLiteral(" mm"));
+                spin->setValue(clearance.value(QStringLiteral("thresholdMm")).toInt());
+                spin->setToolTip(QStringLiteral("改完点右边按钮按新阈值重算整机"));
+                auto *applyThreshold = new QPushButton(QStringLiteral("按此阈值重算…"), page);
+                connect(applyThreshold, &QPushButton::clicked, page,
+                        [spin, onClearanceThreshold]() { onClearanceThreshold(spin->value()); });
+                thresholdRow->addWidget(spin);
+                thresholdRow->addWidget(applyThreshold);
+            }
+            pageLayout->insertLayout(0, thresholdRow);
             qInfo().noquote() << "FT_QT_CLEARANCE_LABEL count=" << clearance.value(QStringLiteral("count")).toInt()
                               << "tightest=" << (clearancePairs.isEmpty() ? 0.0
                                                                          : clearancePairs.at(0).toObject().value(QStringLiteral("gapMm")).toDouble());
