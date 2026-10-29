@@ -475,6 +475,8 @@ bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *docum
     QStringList arguments{script, QStringLiteral("--brief"), brief, QStringLiteral("--with-geometry")};
     for (const QString &move : moves) arguments << QStringLiteral("--move") << move;
     if (resolveAll) arguments << QStringLiteral("--resolve");
+    // 间距初筛固定 20 mm：只读诊断，给干涉页显示「太近但没撞」的零件对
+    arguments << QStringLiteral("--clearance") << QStringLiteral("20");
     process.start(QStringLiteral("node"), arguments);
     if (!process.waitForStarted(10'000)) {
         *error = tr("启动 node 失败：%1").arg(process.errorString());

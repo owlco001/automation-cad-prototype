@@ -171,6 +171,16 @@ CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI �
 实测：点中 `conveyor-frame` → 两次 Shift+Right → 状态栏「已挪 conveyor-frame (10,0,0) · 重叠 2 对（需确认 0）」，
 日志 `FT_QT_PICK part= conveyor-frame` / `FT_QT_NUDGE part= conveyor-frame delta= 10 0 0 count= 2`。
 
+**间距初筛（太近但没撞）**：干涉只抓「撞上了」，实际装配还有一类问题是「没撞但够不着」。
+`desktop/src/machine/clearance.ts` 的 `screenClearance(geometry,{thresholdMm})` 报
+`0.5 < 间隙 < 阈值` 的零件对：距离按 AABB 三个分离轴平方和开根算
+（**不能取最小正间隙**——X 隔 10、Y 隔 50 实际是 51 mm 不是 10），
+贴面 ≤0.5 mm 算接触不算间距不足，已声明连接用**同一份 `joints.ts` 白名单**排除。
+
+实测四工位（阈值 20）：`FT_QT_CLEARANCE_OK threshold=20 count=26 tightest=5.0`，
+最紧一对是 `frame-top × conveyor-motor` 沿 Z 5 mm；Qt 干涉页顶部一行「间距 < 20 mm：26 处，最紧 5.0 mm」。
+六工位阈值 30 时 29 处，主要是 `转台底座 × 治具` 12 mm 这类装配配合间隙。
+
 **批量解开未声明的重叠**：干涉页「批量解开未声明的重叠…」→ 管线带 `--resolve` 跑
 `resolveConflicts`：**只动 suspect**（declared 是设计上该相接的，动它等于改设计），
 每轮只应用位移最小的那一条再整机重算（一次挪多个会互相影响，必须逐轮验证），

@@ -100,3 +100,32 @@ test('machine-design-cli 缺少 --brief 时退出码 2 且不输出 JSON', { tim
   assert.equal(failed.status, 2);
   assert.match(String(failed.stderr), /FT_MACHINE_CLI_USAGE/);
 });
+
+
+test('--clearance 20 输出间距初筛，且按间隙升序、count 与数组一致', { timeout: 120_000 }, () => {
+  const stdout = execFileSync(process.execPath,
+    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--clearance', '20'],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  const clearance = JSON.parse(stdout).geometry.clearance;
+  assert.equal(clearance.thresholdMm, 20);
+  assert.equal(clearance.count, clearance.pairs.length);
+  for (let index = 1; index < clearance.pairs.length; index += 1) {
+    assert.ok(clearance.pairs[index - 1].gapMm <= clearance.pairs[index].gapMm, '必须按间隙升序');
+  }
+  for (const pair of clearance.pairs) {
+    assert.ok(pair.gapMm > 0.5 && pair.gapMm < 20, `间隙必须在 (0.5, 20) 内：${pair.gapMm}`);
+  }
+});
+
+test('--clearance 取值不合法时退出码 2（不带 --with-geometry 也不能静默吞掉）', { timeout: 120_000 }, () => {
+  for (const value of ['0', '-5', 'abc']) {
+    let status = 0;
+    try {
+      execFileSync(process.execPath, [script, '--brief', '四工位点胶机', '--clearance', value],
+        { stdio: ['ignore', 'ignore', 'ignore'] });
+    } catch (error) {
+      status = error.status;
+    }
+    assert.equal(status, 2, `--clearance ${value} 应当退出 2`);
+  }
+});

@@ -320,6 +320,30 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
         auto *note = new QLabel(verdict, page);
         note->setWordWrap(true);
         pageLayout->addWidget(note);
+        const QJsonObject clearance = document.value(QStringLiteral("geometry")).toObject()
+                                          .value(QStringLiteral("clearance")).toObject();
+        if (!clearance.isEmpty()) {
+            const QJsonArray clearancePairs = clearance.value(QStringLiteral("pairs")).toArray();
+            QString tightest;
+            if (!clearancePairs.isEmpty()) {
+                const QJsonObject first = clearancePairs.at(0).toObject();
+                tightest = QStringLiteral("，最紧 %1 mm（%2 × %3）")
+                               .arg(QString::number(first.value(QStringLiteral("gapMm")).toDouble(), 'f', 1))
+                               .arg(first.value(QStringLiteral("a")).toString(),
+                                    first.value(QStringLiteral("b")).toString());
+            }
+            auto *clearanceLabel = new QLabel(
+                QStringLiteral("间距 < %1 mm：%2 处%3　（AABB 距离初筛，贴面 ≤0.5 mm 算接触）")
+                    .arg(clearance.value(QStringLiteral("thresholdMm")).toInt())
+                    .arg(clearance.value(QStringLiteral("count")).toInt())
+                    .arg(tightest), page);
+            clearanceLabel->setWordWrap(true);
+            clearanceLabel->setStyleSheet(QStringLiteral("color:#8a6d3b;"));
+            pageLayout->insertWidget(0, clearanceLabel);
+            qInfo().noquote() << "FT_QT_CLEARANCE_LABEL count=" << clearance.value(QStringLiteral("count")).toInt()
+                              << "tightest=" << (clearancePairs.isEmpty() ? 0.0
+                                                                         : clearancePairs.at(0).toObject().value(QStringLiteral("gapMm")).toDouble());
+        }
         const QJsonObject resolutionForUi = document.value(QStringLiteral("geometry")).toObject()
                                                 .value(QStringLiteral("resolution")).toObject();
         if (onApplyMove) {

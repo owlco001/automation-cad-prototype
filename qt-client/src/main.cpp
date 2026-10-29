@@ -385,6 +385,33 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 间距初筛自检：--clearance-selftest <case.json>
+    {
+        const int index = args.indexOf(QStringLiteral("--clearance-selftest"));
+        if (index >= 0 && index + 1 < args.size()) {
+            QJsonObject document;
+            QString error;
+            if (!MachineCaseDialog::loadFile(args.at(index + 1), &document, &error)) {
+                qCritical().noquote() << "FT_QT_CLEARANCE_FAIL" << error;
+                return 1;
+            }
+            const QJsonObject clearance = document.value(QStringLiteral("geometry")).toObject()
+                                              .value(QStringLiteral("clearance")).toObject();
+            if (clearance.isEmpty()) {
+                qCritical().noquote() << "FT_QT_CLEARANCE_FAIL" << "文档没有 clearance（管线需 --clearance 20）";
+                return 1;
+            }
+            const QJsonArray pairs = clearance.value(QStringLiteral("pairs")).toArray();
+            const double tightest = pairs.isEmpty() ? 0.0
+                                                    : pairs.at(0).toObject().value(QStringLiteral("gapMm")).toDouble();
+            qInfo().noquote() << QStringLiteral("FT_QT_CLEARANCE_OK threshold=%1 count=%2 tightest=%3")
+                                     .arg(clearance.value(QStringLiteral("thresholdMm")).toInt())
+                                     .arg(clearance.value(QStringLiteral("count")).toInt())
+                                     .arg(tightest, 0, 'f', 1);
+            return 0;
+        }
+    }
+
     // 调整清单导出自检：--resolve-csv-selftest <case.json> --out <csv>
     {
         const int index = args.indexOf(QStringLiteral("--resolve-csv-selftest"));

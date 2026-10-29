@@ -8,8 +8,22 @@ import { buildMachineCase } from '../src/machine/case.ts';
 import { generateMachineGeometry } from '../src/machine/geometry.ts';
 import { screenInterference } from '../src/machine/interference.ts';
 import { resolveConflicts } from '../src/machine/resolve.ts';
+import { screenClearance } from '../src/machine/clearance.ts';
 
 const args = process.argv.slice(2);
+
+// --clearance 的取值在解析参数时就校验：不带 --with-geometry 时也不能静默吞掉错误值
+const clearanceIndex = args.indexOf('--clearance');
+let clearanceThreshold = null;
+if (clearanceIndex >= 0) {
+  const raw = args[clearanceIndex + 1];
+  const value = Number(raw);
+  if (raw === undefined || !Number.isFinite(value) || value <= 0) {
+    process.stderr.write('--clearance 需要一个正数（mm）\n');
+    process.exit(2);
+  }
+  clearanceThreshold = value;
+}
 const flag = (name, fallback) => {
   const index = args.indexOf(name);
   return index >= 0 && index + 1 < args.size ? args.at(index + 1) : fallback;
@@ -80,6 +94,9 @@ if (withGeometry) {
       converged: resolution.converged,
       ...(resolution.stopReason ? { stopReason: resolution.stopReason } : {})
     };
+  }
+  if (clearanceThreshold !== null) {
+    caseData.geometry.clearance = screenClearance(caseData.geometry, { thresholdMm: clearanceThreshold });
   }
   caseData.geometry.interference = screenInterference(caseData.geometry);
 }
