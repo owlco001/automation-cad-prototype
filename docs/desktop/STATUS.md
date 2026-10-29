@@ -87,6 +87,21 @@
   实测 `FT_QT_RECHECK_SKIP_OK misreported=2 buttons=1 keys=frame-leg-1|frame-top,frame-leg-2|frame-leg-3`；
   无误报时不出现按钮（`misreported=0 buttons=0`）。样机上暂时造不出真实误报，端到端只到 UI 层。
 
+## 构件库（整机拖拽设计的地基，2026-10-29 夜）
+
+`desktop/src/machine/catalog.ts` + CLI 两个入口：
+
+- `node scripts/machine-design-cli.mjs --catalog` → `{kind:"machine-catalog", catalog:[…]}`，6 类构件
+  （机架立柱/横梁/输送段/滑台气缸/气爪/到位检测），每类带默认尺寸、落地偏移、颜色、材质
+- `--insert-part "upright@-900,0,0"` → 在整机方案里插一个实例（id `user-upright-1`），落点按**底面贴地**解释
+  （中心 z = 落点 z + 落地偏移），插完照常重算干涉/间距
+
+实测：四工位插一根立柱后 `parts 51`、`user-upright-1 center [-900,0,415] size [60,60,830]`、
+`interference.suspects 1`（插在 -900 处确实碰到了东西，没有被吞掉）。
+
+守卫 3 条：类型唯一/尺寸为正、落地偏移与编号避让、未知类型与非法坐标要给可操作原因。
+**口径**：这些都是示意占位体，不是型号级几何；Qt 只负责展示与拖拽，构件定义只在这里。
+
 ## 已知限制
 
 1. **参数化内核依赖 Python**：build123d sidecar 需要本机 Python 与 `spike/build123d/app.py`；安装包只带脚本，不内置解释器。

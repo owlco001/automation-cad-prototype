@@ -11,9 +11,16 @@ import { resolveConflicts, resolveClearance } from '../src/machine/resolve.ts';
 import { resolveLayout, complianceStamp, maxFeasibleClearance } from '../src/machine/layout.ts';
 import { minWidening } from '../src/machine/widen.ts';
 import { recheckPairs } from '../src/machine/recheck.ts';
+import { CATALOG, buildInsertPart } from '../src/machine/catalog.ts';
 import { screenClearance } from '../src/machine/clearance.ts';
 
 const args = process.argv.slice(2);
+
+// 构件库清单：Qt / 拖拽面板都从这里取，不要各自写死一份
+if (args.includes('--catalog')) {
+  process.stdout.write(JSON.stringify({ kind: 'machine-catalog', schemaVersion: 1, catalog: CATALOG }) + '\n');
+  process.exit(0);
+}
 
 // 参数组合的硬错误要在最前面拦：放进「要几何才执行」的那段里，不带 --with-geometry 时会被静默忽略
 if (args.includes('--ignore-pairs') && !args.includes('--layout-compliance')) {
@@ -77,6 +84,19 @@ for (let i = 0; i < args.length; i += 1) {
 if (withGeometry) {
   // 概念占位体（geometryFidelity='conceptual-estimate'）：给客户端画“示意装配”，不是制造几何
   caseData.geometry = generateMachineGeometry(design.config, {});
+  const insertIndex = args.indexOf('--insert-part');
+  if (insertIndex >= 0) {
+    const spec = args[insertIndex + 1] ?? '';
+    const [type, coords] = spec.split('@');
+    const [x, y, z] = (coords ?? '').split(',').map(Number);
+    const partial = buildInsertPart({ type: type ?? '', at: [x, y, z], existingIds: caseData.geometry.parts.map((part) => part.id) });
+    if (!partial.ok) {
+      process.stderr.write(`FT_MACHINE_CLI_INSERT_FAIL ${partial.reason}\n`);
+      process.exit(2);
+    }
+    caseData.geometry.parts = [...caseData.geometry.parts, partial.part];
+    caseData.geometry.inserted = { type: type, partId: partial.part.id, at: [x, y, z] };
+  }
   // 干涉初筛（AABB）：只是「疑似」，不是布尔交集；结构件共位是正常装配
   if (moves.length > 0) {
     const byId = new Map(caseData.geometry.parts.map((part) => [part.id, part]));
