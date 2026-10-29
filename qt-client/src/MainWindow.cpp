@@ -495,7 +495,9 @@ bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *docum
         arguments << QStringLiteral("--resolve-clearance") << QString::number(clearanceResolveMm);
     }
     if (layoutCompliance) {
-        arguments << QStringLiteral("--layout-compliance") << QStringLiteral("20");
+        // 与「间距初筛」用同一个阈值：用户在干涉页里改过 20，排布合规就该按那个值算
+        arguments << QStringLiteral("--layout-compliance")
+                  << QString::number(clearanceMm > 0 ? clearanceMm : m_clearanceMm);
     }
     // 间距初筛阈值可由干涉页调整；默认 20 mm。只读诊断，不改变几何
     arguments << QStringLiteral("--clearance")
@@ -721,7 +723,7 @@ void MainWindow::showMachineCase(const QJsonObject &document) {
             QApplication::setOverrideCursor(Qt::WaitCursor);
             QJsonObject pushed;
             QString pushError;
-            const bool ok = designMachineFromBrief(m_lastBrief, &pushed, &pushError, m_lastMoves, false, 20);
+            const bool ok = designMachineFromBrief(m_lastBrief, &pushed, &pushError, m_lastMoves, false, m_clearanceMm);
             QApplication::restoreOverrideCursor();
             if (!ok) {
                 QMessageBox::warning(this, tr("推开间距失败"), pushError);

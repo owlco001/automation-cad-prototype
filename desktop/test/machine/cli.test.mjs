@@ -171,3 +171,15 @@ test('--layout-compliance 20 交替跑完必须两类都清零（不是只清一
   assert.equal(last.clearanceAfter, 0);
   assert.ok(layout.moves.length > 0);
 });
+
+
+test('排布合规：阈值大到放不下时提前停并说明原因，不空转到轮数用尽', { timeout: 240_000 }, () => {
+  const stdout = execFileSync(process.execPath,
+    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--layout-compliance', '40'],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const layout = JSON.parse(stdout).geometry.layoutCompliance;
+  assert.equal(layout.converged, false, '40 mm 在四工位布局下放不下，不能报合规');
+  assert.match(layout.stopReason ?? '', /没有进展/);
+  assert.ok(layout.rounds.length < 4, `应当提前停，实际跑了 ${layout.rounds.length} 轮`);
+  assert.ok(layout.moves.length < 700, `不应空转出上千次位移，实际 ${layout.moves.length}`);
+});

@@ -403,16 +403,22 @@ int main(int argc, char *argv[]) {
             qCritical().noquote() << "FT_QT_LAYOUT_FAIL 用法：--layout-selftest \"brief\"";
             return 2;
         }
+        // 可选第二个参数是间距阈值（mm），默认 20
+        int layoutThreshold = 20;
+        if (index + 2 < args.size() && !args.at(index + 2).startsWith(QStringLiteral("--"))) {
+            layoutThreshold = args.at(index + 2).toInt();
+        }
         MainWindow window;
         QJsonObject compliant;
         QString error;
-        if (!window.designMachineFromBrief(args.at(index + 1), &compliant, &error, {}, false, 0, true)) {
+        if (!window.designMachineFromBrief(args.at(index + 1), &compliant, &error, {}, false, 0, true, layoutThreshold)) {
             qCritical().noquote() << "FT_QT_LAYOUT_FAIL" << error;
             return 1;
         }
         const QJsonObject layout = compliant.value(QStringLiteral("geometry")).toObject()
                                        .value(QStringLiteral("layoutCompliance")).toObject();
-        qInfo().noquote() << QStringLiteral("FT_QT_LAYOUT_OK rounds=%1 moves=%2 suspects=%3 clearance=%4 converged=%5")
+        qInfo().noquote() << QStringLiteral("FT_QT_LAYOUT_OK threshold=%1 rounds=%2 moves=%3 suspects=%4 clearance=%5 converged=%6")
+                                 .arg(layout.value(QStringLiteral("clearanceMm")).toInt())
                                  .arg(layout.value(QStringLiteral("rounds")).toArray().size())
                                  .arg(layout.value(QStringLiteral("moves")).toArray().size())
                                  .arg(layout.value(QStringLiteral("suspects")).toInt())

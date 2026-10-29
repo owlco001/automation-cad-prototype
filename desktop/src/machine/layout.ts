@@ -42,6 +42,8 @@ export function resolveLayout(geometry: any, options: LayoutOptions): LayoutResu
   let parts: any[] = Array.isArray(geometry?.parts) ? geometry.parts.map((part: any) => ({ ...part })) : [];
   const rounds: LayoutRound[] = [];
   const moves: LayoutResult['moves'] = [];
+  let bestTotal = Number.POSITIVE_INFINITY;
+  let stallRounds = 0;
 
   for (let round = 1; round <= maxRounds; round += 1) {
     const working = { ...geometry, parts };
@@ -73,6 +75,29 @@ export function resolveLayout(geometry: any, options: LayoutOptions): LayoutResu
       suspectsAfter,
       clearanceAfter
     });
+
+    // 「这轮和上轮一样」不等于卡住：20 mm 时实测是 4 → 4 → 0，中间那轮没变但下一轮清了。
+    // 只有**连续两轮都没刷新最好成绩**才判空转（阈值 30 时 8 轮 1458 次位移、问题数一动不动）。
+    const total = suspectsAfter + clearanceAfter;
+    if (total < bestTotal) {
+      bestTotal = total;
+      stallRounds = 0;
+    } else {
+      stallRounds += 1;
+    }
+    if (stallRounds >= 2) {
+      return {
+        parts,
+        rounds,
+        moves,
+        suspects: suspectsAfter,
+        clearance: clearanceAfter,
+        clearanceMm: options.clearanceMm,
+        converged: false,
+        stopReason: `连续 ${stallRounds} 轮没有进展（仍有 ${suspectsAfter} 处重叠、${clearanceAfter} 处间距不足）：`
+                    + `这个 ${options.clearanceMm} mm 间距在当前布局下放不下，需要加宽工位或减少零件`
+      };
+    }
 
     if (suspectsAfter === 0 && clearanceAfter === 0) {
       return {
