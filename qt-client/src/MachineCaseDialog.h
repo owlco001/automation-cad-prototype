@@ -4,6 +4,7 @@
 #pragma once
 
 #include <QDialog>
+#include <functional>
 #include <QJsonObject>
 #include <QString>
 
@@ -13,7 +14,9 @@ class QTabWidget;
 class MachineCaseDialog : public QDialog {
     Q_OBJECT
 public:
-    explicit MachineCaseDialog(const QJsonObject &document, QWidget *parent = nullptr);
+    /// onHighlight：选中干涉对时通知外面在 3D 里点亮两端（空列表 = 取消）
+    explicit MachineCaseDialog(const QJsonObject &document, QWidget *parent = nullptr,
+                               std::function<void(const QStringList &)> onHighlight = {});
 
     /// 读文件并校验 kind/schemaVersion；失败时 error 给出可操作原因
     static bool loadFile(const QString &path, QJsonObject *document, QString *error);

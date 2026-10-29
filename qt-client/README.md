@@ -171,6 +171,11 @@ CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI �
 实测：点中 `conveyor-frame` → 两次 Shift+Right → 状态栏「已挪 conveyor-frame (10,0,0) · 重叠 2 对（需确认 0）」，
 日志 `FT_QT_PICK part= conveyor-frame` / `FT_QT_NUDGE part= conveyor-frame delta= 10 0 0 count= 2`。
 
+**干涉对点选即在 3D 点亮**：干涉初筛表里点一行，那一对零件在视口里同时变暖色（其余恢复原始配色），
+状态栏写「干涉对：A × B」。`AUTOMATIONCAD_PAIR_AUTO=1` 会在打开时自动选第一行（无人值守验收用）。
+
+实测日志：`FT_QT_PAIR_HIGHLIGHT frame-leg-2,frame-stringer-front`。
+
 **试摆位（改完立刻重算干涉）**：`评估 → 试摆位（移动零件重算干涉）…`，选零件 + 三轴位移 →
 带 `--move <id>:<dx>,<dy>,<dz>` 重跑管线 → 3D 与干涉页一起刷新。位移是**增量叠加**的，
 只改中心点不改尺寸/旋转；`--tune-selftest "brief" --move ...` 是无人值守版本。

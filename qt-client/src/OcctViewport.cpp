@@ -20,6 +20,7 @@
 #include <TopoDS_Compound.hxx>
 #include <QFileInfo>
 #include <QKeyEvent>
+#include <QSet>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <gp_Ax1.hxx>
@@ -247,6 +248,23 @@ QString OcctViewport::pickPartAt(int x, int y) {
         }
     }
     return pickedId;
+}
+
+void OcctViewport::highlightParts(const QStringList &partIds) {
+    if (!m_viewReady) return;
+    const QSet<QString> wanted(partIds.begin(), partIds.end());
+    for (int i = 0; i < m_shapes.size(); ++i) {
+        const bool match = wanted.contains(m_shapePartIds.value(i));
+        if (match) {
+            m_shapes.at(i)->SetColor(Quantity_Color(1.0, 0.62, 0.20, Quantity_TOC_sRGB));
+        } else if (i < m_shapeColors.size() && m_shapeColors.at(i).isValid()) {
+            const QColor original = m_shapeColors.at(i);
+            m_shapes.at(i)->SetColor(Quantity_Color(original.redF(), original.greenF(),
+                                                    original.blueF(), Quantity_TOC_sRGB));
+        }
+    }
+    m_highlighted = partIds.join(QLatin1Char(','));
+    m_view->Redraw();
 }
 
 void OcctViewport::highlightPart(const QString &partId) {

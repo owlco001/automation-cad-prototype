@@ -37,6 +37,8 @@ public:
     QString pickPartAt(int x, int y);
     /// 高亮某个零件（传空取消）
     void highlightPart(const QString &partId);
+    /// 高亮一组零件（干涉对用：同时点亮两端）
+    void highlightParts(const QStringList &partIds);
 
     /// 把当前整机示意几何导出成 STL（二进制/ASCII 由 OCCT 决定）。
     /// 注意：这是**摆位后的概念占位体**，不是制造几何。

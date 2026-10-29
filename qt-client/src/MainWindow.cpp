@@ -126,7 +126,16 @@ MainWindow::MainWindow(QWidget *parent)
         if (!renderMachineGeometry(document, &shapes, &geometryError)) {
             statusBar()->showMessage(tr("方案已打开，但 3D 示意没画出来：%1").arg(geometryError), 20000);
         }
-        MachineCaseDialog dialog(document, this);
+        MachineCaseDialog dialog(document, this, [this](const QStringList &ids) {
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+            if (ids.isEmpty()) m_occtViewport->highlightPart(QString());
+            else m_occtViewport->highlightParts(ids);
+#endif
+            if (!ids.isEmpty()) {
+                qInfo().noquote() << "FT_QT_PAIR_HIGHLIGHT" << ids.join(QStringLiteral(","));
+                statusBar()->showMessage(tr("干涉对：%1").arg(ids.join(QStringLiteral(" × "))), 15000);
+            }
+        });
         dialog.exec();
     });
     auto *viewMenu = menuBar()->addMenu(tr("视图"));
@@ -566,7 +575,16 @@ void MainWindow::designMachineDialog() {
     if (!renderMachineGeometry(document, &shapes, &geometryError)) {
         statusBar()->showMessage(tr("整机方案已生成，但 3D 示意没画出来：%1").arg(geometryError), 20000);
     }
-    MachineCaseDialog dialog(document, this);
+    MachineCaseDialog dialog(document, this, [this](const QStringList &ids) {
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+        if (ids.isEmpty()) m_occtViewport->highlightPart(QString());
+        else m_occtViewport->highlightParts(ids);
+#endif
+        if (!ids.isEmpty()) {
+            qInfo().noquote() << "FT_QT_PAIR_HIGHLIGHT" << ids.join(QStringLiteral(","));
+            statusBar()->showMessage(tr("干涉对：%1").arg(ids.join(QStringLiteral(" × "))), 15000);
+        }
+    });
     dialog.exec();
 }
 
@@ -709,7 +727,16 @@ void MainWindow::tunePlacementDialog() {
                                  .arg(interference.value(QStringLiteral("count")).toInt())
                                  .arg(interference.value(QStringLiteral("suspects")).toInt())
                                  .arg(interference.value(QStringLiteral("declared")).toInt()), 20000);
-    MachineCaseDialog refreshed(updated, this);
+    MachineCaseDialog refreshed(updated, this, [this](const QStringList &ids) {
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+        if (ids.isEmpty()) m_occtViewport->highlightPart(QString());
+        else m_occtViewport->highlightParts(ids);
+#endif
+        if (!ids.isEmpty()) {
+            qInfo().noquote() << "FT_QT_PAIR_HIGHLIGHT" << ids.join(QStringLiteral(","));
+            statusBar()->showMessage(tr("干涉对：%1").arg(ids.join(QStringLiteral(" × "))), 15000);
+        }
+    });
     refreshed.exec();
 }
 

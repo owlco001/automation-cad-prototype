@@ -131,7 +131,9 @@ bool MachineCaseDialog::writeBomCsv(const QJsonObject &document, const QString &
     return true;
 }
 
-MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *parent) : QDialog(parent) {
+MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *parent,
+                                     std::function<void(const QStringList &)> onHighlight)
+    : QDialog(parent) {
     setWindowTitle(QStringLiteral("整机方案（只读）"));
     resize(760, 520);
 
@@ -220,6 +222,24 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
             });
         }
         conflictTable->resizeColumnsToContents();
+        if (onHighlight) {
+            // 点一行就把这一对在 3D 里点亮：只给体积不指位置，用户还得自己找
+            connect(conflictTable, &QTableWidget::itemSelectionChanged, this,
+                    [conflictTable, pairs, onHighlight]() {
+                        const int row = conflictTable->currentRow();
+                        if (row < 0 || row >= pairs.size()) {
+                            onHighlight({});
+                            return;
+                        }
+                        const QJsonObject pair = pairs.at(row).toObject();
+                        onHighlight({pair.value(QStringLiteral("a")).toString(),
+                                     pair.value(QStringLiteral("b")).toString()});
+                    });
+        }
+        // 自动化钩子：selectRow 会触发 itemSelectionChanged，用它验证「点一行 → 3D 点亮」整条链
+        if (qEnvironmentVariableIsSet("AUTOMATIONCAD_PAIR_AUTO") && conflictTable->rowCount() > 0) {
+            conflictTable->selectRow(0);
+        }
         auto *page = new QWidget(this);
         auto *pageLayout = new QVBoxLayout(page);
         pageLayout->addWidget(conflictTable, 1);

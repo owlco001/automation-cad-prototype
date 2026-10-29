@@ -303,7 +303,9 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
             qInfo().noquote() << "FT_QT_BRIEF_UI_OPEN" << MachineCaseDialog::summarize(document);
-            MachineCaseDialog dialog(document, nullptr);
+            MachineCaseDialog dialog(document, nullptr, [](const QStringList &ids) {
+                qInfo().noquote() << "FT_QT_PAIR_HIGHLIGHT" << ids.join(QStringLiteral(","));
+            });
             dialog.exec();
             return 0;
         }
@@ -346,7 +348,9 @@ int main(int argc, char *argv[]) {
             }
             MainWindow window;
             window.show();
-            MachineCaseDialog dialog(document, nullptr);
+            MachineCaseDialog dialog(document, nullptr, [](const QStringList &ids) {
+                qInfo().noquote() << "FT_QT_PAIR_HIGHLIGHT" << ids.join(QStringLiteral(","));
+            });
             qInfo().noquote() << "FT_QT_MACHINECASE_UI_OPEN" << MachineCaseDialog::summarize(document);
             dialog.exec();
             return 0;
