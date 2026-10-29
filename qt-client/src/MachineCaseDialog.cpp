@@ -224,7 +224,8 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                                      std::function<void()> onResolveClearance,
                                      std::function<void()> onLayoutCompliance,
                                      std::function<void(int)> onClearanceThreshold,
-                                     int uiClearanceMm)
+                                     int uiClearanceMm,
+                                     std::function<void()> onMeasureMaxClearance)
     : QDialog(parent) {
     setWindowTitle(QStringLiteral("整机方案（只读）"));
     resize(760, 520);
@@ -273,6 +274,19 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
         appendRow(overview, {QStringLiteral("排布合规"), stampText});
     } else {
         appendRow(overview, {QStringLiteral("排布合规"), QStringLiteral("未检查（没有按间距阈值跑过排布合规）")});
+    }
+    const QJsonObject maxClearance = document.value(QStringLiteral("geometry")).toObject()
+                                         .value(QStringLiteral("maxClearance")).toObject();
+    if (!maxClearance.isEmpty()) {
+        const int feasible = maxClearance.value(QStringLiteral("feasibleMm")).toInt();
+        appendRow(overview, {QStringLiteral("最大可行间距"),
+                             feasible > 0
+                                 ? QStringLiteral("%1 mm（二分探测 %2 次，%3–%4 mm 区间）")
+                                       .arg(feasible)
+                                       .arg(maxClearance.value(QStringLiteral("probes")).toArray().size())
+                                       .arg(maxClearance.value(QStringLiteral("minMm")).toInt())
+                                       .arg(maxClearance.value(QStringLiteral("maxMm")).toInt())
+                                 : QStringLiteral("连 %1 mm 都排不开").arg(maxClearance.value(QStringLiteral("minMm")).toInt())});
     }
     overview->resizeColumnsToContents();
     m_tabs->addTab(overview, QStringLiteral("概览"));
@@ -572,6 +586,12 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                     setWindowTitle(windowTitle() + QStringLiteral(" · 已导出 %1 行调整").arg(rows));
                 });
                 applyRow->addWidget(exportResolution);
+            }
+            if (onMeasureMaxClearance) {
+                auto *measureButton = new QPushButton(QStringLiteral("测最大可行间距…"), page);
+                measureButton->setToolTip(QStringLiteral("在 5–60 mm 之间二分，找出还能排得开的最大间距（约 6 秒）"));
+                connect(measureButton, &QPushButton::clicked, page, [onMeasureMaxClearance]() { onMeasureMaxClearance(); });
+                applyRow->addWidget(measureButton);
             }
             if (onLayoutCompliance) {
                 auto *layoutButton = new QPushButton(QStringLiteral("一键排布合规（解重叠 → 推间距 → 复查）…"), page);

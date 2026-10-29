@@ -188,3 +188,58 @@ export function complianceStamp(result: LayoutResult): ComplianceStamp {
     ...(result.advice ? { advice: result.advice } : {})
   };
 }
+
+
+// 「这台机器最大能做到多大间距」：二分探阈值，找到还能排得开的最大值。
+//
+// 为什么值得做：用户提「按 30 mm 查」时，光说「放不下」没用，得知道「25 能、30 不能」才有决策价值。
+// 口径与排布合规完全一致（同一套 AABB 初筛 + 交替求解），只是在阈值上二分。
+// 假设可行性对阈值单调（间距要求越高越难），这是工程近似——探测结果会一并返回，便于人工复核。
+export interface FeasibleClearanceResult {
+  /** 可行的最大间距（mm）；0 表示连 minMm 都放不下 */
+  feasibleMm: number;
+  /** 二分过程，便于人工复核「为什么不是 30」 */
+  probes: Array<{ mm: number; converged: boolean; rounds: number; moves: number }>;
+  minMm: number;
+  maxMm: number;
+}
+
+export interface FeasibleClearanceOptions {
+  minMm?: number;
+  maxMm?: number;
+  /** 二分精度（mm），默认 1 */
+  stepMm?: number;
+}
+
+function probe(geometry: any, mm: number): { converged: boolean; rounds: number; moves: number } {
+  const result = resolveLayout(geometry, { clearanceMm: mm, maxRounds: 4 });
+  return { converged: result.converged, rounds: result.rounds.length, moves: result.moves.length };
+}
+
+export function maxFeasibleClearance(geometry: any, options: FeasibleClearanceOptions = {}): FeasibleClearanceResult {
+  const minMm = options.minMm ?? 1;
+  const maxMm = options.maxMm ?? 60;
+  const stepMm = options.stepMm ?? 1;
+  const probes: FeasibleClearanceResult['probes'] = [];
+
+  const lowest = probe(geometry, minMm);
+  probes.push({ mm: minMm, ...lowest });
+  if (!lowest.converged) return { feasibleMm: 0, probes, minMm, maxMm };
+  if (minMm >= maxMm) return { feasibleMm: minMm, probes, minMm, maxMm };
+
+  const highest = probe(geometry, maxMm);
+  probes.push({ mm: maxMm, ...highest });
+  if (highest.converged) return { feasibleMm: maxMm, probes, minMm, maxMm };
+
+  let low = minMm;
+  let high = maxMm;
+  while (high - low > stepMm) {
+    const mid = Math.round((low + high) / 2);
+    if (mid <= low || mid >= high) break;
+    const result = probe(geometry, mid);
+    probes.push({ mm: mid, ...result });
+    if (result.converged) low = mid;
+    else high = mid;
+  }
+  return { feasibleMm: low, probes, minMm, maxMm };
+}

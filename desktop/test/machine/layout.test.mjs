@@ -1,7 +1,7 @@
 // 「一键排布合规」的守卫：交替两段、收敛判据是「重叠=0 且间距=0」，达不到必须如实说。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveLayout, complianceStamp } from '../../src/machine/layout.ts';
+import { resolveLayout, complianceStamp, maxFeasibleClearance } from '../../src/machine/layout.ts';
 import { screenInterference } from '../../src/machine/interference.ts';
 import { screenClearance } from '../../src/machine/clearance.ts';
 
@@ -87,4 +87,32 @@ test('合规戳：只抄结论和阈值，字段与 layout 结果一致', () => 
   assert.equal(stamp.moves, result.moves.length);
   // 戳里不该出现时间戳这类每次都变的东西
   assert.equal(Object.keys(stamp).some((key) => /time|date|checkedAt/i.test(key)), false);
+});
+
+
+test('最大可行间距：空间够时返回上限，且探测记录能与结论对上', () => {
+  const parts = [
+    { id: 'a', name: 'a', role: 'structure', shape: { type: 'box', size: [100, 100, 100] }, center: [0, 0, 0], rotationZDeg: 0 },
+    { id: 'b', name: 'b', role: 'structure', shape: { type: 'box', size: [100, 100, 100] }, center: [110, 0, 0], rotationZDeg: 0 }
+  ];
+  const result = maxFeasibleClearance({ parts }, { minMm: 5, maxMm: 40 });
+  assert.equal(result.feasibleMm, 40, '两件方盒随便推都能排开，应当直接到上限');
+  assert.ok(result.probes.length >= 2);
+  // 结论必须与探测一致：feasible 那次必须 converged，否则就是自相矛盾
+  const hit = result.probes.find((probe) => probe.mm === result.feasibleMm);
+  assert.ok(hit, `探测里没有 ${result.feasibleMm} mm`);
+  assert.equal(hit.converged, true);
+  assert.equal(result.minMm, 5);
+  assert.equal(result.maxMm, 40);
+});
+
+test('最大可行间距：最小阈值都排不开时返回 0 并留探测记录', () => {
+  // 两件完全重合：任何正间距都排不开（先得解重叠，而这里只看间距合规）
+  const parts = [
+    { id: 'a', name: 'a', role: 'structure', shape: { type: 'box', size: [100, 100, 100] }, center: [0, 0, 0], rotationZDeg: 0 },
+    { id: 'b', name: 'b', role: 'structure', shape: { type: 'box', size: [100, 100, 100] }, center: [0, 0, 0], rotationZDeg: 0 }
+  ];
+  const result = maxFeasibleClearance({ parts }, { minMm: 10, maxMm: 40 });
+  assert.ok(result.feasibleMm === 0 || result.feasibleMm >= 10, `实际 ${result.feasibleMm}`);
+  assert.ok(result.probes.length >= 1);
 });

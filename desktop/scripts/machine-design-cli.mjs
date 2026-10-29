@@ -8,7 +8,7 @@ import { buildMachineCase } from '../src/machine/case.ts';
 import { generateMachineGeometry } from '../src/machine/geometry.ts';
 import { screenInterference } from '../src/machine/interference.ts';
 import { resolveConflicts, resolveClearance } from '../src/machine/resolve.ts';
-import { resolveLayout, complianceStamp } from '../src/machine/layout.ts';
+import { resolveLayout, complianceStamp, maxFeasibleClearance } from '../src/machine/layout.ts';
 import { screenClearance } from '../src/machine/clearance.ts';
 
 const args = process.argv.slice(2);
@@ -95,6 +95,11 @@ if (withGeometry) {
       converged: resolution.converged,
       ...(resolution.stopReason ? { stopReason: resolution.stopReason } : {})
     };
+  }
+  if (args.includes('--max-clearance')) {
+    // 二分找「还能排开的最大间距」，口径与排布合规一致
+    const feasible = maxFeasibleClearance(caseData.geometry, { minMm: 5, maxMm: 60 });
+    caseData.geometry.maxClearance = feasible;
   }
   const layoutIndex = args.indexOf('--layout-compliance');
   if (layoutIndex >= 0) {

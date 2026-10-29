@@ -453,6 +453,47 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    // 最大可行间距自检：--max-clearance-selftest "brief"
+    if (args.contains(QStringLiteral("--max-clearance-selftest"))) {
+        const int index = args.indexOf(QStringLiteral("--max-clearance-selftest"));
+        if (index + 1 >= args.size()) {
+            qCritical().noquote() << "FT_QT_MAXCLEARANCE_FAIL 用法：--max-clearance-selftest \"brief\"";
+            return 2;
+        }
+        MainWindow window;
+        QJsonObject measured;
+        QString error;
+        if (!window.designMachineFromBrief(args.at(index + 1), &measured, &error, {}, false, 0, false,
+                                           window.currentClearanceMm(), true)) {
+            qCritical().noquote() << "FT_QT_MAXCLEARANCE_FAIL" << error;
+            return 1;
+        }
+        const QJsonObject maxClearance = measured.value(QStringLiteral("geometry")).toObject()
+                                             .value(QStringLiteral("maxClearance")).toObject();
+        const int feasible = maxClearance.value(QStringLiteral("feasibleMm")).toInt();
+        const QJsonArray probes = maxClearance.value(QStringLiteral("probes")).toArray();
+        if (feasible <= 0 || probes.isEmpty()) {
+            qCritical().noquote() << "FT_QT_MAXCLEARANCE_FAIL feasible=" << feasible << "probes=" << probes.size();
+            return 1;
+        }
+        // 可行性必须自洽：可行的那个阈值下，排布合规必须真的收敛
+        QJsonObject recheck;
+        if (!window.designMachineFromBrief(args.at(index + 1), &recheck, &error, {}, false, 0, true, feasible)) {
+            qCritical().noquote() << "FT_QT_MAXCLEARANCE_FAIL" << error;
+            return 1;
+        }
+        const QJsonObject layout = recheck.value(QStringLiteral("geometry")).toObject()
+                                       .value(QStringLiteral("layoutCompliance")).toObject();
+        if (!layout.value(QStringLiteral("converged")).toBool()) {
+            qCritical().noquote() << "FT_QT_MAXCLEARANCE_FAIL 声称" << feasible << "mm 可行但复算不收敛";
+            return 1;
+        }
+        qInfo().noquote() << QStringLiteral("FT_QT_MAXCLEARANCE_OK feasible=%1 probes=%2 recheck=%3")
+                                 .arg(feasible).arg(probes.size())
+                                 .arg(layout.value(QStringLiteral("moves")).toArray().size());
+        return 0;
+    }
+
     // 合规戳自检：--compliance-stamp-selftest <case.json> [界面阈值]
     {
         const int index = args.indexOf(QStringLiteral("--compliance-stamp-selftest"));

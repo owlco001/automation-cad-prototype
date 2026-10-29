@@ -452,7 +452,8 @@ bool MainWindow::exportStl(const QString &path, int *bytes, QString *error) {
 
 bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *document, QString *error,
                                         const QStringList &moves, bool resolveAll, int clearanceResolveMm,
-                                        bool layoutCompliance, int clearanceMm) {
+                                        bool layoutCompliance, int clearanceMm,
+                                        bool measureMaxClearance) {
     if (brief.trimmed().isEmpty()) {
         *error = tr("brief 不能为空");
         return false;
@@ -494,6 +495,7 @@ bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *docum
     if (clearanceResolveMm > 0) {
         arguments << QStringLiteral("--resolve-clearance") << QString::number(clearanceResolveMm);
     }
+    if (measureMaxClearance) arguments << QStringLiteral("--max-clearance");
     if (layoutCompliance) {
         // 与「间距初筛」用同一个阈值：用户在干涉页里改过 20，排布合规就该按那个值算
         arguments << QStringLiteral("--layout-compliance")
@@ -626,7 +628,8 @@ void MainWindow::showMachineCase(const QJsonObject &document) {
             [this]() { m_pendingResolveClearance = true; },
             [this]() { m_pendingLayoutCompliance = true; },
             [this](int thresholdMm) { m_pendingClearanceMm = thresholdMm; },
-            m_clearanceMm);
+            m_clearanceMm,
+            [this]() { m_pendingMeasureMax = true; });
         dialog.exec();
         if (m_pendingResolveAll && !m_lastBrief.trimmed().isEmpty()) {
             m_pendingResolveAll = false;
@@ -656,6 +659,29 @@ void MainWindow::showMachineCase(const QJsonObject &document) {
                                          .arg(resolution.value(QStringLiteral("converged")).toBool()
                                                   ? tr("已收敛") : tr("未收敛")), 20000);
             current = resolved;
+            continue;
+        }
+        if (m_pendingMeasureMax && !m_lastBrief.trimmed().isEmpty()) {
+            m_pendingMeasureMax = false;
+            QApplication::setOverrideCursor(Qt::WaitCursor);
+            QJsonObject measured;
+            QString measureError;
+            const bool ok = designMachineFromBrief(m_lastBrief, &measured, &measureError, m_lastMoves,
+                                                   false, 0, false, m_clearanceMm, true);
+            QApplication::restoreOverrideCursor();
+            if (!ok) {
+                QMessageBox::warning(this, tr("测最大间距失败"), measureError);
+                return;
+            }
+            m_lastDocument = measured;
+            const QJsonObject maxClearance = measured.value(QStringLiteral("geometry")).toObject()
+                                                 .value(QStringLiteral("maxClearance")).toObject();
+            qInfo().noquote() << "FT_QT_MAX_CLEARANCE feasible=" << maxClearance.value(QStringLiteral("feasibleMm")).toInt()
+                              << "probes=" << maxClearance.value(QStringLiteral("probes")).toArray().size();
+            statusBar()->showMessage(tr("最大可行间距：%1 mm（探测 %2 次）")
+                                         .arg(maxClearance.value(QStringLiteral("feasibleMm")).toInt())
+                                         .arg(maxClearance.value(QStringLiteral("probes")).toArray().size()), 20000);
+            current = measured;
             continue;
         }
         if (m_pendingClearanceMm > 0 && !m_lastBrief.trimmed().isEmpty()) {

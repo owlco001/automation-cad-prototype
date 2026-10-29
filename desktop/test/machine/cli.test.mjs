@@ -227,3 +227,17 @@ test('排布合规 fixture 与当前算法一致（CI 的 Qt 自检靠它，漂�
   // fixture 里必须真有一个未收敛的反例参数可查（同一份 geometry 按 40 mm 会放不下）
   assert.equal(fixture.geometry.parts.length > 0, true);
 });
+
+
+test('--max-clearance 二分出四工位的最大可行间距 = 25 mm，且该值复算确实收敛', { timeout: 300_000 }, () => {
+  const stdout = execFileSync(process.execPath,
+    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--max-clearance'],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const maxClearance = JSON.parse(stdout).geometry.maxClearance;
+  assert.equal(maxClearance.feasibleMm, 25, `实际 ${maxClearance.feasibleMm}`);
+  assert.ok(maxClearance.probes.length >= 3, '二分至少探测 3 次');
+  // 探测记录必须自洽：25 通过、26 不通过（否则结论不可信）
+  const byMm = new Map(maxClearance.probes.map((probe) => [probe.mm, probe.converged]));
+  assert.equal(byMm.get(25), true);
+  assert.equal(byMm.get(26), false);
+});
