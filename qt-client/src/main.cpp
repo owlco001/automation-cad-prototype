@@ -182,6 +182,16 @@ int main(int argc, char *argv[]) {
             }
             const QJsonObject geometry = document.value(QStringLiteral("geometry")).toObject();
             const QJsonArray envelope = geometry.value(QStringLiteral("envelope")).toArray();
+            const int outIndex = args.indexOf(QStringLiteral("--out"));
+            if (outIndex >= 0 && outIndex + 1 < args.size()) {
+                int bytes = 0;
+                if (!window.exportMachineStlForTest(args.at(outIndex + 1), &bytes, &error)) {
+                    qCritical().noquote() << "FT_QT_GEOMETRY_FAIL" << error;
+                    return 1;
+                }
+                qInfo().noquote() << QStringLiteral("FT_QT_MACHINE_STL_OK path=%1 bytes=%2")
+                                         .arg(args.at(outIndex + 1)).arg(bytes);
+            }
             qInfo().noquote() << QStringLiteral("FT_QT_GEOMETRY_OK shapes=%1 parts=%2 envelope=%3x%4x%5 fidelity=%6")
                                      .arg(shapes)
                                      .arg(geometry.value(QStringLiteral("parts")).toArray().size())

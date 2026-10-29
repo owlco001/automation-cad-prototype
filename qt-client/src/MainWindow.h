@@ -65,12 +65,15 @@ public:
     void runAssemblyBom();
     /// 导出当前零件/装配的 STL（几何来自服务端，客户端不重算）
     void exportStlDialog();
+    void exportMachineStlDialog();
     bool exportStl(const QString &path, int *bytes, QString *error);
     /// 调 desktop 整机管线（node scripts/machine-design-cli.mjs）把一句话变成方案 JSON
     bool designMachineFromBrief(const QString &brief, QJsonObject *document, QString *error);
     void designMachineDialog();
     /// 把方案里的示意几何画到 3D 视口（占位体拼装，客户端只摆位）
     bool renderMachineGeometry(const QJsonObject &document, int *shapeCount, QString *error);
+    /// 无人值守导出整机示意 STL（--geometry-selftest --out 用）
+    bool exportMachineStlForTest(const QString &path, int *bytes, QString *error);
 
 signals:
     /// 每次成功读到包络后发出（首次加载与后续变化都会发）

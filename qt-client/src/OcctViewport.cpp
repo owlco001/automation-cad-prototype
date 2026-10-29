@@ -16,7 +16,9 @@
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRep_Builder.hxx>
+#include <StlAPI_Writer.hxx>
 #include <TopoDS_Compound.hxx>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <gp_Ax1.hxx>
@@ -206,12 +208,39 @@ bool OcctViewport::showMachineGeometry(const QJsonObject &geometry, int *shapeCo
         return false;
     }
     m_hasGeometry = true;
+    m_lastGeometry = geometry;
     *shapeCount = count;
     m_view->FitAll(0.02, false);
     m_view->Redraw();
     return true;
 }
 
+
+bool OcctViewport::exportMachineStl(const QString &path, int *bytes, QString *error) {
+    if (m_shapes.isEmpty()) {
+        *error = tr("当前没有整机示意几何可导出");
+        return false;
+    }
+    BRep_Builder builder;
+    TopoDS_Compound compound;
+    builder.MakeCompound(compound);
+    for (const Handle(AIS_Shape) &shape : m_shapes) {
+        builder.Add(compound, shape->Shape());
+    }
+    StlAPI_Writer writer;
+    writer.ASCIIMode() = Standard_False;
+    if (!writer.Write(compound, path.toUtf8().constData())) {
+        *error = tr("写 STL 失败：%1").arg(path);
+        return false;
+    }
+    const qint64 size = QFileInfo(path).size();
+    if (size <= 0) {
+        *error = tr("写出的 STL 是空文件：%1").arg(path);
+        return false;
+    }
+    *bytes = static_cast<int>(size);
+    return true;
+}
 
 void OcctViewport::ensureRevision(int revision, const QString &url) {
     if (revision == m_revision && m_hasGeometry) return;

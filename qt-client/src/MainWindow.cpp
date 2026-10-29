@@ -102,6 +102,7 @@ MainWindow::MainWindow(QWidget *parent)
     fileMenu->addAction(tr("退出装配视图"), this, [this]() { m_assemblyId.clear(); refreshNow(); });
     fileMenu->addSeparator();
     fileMenu->addAction(tr("导出 STL…"), this, &MainWindow::exportStlDialog);
+    fileMenu->addAction(tr("导出整机示意 STL…"), this, &MainWindow::exportMachineStlDialog);
     fileMenu->addAction(tr("从 brief 生成整机方案…"), this, &MainWindow::designMachineDialog);
     fileMenu->addAction(tr("打开整机方案…"), this, [this]() {
         const QString path = QFileDialog::getOpenFileName(this, tr("打开整机方案"), QString(),
@@ -114,6 +115,11 @@ MainWindow::MainWindow(QWidget *parent)
             return;
         }
         statusBar()->showMessage(tr("整机方案：%1").arg(MachineCaseDialog::summarize(document)), 15000);
+        int shapes = 0;
+        QString geometryError;
+        if (!renderMachineGeometry(document, &shapes, &geometryError)) {
+            statusBar()->showMessage(tr("方案已打开，但 3D 示意没画出来：%1").arg(geometryError), 20000);
+        }
         MachineCaseDialog dialog(document, this);
         dialog.exec();
     });
@@ -536,6 +542,40 @@ void MainWindow::designMachineDialog() {
     }
     MachineCaseDialog dialog(document, this);
     dialog.exec();
+}
+
+bool MainWindow::exportMachineStlForTest(const QString &path, int *bytes, QString *error) {
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    if (!m_occtViewport) {
+        *error = tr("没有 3D 视口");
+        return false;
+    }
+    return m_occtViewport->exportMachineStl(path, bytes, error);
+#else
+    Q_UNUSED(path)
+    Q_UNUSED(bytes)
+    *error = tr("这个构建没有 OCCT，导出整机示意 STL 不可用");
+    return false;
+#endif
+}
+
+void MainWindow::exportMachineStlDialog() {
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    const QString path = QFileDialog::getSaveFileName(this, tr("导出整机示意 STL"),
+                                                      QStringLiteral("machine-layout.stl"), tr("STL 文件 (*.stl)"));
+    if (path.isEmpty()) return;
+    int bytes = 0;
+    QString error;
+    if (!m_occtViewport->exportMachineStl(path, &bytes, &error)) {
+        QMessageBox::warning(this, tr("导出失败"), error);
+        return;
+    }
+    statusBar()->showMessage(tr("已导出整机示意 %1 · %2 字节（概念占位体，不是制造几何）")
+                                 .arg(QFileInfo(path).fileName()).arg(bytes), 15000);
+#else
+    QMessageBox::information(this, tr("导出整机示意 STL"),
+                             tr("这个构建没有 OCCT——需要在带 OCCT 头文件的构建里导出。"));
+#endif
 }
 
 void MainWindow::exportStlDialog() {
