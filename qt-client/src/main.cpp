@@ -319,6 +319,32 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 插入构件自检：--insert-selftest "brief" <type> [x y z]
+    {
+        const int index = args.indexOf(QStringLiteral("--insert-selftest"));
+        if (index >= 0 && index + 2 < args.size()) {
+            MainWindow window;
+            window.resize(1200, 800);
+            window.show();
+            QJsonObject document;
+            QString error;
+            if (!window.designMachineFromBrief(args.at(index + 1), &document, &error)) {
+                qCritical().noquote() << "FT_QT_INSERT_FAIL" << error;
+                return 1;
+            }
+            const QVector3D at(index + 5 < args.size() ? args.at(index + 3).toDouble() : 0.0,
+                               index + 5 < args.size() ? args.at(index + 4).toDouble() : 0.0,
+                               index + 5 < args.size() ? args.at(index + 5).toDouble() : 0.0);
+            int count = 0;
+            if (!window.insertPartFromCatalog(args.at(index + 2), at, &count, &error)) {
+                qCritical().noquote() << "FT_QT_INSERT_FAIL" << error;
+                return 1;
+            }
+            qInfo().noquote() << QStringLiteral("FT_QT_INSERT_OK type=%1 parts=%2").arg(args.at(index + 2)).arg(count);
+            return 0;
+        }
+    }
+
     // 剖切自检：--clip-selftest "一句话" [z]
     // 断言「剖掉之后画出来的像素变少」，不是只看标志位（标志位 true 但没裁掉东西是最容易骗人的）
     if (args.contains(QStringLiteral("--clip-selftest"))) {

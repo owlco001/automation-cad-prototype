@@ -166,6 +166,32 @@ MainWindow::MainWindow(QWidget *parent)
     clipUnavailable->setEnabled(false);
 #endif
     auto *insertMenu = menuBar()->addMenu(tr("插入"));
+    insertMenu->addAction(tr("插入构件…"), this, [this]() {
+        QJsonArray catalog;
+        QString error;
+        if (!loadCatalog(&catalog, &error)) {
+            QMessageBox::warning(this, tr("构件库读取失败"), error);
+            return;
+        }
+        QStringList labels;
+        QStringList types;
+        for (const QJsonValue &entry : catalog) {
+            const QJsonObject item = entry.toObject();
+            labels << item.value(QStringLiteral("label")).toString();
+            types << item.value(QStringLiteral("type")).toString();
+        }
+        bool ok = false;
+        const QString picked = QInputDialog::getItem(this, tr("插入构件"), tr("构件类型："), labels, 0, false, &ok);
+        if (!ok || picked.isEmpty()) return;
+        const QString type = types.at(labels.indexOf(picked));
+        int count = 0;
+        if (!insertPartFromCatalog(type, QVector3D(0, 0, 0), &count, &error)) {
+            QMessageBox::warning(this, tr("插入失败"), error);
+            return;
+        }
+        qInfo().noquote() << "FT_QT_INSERT_PART" << "type=" << type << "parts=" << count;
+        statusBar()->showMessage(tr("已插入 %1（总共 %2 个零件），位置在原点，可用方向键再挪").arg(picked).arg(count), 20000);
+    });
     QAction *newFeature = insertMenu->addAction(tr("新建特征…"), this, &MainWindow::createFeatureDialog);
     newFeature->setShortcut(QKeySequence::New);
     auto *toolsMenu = menuBar()->addMenu(tr("工具"));
@@ -481,7 +507,8 @@ bool MainWindow::exportStl(const QString &path, int *bytes, QString *error) {
 bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *document, QString *error,
                                         const QStringList &moves, bool resolveAll, int clearanceResolveMm,
                                         bool layoutCompliance, int clearanceMm,
-                                        bool measureMaxClearance, const QStringList &ignorePairs) {
+                                        bool measureMaxClearance, const QStringList &ignorePairs,
+                                        const QString &insertPart) {
     if (brief.trimmed().isEmpty()) {
         *error = tr("brief 不能为空");
         return false;
@@ -525,6 +552,9 @@ bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *docum
     }
     if (measureMaxClearance) arguments << QStringLiteral("--max-clearance");
     // 复核确认的误报：交给求解器跳过，别为包围盒的假重叠白推距离
+    if (!insertPart.isEmpty()) {
+        arguments << QStringLiteral("--insert-part") << insertPart;
+    }
     if (!ignorePairs.isEmpty()) {
         arguments << QStringLiteral("--ignore-pairs") << ignorePairs.join(QStringLiteral(","));
     }
@@ -1251,6 +1281,61 @@ bool MainWindow::exportMachineStlForTest(const QString &path, int *bytes, QStrin
     *error = tr("这个构建没有 OCCT，导出整机示意 STL 不可用");
     return false;
 #endif
+}
+
+bool MainWindow::loadCatalog(QJsonArray *catalog, QString *error) {
+    QString script = qEnvironmentVariable("AUTOMATIONCAD_PIPELINE");
+    if (script.isEmpty()) {
+        QDir probe(QCoreApplication::applicationDirPath());
+        const QString rel = QStringLiteral("desktop/scripts/machine-design-cli.mjs");
+        for (int depth = 0; depth < 8; ++depth) {
+            const QString candidate = QFileInfo(probe.filePath(rel)).absoluteFilePath();
+            if (QFileInfo::exists(candidate)) { script = candidate; break; }
+            if (!probe.cdUp()) break;
+        }
+    }
+    if (script.isEmpty() || !QFileInfo::exists(script)) {
+        *error = tr("找不到整机管线脚本；设置 AUTOMATIONCAD_PIPELINE");
+        return false;
+    }
+    QProcess process;
+    process.start(QStringLiteral("node"), {script, QStringLiteral("--catalog")});
+    if (!process.waitForFinished(20'000)) {
+        process.kill();
+        *error = tr("读取构件库超时");
+        return false;
+    }
+    const QJsonDocument parsed = QJsonDocument::fromJson(process.readAllStandardOutput());
+    if (!parsed.isObject() || parsed.object().value(QStringLiteral("kind")).toString() != QStringLiteral("machine-catalog")) {
+        *error = tr("构件库输出不是 machine-catalog");
+        return false;
+    }
+    *catalog = parsed.object().value(QStringLiteral("catalog")).toArray();
+    return true;
+}
+
+bool MainWindow::insertPartFromCatalog(const QString &type, const QVector3D &at, int *partCount, QString *error) {
+    if (m_lastBrief.trimmed().isEmpty()) {
+        *error = tr("还没有整机方案：先用 文件 → 从一句话生成整机 建一台");
+        return false;
+    }
+    const QString spec = QStringLiteral("%1@%2,%3,%4")
+                             .arg(type)
+                             .arg(at.x(), 0, 'f', 1)
+                             .arg(at.y(), 0, 'f', 1)
+                             .arg(at.z(), 0, 'f', 1);
+    QJsonObject document;
+    if (!designMachineFromBrief(m_lastBrief, &document, error, m_lastMoves, false, 0, false, -1, false, {}, spec)) {
+        return false;
+    }
+    const QJsonArray parts = document.value(QStringLiteral("geometry")).toObject()
+                                 .value(QStringLiteral("parts")).toArray();
+    *partCount = parts.size();
+    m_lastDocument = document;
+    int shapes = 0;
+    QString renderError;
+    renderMachineGeometry(document, &shapes, &renderError);
+    return true;
 }
 
 void MainWindow::exportMachineStlDialog() {

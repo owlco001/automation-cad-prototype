@@ -66,6 +66,10 @@ public:
     /// 导出当前零件/装配的 STL（几何来自服务端，客户端不重算）
     void exportStlDialog();
     void exportMachineStlDialog();
+    /// 构件库清单（调 desktop --catalog 拿，Qt 不自己写死）
+    bool loadCatalog(QJsonArray *catalog, QString *error);
+    /// 插入一个构件实例：走管线 --insert-part，几何由 desktop 重算
+    bool insertPartFromCatalog(const QString &type, const QVector3D &at, int *partCount, QString *error);
     bool exportStl(const QString &path, int *bytes, QString *error);
     /// 剖切自检用：抓剖切前后的非背景像素数（真看图，不看标志位）
     bool clipTestMetrics(double z, int *beforePixels, int *afterPixels, QString *error);
@@ -74,7 +78,8 @@ public:
                                 const QStringList &moves = {}, bool resolveAll = false,
                                 int clearanceResolveMm = 0, bool layoutCompliance = false,
                                 int clearanceMm = -1, bool measureMaxClearance = false,
-                                const QStringList &ignorePairs = {});
+                                const QStringList &ignorePairs = {},
+                                const QString &insertPart = {});
     /// 试摆位：在已生成的方案上挪一个零件，重跑管线并重算干涉
     void tunePlacementDialog();
     /// 方向键微调选中零件（3D 里点选后用）
