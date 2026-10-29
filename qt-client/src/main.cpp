@@ -319,6 +319,43 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 撤销插入自检：--undo-insert-selftest "brief" <type>
+    {
+        const int index = args.indexOf(QStringLiteral("--undo-insert-selftest"));
+        if (index >= 0 && index + 2 < args.size()) {
+            MainWindow window;
+            window.resize(1200, 800);
+            window.show();
+            QJsonObject document;
+            QString error;
+            int baseParts = 0;
+            if (!window.designMachineFromBrief(args.at(index + 1), &document, &error)) {
+                qCritical().noquote() << "FT_QT_UNDO_INSERT_FAIL" << error;
+                return 1;
+            }
+            baseParts = document.value(QStringLiteral("geometry")).toObject()
+                            .value(QStringLiteral("parts")).toArray().size();
+            int afterInsert = 0;
+            if (!window.insertPartFromCatalog(args.at(index + 2), QVector3D(0, 0, 0), &afterInsert, &error)) {
+                qCritical().noquote() << "FT_QT_UNDO_INSERT_FAIL" << error;
+                return 1;
+            }
+            int afterUndo = 0;
+            if (!window.undoLastInsert(&afterUndo, &error)) {
+                qCritical().noquote() << "FT_QT_UNDO_INSERT_FAIL" << error;
+                return 1;
+            }
+            if (afterUndo != baseParts || afterInsert != baseParts + 1) {
+                qCritical().noquote() << "FT_QT_UNDO_INSERT_FAIL base=" << baseParts
+                                      << "insert=" << afterInsert << "undo=" << afterUndo;
+                return 1;
+            }
+            qInfo().noquote() << QStringLiteral("FT_QT_UNDO_INSERT_OK base=%1 insert=%2 undo=%3")
+                                     .arg(baseParts).arg(afterInsert).arg(afterUndo);
+            return 0;
+        }
+    }
+
     // 预览盒自检：--preview-selftest "brief" <type>
     {
         const int index = args.indexOf(QStringLiteral("--preview-selftest"));

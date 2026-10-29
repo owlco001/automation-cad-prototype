@@ -293,6 +293,16 @@ MainWindow::MainWindow(QWidget *parent)
     m_undoAction = editMenu->addAction(tr("撤销"), this, &MainWindow::undoOnce);
     m_undoAction->setShortcut(QKeySequence::Undo);
     m_redoAction = editMenu->addAction(tr("重做"), this, &MainWindow::redoOnce);
+    editMenu->addSeparator();
+    editMenu->addAction(tr("撤销最后一次插入"), this, [this]() {
+        int count = 0;
+        QString error;
+        if (!undoLastInsert(&count, &error)) {
+            statusBar()->showMessage(tr("没有可撤销的插入"), 8000);
+            return;
+        }
+        statusBar()->showMessage(tr("已撤销插入，回到 %1 个零件").arg(count), 15000);
+    });
     m_redoAction->setShortcut(QKeySequence::Redo);
     m_undoAction->setEnabled(false);
     m_redoAction->setEnabled(false);
@@ -660,6 +670,8 @@ bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *docum
         return false;
     }
     *document = object;
+    // 记住当前文档：插入的撤销快照要靠它（之前只在调用方赋值，插入路径上会拿到空）
+    m_lastDocument = object;
     // 记住 brief 与累计位移：方向键微调/试摆位都用这两个，不能只靠调用方传
     m_lastBrief = brief;
     m_lastMoves = moves;
@@ -1377,6 +1389,25 @@ bool MainWindow::loadCatalog(QJsonArray *catalog, QString *error) {
     return true;
 }
 
+bool MainWindow::undoLastInsert(int *partCount, QString *error) {
+    if (m_insertHistory.isEmpty()) {
+        *error = tr("没有可撤销的插入");
+        return false;
+    }
+    const QJsonObject previous = m_insertHistory.takeLast();
+    m_lastDocument = previous;
+    int shapes = 0;
+    QString renderError;
+    if (!renderMachineGeometry(previous, &shapes, &renderError)) {
+        *error = renderError;
+        return false;
+    }
+    *partCount = previous.value(QStringLiteral("geometry")).toObject()
+                     .value(QStringLiteral("parts")).toArray().size();
+    qInfo().noquote() << "FT_QT_UNDO_INSERT parts=" << *partCount << "depth=" << m_insertHistory.size();
+    return true;
+}
+
 bool MainWindow::screenPointToGroundForTest(int x, int y, double *worldX, double *worldY) {
 #ifdef AUTOMATIONCAD_HAVE_OCCT
     if (!m_occtViewport) return false;
@@ -1430,8 +1461,10 @@ bool MainWindow::insertPartFromCatalog(const QString &type, const QVector3D &at,
                              .arg(at.x(), 0, 'f', 1)
                              .arg(at.y(), 0, 'f', 1)
                              .arg(at.z(), 0, 'f', 1);
+    if (!m_lastDocument.isEmpty()) m_insertHistory.append(m_lastDocument);
     QJsonObject document;
     if (!designMachineFromBrief(m_lastBrief, &document, error, m_lastMoves, false, 0, false, -1, false, {}, spec)) {
+        m_insertHistory.removeLast();   // 插入失败就别留快照，否则撤销会倒退到同一个状态
         return false;
     }
     const QJsonObject geometry = document.value(QStringLiteral("geometry")).toObject();

@@ -8,6 +8,7 @@
 #endif
 
 #include <QJsonArray>
+#include <QVector>
 #include <QJsonObject>
 #include <QMap>
 
@@ -76,6 +77,9 @@ public:
     /// 预览自检：按构件库尺寸画一个预览盒（不提交几何）
     bool previewForTest(const QString &type, double x, double y, QString *error);
     bool previewVisibleForTest() const;
+    /// 撤销最后一次插入：返回撤销后零件数，没有可撤销的返回 false
+    bool undoLastInsert(int *partCount, QString *error);
+    int insertHistoryDepth() const { return m_insertHistory.size(); }
     bool exportStl(const QString &path, int *bytes, QString *error);
     /// 剖切自检用：抓剖切前后的非背景像素数（真看图，不看标志位）
     bool clipTestMetrics(double z, int *beforePixels, int *afterPixels, QString *error);
@@ -195,6 +199,8 @@ private:        // 最近一次生成的整机方案（试摆位/导出用）
     bool m_pendingSkipMisreports = false;
     QStringList m_pendingIgnoreKeys;
     QJsonArray m_catalogCache;
+    /// 插入前快照：插入这类操作要能撤回，不能让用户手工再删一遍
+    QVector<QJsonObject> m_insertHistory;
     bool m_pendingRecomputeCompliance = false;
     int m_pendingRecomputeMm = 20;
     bool m_pendingShiftScope = false;
