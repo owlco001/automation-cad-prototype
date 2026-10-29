@@ -87,6 +87,9 @@ jobs:
           ./build-qt/automationcad-qt --qt-smoke docs/desktop/eval/layout-case.json 2>&1 | tee /tmp/qt-smoke.log
           # qInfo 用 << 拼接会在 = 两侧插空格，所以按宽松匹配断言
           grep -qE "QT_SMOKE_OK[[:space:]]+checks=[[:space:]]*2" /tmp/qt-smoke.log
+          # 方案存盘往返（不依赖 node）：存到临时文件再回读比对
+          ./build-qt/automationcad-qt --case-save-selftest docs/desktop/eval/layout-case.json 2>&1 | tee /tmp/qt-roundtrip.log
+          grep -qE "FT_QT_CASE_RT_OK" /tmp/qt-roundtrip.log
       - name: Qt 客户端 ↔ 契约服务自检
         timeout-minutes: 5
         run: |

@@ -1,11 +1,14 @@
-# 项目状态 · 2026-10-29
+# 项目状态 · 2026-10-29（晚）
 
 ## 概览
 
-- 仓库：`main` @ `41dfd1c`（GitHub `owlco001/automation-cad-prototype` 与 Gitee 双推，两侧 SHA 一致）。
+- 仓库：`main` @ `d683544`（GitHub `owlco001/automation-cad-prototype` 与 Gitee 双推，两侧 SHA 一致）。
 - 版本：`desktop/package.json` → **0.5.0**，已打源码 tag `v0.5.0`；**安装包仍停在 v0.4.2**（Windows 本地构建、未签名），0.4.3 之后未出包。
-- 质量门槛（2026-10-29 本机 Linux 实跑，`main@41dfd1c`）：`npx tsc --noEmit` 0 错误；`npm test` **2628 总计 / 2626 通过 / 0 失败 / 2 跳过**（跳过项为需真实 FreeCAD 的 E2E，未设 `AUTOMATIONCAD_FREECAD_REAL`）；`npm run build:ext` 通过；`npm run smoke` 收尾 `SMOKE_OK`。
+- 质量门槛（2026-10-29 本机 Linux 实跑，`main@41dfd1c`）：`npx tsc --noEmit` 0 错误；`npm test` **2636 总计 / 2634 通过 / 0 失败 / 2 跳过**（跳过项为需真实 FreeCAD 的 E2E，未设 `AUTOMATIONCAD_FREECAD_REAL`）；`npm run build:ext` 通过；`npm run smoke` 收尾 `SMOKE_OK`。
 - 平台：**Linux + Windows 双真机**。Linux 用 Qt 6.4.2 + g++（OCCT 头文件在 `/usr/local/include/opencascade`）；Windows 有两条链路——Qt 6.8.3 + MinGW 13.1（`D:\Qt`，`AUTOMATIONCAD_OCCT=OFF`，自绘 STL 视口）与 MSVC 2022 + Qt msvc2022_64 + OCCT 8.0.1（AIS 视口真实可用）。构建全过程见 `qt-client/README.md` 第 291 行起。
+- 排布合规链（本轮新增）：干涉/间距 AABB 初筛 → 建议位移 → 批量解重叠 → 一键排布合规（交替求解）→
+  工位级补救建议 → 最大可行间距（二分，四工位 25 mm）→ 合规戳写进方案文件 → 手工挪动后自动标「过期」→ 概览页一键重算。
+  Qt 侧支持单件微调与整站挪（`Ctrl + 方向键`）、保存整机方案（`QSaveFile` 原子写）。
 - CI：`.github/workflows/ci.yml` 在 push `main` 与 `pull_request` 上跑 **四个** 并行 job——`unit`（tsc / 单测 / 包校验 / `eval:agent` / 契约服务 35 条 / MCP 11 条 / 落盘 10 条）、`smoke`（xvfb + 真实 Electron：降级 smoke、SwiftShader WebGL、机型截图 + artifact、MCP 冒烟）、`Qt client build`（Qt6 编译 + `--selftest` / `--history-selftest` / `--feature-ops-selftest` / `--sse-selftest` / 自动刷新）、`FeatureTree real geometry`（pip 装 build123d，跑体积/质量/STL/材料）。Windows 打包仍是手动 `workflow_dispatch`。
 - 评估：`npm run eval:agent` **111/111**，`EVAL_AGENT_OK accuracy=1.00 tools=1.00 refused=1.00`；工具注册表 **25 个（只读 12 / 写 13）**。
 - 数据包：`npm run packs:validate` → **10 包 / 617 条 / 612 唯一型号 / 0 错误 0 警告**。
