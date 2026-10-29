@@ -319,6 +319,33 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 预览盒自检：--preview-selftest "brief" <type>
+    {
+        const int index = args.indexOf(QStringLiteral("--preview-selftest"));
+        if (index >= 0 && index + 2 < args.size()) {
+            MainWindow window;
+            window.resize(1200, 800);
+            window.show();
+            QJsonObject document;
+            QString error;
+            int previewShapes = 0;
+            if (!window.designMachineFromBrief(args.at(index + 1), &document, &error)
+                || !window.renderMachineGeometry(document, &previewShapes, &error)) {
+                qCritical().noquote() << "FT_QT_PREVIEW_FAIL" << error;
+                return 1;
+            }
+            QCoreApplication::processEvents();
+            if (!window.previewForTest(args.at(index + 2), 300.0, 300.0, &error)) {
+                qCritical().noquote() << "FT_QT_PREVIEW_FAIL" << error;
+                return 1;
+            }
+            const bool shown = window.previewVisibleForTest();
+            qInfo().noquote() << QStringLiteral("FT_QT_PREVIEW_OK type=%1 shown=%2").arg(args.at(index + 2)).arg(shown ? 1 : 0);
+            if (!shown) return 1;
+            return 0;
+        }
+    }
+
     // 拖放落点自检：--drop-selftest "brief" <type> [sx sy]
     // 验证「屏幕点 → 地面世界坐标 → 10mm 吸附 → 插入」这条链，Qt 的拖拽事件本身是标准件不另测
     {

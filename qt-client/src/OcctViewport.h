@@ -46,6 +46,8 @@ public:
     bool exportMachineStl(const QString &path, int *bytes, QString *error);
 
     void dragEnterEvent(QDragEnterEvent *event) override;
+    void dragLeaveEvent(QDragLeaveEvent *event) override;
+    void dragMoveEvent(QDragMoveEvent *event) override;
     void dropEvent(QDropEvent *event) override;
 
     void ensureRevision(int revision, const QString &url);
@@ -60,6 +62,11 @@ public:
     bool clipActive() const { return m_clipActive; }
     double clipZ() const { return m_clipZ; }
 
+    /// 拖动预览盒：尺寸由调用方给（来自构件库），这里只负责画一个半透明体
+    void showPreviewBox(double sizeX, double sizeY, double sizeZ, double x, double y);
+    void clearPreviewBox();
+    bool previewVisible() const { return m_previewActive; }
+
     /// 屏幕坐标 → 地面(z=0)世界坐标；取不到返回 false（视口没准备好/射线平行地面）
     bool screenToGround(int x, int y, double *worldX, double *worldY);
 
@@ -71,6 +78,8 @@ public:
 signals:
     /// 构件库拖进来的构件：已换算成地面落点（mm）
     void partDropped(const QString &type, double x, double y);
+    /// 拖动中：已吸附的落点，主窗口据此画预览盒（尺寸由构件库给，Qt 不自造尺寸）
+    void dragPreview(const QString &type, double x, double y);
     void loaded(int triangles);
     void failed(const QString &message);
     /// 选中面/边/点的测量结果
@@ -93,6 +102,10 @@ protected:
     void keyPressEvent(QKeyEvent *event) override;
 
 private:
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    Handle(AIS_Shape) m_previewHandle;
+#endif
+    bool m_previewActive = false;
     void initializeView();
     void displayShape(const TopoDS_Shape &shape);
 

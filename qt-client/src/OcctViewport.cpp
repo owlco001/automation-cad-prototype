@@ -431,6 +431,53 @@ void OcctViewport::dragEnterEvent(QDragEnterEvent *event) {
     if (event->mimeData()->hasFormat(QStringLiteral("application/x-cad-part"))) event->acceptProposedAction();
 }
 
+void OcctViewport::dragMoveEvent(QDragMoveEvent *event) {
+    if (!event->mimeData()->hasFormat(QStringLiteral("application/x-cad-part"))) return;
+    const QString type = QString::fromUtf8(event->mimeData()->data(QStringLiteral("application/x-cad-part")));
+    const QPoint pos = event->position().toPoint();
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    double wx = 0, wy = 0;
+    if (screenToGround(pos.x(), pos.y(), &wx, &wy)) {
+        emit dragPreview(type, std::round(wx / 10.0) * 10.0, std::round(wy / 10.0) * 10.0);
+    }
+#endif
+    Q_UNUSED(pos);
+    event->acceptProposedAction();
+}
+
+void OcctViewport::dragLeaveEvent(QDragLeaveEvent *event) {
+    Q_UNUSED(event);
+    clearPreviewBox();
+}
+
+void OcctViewport::showPreviewBox(double sizeX, double sizeY, double sizeZ, double x, double y) {
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    if (!m_viewReady) return;
+    clearPreviewBox();
+    // 预览盒：只画不提交。半透明蓝灰，落地贴底（z 从 0 到 sizeZ）
+    const TopoDS_Shape box = BRepPrimAPI_MakeBox(gp_Pnt(-sizeX / 2, -sizeY / 2, 0), sizeX, sizeY, sizeZ).Shape();
+    gp_Trsf placement;
+    placement.SetTranslation(gp_Vec(x, y, 0));
+    m_previewHandle = new AIS_Shape(BRepBuilderAPI_Transform(box, placement, true).Shape());
+    m_previewHandle->SetColor(Quantity_Color(0.35, 0.55, 0.85, Quantity_TOC_sRGB));
+    m_previewHandle->SetTransparency(0.55);
+    m_context->Display(m_previewHandle, AIS_Shaded, -1, false);
+    m_previewActive = true;
+    m_view->Redraw();
+#endif
+}
+
+void OcctViewport::clearPreviewBox() {
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    if (m_previewActive && !m_previewHandle.IsNull()) {
+        m_context->Remove(m_previewHandle, false);
+        m_previewHandle.Nullify();
+        if (m_viewReady) m_view->Redraw();
+    }
+#endif
+    m_previewActive = false;
+}
+
 void OcctViewport::dropEvent(QDropEvent *event) {
     if (!event->mimeData()->hasFormat(QStringLiteral("application/x-cad-part"))) return;
     const QString type = QString::fromUtf8(event->mimeData()->data(QStringLiteral("application/x-cad-part")));
@@ -441,6 +488,7 @@ void OcctViewport::dropEvent(QDropEvent *event) {
         qInfo().noquote() << "FT_QT_DROP_REJECT reason=no-ground-hit";
         return;
     }
+    clearPreviewBox();   // 松手后预览盒必须消失，否则会和真实构件叠在一起
     const double snappedX = std::round(wx / 10.0) * 10.0;   // 10 mm 网格吸附
     const double snappedY = std::round(wy / 10.0) * 10.0;
     qInfo().noquote() << "FT_QT_DROP type=" << type << "ground=" << wx << wy

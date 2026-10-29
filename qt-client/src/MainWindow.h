@@ -7,6 +7,7 @@
 #include "OcctViewport.h"
 #endif
 
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QMap>
 
@@ -72,6 +73,9 @@ public:
     bool insertPartFromCatalog(const QString &type, const QVector3D &at, int *partCount, QString *error);
     /// 拖放自检：屏幕点转地面世界坐标
     bool screenPointToGroundForTest(int x, int y, double *worldX, double *worldY);
+    /// 预览自检：按构件库尺寸画一个预览盒（不提交几何）
+    bool previewForTest(const QString &type, double x, double y, QString *error);
+    bool previewVisibleForTest() const;
     bool exportStl(const QString &path, int *bytes, QString *error);
     /// 剖切自检用：抓剖切前后的非背景像素数（真看图，不看标志位）
     bool clipTestMetrics(double z, int *beforePixels, int *afterPixels, QString *error);
@@ -190,6 +194,7 @@ private:        // 最近一次生成的整机方案（试摆位/导出用）
     bool m_pendingMeasureMax = false;
     bool m_pendingSkipMisreports = false;
     QStringList m_pendingIgnoreKeys;
+    QJsonArray m_catalogCache;
     bool m_pendingRecomputeCompliance = false;
     int m_pendingRecomputeMm = 20;
     bool m_pendingShiftScope = false;

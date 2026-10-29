@@ -173,6 +173,19 @@ MainWindow::MainWindow(QWidget *parent)
     // 构件库（停靠面板）：条目可拖到 3D 视口；数据来自 desktop --catalog
 #ifdef AUTOMATIONCAD_HAVE_OCCT
     if (m_occtViewport) {
+        connect(m_occtViewport, &OcctViewport::dragPreview, this, [this](const QString &type, double x, double y) {
+            for (const QJsonValue &entry : m_catalogCache) {
+                const QJsonObject item = entry.toObject();
+                if (item.value(QStringLiteral("type")).toString() != type) continue;
+                const QJsonObject shape = item.value(QStringLiteral("shape")).toObject();
+                const QJsonArray size = shape.value(QStringLiteral("size")).toArray();
+                if (size.size() == 3) {
+                    m_occtViewport->showPreviewBox(size.at(0).toDouble(), size.at(1).toDouble(),
+                                                   size.at(2).toDouble(), x, y);
+                }
+                break;
+            }
+        });
         connect(m_occtViewport, &OcctViewport::partDropped, this, [this](const QString &type, double x, double y) {
             int count = 0;
             QString error;
@@ -199,6 +212,7 @@ MainWindow::MainWindow(QWidget *parent)
             catalogList->addItem(tr("（读取构件库失败：%1）").arg(error));
             return;
         }
+        m_catalogCache = catalog;
         for (const QJsonValue &entry : catalog) {
             const QJsonObject item = entry.toObject();
             auto *row = new QListWidgetItem(item.value(QStringLiteral("label")).toString(), catalogList);
@@ -1369,6 +1383,39 @@ bool MainWindow::screenPointToGroundForTest(int x, int y, double *worldX, double
     return m_occtViewport->screenToGround(x, y, worldX, worldY);
 #else
     Q_UNUSED(x); Q_UNUSED(y); Q_UNUSED(worldX); Q_UNUSED(worldY);
+    return false;
+#endif
+}
+
+bool MainWindow::previewForTest(const QString &type, double x, double y, QString *error) {
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    if (!m_occtViewport) { *error = tr("没有 OCCT 视口"); return false; }
+    if (m_catalogCache.isEmpty()) {
+        QJsonArray catalog;
+        if (!loadCatalog(&catalog, error)) return false;
+        m_catalogCache = catalog;
+    }
+    for (const QJsonValue &entry : m_catalogCache) {
+        const QJsonObject item = entry.toObject();
+        if (item.value(QStringLiteral("type")).toString() != type) continue;
+        const QJsonArray size = item.value(QStringLiteral("shape")).toObject().value(QStringLiteral("size")).toArray();
+        if (size.size() != 3) { *error = tr("构件 %1 没有盒体尺寸").arg(type); return false; }
+        m_occtViewport->showPreviewBox(size.at(0).toDouble(), size.at(1).toDouble(), size.at(2).toDouble(), x, y);
+        return true;
+    }
+    *error = tr("构件库里没有 %1").arg(type);
+    return false;
+#else
+    Q_UNUSED(type); Q_UNUSED(x); Q_UNUSED(y);
+    *error = tr("这个构建没有 OCCT");
+    return false;
+#endif
+}
+
+bool MainWindow::previewVisibleForTest() const {
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    return m_occtViewport && m_occtViewport->previewVisible();
+#else
     return false;
 #endif
 }
