@@ -89,7 +89,18 @@ if (withGeometry) {
     const spec = args[insertIndex + 1] ?? '';
     const [type, coords] = spec.split('@');
     const [x, y, z] = (coords ?? '').split(',').map(Number);
-    const partial = buildInsertPart({ type: type ?? '', at: [x, y, z], existingIds: caseData.geometry.parts.map((part) => part.id) });
+    const sizeIndex = args.indexOf('--part-size');
+    let size;
+    if (sizeIndex >= 0) {
+      const raw = args[sizeIndex + 1] ?? '';
+      const parsed = raw.split('x').map(Number);
+      if (parsed.length !== 3 || !parsed.every((value) => Number.isFinite(value))) {
+        process.stderr.write('FT_MACHINE_CLI_INSERT_FAIL --part-size 需要 长x宽x高（mm），如 60x60x1200\n');
+        process.exit(2);
+      }
+      size = parsed;
+    }
+    const partial = buildInsertPart({ type: type ?? '', at: [x, y, z], ...(size ? { size } : {}), existingIds: caseData.geometry.parts.map((part) => part.id) });
     if (!partial.ok) {
       process.stderr.write(`FT_MACHINE_CLI_INSERT_FAIL ${partial.reason}\n`);
       process.exit(2);

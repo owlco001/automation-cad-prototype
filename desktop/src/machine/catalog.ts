@@ -39,6 +39,8 @@ export function catalogFor(type: string): CatalogEntry | undefined {
 
 export interface InsertRequest {
   type: string;
+  /** 覆盖默认尺寸（mm）。只允许盒体；角度/圆柱构件不支持，传了要给原因 */
+  size?: [number, number, number];
   /** 落点（mm，世界坐标） */
   at: [number, number, number];
   /** 已有零件 id，用来生成不重复的编号 */
@@ -61,6 +63,23 @@ export function buildInsertPart(request: InsertRequest): InsertResult {
     return { ok: false, reason: `构件库里没有类型 ${request.type}（可用：${CATALOG.map((item) => item.type).join('、')}）` };
   }
   const [x, y, z] = request.at;
+  let shape = entry.shape;
+  let groundOffset = entry.groundOffsetMm;
+  if (request.size) {
+    if (entry.shape.type !== 'box') {
+      return { ok: false, reason: `构件 ${entry.type} 不是盒体（${entry.shape.type}），暂不支持改尺寸` };
+    }
+    const [sx, sy, sz] = request.size;
+    if (![sx, sy, sz].every((value) => Number.isFinite(value) && value > 0)) {
+      return { ok: false, reason: '尺寸必须都是正数（mm）' };
+    }
+    if (Math.max(sx, sy, sz) > 5000) {
+      return { ok: false, reason: `尺寸 ${Math.max(sx, sy, sz)} mm 超过单件上限 5000 mm` };
+    }
+    shape = { type: 'box', size: [sx, sy, sz] };
+    // 落地偏移跟着高度变：底面仍然贴地
+    groundOffset = sz / 2;
+  }
   if (![x, y, z].every((value) => Number.isFinite(value))) {
     return { ok: false, reason: '落点坐标必须是数字' };
   }
@@ -74,8 +93,8 @@ export function buildInsertPart(request: InsertRequest): InsertResult {
       id,
       name: entry.label,
       role: entry.role,
-      shape: entry.shape,
-      center: [x, y, z + entry.groundOffsetMm],
+      shape,
+      center: [x, y, z + groundOffset],
       rotationZDeg: 0,
       color: entry.color,
       material: entry.material,
