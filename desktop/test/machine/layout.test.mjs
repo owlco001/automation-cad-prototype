@@ -116,3 +116,37 @@ test('最大可行间距：最小阈值都排不开时返回 0 并留探测记�
   assert.ok(result.feasibleMm === 0 || result.feasibleMm >= 10, `实际 ${result.feasibleMm}`);
   assert.ok(result.probes.length >= 1);
 });
+
+// ---- 工位级建议 ----
+import { buildAdvice } from '../../src/machine/layout.ts';
+
+test('跨工位太近且空间充足：建议可执行，方向指向远离对方的一侧', () => {
+  const geometry = {
+    parts: [
+      // A 站两件（内部不近），B 站一件，与 A 站最近一件只隔 5 mm
+      box('stA-plate', [0, 0, 0], [100, 100, 100]),
+      box('stA-nest', [0, 0, 200], [40, 40, 40]),
+      box('stB-plate', [105, 0, 0], [100, 100, 100])
+    ]
+  };
+  const advice = buildAdvice(geometry, 20);
+  const item = advice.find((entry) => entry.scope === 'stB') ?? advice.find((entry) => entry.scope === 'stA');
+  assert.ok(item, '应当给出建议');
+  assert.equal(item.intraScope, false, '这是跨工位的一对');
+  assert.equal(item.actionable, true, `应当可执行（overlapsAfter=${item.overlapsAfter}）`);
+  assert.equal(item.overlapsAfter, 0);
+  assert.ok(item.shortByMm > 0);
+});
+
+test('工位内部太近：标 intraScope 且不可执行（整站挪不改变内部相对距离）', () => {
+  const geometry = {
+    parts: [
+      box('stA-base', [0, 0, 0], [100, 100, 20]),
+      box('stA-table', [0, 0, 25], [100, 100, 20])
+    ]
+  };
+  const advice = buildAdvice(geometry, 40);
+  assert.equal(advice.length, 1);
+  assert.equal(advice[0].intraScope, true);
+  assert.equal(advice[0].actionable, false);
+});

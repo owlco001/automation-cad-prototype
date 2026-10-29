@@ -214,10 +214,16 @@ CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI �
 **建议要分清「工位内部」和「跨工位」**：四工位 40 mm 下差的全是工位内部
 （`st1-rotary-1-base × st1-rotary-1-table` 3 mm），**整站挪不会改变工位内部的相对距离**——
 这类只给说明「工位内部差 37 mm（整站挪无效，需改工位内布局）」，不给按钮；
-六工位那种跨工位/工位与门架的差才给「st3 X −39 mm」按钮，方向是按「推完撞得最少」筛出来的
-（±、三轴各试一遍，只做筛查不解算，重叠按 10 倍计权）。
-实测：四工位 `FT_QT_SHIFT_OK advice=2 intra=2 cross=0 buttons=0 intraLabel=1`；
-六工位 `advice=9 intra=0 cross=9 buttons=9`。
+跨工位的建议还要过一关：**三轴 × 两向各试一遍**，只有当某个方向推完不产生新重叠时才给按钮
+（打分 = 新重叠 × 10 + 剩余间距不足），否则只说「差 N mm，但往哪推都会撞（预计 M 对）——需加宽线体/减件」。
+
+实测两台样机都推不出零代价方案，所以按钮在这两台机器上**不会出现**：
+- 四工位 `FT_QT_SHIFT_OK advice=2 intra=2 cross=0 actionable=0 buttons=0 intraLabel=1`
+- 六工位 `FT_QT_SHIFT_OK advice=9 intra=0 cross=9 actionable=0 buttons=0`
+  （每条跨工位建议的 `overlapsAfter` 是 6–7 对——照它挪实测把重叠从 1 顶到 12，所以不给按钮是对的）
+
+按钮本身的路径用合成用例覆盖：`buildAdvice` 对「两站相隔 5 mm、别处有空间」返回
+`intraScope=false / actionable=true / overlapsAfter=0`。**端到端（点按钮→重跑）没有真实机器跑通**，这一点如实记在这里。
 
 放不下时不只报「未收敛」，还给到工位级的补救建议：`advice[]` 按零件 id 前缀（`st1`/`frame`/`conveyor`）
 汇总「还差多少 mm 才到阈值」，界面在未收敛的判定下面直接列「· st1 还差 37.0 mm（st1-plate × …）」。

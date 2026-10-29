@@ -34,6 +34,13 @@ export interface LayoutAdvice {
    * （实测四工位 st1 的 37 mm 全是 `st1-rotary-1-base × st1-rotary-1-table` 这类内部间距）。
    */
   intraScope: boolean;
+  /**
+   * 照这个建议挪完，会不会撞出新的重叠（初筛对数）。
+   * 大于 0 说明「怎么推都要撞」——那就别给按钮，改成说清楚。
+   */
+  overlapsAfter: number;
+  /** 能不能直接执行（intraScope 或 overlapsAfter>0 时都不能） */
+  actionable: boolean;
   /** 涉及的零件对（最多列 5 对，避免刷屏） */
   pairs: Array<{ a: string; b: string; gapMm: number }>;
 }
@@ -156,7 +163,7 @@ function scopeOf(partId: string): string {
   return head;
 }
 
-function buildAdvice(geometry: any, clearanceMm: number): LayoutAdvice[] {
+export function buildAdvice(geometry: any, clearanceMm: number): LayoutAdvice[] {
   const parts: any[] = Array.isArray(geometry?.parts) ? geometry.parts : [];
   const screen = screenClearance({ ...geometry, parts }, { thresholdMm: clearanceMm });
   const byScope = new Map<string, LayoutAdvice>();
@@ -167,6 +174,7 @@ function buildAdvice(geometry: any, clearanceMm: number): LayoutAdvice[] {
       if (!existing) {
         byScope.set(scope, { scope, shortByMm, axis: pair.axis, direction: 1,
                              intraScope: scopeOf(pair.a) === scopeOf(pair.b),
+                             overlapsAfter: 0, actionable: true,
                              pairs: [{ a: pair.a, b: pair.b, gapMm: pair.gapMm }] });
         continue;
       }
@@ -192,7 +200,10 @@ function buildAdvice(geometry: any, clearanceMm: number): LayoutAdvice[] {
     const ids = new Set(scopeIds.get(item.scope) ?? []);
     if (ids.size === 0) continue;
     // 工位内部的间距：整站挪不改变相对位置，别给误导性的方向
-    if (item.intraScope) continue;
+    if (item.intraScope) {
+      item.actionable = false;
+      continue;
+    }
     let bestCost = Number.POSITIVE_INFINITY;
     let bestAxis: 'x' | 'y' | 'z' = item.axis;
     let bestDirection: 1 | -1 = 1;
@@ -220,6 +231,10 @@ function buildAdvice(geometry: any, clearanceMm: number): LayoutAdvice[] {
     }
     item.axis = bestAxis;
     item.direction = bestDirection;
+    // bestCost 里重叠按 10 倍计权，这里把重叠部分还原出来
+    item.overlapsAfter = Math.floor(bestCost / 10);
+    // 推哪儿都要撞（比如工位夹在两台机器之间）：不给按钮，避免「点了更糟」
+    item.actionable = item.overlapsAfter === 0;
   }
 
   return [...byScope.values()].sort((left, right) => right.shortByMm - left.shortByMm);

@@ -536,9 +536,14 @@ int main(int argc, char *argv[]) {
         }
         int intra = 0;
         int cross = 0;
+        int actionable = 0;
         for (const QJsonValue &value : advice) {
-            if (value.toObject().value(QStringLiteral("intraScope")).toBool()) intra += 1;
-            else cross += 1;
+            const QJsonObject item = value.toObject();
+            if (item.value(QStringLiteral("intraScope")).toBool()) intra += 1;
+            else {
+                cross += 1;
+                if (item.value(QStringLiteral("actionable")).toBool()) actionable += 1;
+            }
         }
 
         // 界面：跨工位的给按钮，工位内部的给说明——数量和 JSON 里的分类必须对上
@@ -552,20 +557,17 @@ int main(int argc, char *argv[]) {
         for (QAbstractButton *button : dialog.findChildren<QAbstractButton *>()) {
             if (button->toolTip().contains(QStringLiteral("挑的是推完不撞别处的一侧"))) shiftButtons += 1;
         }
-        if (cross == 0 && shiftButtons != 0) {
-            qCritical().noquote() << "FT_QT_SHIFT_FAIL 全是工位内部问题却给了" << shiftButtons << "个整站挪按钮";
-            return 1;
-        }
-        if (cross > 0 && shiftButtons != cross) {
-            qCritical().noquote() << "FT_QT_SHIFT_FAIL 跨工位建议" << cross << "条，按钮却" << shiftButtons << "个";
+        // 只有「跨工位 + 推完不撞」才配按钮；别的都给说明
+        if (shiftButtons != actionable) {
+            qCritical().noquote() << "FT_QT_SHIFT_FAIL 可执行建议" << actionable << "条，按钮却" << shiftButtons << "个";
             return 1;
         }
         if (intra > 0 && !sawIntraLabel) {
             qCritical().noquote() << "FT_QT_SHIFT_FAIL 界面没说明「工位内部差」";
             return 1;
         }
-        qInfo().noquote() << QStringLiteral("FT_QT_SHIFT_OK advice=%1 intra=%2 cross=%3 buttons=%4 intraLabel=%5")
-                                 .arg(advice.size()).arg(intra).arg(cross).arg(shiftButtons)
+        qInfo().noquote() << QStringLiteral("FT_QT_SHIFT_OK advice=%1 intra=%2 cross=%3 actionable=%4 buttons=%5 intraLabel=%6")
+                                 .arg(advice.size()).arg(intra).arg(cross).arg(actionable).arg(shiftButtons)
                                  .arg(sawIntraLabel ? 1 : 0);
         return 0;
     }

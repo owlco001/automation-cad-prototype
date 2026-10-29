@@ -482,6 +482,14 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                             .arg(scope, QString::number(shortBy, 'f', 1)), layoutPage));
                     continue;
                 }
+                if (!item.value(QStringLiteral("actionable")).toBool()) {
+                    // 试过三轴两个方向都会撞：这时候推按钮只会让情况更糟（实测重叠可从 1 涨到 12）
+                    adviceRow->addWidget(new QLabel(
+                        QStringLiteral("%1：差 %2 mm，但往哪推都会撞（预计 %3 对）——需加宽线体/减件")
+                            .arg(scope, QString::number(shortBy, 'f', 1))
+                            .arg(item.value(QStringLiteral("overlapsAfter")).toInt()), layoutPage));
+                    continue;
+                }
                 const double signedMm = direction * shortBy;
                 auto *shift = new QPushButton(
                     QStringLiteral("%1 %2 %3%4 mm")

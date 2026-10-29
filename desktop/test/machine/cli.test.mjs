@@ -271,3 +271,35 @@ test('工位级建议分清「工位内部」和「跨工位」：内部问题�
     assert.ok(item.direction === 1 || item.direction === -1);
   }
 });
+
+
+test('建议的可执行性：actionable 只给「跨工位且推完不撞」的条目', { timeout: 300_000 }, () => {
+  const brief = '六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅';
+  const read = (threshold) => {
+    const stdout = execFileSync(process.execPath,
+      [script, '--brief', brief, '--with-geometry', '--layout-compliance', String(threshold)],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+    return JSON.parse(stdout).geometry.layoutCompliance;
+  };
+
+  for (const threshold of [35, 40]) {
+    const layout = read(threshold);
+    assert.ok(layout.advice.length > 0, `${threshold} mm 应当有建议`);
+    for (const item of layout.advice) {
+      // 三条互相印证：内部问题不可执行；三轴两向都撞的也不可执行
+      if (item.intraScope) {
+        assert.equal(item.actionable, false, `${item.scope} 是工位内部问题，不该可执行`);
+      } else {
+        assert.equal(item.actionable, item.overlapsAfter === 0,
+          `${item.scope} 的 actionable 与 overlapsAfter=${item.overlapsAfter} 不一致`);
+      }
+      assert.ok(item.overlapsAfter >= 0);
+    }
+  }
+
+  // 这台机器在两个阈值下都推不出「零代价」的整站挪：应当如实说「往哪推都会撞」
+  const forty = read(40);
+  assert.ok(forty.advice.filter((item) => !item.intraScope).every((item) => item.actionable === false),
+    '40 mm 下这台六工位机器不该有可执行建议');
+  assert.ok(forty.advice.some((item) => item.overlapsAfter > 0), '应当报出「推哪都撞」的预计对数');
+});
