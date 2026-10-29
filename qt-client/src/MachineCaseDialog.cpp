@@ -203,12 +203,14 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                                          .value(QStringLiteral("interference")).toObject();
     if (!interference.isEmpty()) {
         const QJsonArray pairs = interference.value(QStringLiteral("pairs")).toArray();
-        auto *conflictTable = makeTable({QStringLiteral("零件 A"), QStringLiteral("零件 B"),
+        auto *conflictTable = makeTable({QStringLiteral("判定"), QStringLiteral("零件 A"), QStringLiteral("零件 B"),
                                          QStringLiteral("AABB 重叠体积"), QStringLiteral("重叠盒")}, this);
         for (const QJsonValue &value : pairs) {
             const QJsonObject pair = value.toObject();
             const QJsonArray box = pair.value(QStringLiteral("overlapBox")).toArray();
             appendRow(conflictTable, {
+                pair.value(QStringLiteral("kind")).toString() == QStringLiteral("suspect")
+                    ? QStringLiteral("需确认") : QStringLiteral("结构共位"),
                 pair.value(QStringLiteral("aName")).toString(),
                 pair.value(QStringLiteral("bName")).toString(),
                 QStringLiteral("%1 mm³").arg(pair.value(QStringLiteral("overlapMm3")).toDouble(), 0, 'f', 1),
@@ -220,16 +222,19 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
         auto *page = new QWidget(this);
         auto *pageLayout = new QVBoxLayout(page);
         pageLayout->addWidget(conflictTable, 1);
+        const int joints = interference.value(QStringLiteral("joints")).toInt();
+        const int suspects = interference.value(QStringLiteral("suspects")).toInt();
         QString verdict;
         if (pairs.isEmpty()) {
             verdict = QStringLiteral("未发现 AABB 重叠（%1 个零件两两初筛）").arg(interference.value(QStringLiteral("partCount")).toInt());
-        } else if (interference.value(QStringLiteral("structuralOnly")).toBool()) {
-            verdict = QStringLiteral("%1 对疑似重叠，全部是**结构件共位**（立柱/横梁交接），装配上正常；"
+        } else if (suspects == 0) {
+            verdict = QStringLiteral("%1 对重叠全部是**结构件共位**（立柱/横梁交接），装配上正常；"
                                      "这不是布尔交集结果，要真实体积请在装配视图里跑干涉检查")
-                          .arg(pairs.size());
+                          .arg(joints);
         } else {
-            verdict = QStringLiteral("%1 对疑似重叠，其中有非结构件参与——需要人工确认（AABB 初筛不等于真实干涉）")
-                          .arg(pairs.size());
+            verdict = QStringLiteral("%1 对重叠：**%2 对需人工确认**（有执行机构/传感器参与）+ %3 对结构共位。"
+                                     "AABB 初筛不等于真实干涉，确认后再去装配视图跑布尔交集")
+                          .arg(pairs.size()).arg(suspects).arg(joints);
         }
         auto *note = new QLabel(verdict, page);
         note->setWordWrap(true);

@@ -39,6 +39,21 @@ test('绕 Z 转 45° 的长条，包围盒按旋转后外接尺寸算', () => {
   assert.ok(Math.abs(bounds.max[0] - expected) < 1e-6, `max.x=${bounds.max[0]} expected=${expected}`);
 });
 
+test('结构件互撞标 joint，含运动件标 suspect，且 suspect 排前面', () => {
+  const result = screenInterference({
+    parts: [
+      box('leg', [0, 0, 0], [40, 40, 400], 0, 'frame'),
+      box('beam', [10, 0, 100], [200, 40, 40], 0, 'frame'),
+      box('cyl', [10, 0, 150], [60, 60, 120], 0, 'actuator')
+    ]
+  });
+  assert.equal(result.count, 3);
+  assert.equal(result.joints, 1);      // leg × beam
+  assert.equal(result.suspects, 2);    // cyl 撞 leg / 撞 beam
+  assert.equal(result.pairs[0].kind, 'suspect', '需人工确认的要排最前');
+  assert.equal(result.structuralOnly, false);
+});
+
 test('全是结构件的疑似对要标 structuralOnly（避免被当成设计缺陷）', () => {
   const result = screenInterference({
     parts: [
@@ -48,6 +63,8 @@ test('全是结构件的疑似对要标 structuralOnly（避免被当成设计�
   });
   assert.equal(result.count, 1);
   assert.equal(result.structuralOnly, true);
+  assert.equal(result.joints, 1);
+  assert.equal(result.suspects, 0);
 });
 
 test('执行机构撞到台面时 structuralOnly=false（这种才要看）', () => {
