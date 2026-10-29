@@ -225,7 +225,13 @@ CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI �
 
 手工挪动会让合规结论失效，所以**挪完旧戳自动降级为「已过期」**：
 概览显示「已过期：按 20 mm：已合规（3 轮 / 58 次位移）之后又手工调整了 1 次，需重算才能当结论」。
-实测 `FT_QT_STALE_OK moves=1 shown=已过期：…`。要重算就点「一键排布合规」，戳会重新变新鲜。
+实测 `FT_QT_STALE_OK moves=1 shown=已过期：…`。要重算不必再绕去干涉页：过期的方案在**概览页底部**直接有「立即重算…」按钮，
+按当前间距阈值（不是写死的 20）重跑排布合规，戳重新变新鲜、状态栏报「已按 25 mm 重算：合规（3 轮 / 66 次位移）」。
+实测 `FT_QT_RECOMPUTE_OK staleMoves=1 buttons=1 freshMm=25 converged=1`
+（按钮存在性是从对话框里数出来的；重算后 `clearanceMm` 确实变成 25，不是沿用旧值）。
+
+> 这张按钮没有配截图：它只在交互路径里挂回调，`--machine-case-ui` 打开文件时不挂，
+> 截出来会是「没有按钮」的假象。界面证据用上面那条 selftest 的输出。
 
 **踩到的坑**：这个自检碰了 OCCT 视口（`nudgeSelectedPart` 会重画 3D），在 `QT_QPA_PLATFORM=offscreen` 下
 直接段错误（exit 139），必须走 `xvfb-run`。纯表格/CSV 的自检则 offscreen 就行。

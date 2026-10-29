@@ -247,7 +247,8 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                                      std::function<void()> onLayoutCompliance,
                                      std::function<void(int)> onClearanceThreshold,
                                      int uiClearanceMm,
-                                     std::function<void()> onMeasureMaxClearance)
+                                     std::function<void()> onMeasureMaxClearance,
+                                     std::function<void(int)> onRecomputeCompliance)
     : QDialog(parent) {
     setWindowTitle(QStringLiteral("整机方案（只读）"));
     resize(760, 520);
@@ -323,7 +324,26 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                                  : QStringLiteral("连 %1 mm 都排不开").arg(maxClearance.value(QStringLiteral("minMm")).toInt())});
     }
     overview->resizeColumnsToContents();
-    m_tabs->addTab(overview, QStringLiteral("概览"));
+    const bool stampStale = stamp.value(QStringLiteral("stale")).toBool();
+    if (stampStale && onRecomputeCompliance) {
+        auto *overviewPage = new QWidget(this);
+        auto *overviewLayout = new QVBoxLayout(overviewPage);
+        overviewLayout->addWidget(overview, 1);
+        const int stampClearanceMm = stamp.value(QStringLiteral("clearanceMm")).toInt();
+        const int thresholdForRecompute = uiClearanceMm > 0 ? uiClearanceMm : (stampClearanceMm > 0 ? stampClearanceMm : 20);
+        auto *recomputeRow = new QHBoxLayout();
+        recomputeRow->addWidget(new QLabel(
+            QStringLiteral("这份方案的合规结论已过期，按 %1 mm 重算一次？").arg(thresholdForRecompute), overviewPage));
+        auto *recompute = new QPushButton(QStringLiteral("立即重算…"), overviewPage);
+        connect(recompute, &QPushButton::clicked, overviewPage,
+                [thresholdForRecompute, onRecomputeCompliance]() { onRecomputeCompliance(thresholdForRecompute); });
+        recomputeRow->addWidget(recompute);
+        recomputeRow->addStretch(1);
+        overviewLayout->addLayout(recomputeRow);
+        m_tabs->addTab(overviewPage, QStringLiteral("概览"));
+    } else {
+        m_tabs->addTab(overview, QStringLiteral("概览"));
+    }
 
     // BOM
     auto *bomTable = makeTable({QStringLiteral("类别"), QStringLiteral("名称"), QStringLiteral("型号"), QStringLiteral("数量"), QStringLiteral("来源")}, this);

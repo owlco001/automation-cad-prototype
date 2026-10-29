@@ -510,6 +510,70 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    // 「过期 → 重算 → 新鲜」自检：--recompute-selftest "brief"
+    if (args.contains(QStringLiteral("--recompute-selftest"))) {
+        const int index = args.indexOf(QStringLiteral("--recompute-selftest"));
+        if (index + 1 >= args.size()) {
+            qCritical().noquote() << "FT_QT_RECOMPUTE_FAIL 用法：--recompute-selftest \"brief\"";
+            return 2;
+        }
+        MainWindow window;
+        QJsonObject compliant;
+        QString error;
+        if (!window.designMachineFromBrief(args.at(index + 1), &compliant, &error, {}, false, 0, true, 20)) {
+            qCritical().noquote() << "FT_QT_RECOMPUTE_FAIL" << error;
+            return 1;
+        }
+        const QStringList members = MainWindow::partsOfScope(compliant, QStringLiteral("st2"));
+        if (members.isEmpty()) {
+            qCritical().noquote() << "FT_QT_RECOMPUTE_FAIL st2 没有零件";
+            return 1;
+        }
+        window.selectPartForTest(members.first());
+        window.nudgeSelectedPart(1, 0, 0);
+        const QJsonObject staleDocument = window.documentForTest();
+        const QJsonObject staleStamp = staleDocument.value(QStringLiteral("compliance")).toObject();
+        if (!staleStamp.value(QStringLiteral("stale")).toBool()) {
+            qCritical().noquote() << "FT_QT_RECOMPUTE_FAIL 挪完没标 stale";
+            return 1;
+        }
+
+        // 界面侧：过期时概览页要真有一个「立即重算…」按钮
+        int recomputeButtons = 0;
+        MachineCaseDialog staleDialog(staleDocument, nullptr, {}, {}, {}, {}, {}, {}, 20,
+                                      {}, [](int) {});
+        for (QAbstractButton *button : staleDialog.findChildren<QAbstractButton *>()) {
+            if (button->text().startsWith(QStringLiteral("立即重算"))) recomputeButtons += 1;
+        }
+        if (recomputeButtons < 1) {
+            qCritical().noquote() << "FT_QT_RECOMPUTE_FAIL 概览页没有「立即重算」按钮";
+            return 1;
+        }
+
+        // 管线侧：以「当前累计位移 + 指定阈值」重算，戳必须变新鲜且阈值是新的
+        const int targetMm = 25;
+        QJsonObject refreshed;
+        if (!window.designMachineFromBrief(args.at(index + 1), &refreshed, &error, {}, false, 0, true, targetMm)) {
+            qCritical().noquote() << "FT_QT_RECOMPUTE_FAIL 重算失败：" << error;
+            return 1;
+        }
+        const QJsonObject freshStamp = refreshed.value(QStringLiteral("compliance")).toObject();
+        if (freshStamp.value(QStringLiteral("stale")).toBool()) {
+            qCritical().noquote() << "FT_QT_RECOMPUTE_FAIL 重算后还是 stale";
+            return 1;
+        }
+        if (freshStamp.value(QStringLiteral("clearanceMm")).toInt() != targetMm) {
+            qCritical().noquote() << "FT_QT_RECOMPUTE_FAIL 阈值没生效：" << freshStamp.value(QStringLiteral("clearanceMm")).toInt();
+            return 1;
+        }
+        qInfo().noquote() << QStringLiteral("FT_QT_RECOMPUTE_OK staleMoves=%1 buttons=%2 freshMm=%3 converged=%4")
+                                 .arg(staleStamp.value(QStringLiteral("movesSinceStamp")).toInt())
+                                 .arg(recomputeButtons)
+                                 .arg(freshStamp.value(QStringLiteral("clearanceMm")).toInt())
+                                 .arg(freshStamp.value(QStringLiteral("converged")).toBool() ? 1 : 0);
+        return 0;
+    }
+
     // 方案存取往返自检：--case-save-selftest <case.json>（存→读→比对关键字段）
     {
         const int index = args.indexOf(QStringLiteral("--case-save-selftest"));

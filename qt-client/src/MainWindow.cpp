@@ -634,7 +634,11 @@ void MainWindow::showMachineCase(const QJsonObject &document) {
             [this]() { m_pendingLayoutCompliance = true; },
             [this](int thresholdMm) { m_pendingClearanceMm = thresholdMm; },
             m_clearanceMm,
-            [this]() { m_pendingMeasureMax = true; });
+            [this]() { m_pendingMeasureMax = true; },
+            [this](int thresholdMm) {
+                m_pendingRecomputeCompliance = true;
+                m_pendingRecomputeMm = thresholdMm;
+            });
         dialog.exec();
         if (m_pendingResolveAll && !m_lastBrief.trimmed().isEmpty()) {
             m_pendingResolveAll = false;
@@ -664,6 +668,37 @@ void MainWindow::showMachineCase(const QJsonObject &document) {
                                          .arg(resolution.value(QStringLiteral("converged")).toBool()
                                                   ? tr("已收敛") : tr("未收敛")), 20000);
             current = resolved;
+            continue;
+        }
+        if (m_pendingRecomputeCompliance && !m_lastBrief.trimmed().isEmpty()) {
+            m_pendingRecomputeCompliance = false;
+            const int thresholdMm = m_pendingRecomputeMm > 0 ? m_pendingRecomputeMm : m_clearanceMm;
+            QApplication::setOverrideCursor(Qt::WaitCursor);
+            QJsonObject refreshed;
+            QString refreshError;
+            const bool ok = designMachineFromBrief(m_lastBrief, &refreshed, &refreshError, m_lastMoves,
+                                                   false, 0, true, thresholdMm);
+            QApplication::restoreOverrideCursor();
+            if (!ok) {
+                QMessageBox::warning(this, tr("重算合规失败"), refreshError);
+                return;
+            }
+            m_lastDocument = refreshed;
+            m_clearanceMm = thresholdMm;
+            int refreshedShapes = 0;
+            QString refreshedGeometryError;
+            renderMachineGeometry(refreshed, &refreshedShapes, &refreshedGeometryError);
+            const QJsonObject stamp = refreshed.value(QStringLiteral("compliance")).toObject();
+            qInfo().noquote() << "FT_QT_RECOMPUTE stampMm=" << stamp.value(QStringLiteral("clearanceMm")).toInt()
+                              << "converged=" << stamp.value(QStringLiteral("converged")).toBool()
+                              << "stale=" << stamp.value(QStringLiteral("stale")).toBool();
+            statusBar()->showMessage(tr("已按 %1 mm 重算：%2（%3 轮 / %4 次位移）")
+                                         .arg(thresholdMm)
+                                         .arg(stamp.value(QStringLiteral("converged")).toBool()
+                                                  ? tr("合规") : tr("仍不合规"))
+                                         .arg(stamp.value(QStringLiteral("rounds")).toInt())
+                                         .arg(stamp.value(QStringLiteral("moves")).toInt()), 20000);
+            current = refreshed;
             continue;
         }
         if (m_pendingMeasureMax && !m_lastBrief.trimmed().isEmpty()) {
