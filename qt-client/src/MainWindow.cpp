@@ -583,7 +583,9 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
         case Qt::Key_PageDown: nudgeSelectedPart(0, 0, -step); return;
         case Qt::Key_Escape:
             m_selectedPartId.clear();
+#ifdef AUTOMATIONCAD_HAVE_OCCT
             if (m_occtViewport) m_occtViewport->highlightPart(QString());
+#endif
             statusBar()->showMessage(tr("已取消选中"), 5000);
             return;
         default: break;
@@ -616,7 +618,9 @@ void MainWindow::nudgeSelectedPart(int dx, int dy, int dz) {
     int shapes = 0;
     QString geometryError;
     renderMachineGeometry(updated, &shapes, &geometryError);
+#ifdef AUTOMATIONCAD_HAVE_OCCT
     m_occtViewport->highlightPart(m_selectedPartId);   // 重算后保持选中态
+#endif
     const QJsonObject interference = updated.value(QStringLiteral("geometry")).toObject()
                                         .value(QStringLiteral("interference")).toObject();
     qInfo().noquote() << "FT_QT_NUDGE part=" << m_selectedPartId << "delta=" << dx << dy << dz
