@@ -180,6 +180,10 @@ private:        // 最近一次生成的整机方案（试摆位/导出用）
     bool m_pendingMeasureMax = false;
     bool m_pendingRecomputeCompliance = false;
     int m_pendingRecomputeMm = 20;
+    bool m_pendingShiftScope = false;
+    QString m_pendingShiftScopeName;
+    double m_pendingShiftMm = 0.0;
+    QString m_pendingShiftAxis = QStringLiteral("x");
     /// 打开方案窗口并支持「按建议挪 → 重算 → 重新打开」的循环
     void showMachineCase(const QJsonObject &document);           // 累计的 --move 参数，多次试挪会叠加
     QJsonObject m_assemblyRecord;

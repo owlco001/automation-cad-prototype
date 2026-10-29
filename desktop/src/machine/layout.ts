@@ -24,6 +24,16 @@ export interface LayoutAdvice {
   scope: string;
   /** 该 scope 里最紧的一对还差多少 mm 才到阈值 */
   shortByMm: number;
+  /** 最紧那一对是沿哪个轴太近（整站挪要沿这个轴，不能一律往 +X） */
+  axis: 'x' | 'y' | 'z';
+  /** 该往正方向还是负方向推（选「推完不撞别处」的那一侧） */
+  direction: 1 | -1;
+  /**
+   * 这几对是不是都发生在同一个 scope 内部。
+   * 是的话整站挪**无效**——整个工位一起动，工位内部的相对距离一点没变
+   * （实测四工位 st1 的 37 mm 全是 `st1-rotary-1-base × st1-rotary-1-table` 这类内部间距）。
+   */
+  intraScope: boolean;
   /** 涉及的零件对（最多列 5 对，避免刷屏） */
   pairs: Array<{ a: string; b: string; gapMm: number }>;
 }
@@ -147,20 +157,71 @@ function scopeOf(partId: string): string {
 }
 
 function buildAdvice(geometry: any, clearanceMm: number): LayoutAdvice[] {
-  const screen = screenClearance(geometry, { thresholdMm: clearanceMm });
+  const parts: any[] = Array.isArray(geometry?.parts) ? geometry.parts : [];
+  const screen = screenClearance({ ...geometry, parts }, { thresholdMm: clearanceMm });
   const byScope = new Map<string, LayoutAdvice>();
   for (const pair of screen.pairs) {
     const shortByMm = Math.round((clearanceMm - pair.gapMm) * 100) / 100;
     for (const scope of new Set([scopeOf(pair.a), scopeOf(pair.b)])) {
       const existing = byScope.get(scope);
       if (!existing) {
-        byScope.set(scope, { scope, shortByMm, pairs: [{ a: pair.a, b: pair.b, gapMm: pair.gapMm }] });
+        byScope.set(scope, { scope, shortByMm, axis: pair.axis, direction: 1,
+                             intraScope: scopeOf(pair.a) === scopeOf(pair.b),
+                             pairs: [{ a: pair.a, b: pair.b, gapMm: pair.gapMm }] });
         continue;
       }
-      existing.shortByMm = Math.max(existing.shortByMm, shortByMm);
+      if (shortByMm > existing.shortByMm) {
+        existing.shortByMm = shortByMm;
+        existing.axis = pair.axis;
+      }
+      if (scopeOf(pair.a) !== scopeOf(pair.b)) existing.intraScope = false;
       if (existing.pairs.length < 5) existing.pairs.push({ a: pair.a, b: pair.b, gapMm: pair.gapMm });
     }
   }
+
+  // 方向不能拍脑袋：整站往 +Z 推 37 mm 可能正好顶进门架（实测四工位把间距问题从 4 处推到 34 处）。
+  // 这里把「这个 scope 沿候选轴 ±长度」各试一遍，只做筛查（不解），挑撞得最少的那一侧。
+  const scopeIds = new Map<string, string[]>();
+  for (const part of parts) {
+    const scope = scopeOf(String(part.id ?? ''));
+    const list = scopeIds.get(scope) ?? [];
+    list.push(String(part.id));
+    scopeIds.set(scope, list);
+  }
+  for (const item of byScope.values()) {
+    const ids = new Set(scopeIds.get(item.scope) ?? []);
+    if (ids.size === 0) continue;
+    // 工位内部的间距：整站挪不改变相对位置，别给误导性的方向
+    if (item.intraScope) continue;
+    let bestCost = Number.POSITIVE_INFINITY;
+    let bestAxis: 'x' | 'y' | 'z' = item.axis;
+    let bestDirection: 1 | -1 = 1;
+    const axes: Array<'x' | 'y' | 'z'> = [item.axis, ...(['x', 'y', 'z'] as const).filter((a) => a !== item.axis)];
+    for (const axis of axes) {
+      for (const direction of [1, -1] as const) {
+        const shifted = parts.map((part: any) => {
+          if (!ids.has(String(part.id ?? ''))) return part;
+          const center = [...(part.center as number[])];
+          const index = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
+          center[index] = Number(center[index]) + direction * item.shortByMm;
+          return { ...part, center };
+        });
+        const trial = { ...geometry, parts: shifted };
+        const overlapCount = screenInterference(trial).suspects;
+        const stillShort = screenClearance(trial, { thresholdMm: clearanceMm }).count;
+        // 重叠比「还没推够」更糟：重叠按 10 倍计权
+        const cost = overlapCount * 10 + stillShort;
+        if (cost < bestCost) {
+          bestCost = cost;
+          bestAxis = axis;
+          bestDirection = direction;
+        }
+      }
+    }
+    item.axis = bestAxis;
+    item.direction = bestDirection;
+  }
+
   return [...byScope.values()].sort((left, right) => right.shortByMm - left.shortByMm);
 }
 

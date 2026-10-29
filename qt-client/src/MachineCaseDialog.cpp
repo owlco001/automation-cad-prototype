@@ -248,7 +248,8 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                                      std::function<void(int)> onClearanceThreshold,
                                      int uiClearanceMm,
                                      std::function<void()> onMeasureMaxClearance,
-                                     std::function<void(int)> onRecomputeCompliance)
+                                     std::function<void(int)> onRecomputeCompliance,
+                                     std::function<void(const QString &, double, const QString &)> onShiftScope)
     : QDialog(parent) {
     setWindowTitle(QStringLiteral("整机方案（只读）"));
     resize(760, 520);
@@ -462,6 +463,39 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
             setWindowTitle(windowTitle() + QStringLiteral(" · 已导出 %1 行").arg(rows));
         });
         layoutPageLayout->addWidget(exportLayout, 0, Qt::AlignLeft);
+        // 未收敛时，把「哪个工位还差多少」直接做成动作：整站挪过去再重算
+        const QJsonArray adviceItems = layoutInfo.value(QStringLiteral("advice")).toArray();
+        if (!converged && !adviceItems.isEmpty() && onShiftScope) {
+            auto *adviceRow = new QHBoxLayout();
+            adviceRow->addWidget(new QLabel(QStringLiteral("按建议整站挪："), layoutPage));
+            for (const QJsonValue &value : adviceItems) {
+                const QJsonObject item = value.toObject();
+                const QString scope = item.value(QStringLiteral("scope")).toString();
+                const double shortBy = item.value(QStringLiteral("shortByMm")).toDouble();
+                const QString axis = item.value(QStringLiteral("axis")).toString();
+                const int direction = item.value(QStringLiteral("direction")).toInt(1) < 0 ? -1 : 1;
+                if (scope.isEmpty() || shortBy <= 0) continue;
+                // 工位内部的间距：整站一起挪不会改变内部相对距离，别给一个点了没用的按钮
+                if (item.value(QStringLiteral("intraScope")).toBool()) {
+                    adviceRow->addWidget(new QLabel(
+                        QStringLiteral("%1：工位内部差 %2 mm（整站挪无效，需改工位内布局）")
+                            .arg(scope, QString::number(shortBy, 'f', 1)), layoutPage));
+                    continue;
+                }
+                const double signedMm = direction * shortBy;
+                auto *shift = new QPushButton(
+                    QStringLiteral("%1 %2 %3%4 mm")
+                        .arg(scope, axis.toUpper(), signedMm > 0 ? QStringLiteral("+") : QStringLiteral("−"),
+                             QString::number(qAbs(signedMm), 'f', 1)), layoutPage);
+                shift->setToolTip(QStringLiteral("把 %1 的全部零件沿 %2 轴推 %3 mm（挑的是推完不撞别处的一侧），然后重算合规")
+                                      .arg(scope, axis.toUpper(), QString::number(signedMm, 'f', 1)));
+                connect(shift, &QPushButton::clicked, layoutPage,
+                        [scope, signedMm, axis, onShiftScope]() { onShiftScope(scope, signedMm, axis); });
+                adviceRow->addWidget(shift);
+            }
+            adviceRow->addStretch(1);
+            layoutPageLayout->addLayout(adviceRow);
+        }
         layoutPageLayout->addStretch(1);
         auto *preview = makeTable({QStringLiteral("类型"), QStringLiteral("零件"), QStringLiteral("轴"),
                                    QStringLiteral("位移(mm)")}, layoutPage);

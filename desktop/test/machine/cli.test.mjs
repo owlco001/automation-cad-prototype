@@ -189,6 +189,7 @@ test('排布合规：阈值大到放不下时提前停并说明原因，不空�
   assert.ok(scopes.includes('st1') && scopes.includes('st4'), `建议工位不对：${scopes.join(',')}`);
   const st1 = layout.advice.find((item) => item.scope === 'st1');
   assert.equal(st1.shortByMm, 37, `st1 还差 ${st1.shortByMm}`);
+  assert.ok(['x', 'y', 'z'].includes(st1.axis), `建议必须带轴：${st1.axis}`);
   assert.ok(st1.pairs.length >= 1 && st1.pairs.length <= 5);
   for (const item of layout.advice) assert.ok(item.shortByMm > 0);
 });
@@ -243,4 +244,30 @@ test('--max-clearance 二分出四工位的最大可行间距 = 25 mm，且该�
   const byMm = new Map(maxClearance.probes.map((probe) => [probe.mm, probe.converged]));
   assert.equal(byMm.get(25), true);
   assert.equal(byMm.get(26), false);
+});
+
+
+test('工位级建议分清「工位内部」和「跨工位」：内部问题整站挪无效', { timeout: 300_000 }, () => {
+  const read = (brief) => {
+    const stdout = execFileSync(process.execPath,
+      [script, '--brief', brief, '--with-geometry', '--layout-compliance', '40'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+    return JSON.parse(stdout).geometry.layoutCompliance;
+  };
+
+  // 四工位：40 mm 下差的全是工位内部（转台底座 × 转台台面），整站挪不会改变相对距离
+  const four = read('四工位点胶机，节拍 25 件/分钟');
+  assert.ok(four.advice.length > 0);
+  for (const item of four.advice) {
+    assert.equal(item.intraScope, true, `${item.scope} 应当是工位内部问题`);
+  }
+
+  // 六工位：差的是跨工位的（工位之间 / 工位与门架），这类才该给「整站挪」按钮
+  const six = read('六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅');
+  assert.ok(six.advice.length > 0);
+  assert.ok(six.advice.some((item) => item.intraScope === false), '六工位应当有跨工位建议');
+  for (const item of six.advice) {
+    assert.ok(['x', 'y', 'z'].includes(item.axis));
+    assert.ok(item.direction === 1 || item.direction === -1);
+  }
 });

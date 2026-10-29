@@ -13,6 +13,7 @@
 #include <QJsonObject>
 #include <QStringList>
 #include <QSpinBox>
+#include <QLabel>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QAbstractButton>
@@ -507,6 +508,65 @@ int main(int argc, char *argv[]) {
         qInfo().noquote() << QStringLiteral("FT_QT_STALE_OK moves=%1 shown=%2")
                                  .arg(staleStamp.value(QStringLiteral("movesSinceStamp")).toInt())
                                  .arg(shown);
+        return 0;
+    }
+
+    // 工位级建议自检：--shift-scope-selftest "brief"
+    // 这一版只钉住「建议说了什么」和「界面怎么呈现」——四工位这台机器的间距问题全在工位内部，
+    // 整站挪本来就不该给按钮（给了也是点了没用的假动作）。
+    if (args.contains(QStringLiteral("--shift-scope-selftest"))) {
+        const int index = args.indexOf(QStringLiteral("--shift-scope-selftest"));
+        if (index + 1 >= args.size()) {
+            qCritical().noquote() << "FT_QT_SHIFT_FAIL 用法：--shift-scope-selftest \"brief\"";
+            return 2;
+        }
+        MainWindow window;
+        QJsonObject loose;
+        QString error;
+        if (!window.designMachineFromBrief(args.at(index + 1), &loose, &error, {}, false, 0, true, 40)) {
+            qCritical().noquote() << "FT_QT_SHIFT_FAIL" << error;
+            return 1;
+        }
+        const QJsonObject layoutInfo = loose.value(QStringLiteral("geometry")).toObject()
+                                           .value(QStringLiteral("layoutCompliance")).toObject();
+        const QJsonArray advice = layoutInfo.value(QStringLiteral("advice")).toArray();
+        if (advice.isEmpty()) {
+            qCritical().noquote() << "FT_QT_SHIFT_FAIL 40 mm 下应当放不下并给建议";
+            return 1;
+        }
+        int intra = 0;
+        int cross = 0;
+        for (const QJsonValue &value : advice) {
+            if (value.toObject().value(QStringLiteral("intraScope")).toBool()) intra += 1;
+            else cross += 1;
+        }
+
+        // 界面：跨工位的给按钮，工位内部的给说明——数量和 JSON 里的分类必须对上
+        MachineCaseDialog dialog(loose, nullptr, {}, {}, {}, {}, {}, {}, 40, {},
+                                 [](int) {}, [](const QString &, double, const QString &) {});
+        bool sawIntraLabel = false;
+        int shiftButtons = 0;
+        for (QLabel *label : dialog.findChildren<QLabel *>()) {
+            if (label->text().contains(QStringLiteral("工位内部差"))) sawIntraLabel = true;
+        }
+        for (QAbstractButton *button : dialog.findChildren<QAbstractButton *>()) {
+            if (button->toolTip().contains(QStringLiteral("挑的是推完不撞别处的一侧"))) shiftButtons += 1;
+        }
+        if (cross == 0 && shiftButtons != 0) {
+            qCritical().noquote() << "FT_QT_SHIFT_FAIL 全是工位内部问题却给了" << shiftButtons << "个整站挪按钮";
+            return 1;
+        }
+        if (cross > 0 && shiftButtons != cross) {
+            qCritical().noquote() << "FT_QT_SHIFT_FAIL 跨工位建议" << cross << "条，按钮却" << shiftButtons << "个";
+            return 1;
+        }
+        if (intra > 0 && !sawIntraLabel) {
+            qCritical().noquote() << "FT_QT_SHIFT_FAIL 界面没说明「工位内部差」";
+            return 1;
+        }
+        qInfo().noquote() << QStringLiteral("FT_QT_SHIFT_OK advice=%1 intra=%2 cross=%3 buttons=%4 intraLabel=%5")
+                                 .arg(advice.size()).arg(intra).arg(cross).arg(shiftButtons)
+                                 .arg(sawIntraLabel ? 1 : 0);
         return 0;
     }
 

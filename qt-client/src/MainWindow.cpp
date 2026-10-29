@@ -638,6 +638,12 @@ void MainWindow::showMachineCase(const QJsonObject &document) {
             [this](int thresholdMm) {
                 m_pendingRecomputeCompliance = true;
                 m_pendingRecomputeMm = thresholdMm;
+            },
+            [this](const QString &scope, double mm, const QString &axis) {
+                m_pendingShiftScope = true;
+                m_pendingShiftScopeName = scope;
+                m_pendingShiftMm = mm;
+                m_pendingShiftAxis = axis.isEmpty() ? QStringLiteral("x") : axis;
             });
         dialog.exec();
         if (m_pendingResolveAll && !m_lastBrief.trimmed().isEmpty()) {
@@ -668,6 +674,54 @@ void MainWindow::showMachineCase(const QJsonObject &document) {
                                          .arg(resolution.value(QStringLiteral("converged")).toBool()
                                                   ? tr("已收敛") : tr("未收敛")), 20000);
             current = resolved;
+            continue;
+        }
+        if (m_pendingShiftScope && !m_lastBrief.trimmed().isEmpty()) {
+            m_pendingShiftScope = false;
+            const QString scope = m_pendingShiftScopeName;
+            const double mm = m_pendingShiftMm;
+            const QStringList members = partsOfScope(m_lastDocument, scope);
+            if (members.isEmpty()) {
+                QMessageBox::warning(this, tr("整站挪失败"), tr("找不到 %1 的零件").arg(scope));
+                return;
+            }
+            // 沿建议里那个轴挪：建议是「这一对在 Y 方向太近」，就往 Y 推，不能一律往 +X
+            const QString axis = m_pendingShiftAxis;
+            const double dx = axis == QStringLiteral("x") ? mm : 0.0;
+            const double dy = axis == QStringLiteral("y") ? mm : 0.0;
+            const double dz = axis == QStringLiteral("z") ? mm : 0.0;
+            QStringList moves = m_lastMoves;
+            for (const QString &id : members) {
+                moves << QStringLiteral("%1:%2,%3,%4").arg(id).arg(dx).arg(dy).arg(dz);
+            }
+            QApplication::setOverrideCursor(Qt::WaitCursor);
+            QJsonObject shifted;
+            QString shiftError;
+            const bool ok = designMachineFromBrief(m_lastBrief, &shifted, &shiftError, moves,
+                                                   false, 0, true, m_clearanceMm);
+            QApplication::restoreOverrideCursor();
+            if (!ok) {
+                QMessageBox::warning(this, tr("整站挪失败"), shiftError);
+                return;
+            }
+            m_lastDocument = shifted;
+            m_lastMoves = moves;
+            int shiftShapes = 0;
+            QString shiftGeometryError;
+            renderMachineGeometry(shifted, &shiftShapes, &shiftGeometryError);
+            const QJsonObject layoutInfo = shifted.value(QStringLiteral("geometry")).toObject()
+                                               .value(QStringLiteral("layoutCompliance")).toObject();
+            qInfo().noquote() << "FT_QT_SHIFT_SCOPE scope=" << scope << "axis=" << axis << "mm=" << mm
+                              << "members=" << members.size()
+                              << "converged=" << layoutInfo.value(QStringLiteral("converged")).toBool()
+                              << "clearance=" << layoutInfo.value(QStringLiteral("clearance")).toInt();
+            statusBar()->showMessage(tr("整站挪 %1 沿 %2 +%3 mm（%4 件）→ %5（剩余间距不足 %6 处）")
+                                         .arg(scope, axis.toUpper(), QString::number(mm, 'f', 1))
+                                         .arg(members.size())
+                                         .arg(layoutInfo.value(QStringLiteral("converged")).toBool()
+                                                  ? tr("已合规") : tr("仍未合规"))
+                                         .arg(layoutInfo.value(QStringLiteral("clearance")).toInt()), 25000);
+            current = shifted;
             continue;
         }
         if (m_pendingRecomputeCompliance && !m_lastBrief.trimmed().isEmpty()) {
