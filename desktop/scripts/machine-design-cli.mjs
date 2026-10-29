@@ -5,6 +5,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { buildMachineCase } from '../src/machine/case.ts';
+import { generateMachineGeometry } from '../src/machine/geometry.ts';
 
 const args = process.argv.slice(2);
 const flag = (name, fallback) => {
@@ -26,12 +27,18 @@ const repoRoot = resolve(desktopRoot, '..');
 const partsDir = join(repoRoot, 'packs', 'builtin');
 const pricebookFile = join(partsDir, 'pricebook-cn', 'pricebook.json');
 
-const { caseData } = buildMachineCase({
+const withGeometry = args.includes('--with-geometry');
+const { caseData, design } = buildMachineCase({
   brief,
   partsDir,
   ...(existsSync(pricebookFile) ? { pricebookFile } : {}),
   pricingAssumptions: ['命令行未读取 userData/machine-pricing.json，使用工程默认系数与工时单价。']
 });
+
+if (withGeometry) {
+  // 概念占位体（geometryFidelity='conceptual-estimate'）：给客户端画“示意装配”，不是制造几何
+  caseData.geometry = generateMachineGeometry(design.config, {});
+}
 
 const json = `${JSON.stringify(caseData, null, 2)}\n`;
 if (outFile) {

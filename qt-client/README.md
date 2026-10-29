@@ -52,6 +52,7 @@
 | `docs/desktop/screenshots/qt-client-09-ctxmenu.png` | 特征右键菜单：「压缩 / 解除压缩」「删除特征（可撤销）」，都在服务端校验后执行 |
 | `docs/desktop/screenshots/qt-client-16-iso.png` | 默认等轴测视角（视图菜单可选等轴测/正视/俯视/右视/适合视图） |
 | `docs/desktop/screenshots/qt-client-17-top.png` | 俯视：8 个孔（4 沉头 + 4 通孔）和四角 R3 一眼可见——视口画的是服务端真几何，不是占位盒 |
+| `docs/desktop/screenshots/qt-client-35-machine-3d.png` | 整机示意 3D：70 个占位体、包络 2140×740×1177（概念估算，不是制造几何） |
 | `docs/desktop/screenshots/qt-client-34-brief-machine.png` | 一句话生成：四工位点胶机 → 4 工位 / 3.103 kW / 22,016.79（2 项无价格） |
 | `docs/desktop/screenshots/qt-client-31-machine-overview.png` | 整机方案概览：6 工位 / 31.75 件每分 / 达标 / 4.65 kW / 成本 34,489.91（3 项无价格） |
 | `docs/desktop/screenshots/qt-client-32-machine-bom.png` | 整机方案 BOM：12 项（含伺服驱动器 SV660P 750 W ×6） |
@@ -129,6 +130,21 @@ CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI �
 管线实现只有一处（`desktop/src/machine/case.ts`），脚本与 CLI 共用；
 `desktop/test/machine/cli.test.mjs` 守着「CLI 输出 == machine-case.json」，
 重构后重新生成的案例文件字节完全一致（`CASE_JSON_IDENTICAL`）。
+
+**整机示意 3D**：生成方案后直接把 `geometry.parts` 画进 OCCT 视口——每个占位体一个 AIS 对象、
+用管线给的颜色，box/cylinder 两种形体，`center` 是形体中心、`rotationZDeg` 绕 Z。
+状态栏写清「%1 个占位体 · 包络 X×Y×Z · 精度=概念估算」。
+
+实测四工位点胶机：**70 个占位体 / 包络 2140×740×1177 mm / fidelity=conceptual-estimate**
+（`--geometry-selftest "一句话"` 无人值守输出 `FT_QT_GEOMETRY_OK`）。
+
+两个自己踩的坑记一下：
+- 构造后立刻渲染时视口 `width/height` 还是 0，`FitAll` 算不出比例 → 画面全空。修法是渲染前 `MustBeResized()`，
+  并且 UI 路径用 `QTimer::singleShot` 等窗口真正显示。
+- 70 个零件合成一个 `TopoDS_Compound` 会变成一坨同色实体，看不出结构 → 改为逐件 `AIS_Shape` + 各自颜色。
+
+已知未解决：无窗口管理器环境下 `windowclose` 不生效（关窗退出未验证）；外部 SIGTERM 强杀进程时
+OCCT 清理偶发段错误（正常关窗路径没复现到）。
 
 **整机方案（只读）**：`文件 → 打开整机方案…` 读 desktop 管线导出的 `machine-case` JSON
 （`schemaVersion=1`、`kind=machine-case`，校验不过会明确报「不是整机方案文件 / 不支持的版本」），

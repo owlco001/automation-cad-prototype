@@ -6,6 +6,8 @@
 #include <QApplication>
 #include <QSurfaceFormat>
 #include <QDebug>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QStringList>
 #include <QTimer>
 
@@ -158,6 +160,63 @@ int main(int argc, char *argv[]) {
             }
             qInfo().noquote() << "FT_QT_MACHINECASE_OK" << MachineCaseDialog::summarize(document);
             return 0;
+        }
+    }
+
+    // 整机示意 3D 自检：--geometry-selftest "一句话"（要 node + OCCT 视口）
+    if (args.contains(QStringLiteral("--geometry-selftest")) && args.indexOf(QStringLiteral("--geometry-selftest")) + 1 < args.size()) {
+        const int geoIndex = args.indexOf(QStringLiteral("--geometry-selftest"));
+        {
+            MainWindow window;
+            window.show();
+            QJsonObject document;
+            QString error;
+            if (!window.designMachineFromBrief(args.at(geoIndex + 1), &document, &error)) {
+                qCritical().noquote() << "FT_QT_GEOMETRY_FAIL" << error;
+                return 1;
+            }
+            int shapes = 0;
+            if (!window.renderMachineGeometry(document, &shapes, &error)) {
+                qCritical().noquote() << "FT_QT_GEOMETRY_FAIL" << error;
+                return 1;
+            }
+            const QJsonObject geometry = document.value(QStringLiteral("geometry")).toObject();
+            const QJsonArray envelope = geometry.value(QStringLiteral("envelope")).toArray();
+            qInfo().noquote() << QStringLiteral("FT_QT_GEOMETRY_OK shapes=%1 parts=%2 envelope=%3x%4x%5 fidelity=%6")
+                                     .arg(shapes)
+                                     .arg(geometry.value(QStringLiteral("parts")).toArray().size())
+                                     .arg(envelope.at(0).toDouble(), 0, 'f', 0)
+                                     .arg(envelope.at(1).toDouble(), 0, 'f', 0)
+                                     .arg(envelope.at(2).toDouble(), 0, 'f', 0)
+                                     .arg(geometry.value(QStringLiteral("geometryFidelity")).toString());
+            return 0;
+        }
+    }
+
+    // 整机示意 3D 窗口：--geometry-ui "一句话"（停在窗口上，供截图/人肉核对）
+    if (args.contains(QStringLiteral("--geometry-ui"))) {
+        const int geoIndex = args.indexOf(QStringLiteral("--geometry-ui"));
+        if (geoIndex + 1 < args.size()) {
+            MainWindow window;
+            window.resize(1400, 900);
+            window.show();
+            QJsonObject document;
+            QString error;
+            if (!window.designMachineFromBrief(args.at(geoIndex + 1), &document, &error)) {
+                qCritical().noquote() << "FT_QT_GEOMETRY_FAIL" << error;
+                return 1;
+            }
+            // 等窗口真正显示（拿到窗口尺寸）再渲染，否则 FitAll 在 0 尺寸上算比例，画面会是空的
+            QTimer::singleShot(1500, &window, [&window, document]() {
+                int shapes = 0;
+                QString renderError;
+                if (!window.renderMachineGeometry(document, &shapes, &renderError)) {
+                    qCritical().noquote() << "FT_QT_GEOMETRY_FAIL" << renderError;
+                    return;
+                }
+                qInfo().noquote() << "FT_QT_GEOMETRY_UI_OPEN shapes=" << shapes;
+            });
+            return app.exec();
         }
     }
 

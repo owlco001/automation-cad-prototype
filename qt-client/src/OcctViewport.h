@@ -5,6 +5,7 @@
 // 为什么之前没用：本机是 Debian 12/13 混源，libocct-{data-exchange,visualization}-dev
 // 被 libfreetype-dev 版本冲突卡住。现在把这两个 dev 包的**头文件**单独解出来放到
 // /usr/local/include/opencascade（运行时 .so 本来就在），所以能编能跑。
+#include <QVector>
 #include <QWidget>
 
 #include <AIS_InteractiveContext.hxx>
@@ -14,6 +15,7 @@
 #include <V3d_View.hxx>
 #include <V3d_Viewer.hxx>
 
+class QJsonObject;
 class QNetworkAccessManager;
 class QNetworkReply;
 
@@ -22,6 +24,10 @@ class OcctViewport : public QWidget {
 public:
     explicit OcctViewport(QWidget *parent = nullptr);
     ~OcctViewport() override;
+
+    /// 整机「示意装配」：把 machine-geometry 的占位体（box/cylinder）拼成一个 compound 显示。
+    /// 几何来自 desktop 管线（conceptual-estimate），客户端不重算，只摆位。
+    bool showMachineGeometry(const QJsonObject &geometry, int *shapeCount, QString *error);
 
     void ensureRevision(int revision, const QString &url);
     void loadFromUrl(const QString &url);
@@ -55,6 +61,7 @@ private:
     Handle(AIS_InteractiveContext) m_context;
     Handle(Aspect_NeutralWindow) m_window;
     Handle(AIS_Shape) m_shape;
+    QVector<Handle(AIS_Shape)> m_shapes;  // 整机示意：每个零件一个 AIS 对象（各自颜色）
     bool m_viewReady = false;
     bool m_hasGeometry = false;
     int m_triangles = 0;

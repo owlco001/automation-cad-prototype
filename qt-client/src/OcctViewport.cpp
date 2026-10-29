@@ -12,6 +12,19 @@
 
 #include <Aspect_DisplayConnection.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRep_Builder.hxx>
+#include <TopoDS_Compound.hxx>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <gp_Ax1.hxx>
+#include <gp_Ax2.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Trsf.hxx>
+#include <gp_Vec.hxx>
+#include <cmath>
 #include <BRepGProp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <cmath>
@@ -44,6 +57,10 @@ OcctViewport::OcctViewport(QWidget *parent) : QWidget(parent), m_net(new QNetwor
 
 OcctViewport::~OcctViewport() {
     if (m_pending) m_pending->abort();
+    // 先放掉 AIS 对象，再拆 context/viewer：反过来的话 AIS_Shape 析构时还会碰已释放的 context
+    if (!m_context.IsNull()) m_context->RemoveAll(false);
+    m_shapes.clear();
+    if (!m_shape.IsNull()) m_shape.Nullify();
     if (m_view) {
         m_view->Remove();
     }
@@ -114,6 +131,87 @@ void OcctViewport::paintEvent(QPaintEvent *) {
     }
     m_view->Redraw();
 }
+
+bool OcctViewport::showMachineGeometry(const QJsonObject &geometry, int *shapeCount, QString *error) {
+    const QJsonArray parts = geometry.value(QStringLiteral("parts")).toArray();
+    if (parts.isEmpty()) {
+        *error = tr("方案里没有几何（parts 为空）");
+        return false;
+    }
+    if (!m_viewReady) {
+        initializeView();
+    }
+    if (!m_viewReady) {
+        *error = tr("3D 视口初始化失败");
+        return false;
+    }
+    // 视口可能还没拿到真实尺寸（构造后立刻渲染时 width/height 是 0 → FitAll 算不出比例，画面空白）
+    m_view->MustBeResized();
+
+    // 每个零件单独显示并用自己的颜色：整机是 70 个占位体拼起来的，合成一个 compound 会变成一坨同色实体，
+    // 看不出工位/门架/执行机构的结构。
+    m_context->RemoveAll(false);
+    m_shapes.clear();
+    int count = 0;
+    for (const QJsonValue &value : parts) {
+        const QJsonObject part = value.toObject();
+        const QJsonObject shape = part.value(QStringLiteral("shape")).toObject();
+        const QJsonArray center = part.value(QStringLiteral("center")).toArray();
+        if (center.size() != 3) continue;
+
+        TopoDS_Shape solid;
+        if (shape.value(QStringLiteral("type")).toString() == QStringLiteral("box")) {
+            const QJsonArray size = shape.value(QStringLiteral("size")).toArray();
+            if (size.size() != 3) continue;
+            const double x = size.at(0).toDouble();
+            const double y = size.at(1).toDouble();
+            const double z = size.at(2).toDouble();
+            // center 是形体中心，不是角点
+            solid = BRepPrimAPI_MakeBox(gp_Pnt(-x / 2, -y / 2, -z / 2), x, y, z).Shape();
+        } else if (shape.value(QStringLiteral("type")).toString() == QStringLiteral("cylinder")) {
+            const double radius = shape.value(QStringLiteral("radius")).toDouble();
+            const double length = shape.value(QStringLiteral("length")).toDouble();
+            if (radius <= 0 || length <= 0) continue;
+            const QString axis = shape.value(QStringLiteral("axis")).toString();
+            gp_Ax2 axis2(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1));
+            if (axis == QStringLiteral("x")) axis2.SetDirection(gp_Dir(1, 0, 0));
+            else if (axis == QStringLiteral("y")) axis2.SetDirection(gp_Dir(0, 1, 0));
+            solid = BRepPrimAPI_MakeCylinder(axis2, radius, length).Shape();
+            // 圆柱默认从原点朝 +轴 长出来，先挪到「以中心对称」
+            gp_Trsf recenter;
+            if (axis == QStringLiteral("x")) recenter.SetTranslation(gp_Vec(-length / 2, 0, 0));
+            else if (axis == QStringLiteral("y")) recenter.SetTranslation(gp_Vec(0, -length / 2, 0));
+            else recenter.SetTranslation(gp_Vec(0, 0, -length / 2));
+            solid = BRepBuilderAPI_Transform(solid, recenter, true).Shape();
+        }
+        if (solid.IsNull()) continue;
+
+        gp_Trsf placement;
+        placement.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(0, 0, 1)),
+                              part.value(QStringLiteral("rotationZDeg")).toDouble() * M_PI / 180.0);
+        placement.SetTranslationPart(gp_Vec(center.at(0).toDouble(), center.at(1).toDouble(), center.at(2).toDouble()));
+
+        Handle(AIS_Shape) shapeHandle = new AIS_Shape(BRepBuilderAPI_Transform(solid, placement, true).Shape());
+        const QString hex = part.value(QStringLiteral("color")).toString();
+        QColor color(hex);
+        if (!color.isValid()) color = QColor(QStringLiteral("#8a949c"));
+        shapeHandle->SetColor(Quantity_Color(color.redF(), color.greenF(), color.blueF(), Quantity_TOC_sRGB));
+        shapeHandle->SetMaterial(Graphic3d_NOM_PLASTIC);
+        m_context->Display(shapeHandle, AIS_Shaded, -1, false);
+        m_shapes.append(shapeHandle);
+        ++count;
+    }
+    if (count == 0) {
+        *error = tr("几何里没有可显示的形体（%1 个零件全部无法识别）").arg(parts.size());
+        return false;
+    }
+    m_hasGeometry = true;
+    *shapeCount = count;
+    m_view->FitAll(0.02, false);
+    m_view->Redraw();
+    return true;
+}
+
 
 void OcctViewport::ensureRevision(int revision, const QString &url) {
     if (revision == m_revision && m_hasGeometry) return;
