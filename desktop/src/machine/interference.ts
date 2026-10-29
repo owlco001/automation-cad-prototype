@@ -35,6 +35,8 @@ export interface ScreenResult {
   suspects: number;
   /** 声明连接的数量（可能比 overlapping 的多：声明了但没重叠） */
   declaredJoints: number;
+  /** generator = 由几何生成器产出；rules = 退回命名规则（老数据） */
+  jointSource: 'generator' | 'rules';
   /** 全部重叠都是已声明连接时为 true */
   structuralOnly: boolean;
 }
@@ -72,10 +74,18 @@ export function partBounds(part: any): { min: Vec3; max: Vec3 } {
 export function screenInterference(geometry: any): ScreenResult {
   const parts = Array.isArray(geometry?.parts) ? geometry.parts : [];
   const boxes = parts.map((part: any) => ({ part, bounds: partBounds(part) }));
+  // 优先用生成器自己产出的 joints（几何=唯一事实来源）；
+  // 老数据/外部 geometry 没有 joints 字段时，退回按命名规则的表，并在结果里标出来源。
+  const generatorJoints = Array.isArray(geometry?.joints) ? geometry.joints : [];
   const declared = new Map<string, string>();
   for (const joint of declaredJoints(parts)) {
     declared.set(jointKey(joint.a, joint.b), joint.reason);
   }
+  for (const joint of generatorJoints) {
+    if (typeof joint?.a !== 'string' || typeof joint?.b !== 'string') continue;
+    declared.set(jointKey(joint.a, joint.b), String(joint.reason ?? '生成器声明的结构连接'));
+  }
+  const jointSource = generatorJoints.length > 0 ? 'generator' : 'rules';
   const pairs: ScreenPair[] = [];
   const EPS = 0.5;  // mm：小于这个量的接触（贴面/装配面）不算
   for (let i = 0; i < boxes.length; i += 1) {
@@ -112,6 +122,7 @@ export function screenInterference(geometry: any): ScreenResult {
     declared: pairs.length - suspects,
     suspects,
     declaredJoints: declared.size,
+    jointSource,
     structuralOnly: pairs.length > 0 && suspects === 0
   };
 }

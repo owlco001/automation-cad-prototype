@@ -238,6 +238,11 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                                      "AABB 初筛也不等于真实干涉")
                           .arg(pairs.size()).arg(suspects).arg(declared);
         }
+        const QString jointSource = interference.value(QStringLiteral("jointSource")).toString();
+        verdict += QStringLiteral("\n连接来源：%1").arg(
+            jointSource == QStringLiteral("generator")
+                ? QStringLiteral("几何生成器产出（新增构件类型会自己登记）")
+                : QStringLiteral("命名规则回退（老数据没有 joints 字段）"));
         auto *note = new QLabel(verdict, page);
         note->setWordWrap(true);
         pageLayout->addWidget(note);

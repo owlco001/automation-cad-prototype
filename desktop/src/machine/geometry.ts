@@ -113,6 +113,13 @@ export interface GeomStation {
 
 export type GeomLayout = 'single' | 'linear' | 'dial' | 'gantry' | 'dual' | 'hybrid' | 'cell';
 
+/** 生成器自己建立的结构连接：这两件本来就该相接（立柱插横梁），干涉初筛据此放行。 */
+export interface GeomJoint {
+  a: string;
+  b: string;
+  reason: string;
+}
+
 export interface MachineGeometry {
   schemaVersion: 1;
   kind: 'machine-geometry';
@@ -131,6 +138,8 @@ export interface MachineGeometry {
   stations: GeomStation[];
   parts: GeomPart[];
   moving: GeomMovingAxis[];
+  /** 生成器显式产出的结构连接（不靠命名规则猜），干涉初筛只放行这些。 */
+  joints: GeomJoint[];
   /** 结构件 BOM（机架、底板、门架、输送线等），与 bomDraft 的执行机构/传感器分开。 */
   structureBom: { name: string; spec: string; qty: number; material: string }[];
   assumptions: string[];
@@ -1702,6 +1711,26 @@ export function generateMachineGeometry(
       bomGroup: 'structure'
     });
   }
+  // 结构连接由生成器直接产出：立柱↔台面、立柱↔下横梁、横梁交汇。
+  // 干涉初筛只放行这里声明过的对，新增构件类型必须在这里登记，否则会被报成「需人工确认」（有意为之）。
+  const frameJoints: GeomJoint[] = [];
+  const addJoint = (a: string, b: string, reason: string): void => {
+    if (a === b) return;
+    frameJoints.push({ a, b, reason });
+  };
+  const legIds = frameParts.filter((part) => part.id.startsWith('frame-leg-')).map((part) => part.id);
+  const stringerIds = frameParts.filter((part) => part.id.startsWith('frame-stringer-')).map((part) => part.id);
+  const crossIds = frameParts.filter((part) => part.id.startsWith('frame-cross-')).map((part) => part.id);
+  for (const leg of legIds) {
+    addJoint(leg, 'frame-top', '立柱接台面');
+    for (const stringer of stringerIds) addJoint(leg, stringer, '立柱插横梁');
+    for (const cross of crossIds) addJoint(leg, cross, '立柱插下横梁');
+  }
+  for (const stringer of stringerIds) {
+    for (const cross of crossIds) addJoint(stringer, cross, '下横梁交汇');
+    addJoint(stringer, 'frame-top', '横梁接台面');
+  }
+
   const allParts = [...frameParts, ...parts].map((part) => ({ ...part, estimated: true as const }));
 
   const boundsMin: Vec3 = [Infinity, Infinity, Infinity];
@@ -1736,6 +1765,7 @@ export function generateMachineGeometry(
     bounds: { min: roundVec(boundsMin), max: roundVec(boundsMax) },
     tableHeight: D.tableHeight,
     stations,
+    joints: frameJoints,
     parts: allParts,
     moving,
     structureBom,
