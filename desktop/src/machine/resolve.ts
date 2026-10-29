@@ -6,8 +6,9 @@
 //   也可能把本来不重叠的件推到一起，所以必须逐轮验证
 // - 有轮数上限和「没进展就停」两条保险，收敛不了要如实返回 false，不能假装解开
 
-import { screenInterference } from './interference.ts';
+import { screenInterference, partBounds } from './interference.ts';
 import type { ScreenPair } from './interference.ts';
+import { screenClearance } from './clearance.ts';
 
 export interface ResolveMove {
   partId: string;
@@ -112,4 +113,119 @@ export function resolveConflicts(geometry: any, options: ResolveOptions = {}): R
   const converged = final.suspects === 0;
   const base = { parts, moves, before, after: final.suspects, iterations, converged };
   return converged ? base : { ...base, stopReason: `轮数用尽（${maxIterations}）` };
+}
+
+
+// ---------------------------------------------------------------------------
+// 间距合规：把「太近但没撞」的件沿间隙轴推开到阈值之上。
+//
+// 与解重叠的区别：这里不需要绕过对方边界，位移就是「阈值 − 当前间隙」，
+// 方向从对方指向被挪件；逐轮重算是因为推开一件可能会挤到旁边的件。
+// ---------------------------------------------------------------------------
+
+export interface ClearanceMove extends ResolveMove {
+  /** 挪完之后这一对的间隙（mm） */
+  gapAfter: number;
+}
+
+export interface ClearanceResolveResult {
+  parts: any[];
+  moves: ClearanceMove[];
+  before: number;
+  after: number;
+  iterations: number;
+  converged: boolean;
+  stopReason?: string;
+  thresholdMm: number;
+}
+
+export interface ClearanceResolveOptions {
+  thresholdMm: number;
+  maxIterations?: number;
+  /** 推到阈值之上多留一点，默认 1 mm；太小会被浮点判回临界 */
+  gap?: number;
+}
+
+function bboxVolume(part: any): number {
+  const bounds = partBounds(part);
+  return (bounds.max[0] - bounds.min[0]) * (bounds.max[1] - bounds.min[1]) * (bounds.max[2] - bounds.min[2]);
+}
+
+export function resolveClearance(geometry: any, options: ClearanceResolveOptions): ClearanceResolveResult {
+  const thresholdMm = options.thresholdMm;
+  const margin = options.gap ?? 1;
+  // 默认 200：推开一件会挤到旁边的件，实测四工位 26 处要 42 轮才清干净，40 轮不够
+  const maxIterations = options.maxIterations ?? 200;
+  let parts: any[] = Array.isArray(geometry?.parts) ? geometry.parts.map((part: any) => ({ ...part })) : [];
+  const before = screenClearance({ ...geometry, parts }, { thresholdMm }).count;
+  const moves: ClearanceMove[] = [];
+  let iterations = 0;
+
+  while (iterations < maxIterations) {
+    const screen = screenClearance({ ...geometry, parts }, { thresholdMm });
+    if (screen.count === 0) {
+      return { parts, moves, before, after: 0, iterations, converged: true, thresholdMm };
+    }
+    const pair = screen.pairs[0];
+    if (!pair) {
+      return { parts, moves, before, after: screen.count, iterations, converged: false,
+               stopReason: '间距初筛报了数但取不到第一对', thresholdMm };
+    }
+    const byId = new Map<string, any>(parts.map((part) => [String(part.id), part]));
+    const left = byId.get(pair.a);
+    const right = byId.get(pair.b);
+    if (!left || !right) {
+      return {
+        parts,
+        moves,
+        before,
+        after: screen.count,
+        iterations,
+        converged: false,
+        stopReason: `找不到零件 ${pair.a} / ${pair.b}`,
+        thresholdMm
+      };
+    }
+    // 挪体积小的那件：治具/传感器动比门架动便宜
+    const mover = bboxVolume(left) <= bboxVolume(right) ? left : right;
+    const other = mover === left ? right : left;
+    const axisIndex = ['x', 'y', 'z'].indexOf(pair.axis);
+    const direction = (Number((mover.center as number[])[axisIndex]) >= Number((other.center as number[])[axisIndex])) ? 1 : -1;
+    const delta = direction * (thresholdMm - pair.gapMm + margin);
+    if (!Number.isFinite(delta) || Math.abs(delta) < 1e-9) {
+      return {
+        parts,
+        moves,
+        before,
+        after: screen.count,
+        iterations,
+        converged: false,
+        stopReason: '位移算出 0，无法推进',
+        thresholdMm
+      };
+    }
+    const from = [...((mover.center as number[]) ?? [0, 0, 0])];
+    parts = applyMove(parts, String(mover.id), pair.axis, delta);
+    const afterPart = parts.find((part: any) => String(part.id) === String(mover.id)) as any;
+    const to = [...((afterPart?.center as number[]) ?? [0, 0, 0])];
+    iterations += 1;
+    const recheck = screenClearance({ ...geometry, parts }, { thresholdMm });
+    const stillThere = recheck.pairs.find(
+      (candidate) => (candidate.a === pair.a && candidate.b === pair.b) || (candidate.a === pair.b && candidate.b === pair.a)
+    );
+    moves.push({
+      partId: String(mover.id),
+      axis: pair.axis,
+      delta,
+      remainingAfter: recheck.count,
+      from,
+      to,
+      gapAfter: stillThere ? stillThere.gapMm : thresholdMm
+    });
+  }
+
+  const final = screenClearance({ ...geometry, parts }, { thresholdMm });
+  const converged = final.count === 0;
+  const base = { parts, moves, before, after: final.count, iterations, converged, thresholdMm };
+  return converged ? base : { ...base, stopReason: `轮数用尽（${maxIterations}），仍有 ${final.count} 处间距不足` };
 }

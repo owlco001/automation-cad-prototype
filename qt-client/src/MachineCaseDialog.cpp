@@ -176,7 +176,8 @@ bool MachineCaseDialog::writeResolutionCsv(const QJsonObject &document, const QS
 MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *parent,
                                      std::function<void(const QStringList &)> onHighlight,
                                      std::function<void(const QString &, int, double)> onApplyMove,
-                                     std::function<void()> onResolveAll)
+                                     std::function<void()> onResolveAll,
+                                     std::function<void()> onResolveClearance)
     : QDialog(parent) {
     setWindowTitle(QStringLiteral("整机方案（只读）"));
     resize(760, 520);
@@ -384,6 +385,13 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                     setWindowTitle(windowTitle() + QStringLiteral(" · 已导出 %1 行调整").arg(rows));
                 });
                 applyRow->addWidget(exportResolution);
+            }
+            if (onResolveClearance && !clearance.isEmpty()) {
+                auto *pushButton = new QPushButton(
+                    QStringLiteral("推开到间距 ≥ %1 mm…").arg(clearance.value(QStringLiteral("thresholdMm")).toInt()), page);
+                pushButton->setToolTip(QStringLiteral("沿间隙轴把较小的那件推开，逐轮重算"));
+                connect(pushButton, &QPushButton::clicked, page, [onResolveClearance]() { onResolveClearance(); });
+                applyRow->addWidget(pushButton);
             }
             if (onResolveAll) {
                 auto *resolveButton = new QPushButton(QStringLiteral("批量解开未声明的重叠…"), page);

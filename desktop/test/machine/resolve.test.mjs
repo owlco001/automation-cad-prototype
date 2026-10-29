@@ -93,3 +93,42 @@ test('每条调整都带挪动前后的中心坐标（工程师要照着改模�
   const expected = geometry.parts.find((part) => part.id === move.partId).center;
   assert.deepEqual(move.from, expected, 'from 必须是该件原始中心');
 });
+
+// ---- 间距合规 ----
+import { resolveClearance } from '../../src/machine/resolve.ts';
+import { screenClearance } from '../../src/machine/clearance.ts';
+
+test('间距 10 mm 阈值 20：推开后必须真的 ≥20 mm', () => {
+  const geometry = { parts: [box('a', [0, 0, 0], [100, 100, 100]), box('b', [110, 0, 0], [100, 100, 100])] };
+  const before = screenClearance(geometry, { thresholdMm: 20 });
+  assert.equal(before.count, 1);
+  assert.equal(before.pairs[0].gapMm, 10);
+
+  const result = resolveClearance(geometry, { thresholdMm: 20 });
+  assert.equal(result.converged, true);
+  assert.equal(result.after, 0);
+  assert.equal(result.moves.length, 1);
+  const after = screenClearance({ ...geometry, parts: result.parts }, { thresholdMm: 20 });
+  assert.equal(after.count, 0, '推开之后不该再有间距不足');
+  // 位移 = 阈值 − 间隙 + 1 mm 余量 = 11
+  assert.ok(Math.abs(Math.abs(result.moves[0].delta) - 11) < 1e-6, `实际 ${result.moves[0].delta}`);
+});
+
+test('间距合规只推「间隙轴」方向，不动其它坐标', () => {
+  const geometry = { parts: [box('a', [0, 0, 0], [100, 100, 100]), box('b', [0, 0, 110], [100, 100, 100])] };
+  const result = resolveClearance(geometry, { thresholdMm: 20 });
+  assert.equal(result.moves[0].axis, 'z');
+  const after = result.parts.find((part) => part.id === result.moves[0].partId);
+  const before = geometry.parts.find((part) => part.id === result.moves[0].partId);
+  assert.equal(after.center[0], before.center[0]);
+  assert.equal(after.center[1], before.center[1]);
+  assert.ok(Math.abs(after.center[2] - before.center[2]) > 0);
+});
+
+test('轮数上限用尽时如实返回 converged=false（间距版）', () => {
+  const geometry = { parts: [box('a', [0, 0, 0], [100, 100, 100]), box('b', [110, 0, 0], [100, 100, 100])] };
+  const result = resolveClearance(geometry, { thresholdMm: 20, maxIterations: 0 });
+  assert.equal(result.converged, false);
+  assert.ok(result.stopReason);
+  assert.equal(result.moves.length, 0);
+});

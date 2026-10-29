@@ -129,3 +129,24 @@ test('--clearance 取值不合法时退出码 2（不带 --with-geometry 也不�
     assert.equal(status, 2, `--clearance ${value} 应当退出 2`);
   }
 });
+
+
+test('--resolve-clearance 20 把间距推到阈值之上（不是只算建议，要真的合规）', { timeout: 180_000 }, () => {
+  const stdout = execFileSync(process.execPath,
+    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry',
+     '--resolve-clearance', '20', '--clearance', '20'],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const geometry = JSON.parse(stdout).geometry;
+  const resolution = geometry.clearanceResolution;
+  assert.equal(resolution.converged, true, `未收敛：${resolution.stopReason}`);
+  assert.ok(resolution.before > 0, '这个案例本来就有间距问题');
+  assert.equal(resolution.after, 0);
+  assert.equal(geometry.clearance.count, 0, '重算后的间距初筛必须为 0');
+  // 注意：不能断言「每条 move 的 gapAfter 都 ≥ 阈值」——单轴推开只增加一个轴的距离，
+  // 而距离是各分离轴的平方和；后续 move 还会改变这一对的距离（实测某条当时 19.6 mm，
+  // 再经过后续微调才到 20 以上）。能守住的是「整轮跑完 count=0」。
+  assert.ok(resolution.moves.length > 0);
+  for (const move of resolution.moves) {
+    assert.ok(move.gapAfter > 0.5, `${move.partId} 挪完是接触状态 ${move.gapAfter} mm`);
+  }
+});

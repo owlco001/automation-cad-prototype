@@ -444,7 +444,7 @@ bool MainWindow::exportStl(const QString &path, int *bytes, QString *error) {
 }
 
 bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *document, QString *error,
-                                        const QStringList &moves, bool resolveAll) {
+                                        const QStringList &moves, bool resolveAll, int clearanceResolveMm) {
     if (brief.trimmed().isEmpty()) {
         *error = tr("brief 不能为空");
         return false;
@@ -475,6 +475,9 @@ bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *docum
     QStringList arguments{script, QStringLiteral("--brief"), brief, QStringLiteral("--with-geometry")};
     for (const QString &move : moves) arguments << QStringLiteral("--move") << move;
     if (resolveAll) arguments << QStringLiteral("--resolve");
+    if (clearanceResolveMm > 0) {
+        arguments << QStringLiteral("--resolve-clearance") << QString::number(clearanceResolveMm);
+    }
     // 间距初筛固定 20 mm：只读诊断，给干涉页显示「太近但没撞」的零件对
     arguments << QStringLiteral("--clearance") << QStringLiteral("20");
     process.start(QStringLiteral("node"), arguments);
@@ -597,7 +600,8 @@ void MainWindow::showMachineCase(const QJsonObject &document) {
                 m_pendingMoveAxis = axis;
                 m_pendingMoveDelta = delta;
             },
-            [this]() { m_pendingResolveAll = true; });
+            [this]() { m_pendingResolveAll = true; },
+            [this]() { m_pendingResolveClearance = true; });
         dialog.exec();
         if (m_pendingResolveAll && !m_lastBrief.trimmed().isEmpty()) {
             m_pendingResolveAll = false;
@@ -627,6 +631,36 @@ void MainWindow::showMachineCase(const QJsonObject &document) {
                                          .arg(resolution.value(QStringLiteral("converged")).toBool()
                                                   ? tr("已收敛") : tr("未收敛")), 20000);
             current = resolved;
+            continue;
+        }
+        if (m_pendingResolveClearance && !m_lastBrief.trimmed().isEmpty()) {
+            m_pendingResolveClearance = false;
+            QApplication::setOverrideCursor(Qt::WaitCursor);
+            QJsonObject pushed;
+            QString pushError;
+            const bool ok = designMachineFromBrief(m_lastBrief, &pushed, &pushError, m_lastMoves, false, 20);
+            QApplication::restoreOverrideCursor();
+            if (!ok) {
+                QMessageBox::warning(this, tr("推开间距失败"), pushError);
+                return;
+            }
+            m_lastDocument = pushed;
+            int pushedShapes = 0;
+            QString pushedGeometryError;
+            renderMachineGeometry(pushed, &pushedShapes, &pushedGeometryError);
+            const QJsonObject push = pushed.value(QStringLiteral("geometry")).toObject()
+                                         .value(QStringLiteral("clearanceResolution")).toObject();
+            qInfo().noquote() << "FT_QT_PUSH_CLEARANCE before=" << push.value(QStringLiteral("before")).toInt()
+                              << "after=" << push.value(QStringLiteral("after")).toInt()
+                              << "moves=" << push.value(QStringLiteral("moves")).toArray().size()
+                              << "converged=" << push.value(QStringLiteral("converged")).toBool();
+            statusBar()->showMessage(tr("间距：%1 → %2 处（挪了 %3 次，%4）")
+                                         .arg(push.value(QStringLiteral("before")).toInt())
+                                         .arg(push.value(QStringLiteral("after")).toInt())
+                                         .arg(push.value(QStringLiteral("moves")).toArray().size())
+                                         .arg(push.value(QStringLiteral("converged")).toBool()
+                                                  ? tr("已收敛") : tr("未收敛")), 20000);
+            current = pushed;
             continue;
         }
         if (m_pendingMovePartId.isEmpty() || m_lastBrief.trimmed().isEmpty()) return;

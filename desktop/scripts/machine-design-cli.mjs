@@ -7,7 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import { buildMachineCase } from '../src/machine/case.ts';
 import { generateMachineGeometry } from '../src/machine/geometry.ts';
 import { screenInterference } from '../src/machine/interference.ts';
-import { resolveConflicts } from '../src/machine/resolve.ts';
+import { resolveConflicts, resolveClearance } from '../src/machine/resolve.ts';
 import { screenClearance } from '../src/machine/clearance.ts';
 
 const args = process.argv.slice(2);
@@ -93,6 +93,25 @@ if (withGeometry) {
       iterations: resolution.iterations,
       converged: resolution.converged,
       ...(resolution.stopReason ? { stopReason: resolution.stopReason } : {})
+    };
+  }
+  const clearanceResolveIndex = args.indexOf('--resolve-clearance');
+  if (clearanceResolveIndex >= 0) {
+    const threshold = Number(args[clearanceResolveIndex + 1]);
+    if (!Number.isFinite(threshold) || threshold <= 0) {
+      process.stderr.write('--resolve-clearance 需要一个正数（mm）\n');
+      process.exit(2);
+    }
+    const resolved = resolveClearance(caseData.geometry, { thresholdMm: threshold });
+    caseData.geometry.parts = resolved.parts;
+    caseData.geometry.clearanceResolution = {
+      thresholdMm: resolved.thresholdMm,
+      before: resolved.before,
+      after: resolved.after,
+      moves: resolved.moves,
+      iterations: resolved.iterations,
+      converged: resolved.converged,
+      ...(resolved.stopReason ? { stopReason: resolved.stopReason } : {})
     };
   }
   if (clearanceThreshold !== null) {

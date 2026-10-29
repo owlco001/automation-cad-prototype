@@ -385,6 +385,30 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 推开间距自检：--push-selftest "brief"
+    if (args.contains(QStringLiteral("--push-selftest"))) {
+        const int index = args.indexOf(QStringLiteral("--push-selftest"));
+        if (index + 1 >= args.size()) {
+            qCritical().noquote() << "FT_QT_PUSH_FAIL 用法：--push-selftest \"brief\"";
+            return 2;
+        }
+        MainWindow window;
+        QJsonObject pushed;
+        QString error;
+        if (!window.designMachineFromBrief(args.at(index + 1), &pushed, &error, {}, false, 20)) {
+            qCritical().noquote() << "FT_QT_PUSH_FAIL" << error;
+            return 1;
+        }
+        const QJsonObject push = pushed.value(QStringLiteral("geometry")).toObject()
+                                     .value(QStringLiteral("clearanceResolution")).toObject();
+        qInfo().noquote() << QStringLiteral("FT_QT_PUSH_OK before=%1 after=%2 moves=%3 converged=%4")
+                                 .arg(push.value(QStringLiteral("before")).toInt())
+                                 .arg(push.value(QStringLiteral("after")).toInt())
+                                 .arg(push.value(QStringLiteral("moves")).toArray().size())
+                                 .arg(push.value(QStringLiteral("converged")).toBool() ? 1 : 0);
+        return 0;
+    }
+
     // 间距初筛自检：--clearance-selftest <case.json>
     {
         const int index = args.indexOf(QStringLiteral("--clearance-selftest"));
