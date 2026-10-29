@@ -85,7 +85,8 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           export QT_QPA_PLATFORM=offscreen
           ./build-qt/automationcad-qt --qt-smoke docs/desktop/eval/layout-case.json 2>&1 | tee /tmp/qt-smoke.log
-          grep -q "QT_SMOKE_OK checks=2" /tmp/qt-smoke.log
+          # qInfo 用 << 拼接会在 = 两侧插空格，所以按宽松匹配断言
+          grep -qE "QT_SMOKE_OK[[:space:]]+checks=[[:space:]]*2" /tmp/qt-smoke.log
       - name: Qt 客户端 ↔ 契约服务自检
         timeout-minutes: 5
         run: |
