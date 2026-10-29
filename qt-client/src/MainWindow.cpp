@@ -173,6 +173,15 @@ MainWindow::MainWindow(QWidget *parent)
     // 构件库（停靠面板）：条目可拖到 3D 视口；数据来自 desktop --catalog
 #ifdef AUTOMATIONCAD_HAVE_OCCT
     if (m_occtViewport) {
+        connect(m_occtViewport, &OcctViewport::partDragFinished, this, [this](const QString &partId, double x, double y) {
+            int count = 0;
+            QString error;
+            if (!movePartTo(partId, x, y, &count, &error)) {
+                statusBar()->showMessage(tr("拖动未提交：%1").arg(error), 12000);
+                return;
+            }
+            statusBar()->showMessage(tr("%1 已拖到 (%2, %3)").arg(partId).arg(x).arg(y), 15000);
+        });
         connect(m_occtViewport, &OcctViewport::dragPreview, this, [this](const QString &type, double x, double y) {
             for (const QJsonValue &entry : m_catalogCache) {
                 const QJsonObject item = entry.toObject();
@@ -1387,6 +1396,47 @@ bool MainWindow::loadCatalog(QJsonArray *catalog, QString *error) {
         return false;
     }
     *catalog = parsed.object().value(QStringLiteral("catalog")).toArray();
+    return true;
+}
+
+bool MainWindow::movePartTo(const QString &partId, double x, double y, int *partCount, QString *error) {
+    if (m_lastBrief.trimmed().isEmpty()) {
+        *error = tr("还没有整机方案");
+        return false;
+    }
+    // 当前位置从方案里读（不能拿鼠标按下时的坐标当基准）
+    QJsonArray parts = m_lastDocument.value(QStringLiteral("geometry")).toObject()
+                           .value(QStringLiteral("parts")).toArray();
+    QJsonArray center;
+    for (const QJsonValue &entry : parts) {
+        const QJsonObject part = entry.toObject();
+        if (part.value(QStringLiteral("id")).toString() == partId) {
+            center = part.value(QStringLiteral("center")).toArray();
+            break;
+        }
+    }
+    if (center.size() != 3) {
+        *error = tr("方案里找不到零件 %1").arg(partId);
+        return false;
+    }
+    const double dx = x - center.at(0).toDouble();
+    const double dy = y - center.at(1).toDouble();
+    if (std::abs(dx) < 0.5 && std::abs(dy) < 0.5) {
+        *error = tr("位移太小（0 mm），没有提交");
+        return false;
+    }
+    QStringList moves = m_lastMoves;
+    moves << QStringLiteral("%1:%2,%3,0").arg(partId).arg(dx, 0, 'f', 1).arg(dy, 0, 'f', 1);
+    QJsonObject document;
+    if (!designMachineFromBrief(m_lastBrief, &document, error, moves)) return false;
+    m_lastMoves = moves;
+    m_lastDocument = document;
+    *partCount = document.value(QStringLiteral("geometry")).toObject()
+                     .value(QStringLiteral("parts")).toArray().size();
+    int shapes = 0;
+    QString renderError;
+    renderMachineGeometry(document, &shapes, &renderError);
+    qInfo().noquote() << "FT_QT_PART_MOVED" << partId << "dx=" << dx << "dy=" << dy;
     return true;
 }
 

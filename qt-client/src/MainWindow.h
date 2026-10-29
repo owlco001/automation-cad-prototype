@@ -81,6 +81,8 @@ public:
     bool previewVisibleForTest() const;
     /// 撤销最后一次插入：返回撤销后零件数，没有可撤销的返回 false
     bool undoLastInsert(int *partCount, QString *error);
+    /// 把已有零件拖到地面坐标 (x,y)：算出相对位移后走管线 --move，几何由 desktop 重算
+    bool movePartTo(const QString &partId, double x, double y, int *partCount, QString *error);
     int insertHistoryDepth() const { return m_insertHistory.size(); }
     bool exportStl(const QString &path, int *bytes, QString *error);
     /// 剖切自检用：抓剖切前后的非背景像素数（真看图，不看标志位）

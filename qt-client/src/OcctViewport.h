@@ -79,6 +79,9 @@ public:
 signals:
     /// 构件库拖进来的构件：已换算成地面落点（mm）
     void partDropped(const QString &type, double x, double y);
+    /// 按住 Ctrl 拖动已有零件：落点（地面坐标，已吸附）
+    void partDragMove(const QString &partId, double x, double y);
+    void partDragFinished(const QString &partId, double x, double y);
     /// 拖动中：已吸附的落点，主窗口据此画预览盒（尺寸由构件库给，Qt 不自造尺寸）
     void dragPreview(const QString &type, double x, double y);
     void loaded(int triangles);
@@ -107,6 +110,8 @@ private:
     Handle(AIS_Shape) m_previewHandle;
 #endif
     bool m_previewActive = false;
+    bool m_partDragActive = false;
+    QString m_dragPartId;
     void initializeView();
     void displayShape(const TopoDS_Shape &shape);
 

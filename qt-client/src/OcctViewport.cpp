@@ -650,11 +650,29 @@ void OcctViewport::setStandardView(int which) {
 
 void OcctViewport::mousePressEvent(QMouseEvent *event) {
     m_lastPos = event->pos();
-    if (event->button() == Qt::LeftButton && m_viewReady) m_view->StartRotation(event->pos().x(), event->pos().y());
+    if (event->button() != Qt::LeftButton || !m_viewReady) return;
+    // Ctrl + 左键 = 拖零件；普通左键 = 转相机（不抢原来的操作）
+    if (event->modifiers() & Qt::ControlModifier) {
+        const QString picked = pickPartAt(event->pos().x(), event->pos().y());
+        if (!picked.isEmpty()) {
+            m_partDragActive = true;
+            m_dragPartId = picked;
+            qInfo().noquote() << "FT_QT_PART_DRAG_START" << picked;
+            return;
+        }
+    }
+    m_view->StartRotation(event->pos().x(), event->pos().y());
 }
 
 void OcctViewport::mouseMoveEvent(QMouseEvent *event) {
     if (!(event->buttons() & Qt::LeftButton) || !m_viewReady) return;
+    if (m_partDragActive) {
+        double wx = 0, wy = 0;
+        if (screenToGround(event->pos().x(), event->pos().y(), &wx, &wy)) {
+            emit partDragMove(m_dragPartId, std::round(wx / 10.0) * 10.0, std::round(wy / 10.0) * 10.0);
+        }
+        return;
+    }
     m_view->Rotation(event->pos().x(), event->pos().y());
     m_view->Redraw();
     m_lastPos = event->pos();
@@ -662,6 +680,16 @@ void OcctViewport::mouseMoveEvent(QMouseEvent *event) {
 
 void OcctViewport::mouseReleaseEvent(QMouseEvent *event) {
     if (!m_viewReady) return;
+    if (m_partDragActive) {
+        m_partDragActive = false;
+        double wx = 0, wy = 0;
+        if (screenToGround(event->pos().x(), event->pos().y(), &wx, &wy)) {
+            emit partDragFinished(m_dragPartId, std::round(wx / 10.0) * 10.0, std::round(wy / 10.0) * 10.0);
+        }
+        qInfo().noquote() << "FT_QT_PART_DRAG_END" << m_dragPartId;
+        m_dragPartId.clear();
+        return;
+    }
     const QPoint delta = event->pos() - m_lastPos;
     m_view->Redraw();
     if (event->button() != Qt::LeftButton || delta.manhattanLength() > 4 || !m_hasGeometry) return;

@@ -319,6 +319,33 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 拖动已有零件自检：--move-part-selftest "brief" <partId> <x> <y>
+    {
+        const int index = args.indexOf(QStringLiteral("--move-part-selftest"));
+        if (index >= 0 && index + 4 < args.size()) {
+            MainWindow window;
+            window.resize(1200, 800);
+            window.show();
+            QJsonObject document;
+            QString error;
+            int shapes = 0;
+            if (!window.designMachineFromBrief(args.at(index + 1), &document, &error)
+                || !window.renderMachineGeometry(document, &shapes, &error)) {
+                qCritical().noquote() << "FT_QT_MOVE_PART_FAIL" << error;
+                return 1;
+            }
+            int count = 0;
+            if (!window.movePartTo(args.at(index + 2), args.at(index + 3).toDouble(),
+                                   args.at(index + 4).toDouble(), &count, &error)) {
+                qCritical().noquote() << "FT_QT_MOVE_PART_FAIL" << error;
+                return 1;
+            }
+            qInfo().noquote() << QStringLiteral("FT_QT_MOVE_PART_OK part=%1 to=%2,%3 parts=%4")
+                                     .arg(args.at(index + 2)).arg(args.at(index + 3)).arg(args.at(index + 4)).arg(count);
+            return 0;
+        }
+    }
+
     // 撤销插入自检：--undo-insert-selftest "brief" <type>
     {
         const int index = args.indexOf(QStringLiteral("--undo-insert-selftest"));
