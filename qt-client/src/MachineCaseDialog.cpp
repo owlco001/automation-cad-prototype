@@ -177,7 +177,8 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                                      std::function<void(const QStringList &)> onHighlight,
                                      std::function<void(const QString &, int, double)> onApplyMove,
                                      std::function<void()> onResolveAll,
-                                     std::function<void()> onResolveClearance)
+                                     std::function<void()> onResolveClearance,
+                                     std::function<void()> onLayoutCompliance)
     : QDialog(parent) {
     setWindowTitle(QStringLiteral("整机方案（只读）"));
     resize(760, 520);
@@ -385,6 +386,12 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                     setWindowTitle(windowTitle() + QStringLiteral(" · 已导出 %1 行调整").arg(rows));
                 });
                 applyRow->addWidget(exportResolution);
+            }
+            if (onLayoutCompliance) {
+                auto *layoutButton = new QPushButton(QStringLiteral("一键排布合规（解重叠 → 推间距 → 复查）…"), page);
+                layoutButton->setToolTip(QStringLiteral("交替跑两段直到「未声明重叠 0 且间距不足 0」，收敛不了会说明原因"));
+                connect(layoutButton, &QPushButton::clicked, page, [onLayoutCompliance]() { onLayoutCompliance(); });
+                applyRow->addWidget(layoutButton);
             }
             if (onResolveClearance && !clearance.isEmpty()) {
                 auto *pushButton = new QPushButton(

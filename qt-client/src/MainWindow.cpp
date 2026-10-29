@@ -444,7 +444,8 @@ bool MainWindow::exportStl(const QString &path, int *bytes, QString *error) {
 }
 
 bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *document, QString *error,
-                                        const QStringList &moves, bool resolveAll, int clearanceResolveMm) {
+                                        const QStringList &moves, bool resolveAll, int clearanceResolveMm,
+                                        bool layoutCompliance) {
     if (brief.trimmed().isEmpty()) {
         *error = tr("brief 不能为空");
         return false;
@@ -477,6 +478,9 @@ bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *docum
     if (resolveAll) arguments << QStringLiteral("--resolve");
     if (clearanceResolveMm > 0) {
         arguments << QStringLiteral("--resolve-clearance") << QString::number(clearanceResolveMm);
+    }
+    if (layoutCompliance) {
+        arguments << QStringLiteral("--layout-compliance") << QStringLiteral("20");
     }
     // 间距初筛固定 20 mm：只读诊断，给干涉页显示「太近但没撞」的零件对
     arguments << QStringLiteral("--clearance") << QStringLiteral("20");
@@ -601,7 +605,8 @@ void MainWindow::showMachineCase(const QJsonObject &document) {
                 m_pendingMoveDelta = delta;
             },
             [this]() { m_pendingResolveAll = true; },
-            [this]() { m_pendingResolveClearance = true; });
+            [this]() { m_pendingResolveClearance = true; },
+            [this]() { m_pendingLayoutCompliance = true; });
         dialog.exec();
         if (m_pendingResolveAll && !m_lastBrief.trimmed().isEmpty()) {
             m_pendingResolveAll = false;
@@ -631,6 +636,39 @@ void MainWindow::showMachineCase(const QJsonObject &document) {
                                          .arg(resolution.value(QStringLiteral("converged")).toBool()
                                                   ? tr("已收敛") : tr("未收敛")), 20000);
             current = resolved;
+            continue;
+        }
+        if (m_pendingLayoutCompliance && !m_lastBrief.trimmed().isEmpty()) {
+            m_pendingLayoutCompliance = false;
+            QApplication::setOverrideCursor(Qt::WaitCursor);
+            QJsonObject compliant;
+            QString layoutError;
+            const bool ok = designMachineFromBrief(m_lastBrief, &compliant, &layoutError, m_lastMoves, false, 0, true);
+            QApplication::restoreOverrideCursor();
+            if (!ok) {
+                QMessageBox::warning(this, tr("排布合规失败"), layoutError);
+                return;
+            }
+            m_lastDocument = compliant;
+            int layoutShapes = 0;
+            QString layoutGeometryError;
+            renderMachineGeometry(compliant, &layoutShapes, &layoutGeometryError);
+            const QJsonObject layout = compliant.value(QStringLiteral("geometry")).toObject()
+                                           .value(QStringLiteral("layoutCompliance")).toObject();
+            const QJsonArray layoutRounds = layout.value(QStringLiteral("rounds")).toArray();
+            qInfo().noquote() << "FT_QT_LAYOUT_COMPLIANCE rounds=" << layoutRounds.size()
+                              << "moves=" << layout.value(QStringLiteral("moves")).toArray().size()
+                              << "suspects=" << layout.value(QStringLiteral("suspects")).toInt()
+                              << "clearance=" << layout.value(QStringLiteral("clearance")).toInt()
+                              << "converged=" << layout.value(QStringLiteral("converged")).toBool();
+            statusBar()->showMessage(tr("排布合规：%1 轮 %2 次位移 · 剩余重叠 %3 / 间距不足 %4 · %5")
+                                         .arg(layoutRounds.size())
+                                         .arg(layout.value(QStringLiteral("moves")).toArray().size())
+                                         .arg(layout.value(QStringLiteral("suspects")).toInt())
+                                         .arg(layout.value(QStringLiteral("clearance")).toInt())
+                                         .arg(layout.value(QStringLiteral("converged")).toBool()
+                                                  ? tr("已合规") : tr("未收敛")), 20000);
+            current = compliant;
             continue;
         }
         if (m_pendingResolveClearance && !m_lastBrief.trimmed().isEmpty()) {

@@ -385,6 +385,31 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 排布合规自检：--layout-selftest "brief"
+    if (args.contains(QStringLiteral("--layout-selftest"))) {
+        const int index = args.indexOf(QStringLiteral("--layout-selftest"));
+        if (index + 1 >= args.size()) {
+            qCritical().noquote() << "FT_QT_LAYOUT_FAIL 用法：--layout-selftest \"brief\"";
+            return 2;
+        }
+        MainWindow window;
+        QJsonObject compliant;
+        QString error;
+        if (!window.designMachineFromBrief(args.at(index + 1), &compliant, &error, {}, false, 0, true)) {
+            qCritical().noquote() << "FT_QT_LAYOUT_FAIL" << error;
+            return 1;
+        }
+        const QJsonObject layout = compliant.value(QStringLiteral("geometry")).toObject()
+                                       .value(QStringLiteral("layoutCompliance")).toObject();
+        qInfo().noquote() << QStringLiteral("FT_QT_LAYOUT_OK rounds=%1 moves=%2 suspects=%3 clearance=%4 converged=%5")
+                                 .arg(layout.value(QStringLiteral("rounds")).toArray().size())
+                                 .arg(layout.value(QStringLiteral("moves")).toArray().size())
+                                 .arg(layout.value(QStringLiteral("suspects")).toInt())
+                                 .arg(layout.value(QStringLiteral("clearance")).toInt())
+                                 .arg(layout.value(QStringLiteral("converged")).toBool() ? 1 : 0);
+        return 0;
+    }
+
     // 推开间距自检：--push-selftest "brief"
     if (args.contains(QStringLiteral("--push-selftest"))) {
         const int index = args.indexOf(QStringLiteral("--push-selftest"));

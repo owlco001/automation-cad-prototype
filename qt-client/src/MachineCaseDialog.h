@@ -20,7 +20,8 @@ public:
                                std::function<void(const QStringList &)> onHighlight = {},
                                std::function<void(const QString &, int, double)> onApplyMove = {},
                                std::function<void()> onResolveAll = {},
-                               std::function<void()> onResolveClearance = {});
+                               std::function<void()> onResolveClearance = {},
+                               std::function<void()> onLayoutCompliance = {});
 
     /// 读文件并校验 kind/schemaVersion；失败时 error 给出可操作原因
     static bool loadFile(const QString &path, QJsonObject *document, QString *error);

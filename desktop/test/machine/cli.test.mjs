@@ -150,3 +150,24 @@ test('--resolve-clearance 20 把间距推到阈值之上（不是只算建议，
     assert.ok(move.gapAfter > 0.5, `${move.partId} 挪完是接触状态 ${move.gapAfter} mm`);
   }
 });
+
+
+test('--layout-compliance 20 交替跑完必须两类都清零（不是只清一类）', { timeout: 240_000 }, () => {
+  const stdout = execFileSync(process.execPath,
+    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry',
+     '--layout-compliance', '20', '--clearance', '20'],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const geometry = JSON.parse(stdout).geometry;
+  const layout = geometry.layoutCompliance;
+  assert.equal(layout.converged, true, `未收敛：${layout.stopReason}`);
+  assert.equal(layout.suspects, 0);
+  assert.equal(layout.clearance, 0);
+  assert.equal(geometry.interference.suspects, 0, '重算后的干涉初筛也必须为 0');
+  assert.equal(geometry.clearance.count, 0, '重算后的间距初筛也必须为 0');
+  assert.ok(layout.rounds.length >= 1);
+  // 轮次记录必须能看出「推间距会撞出新重叠」这件事发生过
+  const last = layout.rounds[layout.rounds.length - 1];
+  assert.equal(last.suspectsAfter, 0);
+  assert.equal(last.clearanceAfter, 0);
+  assert.ok(layout.moves.length > 0);
+});

@@ -181,6 +181,16 @@ CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI �
 最紧一对是 `frame-top × conveyor-motor` 沿 Z 5 mm；Qt 干涉页顶部一行「间距 < 20 mm：26 处，最紧 5.0 mm」。
 六工位阈值 30 时 29 处，主要是 `转台底座 × 治具` 12 mm 这类装配配合间隙。
 
+**一键排布合规**：`resolveLayout(geometry,{clearanceMm})` 把两段交替跑——解重叠 → 推间距 → 复查，
+不干净就再来一轮。**必须交替**：推间距会把件推到旁边撞出新的重叠，解重叠也可能把件推进别人的安全距离。
+收敛判据只有一条：未声明重叠 = 0 **且** 间距不足 = 0；达不到就返回 `converged:false` + 原因。
+
+实测四工位（阈值 20）：`FT_QT_LAYOUT_OK rounds=3 moves=58 suspects=0 clearance=0 converged=1`，
+逐轮记录把这个来回写得很清楚：
+- 第 1 轮：重叠 0 → 4（推间距推出 4 处新重叠）、间距 26 → 0
+- 第 2 轮：重叠 4 → 4（解完又被推间距撞回去）、间距 0 → 0
+- 第 3 轮：重叠 4 → 0、间距 0 → 0 → 合规
+
 **一键把间距推到阈值之上**：`resolveClearance(geometry,{thresholdMm})` 逐轮把最紧的那一对
 沿间隙轴推开（推较小的那件），位移 = 阈值 − 当前间隙 + 1 mm 余量，然后整机重算。
 实测四工位 `FT_QT_PUSH_OK before=26 after=0 moves=42 converged=1`——26 处清干净用了 **42 次微调**，
