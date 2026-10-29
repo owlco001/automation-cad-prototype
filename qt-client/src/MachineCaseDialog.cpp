@@ -249,7 +249,8 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                                      int uiClearanceMm,
                                      std::function<void()> onMeasureMaxClearance,
                                      std::function<void(int)> onRecomputeCompliance,
-                                     std::function<void(const QString &, double, const QString &)> onShiftScope)
+                                     std::function<void(const QString &, double, const QString &)> onShiftScope,
+                                 std::function<void(const QStringList &)> onSkipMisreports)
     : QDialog(parent) {
     setWindowTitle(QStringLiteral("整机方案（只读）"));
     resize(760, 520);
@@ -755,6 +756,23 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
             auto *recheckLabel = new QLabel(recheckText, page);
             recheckLabel->setWordWrap(true);
             pageLayout->addWidget(recheckLabel);
+
+            // 「误报」不只是告知：把复核结论直接变成忽略名单，省掉手抄 jointKey
+            if (onSkipMisreports && recheck.value(QStringLiteral("misreported")).toInt() > 0) {
+                QStringList keys;
+                for (const QJsonValue &entry : recheck.value(QStringLiteral("pairs")).toArray()) {
+                    const QJsonObject pair = entry.toObject();
+                    if (pair.value(QStringLiteral("verdict")).toString() != QStringLiteral("misreported")) continue;
+                    const QString left = pair.value(QStringLiteral("a")).toString();
+                    const QString right = pair.value(QStringLiteral("b")).toString();
+                    keys << (left < right ? left + QLatin1Char('|') + right : right + QLatin1Char('|') + left);
+                }
+                auto *skipButton = new QPushButton(
+                    QStringLiteral("按复核结论重排（跳过 %1 处误报）…").arg(keys.size()), page);
+                skipButton->setToolTip(QStringLiteral("只跳过真实布尔确认过不相交的对；其余疑似照旧算重叠"));
+                connect(skipButton, &QPushButton::clicked, page, [onSkipMisreports, keys]() { onSkipMisreports(keys); });
+                pageLayout->addWidget(skipButton);
+            }
         }
 
         m_tabs->addTab(page, QStringLiteral("干涉初筛（%1）").arg(pairs.size()));

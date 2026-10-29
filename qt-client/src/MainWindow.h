@@ -71,7 +71,8 @@ public:
     bool designMachineFromBrief(const QString &brief, QJsonObject *document, QString *error,
                                 const QStringList &moves = {}, bool resolveAll = false,
                                 int clearanceResolveMm = 0, bool layoutCompliance = false,
-                                int clearanceMm = -1, bool measureMaxClearance = false);
+                                int clearanceMm = -1, bool measureMaxClearance = false,
+                                const QStringList &ignorePairs = {});
     /// 试摆位：在已生成的方案上挪一个零件，重跑管线并重算干涉
     void tunePlacementDialog();
     /// 方向键微调选中零件（3D 里点选后用）
@@ -178,6 +179,8 @@ private:        // 最近一次生成的整机方案（试摆位/导出用）
     int m_clearanceMm = 20;
     int m_pendingClearanceMm = 0;
     bool m_pendingMeasureMax = false;
+    bool m_pendingSkipMisreports = false;
+    QStringList m_pendingIgnoreKeys;
     bool m_pendingRecomputeCompliance = false;
     int m_pendingRecomputeMm = 20;
     bool m_pendingShiftScope = false;

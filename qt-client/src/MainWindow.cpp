@@ -454,7 +454,7 @@ bool MainWindow::exportStl(const QString &path, int *bytes, QString *error) {
 bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *document, QString *error,
                                         const QStringList &moves, bool resolveAll, int clearanceResolveMm,
                                         bool layoutCompliance, int clearanceMm,
-                                        bool measureMaxClearance) {
+                                        bool measureMaxClearance, const QStringList &ignorePairs) {
     if (brief.trimmed().isEmpty()) {
         *error = tr("brief 不能为空");
         return false;
@@ -497,6 +497,10 @@ bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *docum
         arguments << QStringLiteral("--resolve-clearance") << QString::number(clearanceResolveMm);
     }
     if (measureMaxClearance) arguments << QStringLiteral("--max-clearance");
+    // 复核确认的误报：交给求解器跳过，别为包围盒的假重叠白推距离
+    if (!ignorePairs.isEmpty()) {
+        arguments << QStringLiteral("--ignore-pairs") << ignorePairs.join(QStringLiteral(","));
+    }
     if (layoutCompliance) {
         // 与「间距初筛」用同一个阈值：用户在干涉页里改过 20，排布合规就该按那个值算
         arguments << QStringLiteral("--layout-compliance")
@@ -644,6 +648,10 @@ void MainWindow::showMachineCase(const QJsonObject &document) {
                 m_pendingShiftScopeName = scope;
                 m_pendingShiftMm = mm;
                 m_pendingShiftAxis = axis.isEmpty() ? QStringLiteral("x") : axis;
+            },
+            [this](const QStringList &keys) {
+                m_pendingSkipMisreports = true;
+                m_pendingIgnoreKeys = keys;
             });
         dialog.exec();
         if (m_pendingResolveAll && !m_lastBrief.trimmed().isEmpty()) {
@@ -804,6 +812,39 @@ void MainWindow::showMachineCase(const QJsonObject &document) {
                                          .arg(nextThreshold)
                                          .arg(clearance.value(QStringLiteral("count")).toInt()), 20000);
             current = rescreened;
+            continue;
+        }
+        if (m_pendingSkipMisreports && !m_lastBrief.trimmed().isEmpty()) {
+            m_pendingSkipMisreports = false;
+            const QStringList keys = m_pendingIgnoreKeys;
+            m_pendingIgnoreKeys.clear();
+            QApplication::setOverrideCursor(Qt::WaitCursor);
+            QJsonObject skipped;
+            QString skipError;
+            // 跳过的对是「真实布尔确认过不相交」的，不是凭包围盒猜的
+            const bool ok = designMachineFromBrief(m_lastBrief, &skipped, &skipError, m_lastMoves, false, 0, true, -1, false, keys);
+            QApplication::restoreOverrideCursor();
+            if (!ok) {
+                QMessageBox::warning(this, tr("按复核结论重排失败"), skipError);
+                return;
+            }
+            m_lastDocument = skipped;
+            int skippedShapes = 0;
+            QString skippedGeometryError;
+            renderMachineGeometry(skipped, &skippedShapes, &skippedGeometryError);
+            const QJsonObject layout = skipped.value(QStringLiteral("geometry")).toObject()
+                                           .value(QStringLiteral("layoutCompliance")).toObject();
+            qInfo().noquote() << "FT_QT_SKIP_MISREPORTS ignored=" << keys.size()
+                              << "suspects=" << layout.value(QStringLiteral("suspects")).toInt()
+                              << "clearance=" << layout.value(QStringLiteral("clearance")).toInt()
+                              << "converged=" << layout.value(QStringLiteral("converged")).toBool();
+            statusBar()->showMessage(tr("按复核结论重排：跳过 %1 处 AABB 误报 · 剩余重叠 %2 / 间距不足 %3 · %4")
+                                         .arg(keys.size())
+                                         .arg(layout.value(QStringLiteral("suspects")).toInt())
+                                         .arg(layout.value(QStringLiteral("clearance")).toInt())
+                                         .arg(layout.value(QStringLiteral("converged")).toBool()
+                                                  ? tr("已合规") : tr("未收敛")), 20000);
+            current = skipped;
             continue;
         }
         if (m_pendingLayoutCompliance && !m_lastBrief.trimmed().isEmpty()) {

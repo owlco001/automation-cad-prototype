@@ -3,7 +3,9 @@
 // 否则主窗口状态栏会显示“服务未连接”，这是预期行为，不是崩溃。
 #include "MainWindow.h"
 #include "MachineCaseDialog.h"
+#include <functional>
 #include <QApplication>
+#include <QPushButton>
 #include <QSurfaceFormat>
 #include <QDebug>
 #include <QDir>
@@ -921,6 +923,65 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
             qInfo().noquote() << QStringLiteral("FT_QT_LAYOUTCSV_OK rows=%1").arg(rows);
+            return 0;
+        }
+    }
+
+    // 复核结论 → 忽略名单自检：--recheck-skip-selftest <case.json>
+    // 用途：验证「按复核结论重排」按钮只在有误报时出现，且拿到的 key 与 booleanRecheck 里的 misreported 对一致
+    {
+        const int index = args.indexOf(QStringLiteral("--recheck-skip-selftest"));
+        if (index >= 0 && index + 1 < args.size()) {
+            QJsonObject document;
+            QString error;
+            if (!MachineCaseDialog::loadFile(args.at(index + 1), &document, &error)) {
+                qCritical().noquote() << "FT_QT_RECHECK_SKIP_FAIL" << error;
+                return 1;
+            }
+            QStringList captured;
+            MachineCaseDialog dialog(
+                document, nullptr,
+                std::function<void(const QStringList &)>{},
+                std::function<void(const QString &, int, double)>{},
+                std::function<void()>{}, std::function<void()>{}, std::function<void()>{},
+                std::function<void(int)>{}, -1,
+                std::function<void()>{}, std::function<void(int)>{},
+                std::function<void(const QString &, double, const QString &)>{},
+                [&captured](const QStringList &keys) { captured = keys; });
+            QList<QPushButton *> buttons = dialog.findChildren<QPushButton *>();
+            QPushButton *skip = nullptr;
+            for (QPushButton *button : buttons) {
+                if (button->text().startsWith(QStringLiteral("按复核结论重排"))) { skip = button; break; }
+            }
+            const QJsonObject recheck = document.value(QStringLiteral("geometry")).toObject()
+                                            .value(QStringLiteral("booleanRecheck")).toObject();
+            const int misreported = recheck.value(QStringLiteral("misreported")).toInt();
+            if (misreported == 0) {
+                if (skip) {
+                    qCritical().noquote() << "FT_QT_RECHECK_SKIP_FAIL 没有误报却出现按钮";
+                    return 1;
+                }
+                qInfo().noquote() << "FT_QT_RECHECK_SKIP_OK misreported=0 buttons=0";
+                return 0;
+            }
+            if (!skip) {
+                qCritical().noquote() << "FT_QT_RECHECK_SKIP_FAIL misreported=" << misreported << "但没有按钮";
+                return 1;
+            }
+            skip->click();
+            if (captured.size() != misreported) {
+                qCritical().noquote() << "FT_QT_RECHECK_SKIP_FAIL 按钮给出" << captured.size()
+                                      << "个 key，误报有" << misreported << "处";
+                return 1;
+            }
+            for (const QString &key : captured) {
+                if (!key.contains(QLatin1Char('|'))) {
+                    qCritical().noquote() << "FT_QT_RECHECK_SKIP_FAIL key 不是 jointKey 形式：" << key;
+                    return 1;
+                }
+            }
+            qInfo().noquote() << QStringLiteral("FT_QT_RECHECK_SKIP_OK misreported=%1 buttons=1 keys=%2")
+                                     .arg(misreported).arg(captured.join(QStringLiteral(",")));
             return 0;
         }
     }
