@@ -36,6 +36,8 @@ export interface ResolveResult {
 
 export interface ResolveOptions {
   maxIterations?: number;
+  /** 真实布尔已确认的 AABB 误报对（`jointKey`），求解时跳过 */
+  ignorePairs?: string[];
 }
 
 const AXIS_INDEX: Record<'x' | 'y' | 'z', number> = { x: 0, y: 1, z: 2 };
@@ -58,14 +60,15 @@ function cheapestSuspect(pairs: ScreenPair[]): ScreenPair | undefined {
 
 export function resolveConflicts(geometry: any, options: ResolveOptions = {}): ResolveResult {
   const maxIterations = options.maxIterations ?? 40;
+  const ignore = options.ignorePairs ?? [];
   const joints = Array.isArray(geometry?.joints) ? geometry.joints : [];
   let parts = Array.isArray(geometry?.parts) ? geometry.parts.map((part: any) => ({ ...part })) : [];
-  const before = screenInterference({ ...geometry, parts }).suspects;
+  const before = screenInterference({ ...geometry, parts }, { ignorePairs: ignore }).suspects;
   const moves: ResolveMove[] = [];
   let iterations = 0;
 
   while (iterations < maxIterations) {
-    const result = screenInterference({ ...geometry, parts, joints });
+    const result = screenInterference({ ...geometry, parts, joints }, { ignorePairs: ignore });
     if (result.suspects === 0) {
       return { parts, moves, before, after: 0, iterations, converged: true };
     }

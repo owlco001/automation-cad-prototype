@@ -64,10 +64,13 @@ export interface LayoutOptions {
   clearanceMm: number;
   /** 交替轮数上限，默认 4 */
   maxRounds?: number;
+  /** 真实布尔已确认的 AABB 误报对（`jointKey`）：不算违规、也不推它 */
+  ignorePairs?: string[];
 }
 
 export function resolveLayout(geometry: any, options: LayoutOptions): LayoutResult {
   const maxRounds = options.maxRounds ?? 4;
+  const ignorePairs = options.ignorePairs ?? [];
   let parts: any[] = Array.isArray(geometry?.parts) ? geometry.parts.map((part: any) => ({ ...part })) : [];
   const rounds: LayoutRound[] = [];
   const moves: LayoutResult['moves'] = [];
@@ -76,10 +79,10 @@ export function resolveLayout(geometry: any, options: LayoutOptions): LayoutResu
 
   for (let round = 1; round <= maxRounds; round += 1) {
     const working = { ...geometry, parts };
-    const suspectsBefore = screenInterference(working).suspects;
+    const suspectsBefore = screenInterference(working, { ignorePairs }).suspects;
     const clearanceBefore = screenClearance(working, { thresholdMm: options.clearanceMm }).count;
 
-    const overlaps = resolveConflicts(working);
+    const overlaps = resolveConflicts(working, { ignorePairs });
     parts = overlaps.parts;
     for (const move of overlaps.moves) {
       moves.push({ partId: move.partId, axis: move.axis, delta: move.delta, from: move.from, to: move.to, kind: 'overlap' });
@@ -93,7 +96,7 @@ export function resolveLayout(geometry: any, options: LayoutOptions): LayoutResu
     }
 
     const finalWorking = { ...geometry, parts };
-    const suspectsAfter = screenInterference(finalWorking).suspects;
+    const suspectsAfter = screenInterference(finalWorking, { ignorePairs }).suspects;
     const clearanceAfter = screenClearance(finalWorking, { thresholdMm: options.clearanceMm }).count;
     rounds.push({
       round,
@@ -143,7 +146,7 @@ export function resolveLayout(geometry: any, options: LayoutOptions): LayoutResu
   }
 
   const finalWorking = { ...geometry, parts };
-  const suspects = screenInterference(finalWorking).suspects;
+  const suspects = screenInterference(finalWorking, { ignorePairs }).suspects;
   const clearance = screenClearance(finalWorking, { thresholdMm: options.clearanceMm }).count;
   const converged = suspects === 0 && clearance === 0;
   const base = { parts, rounds, moves, suspects, clearance, clearanceMm: options.clearanceMm, converged };

@@ -15,6 +15,12 @@ import { screenClearance } from '../src/machine/clearance.ts';
 
 const args = process.argv.slice(2);
 
+// 参数组合的硬错误要在最前面拦：放进「要几何才执行」的那段里，不带 --with-geometry 时会被静默忽略
+if (args.includes('--ignore-pairs') && !args.includes('--layout-compliance')) {
+  process.stderr.write('--ignore-pairs 只对 --layout-compliance 生效（没有 --layout-compliance 时不能默默吞掉）\n');
+  process.exit(2);
+}
+
 // --clearance 的取值在解析参数时就校验：不带 --with-geometry 时也不能静默吞掉错误值
 const clearanceIndex = args.indexOf('--clearance');
 let clearanceThreshold = null;
@@ -98,6 +104,14 @@ if (withGeometry) {
       ...(resolution.stopReason ? { stopReason: resolution.stopReason } : {})
     };
   }
+  const ignoreIndex = args.indexOf('--ignore-pairs');
+  const ignorePairs = ignoreIndex >= 0 && args[ignoreIndex + 1] && !args[ignoreIndex + 1].startsWith('--')
+    ? args[ignoreIndex + 1].split(',').map((item) => item.trim()).filter(Boolean)
+    : [];
+  if (ignorePairs.length && args.indexOf('--layout-compliance') < 0) {
+    process.stderr.write('--ignore-pairs 只对 --layout-compliance 生效\n');
+    process.exit(2);
+  }
   const recheckIndex = args.indexOf('--boolean-recheck');
   if (recheckIndex >= 0) {
     const url = args[recheckIndex + 1];
@@ -131,7 +145,7 @@ if (withGeometry) {
       process.stderr.write('--layout-compliance 需要一个正数（mm）\n');
       process.exit(2);
     }
-    const layout = resolveLayout(caseData.geometry, { clearanceMm: threshold });
+    const layout = resolveLayout(caseData.geometry, { clearanceMm: threshold, ...(ignorePairs.length ? { ignorePairs } : {}) });
     caseData.geometry.parts = layout.parts;
     caseData.geometry.layoutCompliance = {
       clearanceMm: layout.clearanceMm,
@@ -141,6 +155,8 @@ if (withGeometry) {
       clearance: layout.clearance,
       converged: layout.converged,
       ...(layout.stopReason ? { stopReason: layout.stopReason } : {}),
+      // 被跳过的「复核确认误报」对：不写出来的话，数字会显得莫名比上次好
+      ...(ignorePairs.length ? { ignoredPairs: ignorePairs.length, ignoredKeys: ignorePairs } : {}),
       ...(layout.advice ? { advice: layout.advice } : {})
     };
     // 同时把结论写到文档顶层：打开方案时不用翻 geometry 也知道「按多少 mm 检查过、结论如何」

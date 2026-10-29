@@ -84,7 +84,16 @@ function extentVolume(part: any): number {
   return hx * hy * hz * 8;
 }
 
-export function screenInterference(geometry: any): ScreenResult {
+export interface ScreenOptions {
+  /**
+   * 已由真实布尔确认「AABB 误报」的对（`jointKey(a,b)`），初筛直接跳过。
+   * 只该放进来**复核过**的对：没复核过的照旧算 suspect，不能靠猜。
+   */
+  ignorePairs?: string[];
+}
+
+export function screenInterference(geometry: any, options: ScreenOptions = {}): ScreenResult {
+  const ignored = new Set(options.ignorePairs ?? []);
   const parts = Array.isArray(geometry?.parts) ? geometry.parts : [];
   const boxes = parts.map((part: any) => ({ part, bounds: partBounds(part) }));
   // 优先用生成器自己产出的 joints（几何=唯一事实来源）；
@@ -109,6 +118,7 @@ export function screenInterference(geometry: any): ScreenResult {
       const dy = Math.min(a.max[1], b.max[1]) - Math.max(a.min[1], b.min[1]);
       const dz = Math.min(a.max[2], b.max[2]) - Math.max(a.min[2], b.min[2]);
       if (dx <= EPS || dy <= EPS || dz <= EPS) continue;
+      if (ignored.has(jointKey(String(boxes[i].part.id), String(boxes[j].part.id)))) continue;
       const reason = declared.get(jointKey(String(boxes[i].part.id), String(boxes[j].part.id)));
       // 分开代价最小的方案：逐轴算「往 + / 往 -」各自要挪多远，取全局最小。
       // 注意不能直接拿重叠量当位移：移动件一旦越过对方边界，所需位移会比重叠量更大

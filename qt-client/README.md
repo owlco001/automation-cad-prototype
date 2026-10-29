@@ -296,6 +296,11 @@ CI 的 Qt job 现在会拿仓库里的 fixture（`docs/desktop/eval/layout-case.
 
 复跑：`node featuretree-service/aabb-vs-boolean.mjs`（需要 build123d；CI 的 FeatureTree job 已纳入）。
 
+**复核确认的误报可以不让求解器理会**：`--layout-compliance 20 --ignore-pairs a|b,c|d`
+（键就是 `jointKey`：两个零件 id 按字典序用 `|` 连起来）。只想跳过**复核过**的对——没复核过的照旧算
+suspect，不能靠猜；被跳过的数量会写进结果 `ignoredPairs`，否则数字会莫名比上次好看。
+`--ignore-pairs` 不带 `--layout-compliance` 直接退出 2，不允许静默吞掉。
+
 不知道该怎么定阈值时，干涉页有「测最大可行间距…」：在 5–60 mm 之间二分，
 返回「这台机器还能排得开的最大间距」。实测四工位 → **25 mm**（探测 7 次：5 通过、60 不通过、33 不通过、
 19 通过、26 不通过、23 通过、25 通过），界面概览显示「最大可行间距：25 mm（二分探测 7 次，5–60 mm 区间）」。

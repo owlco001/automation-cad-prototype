@@ -150,3 +150,19 @@ test('位移不能直接用重叠量：40mm 重叠可能要挪更多才真的分
   const suggestion = result.pairs[0].suggestion;
   assert.ok(Math.abs(suggestion.delta) > 40, `建议位移 ${suggestion.delta} 不应等于重叠量 40`);
 });
+
+test('ignorePairs：只跳过明确名单里的对，其余照旧算 suspect', async () => {
+  const { screenInterference } = await import('../../src/machine/interference.ts');
+  const geometry = {
+    parts: [
+      { id: 'a', shape: { type: 'box', size: [10, 10, 10] }, center: [0, 0, 0] },
+      { id: 'b', shape: { type: 'box', size: [10, 10, 10] }, center: [5, 0, 0] },
+      { id: 'c', shape: { type: 'box', size: [10, 10, 10] }, center: [0, 5, 0] }
+    ]
+  };
+  const before = screenInterference(geometry);
+  assert.equal(before.suspects, 3, '三对都重叠');
+  const after = screenInterference(geometry, { ignorePairs: ['a|b'] });
+  assert.equal(after.suspects, 2, '只跳过 a|b');
+  assert.ok(!after.pairs.some((pair) => [pair.a, pair.b].sort().join('|') === 'a|b'));
+});
