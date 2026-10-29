@@ -163,6 +163,32 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 方向键微调自检：--nudge-selftest "brief" --part <id> --delta dx,dy,dz
+    if (args.contains(QStringLiteral("--nudge-selftest"))) {
+        const int briefIndex = args.indexOf(QStringLiteral("--nudge-selftest"));
+        const int partIndex = args.indexOf(QStringLiteral("--part"));
+        const int deltaIndex = args.indexOf(QStringLiteral("--delta"));
+        if (briefIndex + 1 >= args.size() || partIndex < 0 || deltaIndex < 0) {
+            qCritical().noquote() << "FT_QT_NUDGE_FAIL 用法：--nudge-selftest \"brief\" --part <id> --delta dx,dy,dz";
+            return 2;
+        }
+        MainWindow window;
+        QJsonObject document;
+        QString error;
+        if (!window.designMachineFromBrief(args.at(briefIndex + 1), &document, &error)) {
+            qCritical().noquote() << "FT_QT_NUDGE_FAIL" << error;
+            return 1;
+        }
+        const QStringList parts = args.at(deltaIndex + 1).split(QLatin1Char(','));
+        if (parts.size() != 3) {
+            qCritical().noquote() << "FT_QT_NUDGE_FAIL --delta 需要 dx,dy,dz";
+            return 2;
+        }
+        window.selectPartForTest(args.at(partIndex + 1));
+        window.nudgeSelectedPart(parts.at(0).toInt(), parts.at(1).toInt(), parts.at(2).toInt());
+        return 0;
+    }
+
     // 试摆位自检：--tune-selftest "brief" --move id:dx,dy,dz（可重复），打印挪之前/之后的重叠数
     if (args.contains(QStringLiteral("--tune-selftest"))) {
         const int briefIndex = args.indexOf(QStringLiteral("--tune-selftest"));

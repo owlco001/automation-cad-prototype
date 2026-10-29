@@ -19,6 +19,7 @@
 #include <StlAPI_Writer.hxx>
 #include <TopoDS_Compound.hxx>
 #include <QFileInfo>
+#include <QKeyEvent>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <gp_Ax1.hxx>
@@ -50,6 +51,7 @@ constexpr int kStlTriangleBytes = 50;
 } // namespace
 
 OcctViewport::OcctViewport(QWidget *parent) : QWidget(parent), m_net(new QNetworkAccessManager(this)) {
+    setFocusPolicy(Qt::StrongFocus);
     setMinimumSize(320, 240);
     setMouseTracking(false);
     setAttribute(Qt::WA_NativeWindow); // OCCT 要真的原生窗口句柄
@@ -154,6 +156,9 @@ bool OcctViewport::showMachineGeometry(const QJsonObject &geometry, int *shapeCo
     // 看不出工位/门架/执行机构的结构。
     m_context->RemoveAll(false);
     m_shapes.clear();
+    m_shapePartIds.clear();
+    m_shapeColors.clear();
+    m_highlighted.clear();
     int count = 0;
     for (const QJsonValue &value : parts) {
         const QJsonObject part = value.toObject();
@@ -201,6 +206,8 @@ bool OcctViewport::showMachineGeometry(const QJsonObject &geometry, int *shapeCo
         shapeHandle->SetMaterial(Graphic3d_NOM_PLASTIC);
         m_context->Display(shapeHandle, AIS_Shaded, -1, false);
         m_shapes.append(shapeHandle);
+        m_shapePartIds.append(part.value(QStringLiteral("id")).toString());
+        m_shapeColors.append(color);
         ++count;
     }
     if (count == 0) {
@@ -215,6 +222,63 @@ bool OcctViewport::showMachineGeometry(const QJsonObject &geometry, int *shapeCo
     return true;
 }
 
+
+QString OcctViewport::pickPartAt(int x, int y) {
+    if (!m_viewReady || m_shapes.isEmpty()) return QString();
+    m_view->MustBeResized();
+    Standard_Real px = 0.0, py = 0.0, pz = 0.0, dx = 0.0, dy = 0.0, dz = 0.0;
+    m_view->ConvertWithProj(x, y, px, py, pz, dx, dy, dz);
+    gp_Dir direction(dx, dy, dz);
+    if (gp_Vec(direction).SquareMagnitude() < 1e-12) return QString();
+    const gp_Pnt origin(px, py, pz);
+
+    // 逐件求交取最近：70 个零件也就几十次射线求交，比维护 AIS 选择状态可靠
+    Standard_Real best = 1e18;
+    QString pickedId;
+    for (int i = 0; i < m_shapes.size(); ++i) {
+        IntCurvesFace_ShapeIntersector intersector;
+        intersector.Load(m_shapes.at(i)->Shape(), 1e-6);
+        intersector.Perform(gp_Lin(origin, direction), -1e6, 1e6);
+        if (!intersector.IsDone() || intersector.NbPnt() < 1) continue;
+        const Standard_Real w = intersector.WParameter(1);
+        if (w < best) {
+            best = w;
+            pickedId = m_shapePartIds.value(i);
+        }
+    }
+    return pickedId;
+}
+
+void OcctViewport::highlightPart(const QString &partId) {
+    if (!m_viewReady) return;
+    for (int i = 0; i < m_shapes.size(); ++i) {
+        const bool match = !partId.isEmpty() && m_shapePartIds.value(i) == partId;
+        if (match) {
+            // 选中件用暖色，未选中恢复各自原始颜色（管线给的颜色，不能一律抹成默认灰）
+            m_shapes.at(i)->SetColor(Quantity_Color(1.0, 0.62, 0.20, Quantity_TOC_sRGB));
+        } else if (i < m_shapeColors.size() && m_shapeColors.at(i).isValid()) {
+            const QColor original = m_shapeColors.at(i);
+            m_shapes.at(i)->SetColor(Quantity_Color(original.redF(), original.greenF(),
+                                                    original.blueF(), Quantity_TOC_sRGB));
+        }
+    }
+    m_highlighted = partId;
+    m_view->Redraw();
+}
+
+void OcctViewport::keyPressEvent(QKeyEvent *event) {
+    const int step = (event->modifiers() & Qt::ShiftModifier) ? 10 : 1;
+    switch (event->key()) {
+    case Qt::Key_Left: emit nudgeRequested(-step, 0, 0); return;
+    case Qt::Key_Right: emit nudgeRequested(step, 0, 0); return;
+    case Qt::Key_Up: emit nudgeRequested(0, step, 0); return;
+    case Qt::Key_Down: emit nudgeRequested(0, -step, 0); return;
+    case Qt::Key_PageUp: emit nudgeRequested(0, 0, step); return;
+    case Qt::Key_PageDown: emit nudgeRequested(0, 0, -step); return;
+    default: break;
+    }
+    QWidget::keyPressEvent(event);
+}
 
 bool OcctViewport::exportMachineStl(const QString &path, int *bytes, QString *error) {
     if (m_shapes.isEmpty()) {
@@ -351,6 +415,13 @@ void OcctViewport::mouseReleaseEvent(QMouseEvent *event) {
     const QPoint delta = event->pos() - m_lastPos;
     m_view->Redraw();
     if (event->button() != Qt::LeftButton || delta.manhattanLength() > 4 || !m_hasGeometry) return;
+
+    // 整机示意模式：点选零件（逐件射线求交），不走下面 STL 单件的测面积路径
+    if (!m_shapes.isEmpty()) {
+        setFocus(Qt::MouseFocusReason);
+        emit partPicked(pickPartAt(event->pos().x(), event->pos().y()));
+        return;
+    }
 
     // 不用 AIS 的 SelectDetected：在 Aspect_NeutralWindow 下 MoveTo 会直接段错误（实测两次）。
     // 改成自己算射线，再与 BRep 求交——结果一样（最近的面），但没有那套隐藏状态。

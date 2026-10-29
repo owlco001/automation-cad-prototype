@@ -13,6 +13,7 @@
 #include <QDir>
 #include <QEventLoop>
 #include <QInputDialog>
+#include <QKeyEvent>
 #include <QProcess>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -24,18 +25,21 @@
 #include <QTextStream>
 #include <QVBoxLayout>
 #include <QInputDialog>
+#include <QKeyEvent>
 #include <QColor>
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDir>
 #include <QEventLoop>
 #include <QInputDialog>
+#include <QKeyEvent>
 #include <QProcess>
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDir>
 #include <QEventLoop>
 #include <QInputDialog>
+#include <QKeyEvent>
 #include <QProcess>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -218,6 +222,20 @@ MainWindow::MainWindow(QWidget *parent)
         });
         connect(m_occtViewport, &OcctViewport::measured, this, [this](const QString &message) {
             statusBar()->showMessage(message, 10000);
+        });
+        connect(m_occtViewport, &OcctViewport::partPicked, this, [this](const QString &partId) {
+            m_selectedPartId = partId;
+            qInfo().noquote() << "FT_QT_PICK part=" << (partId.isEmpty() ? QStringLiteral("(空)") : partId);
+            m_occtViewport->highlightPart(partId);
+            if (partId.isEmpty()) {
+                statusBar()->showMessage(tr("点空白处，已取消选中"), 5000);
+                return;
+            }
+            statusBar()->showMessage(tr("已选 %1 · 方向键 1 mm / Shift+方向键 10 mm，PgUp/PgDn 调 Z")
+                                         .arg(partId), 20000);
+        });
+        connect(m_occtViewport, &OcctViewport::nudgeRequested, this, [this](int dx, int dy, int dz) {
+            nudgeSelectedPart(dx, dy, dz);
         });
     }
 #endif
@@ -488,6 +506,9 @@ bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *docum
         return false;
     }
     *document = object;
+    // 记住 brief 与累计位移：方向键微调/试摆位都用这两个，不能只靠调用方传
+    m_lastBrief = brief;
+    m_lastMoves = moves;
     return true;
 }
 
@@ -547,6 +568,63 @@ void MainWindow::designMachineDialog() {
     }
     MachineCaseDialog dialog(document, this);
     dialog.exec();
+}
+
+void MainWindow::keyPressEvent(QKeyEvent *event) {
+    qInfo().noquote() << "FT_QT_KEY key=" << event->key() << "sel=" << m_selectedPartId;
+    const int step = (event->modifiers() & Qt::ShiftModifier) ? 10 : 1;
+    if (!m_selectedPartId.isEmpty()) {
+        switch (event->key()) {
+        case Qt::Key_Left: nudgeSelectedPart(-step, 0, 0); return;
+        case Qt::Key_Right: nudgeSelectedPart(step, 0, 0); return;
+        case Qt::Key_Up: nudgeSelectedPart(0, step, 0); return;
+        case Qt::Key_Down: nudgeSelectedPart(0, -step, 0); return;
+        case Qt::Key_PageUp: nudgeSelectedPart(0, 0, step); return;
+        case Qt::Key_PageDown: nudgeSelectedPart(0, 0, -step); return;
+        case Qt::Key_Escape:
+            m_selectedPartId.clear();
+            if (m_occtViewport) m_occtViewport->highlightPart(QString());
+            statusBar()->showMessage(tr("已取消选中"), 5000);
+            return;
+        default: break;
+        }
+    }
+    QMainWindow::keyPressEvent(event);
+}
+
+void MainWindow::nudgeSelectedPart(int dx, int dy, int dz) {
+    if (m_selectedPartId.isEmpty()) {
+        statusBar()->showMessage(tr("先在 3D 里点选一个零件，再用方向键微调"), 8000);
+        return;
+    }
+    if (m_lastBrief.trimmed().isEmpty()) {
+        statusBar()->showMessage(tr("需要先用 brief 生成方案，才知道怎么重算"), 8000);
+        return;
+    }
+    QStringList moves = m_lastMoves;
+    moves << QStringLiteral("%1:%2,%3,%4").arg(m_selectedPartId).arg(dx).arg(dy).arg(dz);
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    QJsonObject updated;
+    QString error;
+    const bool ok = designMachineFromBrief(m_lastBrief, &updated, &error, moves);
+    QApplication::restoreOverrideCursor();
+    if (!ok) {
+        statusBar()->showMessage(tr("微调失败：%1").arg(error), 15000);
+        return;
+    }
+    m_lastDocument = updated;
+    int shapes = 0;
+    QString geometryError;
+    renderMachineGeometry(updated, &shapes, &geometryError);
+    m_occtViewport->highlightPart(m_selectedPartId);   // 重算后保持选中态
+    const QJsonObject interference = updated.value(QStringLiteral("geometry")).toObject()
+                                        .value(QStringLiteral("interference")).toObject();
+    qInfo().noquote() << "FT_QT_NUDGE part=" << m_selectedPartId << "delta=" << dx << dy << dz
+                      << "count=" << interference.value(QStringLiteral("count")).toInt();
+    statusBar()->showMessage(tr("已挪 %1 (%2,%3,%4) · 重叠 %5 对（需确认 %6）")
+                                 .arg(m_selectedPartId).arg(dx).arg(dy).arg(dz)
+                                 .arg(interference.value(QStringLiteral("count")).toInt())
+                                 .arg(interference.value(QStringLiteral("suspects")).toInt()), 15000);
 }
 
 void MainWindow::tunePlacementDialog() {

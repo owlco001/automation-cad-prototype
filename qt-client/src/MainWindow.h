@@ -72,6 +72,10 @@ public:
                                 const QStringList &moves = {});
     /// 试摆位：在已生成的方案上挪一个零件，重跑管线并重算干涉
     void tunePlacementDialog();
+    /// 方向键微调选中零件（3D 里点选后用）
+    void nudgeSelectedPart(int dx, int dy, int dz);
+    /// 无人值守：直接指定选中零件（--nudge-selftest 用）
+    void selectPartForTest(const QString &partId) { m_selectedPartId = partId; }
     void designMachineDialog();
     /// 把方案里的示意几何画到 3D 视口（占位体拼装，客户端只摆位）
     bool renderMachineGeometry(const QJsonObject &document, int *shapeCount, QString *error);
@@ -95,6 +99,10 @@ private slots:
     void onPropertyCellChanged(int row, int column);
     void onTreeReply();
     void onOperationReply();
+
+protected:
+    /// 方向键微调选中零件（放在窗口级：视口有没有焦点都能用）
+    void keyPressEvent(QKeyEvent *event) override;
 
 private:
     void refreshTree(const QJsonObject &envelope);
@@ -137,7 +145,8 @@ private:
     QString m_assemblyId;
     QString m_lastBrief;               // 最近一次生成/打开的方案 brief（试摆位要用）
     QStringList m_lastMoves;
-    QJsonObject m_lastDocument;        // 最近一次生成的整机方案（试摆位/导出用）           // 累计的 --move 参数，多次试挪会叠加
+    QJsonObject m_lastDocument;        // 最近一次生成的整机方案（试摆位/导出用）
+    QString m_selectedPartId;          // 3D 里点选的零件           // 累计的 --move 参数，多次试挪会叠加
     QJsonObject m_assemblyRecord;
     void editAssemblyMember(int memberIndex);
     bool fetchGeometryStl(QByteArray *bytes, QString *error);

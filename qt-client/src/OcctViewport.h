@@ -5,7 +5,9 @@
 // 为什么之前没用：本机是 Debian 12/13 混源，libocct-{data-exchange,visualization}-dev
 // 被 libfreetype-dev 版本冲突卡住。现在把这两个 dev 包的**头文件**单独解出来放到
 // /usr/local/include/opencascade（运行时 .so 本来就在），所以能编能跑。
+#include <QColor>
 #include <QJsonObject>
+#include <QStringList>
 #include <QVector>
 #include <QWidget>
 
@@ -30,6 +32,12 @@ public:
     /// 几何来自 desktop 管线（conceptual-estimate），客户端不重算，只摆位。
     bool showMachineGeometry(const QJsonObject &geometry, int *shapeCount, QString *error);
 
+    /// 点选整机示意里的一个零件：返回 partId（没点到返回空）。用射线求交，不走 AIS 选择
+    /// （NeutralWindow 下 AIS 的 MoveTo/SelectDetected 实测段错误）。
+    QString pickPartAt(int x, int y);
+    /// 高亮某个零件（传空取消）
+    void highlightPart(const QString &partId);
+
     /// 把当前整机示意几何导出成 STL（二进制/ASCII 由 OCCT 决定）。
     /// 注意：这是**摆位后的概念占位体**，不是制造几何。
     bool exportMachineStl(const QString &path, int *bytes, QString *error);
@@ -46,6 +54,10 @@ signals:
     void failed(const QString &message);
     /// 选中面/边/点的测量结果
     void measured(const QString &message);
+    /// 方向键微调请求（dx/dy/dz 单位 mm），由外面决定怎么应用
+    void nudgeRequested(int dx, int dy, int dz);
+    /// 点中整机示意里的零件（空 = 点到空白）
+    void partPicked(const QString &partId);
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -55,6 +67,7 @@ protected:
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
 
 private:
     void initializeView();
@@ -67,6 +80,9 @@ private:
     Handle(Aspect_NeutralWindow) m_window;
     Handle(AIS_Shape) m_shape;
     QVector<Handle(AIS_Shape)> m_shapes;
+    QStringList m_shapePartIds;      // 与 m_shapes 一一对应的 partId
+    QVector<QColor> m_shapeColors;   // 原始颜色（高亮后要能还原，不能一律变默认灰）
+    QString m_highlighted;
     QJsonObject m_lastGeometry;  // 最近一次整机示意几何（导出 STL 用）  // 整机示意：每个零件一个 AIS 对象（各自颜色）
     bool m_viewReady = false;
     bool m_hasGeometry = false;

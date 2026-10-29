@@ -52,6 +52,7 @@
 | `docs/desktop/screenshots/qt-client-09-ctxmenu.png` | 特征右键菜单：「压缩 / 解除压缩」「删除特征（可撤销）」，都在服务端校验后执行 |
 | `docs/desktop/screenshots/qt-client-16-iso.png` | 默认等轴测视角（视图菜单可选等轴测/正视/俯视/右视/适合视图） |
 | `docs/desktop/screenshots/qt-client-17-top.png` | 俯视：8 个孔（4 沉头 + 4 通孔）和四角 R3 一眼可见——视口画的是服务端真几何，不是占位盒 |
+| `docs/desktop/screenshots/qt-client-40-pick-nudge.png` | 3D 点选零件后方向键微调：状态栏「已挪 conveyor-frame (10,0,0) · 重叠 2 对」 |
 | `docs/desktop/screenshots/qt-client-35-machine-3d.png` | 整机示意 3D：70 个占位体、包络 2140×740×1177（概念估算，不是制造几何） |
 | `docs/desktop/screenshots/qt-client-34-brief-machine.png` | 一句话生成：四工位点胶机 → 4 工位 / 3.103 kW / 22,016.79（2 项无价格） |
 | `docs/desktop/screenshots/qt-client-31-machine-overview.png` | 整机方案概览：6 工位 / 31.75 件每分 / 达标 / 4.65 kW / 成本 34,489.91（3 项无价格） |
@@ -159,6 +160,16 @@ CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI �
 
 实测四工位点胶机：2 对重叠 → 全部 `declared`（立柱插横梁，各 96,000 mm³），`suspects=0`，
 声明表共 138 对连接。
+
+**3D 点选 + 方向键微调**：在整机示意里点一个零件 → 状态栏显示零件 id →
+方向键 1 mm、Shift+方向键 10 mm、PgUp/PgDn 调 Z，Esc 取消选中；每按一次都重跑管线并刷新干涉页，
+选中态会保留。
+
+点选不用 AIS 选择（NeutralWindow 下 `MoveTo/SelectDetected` 实测段错误），改成逐件射线求交取最近命中的零件。
+无窗口管理器的环境（xvfb）里键盘要先 `xdotool windowfocus <wid>`，否则按键不投递——这是环境问题，不是客户端问题。
+
+实测：点中 `conveyor-frame` → 两次 Shift+Right → 状态栏「已挪 conveyor-frame (10,0,0) · 重叠 2 对（需确认 0）」，
+日志 `FT_QT_PICK part= conveyor-frame` / `FT_QT_NUDGE part= conveyor-frame delta= 10 0 0 count= 2`。
 
 **试摆位（改完立刻重算干涉）**：`评估 → 试摆位（移动零件重算干涉）…`，选零件 + 三轴位移 →
 带 `--move <id>:<dx>,<dy>,<dz>` 重跑管线 → 3D 与干涉页一起刷新。位移是**增量叠加**的，
