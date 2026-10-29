@@ -130,6 +130,22 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    // 从 brief 生成整机方案自检：--brief-selftest "一句话"（要求 node + desktop 管线可执行）
+    {
+        const int briefIndex = args.indexOf(QStringLiteral("--brief-selftest"));
+        if (briefIndex >= 0 && briefIndex + 1 < args.size()) {
+            MainWindow window;
+            QJsonObject document;
+            QString error;
+            if (!window.designMachineFromBrief(args.at(briefIndex + 1), &document, &error)) {
+                qCritical().noquote() << "FT_QT_BRIEF_FAIL" << error;
+                return 1;
+            }
+            qInfo().noquote() << "FT_QT_BRIEF_OK" << MachineCaseDialog::summarize(document);
+            return 0;
+        }
+    }
+
     // 整机方案自检：--machine-case <path>，只读解析并打印摘要（人肉核对/CI 都能用）
     {
         const int caseIndex = args.indexOf(QStringLiteral("--machine-case"));
@@ -141,6 +157,25 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
             qInfo().noquote() << "FT_QT_MACHINECASE_OK" << MachineCaseDialog::summarize(document);
+            return 0;
+        }
+    }
+
+    // brief → 方案窗口：--brief-ui "一句话"（截图/人肉核对用）
+    {
+        const int uiBrief = args.indexOf(QStringLiteral("--brief-ui"));
+        if (uiBrief >= 0 && uiBrief + 1 < args.size()) {
+            MainWindow window;
+            window.show();
+            QJsonObject document;
+            QString error;
+            if (!window.designMachineFromBrief(args.at(uiBrief + 1), &document, &error)) {
+                qCritical().noquote() << "FT_QT_BRIEF_FAIL" << error;
+                return 1;
+            }
+            qInfo().noquote() << "FT_QT_BRIEF_UI_OPEN" << MachineCaseDialog::summarize(document);
+            MachineCaseDialog dialog(document, nullptr);
+            dialog.exec();
             return 0;
         }
     }

@@ -52,6 +52,7 @@
 | `docs/desktop/screenshots/qt-client-09-ctxmenu.png` | 特征右键菜单：「压缩 / 解除压缩」「删除特征（可撤销）」，都在服务端校验后执行 |
 | `docs/desktop/screenshots/qt-client-16-iso.png` | 默认等轴测视角（视图菜单可选等轴测/正视/俯视/右视/适合视图） |
 | `docs/desktop/screenshots/qt-client-17-top.png` | 俯视：8 个孔（4 沉头 + 4 通孔）和四角 R3 一眼可见——视口画的是服务端真几何，不是占位盒 |
+| `docs/desktop/screenshots/qt-client-34-brief-machine.png` | 一句话生成：四工位点胶机 → 4 工位 / 3.103 kW / 22,016.79（2 项无价格） |
 | `docs/desktop/screenshots/qt-client-31-machine-overview.png` | 整机方案概览：6 工位 / 31.75 件每分 / 达标 / 4.65 kW / 成本 34,489.91（3 项无价格） |
 | `docs/desktop/screenshots/qt-client-32-machine-bom.png` | 整机方案 BOM：12 项（含伺服驱动器 SV660P 750 W ×6） |
 | `docs/desktop/screenshots/qt-client-33-machine-io.png` | 整机方案 IO：19 点（ST1-PRX-S1 → I0.0 输入 接近开关 工位1） |
@@ -116,6 +117,18 @@ CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI �
 `--export-selftest --out <path>` 是无人值守版本。实测零件 330,284 B / 6,604 三角面，
 装配（3 个成员）990,684 B / 19,812 三角面 = 正好 3 倍。
 装配清单对话框里还有「导出 CSV…」（带 UTF-8 BOM，Excel 打开中文不乱码）。
+
+**一句话 → 整机方案**：`文件 → 从 brief 生成整机方案…` 调 `desktop/scripts/machine-design-cli.mjs`
+（stdout 只给 JSON，日志走 stderr），跑完整机管线后直接弹方案窗口。管线脚本位置可用
+`AUTOMATIONCAD_PIPELINE` 指定，否则按构建目录向上找 `desktop/scripts/machine-design-cli.mjs`。
+
+实测新 brief（四工位点胶机 / 25 件每分 / 步进+气爪+到位检测）：
+**4 工位 / BOM 11 项 / IO 12 点 / 3.103 kW / 71.01 件每分 / 22,016.79（2 项无价格）**。
+`--brief-selftest "一句话"` 是无人值守版本（CI 里跑的就是它）。
+
+管线实现只有一处（`desktop/src/machine/case.ts`），脚本与 CLI 共用；
+`desktop/test/machine/cli.test.mjs` 守着「CLI 输出 == machine-case.json」，
+重构后重新生成的案例文件字节完全一致（`CASE_JSON_IDENTICAL`）。
 
 **整机方案（只读）**：`文件 → 打开整机方案…` 读 desktop 管线导出的 `machine-case` JSON
 （`schemaVersion=1`、`kind=machine-case`，校验不过会明确报「不是整机方案文件 / 不支持的版本」），

@@ -127,6 +127,12 @@ jobs:
       - name: Qt 自动刷新验收（外部改树 → 客户端 1.5s 内刷新）
         timeout-minutes: 5
         run: node qt-client/tests/watch.mjs --binary build-qt/automationcad-qt
+      - name: 一句话 → 整机方案（Qt 调 desktop 管线）
+        timeout-minutes: 6
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          QT_QPA_PLATFORM=offscreen AUTOMATIONCAD_PIPELINE="$GITHUB_WORKSPACE/desktop/scripts/machine-design-cli.mjs" \
+            ./build-qt/automationcad-qt --brief-selftest "四工位点胶机，节拍 25 件/分钟，每工位 1 套步进 + 1 个气爪 + 1 个到位检测"
       - name: Qt SSE 推送验收（轮询设 30s，只能靠事件）
         timeout-minutes: 5
         run: node qt-client/tests/sse.mjs --binary build-qt/automationcad-qt

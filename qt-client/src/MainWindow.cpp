@@ -8,7 +8,12 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QApplication>
+#include <QCoreApplication>
+#include <QDir>
 #include <QEventLoop>
+#include <QInputDialog>
+#include <QProcess>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -20,8 +25,18 @@
 #include <QVBoxLayout>
 #include <QInputDialog>
 #include <QColor>
+#include <QApplication>
+#include <QCoreApplication>
+#include <QDir>
 #include <QEventLoop>
+#include <QInputDialog>
+#include <QProcess>
+#include <QApplication>
+#include <QCoreApplication>
+#include <QDir>
 #include <QEventLoop>
+#include <QInputDialog>
+#include <QProcess>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
@@ -87,6 +102,7 @@ MainWindow::MainWindow(QWidget *parent)
     fileMenu->addAction(tr("退出装配视图"), this, [this]() { m_assemblyId.clear(); refreshNow(); });
     fileMenu->addSeparator();
     fileMenu->addAction(tr("导出 STL…"), this, &MainWindow::exportStlDialog);
+    fileMenu->addAction(tr("从 brief 生成整机方案…"), this, &MainWindow::designMachineDialog);
     fileMenu->addAction(tr("打开整机方案…"), this, [this]() {
         const QString path = QFileDialog::getOpenFileName(this, tr("打开整机方案"), QString(),
                                                           tr("整机方案 (*.json)"));
@@ -399,6 +415,92 @@ bool MainWindow::exportStl(const QString &path, int *bytes, QString *error) {
     }
     *bytes = static_cast<int>(stl.size());
     return true;
+}
+
+bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *document, QString *error) {
+    if (brief.trimmed().isEmpty()) {
+        *error = tr("brief 不能为空");
+        return false;
+    }
+    // 管线脚本位置：优先环境变量，其次仓库内约定路径（app 在 build 目录时向上找）
+    QString script = qEnvironmentVariable("AUTOMATIONCAD_PIPELINE");
+    if (script.isEmpty()) {
+        const QStringList candidates = {
+            QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("../desktop/scripts/machine-design-cli.mjs")),
+            QDir(QCoreApplication::applicationDirPath()).filePath(QStringLiteral("../../desktop/scripts/machine-design-cli.mjs")),
+            QDir::current().filePath(QStringLiteral("desktop/scripts/machine-design-cli.mjs"))
+        };
+        for (const QString &candidate : candidates) {
+            if (QFileInfo::exists(QFileInfo(candidate).absoluteFilePath())) {
+                script = QFileInfo(candidate).absoluteFilePath();
+                break;
+            }
+        }
+    }
+    if (script.isEmpty() || !QFileInfo::exists(script)) {
+        *error = tr("找不到整机管线脚本（%1）；设置环境变量 AUTOMATIONCAD_PIPELINE 指向 desktop/scripts/machine-design-cli.mjs")
+                     .arg(script.isEmpty() ? tr("未设置") : script);
+        return false;
+    }
+
+    QProcess process;
+    process.setProcessChannelMode(QProcess::SeparateChannels);
+    process.start(QStringLiteral("node"), {script, QStringLiteral("--brief"), brief});
+    if (!process.waitForStarted(10'000)) {
+        *error = tr("启动 node 失败：%1").arg(process.errorString());
+        return false;
+    }
+    if (!process.waitForFinished(180'000)) {
+        process.kill();
+        process.waitForFinished(2'000);
+        *error = tr("整机管线超时（180 秒未结束）");
+        return false;
+    }
+    const QByteArray out = process.readAllStandardOutput();
+    const QByteArray err = process.readAllStandardError();
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        *error = tr("整机管线退出码 %1：%2")
+                     .arg(process.exitCode())
+                     .arg(QString::fromUtf8(err).trimmed().left(400));
+        return false;
+    }
+    QJsonParseError parseError{};
+    const QJsonDocument parsed = QJsonDocument::fromJson(out, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !parsed.isObject()) {
+        *error = tr("管线输出不是 JSON（偏移 %1：%2）").arg(parseError.offset).arg(parseError.errorString());
+        return false;
+    }
+    const QJsonObject object = parsed.object();
+    if (object.value(QStringLiteral("kind")).toString() != QStringLiteral("machine-case")) {
+        *error = tr("管线输出不是整机方案（kind=%1）").arg(object.value(QStringLiteral("kind")).toString());
+        return false;
+    }
+    *document = object;
+    return true;
+}
+
+void MainWindow::designMachineDialog() {
+    bool accepted = false;
+    const QString brief = QInputDialog::getMultiLineText(
+        this, tr("从一句话生成整机方案"),
+        tr("写清工位/节拍/执行机构（对话框不预填内容，避免把猜测当用户输入）："),
+        QString(), &accepted);
+    if (!accepted || brief.trimmed().isEmpty()) return;
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    statusBar()->showMessage(tr("正在跑整机管线（brief → 工位 → BOM → IO → 配电 → 节拍 → 成本）…"));
+    QJsonObject document;
+    QString error;
+    const bool ok = designMachineFromBrief(brief, &document, &error);
+    QApplication::restoreOverrideCursor();
+    if (!ok) {
+        QMessageBox::warning(this, tr("生成失败"), error);
+        statusBar()->showMessage(tr("整机方案生成失败"), 8000);
+        return;
+    }
+    statusBar()->showMessage(tr("整机方案：%1").arg(MachineCaseDialog::summarize(document)), 15000);
+    MachineCaseDialog dialog(document, this);
+    dialog.exec();
 }
 
 void MainWindow::exportStlDialog() {

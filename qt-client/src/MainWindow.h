@@ -66,6 +66,9 @@ public:
     /// 导出当前零件/装配的 STL（几何来自服务端，客户端不重算）
     void exportStlDialog();
     bool exportStl(const QString &path, int *bytes, QString *error);
+    /// 调 desktop 整机管线（node scripts/machine-design-cli.mjs）把一句话变成方案 JSON
+    bool designMachineFromBrief(const QString &brief, QJsonObject *document, QString *error);
+    void designMachineDialog();
 
 signals:
     /// 每次成功读到包络后发出（首次加载与后续变化都会发）
