@@ -2745,6 +2745,55 @@
       "三维模型为估算占位几何；请勿据此确认型号包络、安装空间、运动干涉或制造尺寸。",
       "旋转轴分度角为方案/系统估算值（待核验）：工位1·工位1旋转轴1 90°；工位2·工位2旋转轴1 90°；工位3·工位3旋转轴1 90°；工位4·工位4旋转轴1 90°；请按机构工艺与选定型号复核；整机仍为概念估算占位体，不代表旋转台型号、安装或制造数据。"
     ],
+    "maxClearance": {
+      "feasibleMm": 25,
+      "probes": [
+        {
+          "mm": 5,
+          "converged": true,
+          "rounds": 1,
+          "moves": 0
+        },
+        {
+          "mm": 60,
+          "converged": false,
+          "rounds": 4,
+          "moves": 850
+        },
+        {
+          "mm": 33,
+          "converged": false,
+          "rounds": 3,
+          "moves": 460
+        },
+        {
+          "mm": 19,
+          "converged": true,
+          "rounds": 3,
+          "moves": 58
+        },
+        {
+          "mm": 26,
+          "converged": false,
+          "rounds": 3,
+          "moves": 456
+        },
+        {
+          "mm": 23,
+          "converged": true,
+          "rounds": 3,
+          "moves": 66
+        },
+        {
+          "mm": 25,
+          "converged": true,
+          "rounds": 3,
+          "moves": 66
+        }
+      ],
+      "minMm": 5,
+      "maxMm": 60
+    },
     "layoutCompliance": {
       "clearanceMm": 20,
       "rounds": [
@@ -3771,6 +3820,7 @@
     "suspects": 0,
     "clearance": 0,
     "rounds": 3,
-    "moves": 58
+    "moves": 58,
+    "maxFeasibleMm": 25
   }
 }

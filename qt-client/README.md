@@ -215,10 +215,17 @@ CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI �
 汇总「还差多少 mm 才到阈值」，界面在未收敛的判定下面直接列「· st1 还差 37.0 mm（st1-plate × …）」。
 实测 40 mm 时 `st1` / `st4` 各差 37 mm（阈值 40 − 实际 3 mm），按还差从大到小排。
 
+如果同一份方案也测过最大可行间距，戳里会多一个 `maxFeasibleMm`：概览显示
+「按 20 mm：已合规（3 轮 / 58 次位移）；机器上限 25 mm（还可放宽 5 mm）」——直接回答「还有没有余量」。
+
 合规结论会写进方案文件本身（顶层 `compliance` 戳：`clearanceMm / converged / suspects / clearance / rounds / moves`，
 不含时间戳以免 golden 文件每次变化）。打开方案时概览页显示「排布合规：按 20 mm：已合规（3 轮 / 58 次位移）」；
 若界面当前阈值与戳里的不同，会补一句「⚠ 界面当前阈值是 35 mm…需重新计算」——避免误以为这份方案是按现在的阈值查过的。
 没有跑过合规的方案显示「未检查」，不假装合规。
+
+跑一条命令就能把 Qt 侧这批自检串起来：`--qt-smoke <fixture>`（概览戳 + CSV 行数一致；
+本地加 `--replay` 还会用 fixture 里的 brief 重跑管线，要求排布合规仍收敛）。
+实测 `QT_SMOKE_OK checks=3`，重放 `rounds=3 moves=58` 与 fixture 一致；CI 里跑不带 `--replay` 的版本（`checks=2`，不需要 node）。
 
 CI 的 Qt job 现在会拿仓库里的 fixture（`docs/desktop/eval/layout-case.json`，88 KB）跑
 `--compliance-stamp-selftest` 与 `--layout-csv-selftest`，并校验 CSV 是 **60 行**（58 位移 + 表头 + 合计）——

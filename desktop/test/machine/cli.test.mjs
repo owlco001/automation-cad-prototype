@@ -224,6 +224,9 @@ test('排布合规 fixture 与当前算法一致（CI 的 Qt 自检靠它，漂�
   const details = fixture.geometry.layoutCompliance;
   assert.equal(details.moves.length, 58);
   assert.equal(details.rounds.length, 3);
+  // 同一份 fixture 也标了机器上限：打开方案就能看出「按 20 排的，其实能到 25」
+  assert.equal(stamp.maxFeasibleMm, 25);
+  assert.equal(fixture.geometry.maxClearance.feasibleMm, 25);
   // fixture 里必须真有一个未收敛的反例参数可查（同一份 geometry 按 40 mm 会放不下）
   assert.equal(fixture.geometry.parts.length > 0, true);
 });

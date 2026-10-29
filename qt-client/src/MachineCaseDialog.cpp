@@ -267,6 +267,13 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                                 .arg(stampConverged ? QStringLiteral("已合规") : QStringLiteral("未收敛"))
                                 .arg(stamp.value(QStringLiteral("rounds")).toInt())
                                 .arg(stamp.value(QStringLiteral("moves")).toInt());
+        if (stamp.contains(QStringLiteral("maxFeasibleMm"))) {
+            const int maxFeasible = stamp.value(QStringLiteral("maxFeasibleMm")).toInt();
+            stampText += QStringLiteral("；机器上限 %1 mm").arg(maxFeasible);
+            if (stampConverged && maxFeasible > stampMm) {
+                stampText += QStringLiteral("（还可放宽 %1 mm）").arg(maxFeasible - stampMm);
+            }
+        }
         if (uiClearanceMm > 0 && uiClearanceMm != stampMm) {
             stampText += QStringLiteral("　⚠ 界面当前阈值是 %1 mm，与这份方案的检查值不同，需重新计算")
                              .arg(uiClearanceMm);

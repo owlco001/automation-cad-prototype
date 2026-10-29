@@ -121,7 +121,14 @@ if (withGeometry) {
       ...(layout.advice ? { advice: layout.advice } : {})
     };
     // 同时把结论写到文档顶层：打开方案时不用翻 geometry 也知道「按多少 mm 检查过、结论如何」
-    caseData.compliance = complianceStamp(layout);
+    caseData.compliance = {
+      ...complianceStamp(layout),
+      // 如果同一份方案也测过「最大可行间距」，把上限一起写进戳：
+      // 打开方案时才能回答「这份是按 25 排的，机器上限也是 25」还是「按 20 排的，其实还能到 25」
+      ...(caseData.geometry.maxClearance
+        ? { maxFeasibleMm: caseData.geometry.maxClearance.feasibleMm }
+        : {})
+    };
   }
   const clearanceResolveIndex = args.indexOf('--resolve-clearance');
   if (clearanceResolveIndex >= 0) {

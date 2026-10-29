@@ -453,6 +453,79 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    // 统一冒烟入口：--qt-smoke <fixture.json>（把下面几条串起来，省得手敲一长串环境变量）
+    {
+        const int index = args.indexOf(QStringLiteral("--qt-smoke"));
+        if (index >= 0 && index + 1 < args.size()) {
+            QJsonObject document;
+            QString error;
+            if (!MachineCaseDialog::loadFile(args.at(index + 1), &document, &error)) {
+                qCritical().noquote() << "QT_SMOKE_FAIL" << error;
+                return 1;
+            }
+            int checks = 0;
+
+            // 1) 概览页能读到合规戳（不是只有 JSON 里有）
+            MachineCaseDialog dialog(document, nullptr, {}, {}, {}, {}, {}, {}, 20);
+            QString stampText;
+            for (QTableWidget *table : dialog.findChildren<QTableWidget *>()) {
+                for (int row = 0; row < table->rowCount(); ++row) {
+                    if (table->item(row, 0) && table->item(row, 0)->text() == QStringLiteral("排布合规")) {
+                        stampText = table->item(row, 1) ? table->item(row, 1)->text() : QString();
+                    }
+                }
+            }
+            if (stampText.isEmpty()) {
+                qCritical().noquote() << "QT_SMOKE_FAIL 概览页缺少排布合规行";
+                return 1;
+            }
+            qInfo().noquote() << "QT_SMOKE_STAMP" << stampText;
+            checks += 1;
+
+            // 2) 排布位移 CSV 能导出且行数与 JSON 一致
+            const QString csvPath = QDir::tempPath() + QStringLiteral("/automationcad-smoke-layout.csv");
+            int csvRows = 0;
+            if (!MachineCaseDialog::writeLayoutCsv(document, csvPath, &csvRows, &error)) {
+                qCritical().noquote() << "QT_SMOKE_FAIL" << error;
+                return 1;
+            }
+            const QJsonObject layoutInfo = document.value(QStringLiteral("geometry")).toObject()
+                                               .value(QStringLiteral("layoutCompliance")).toObject();
+            if (csvRows != layoutInfo.value(QStringLiteral("moves")).toArray().size()) {
+                qCritical().noquote() << "QT_SMOKE_FAIL CSV 行数" << csvRows << "与 JSON 位移数"
+                                      << layoutInfo.value(QStringLiteral("moves")).toArray().size() << "不一致";
+                return 1;
+            }
+            qInfo().noquote() << "QT_SMOKE_CSV rows=" << csvRows;
+            checks += 1;
+
+            // 3) 同一条 brief 重跑管线：排布合规必须仍收敛（防算法漂移把 fixture 变成假绿）
+            const QString brief = document.value(QStringLiteral("brief")).toString();
+            // 重放需要 node + 管线，CI 里没装 node，所以默认只验「读文件 + 导出」；本地加 --replay
+            if (!brief.isEmpty() && args.contains(QStringLiteral("--replay"))) {
+                MainWindow window;
+                QJsonObject replayed;
+                if (!window.designMachineFromBrief(brief, &replayed, &error, {}, false, 0, true, 20)) {
+                    qCritical().noquote() << "QT_SMOKE_FAIL 重跑管线：" << error;
+                    return 1;
+                }
+                const QJsonObject replayedLayout = replayed.value(QStringLiteral("geometry")).toObject()
+                                                       .value(QStringLiteral("layoutCompliance")).toObject();
+                if (!replayedLayout.value(QStringLiteral("converged")).toBool()) {
+                    qCritical().noquote() << "QT_SMOKE_FAIL 重跑后排布不收敛";
+                    return 1;
+                }
+                qInfo().noquote() << "QT_SMOKE_REPLAY rounds="
+                                  << replayedLayout.value(QStringLiteral("rounds")).toArray().size()
+                                  << "moves=" << replayedLayout.value(QStringLiteral("moves")).toArray().size();
+                checks += 1;
+            }
+
+            qInfo().noquote() << "QT_SMOKE_OK checks=" << checks;
+            return 0;
+        }
+    }
+
     // 最大可行间距自检：--max-clearance-selftest "brief"
     if (args.contains(QStringLiteral("--max-clearance-selftest"))) {
         const int index = args.indexOf(QStringLiteral("--max-clearance-selftest"));
