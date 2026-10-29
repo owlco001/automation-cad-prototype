@@ -64,18 +64,18 @@ function loadBuiltinParts(builtinDir: string) {
 }
 
 function stationTable(design: any) {
-  return design.config.stations.map((station) => {
+  return design.config.stations.map((station: any) => {
     const actuators = design.config.actuators
-      .filter((actuator) => actuator.station === station)
-      .map((actuator) => ({
+      .filter((actuator: any) => actuator.station === station)
+      .map((actuator: any) => ({
         id: actuator.id,
         kind: actuator.kind,
         name: actuator.name,
         points: [actuator.extendPoint, actuator.retractPoint, actuator.gripPoint, actuator.point].filter(Boolean)
       }));
     const sensors = design.config.sensors
-      .filter((sensor) => sensor.station === station)
-      .map((sensor) => ({ point: sensor.point, part: sensor.part }));
+      .filter((sensor: any) => sensor.station === station)
+      .map((sensor: any) => ({ point: sensor.point, part: sensor.part }));
     return { station, actuators, sensors };
   });
 }
