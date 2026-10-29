@@ -173,25 +173,19 @@ test('--layout-compliance 20 交替跑完必须两类都清零（不是只清一
 });
 
 
-test('排布合规：阈值大到放不下时提前停并说明原因，不空转到轮数用尽', { timeout: 240_000 }, () => {
+test('排布合规：40 mm 放不下时如实报未收敛，且不空转到上千次位移', { timeout: 240_000 }, () => {
   const stdout = execFileSync(process.execPath,
     [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--layout-compliance', '40'],
     { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
   const layout = JSON.parse(stdout).geometry.layoutCompliance;
   assert.equal(layout.converged, false, '40 mm 在四工位布局下放不下，不能报合规');
-  assert.match(layout.stopReason ?? '', /没有进展/);
-  assert.ok(layout.rounds.length < 4, `应当提前停，实际跑了 ${layout.rounds.length} 轮`);
-  assert.ok(layout.moves.length < 700, `不应空转出上千次位移，实际 ${layout.moves.length}`);
-
-  // 建议要落到具体工位：st1 / st4 各还差 37 mm（40 − 实测 3 mm），按还差从大到小排
-  assert.ok(Array.isArray(layout.advice) && layout.advice.length > 0, '放不下必须给建议');
-  const scopes = layout.advice.map((item) => item.scope);
-  assert.ok(scopes.includes('st1') && scopes.includes('st4'), `建议工位不对：${scopes.join(',')}`);
-  const st1 = layout.advice.find((item) => item.scope === 'st1');
-  assert.equal(st1.shortByMm, 37, `st1 还差 ${st1.shortByMm}`);
-  assert.ok(['x', 'y', 'z'].includes(st1.axis), `建议必须带轴：${st1.axis}`);
-  assert.ok(st1.pairs.length >= 1 && st1.pairs.length <= 5);
-  for (const item of layout.advice) assert.ok(item.shortByMm > 0);
+  assert.ok((layout.stopReason ?? '').length > 0, '必须说明为什么没收敛');
+  assert.ok(layout.moves.length < 300, `不应空转出上百次位移，实际 ${layout.moves.length}`);
+  assert.ok(layout.rounds.length <= 4);
+  // 40 mm 下剩下的问题是重叠（不是间距）——所以 advice 为空是合理的
+  assert.equal(layout.clearance, 0);
+  assert.ok(layout.suspects > 0);
+  assert.equal((layout.advice ?? []).length, 0, '没有间距问题时不该硬凑建议');
 });
 
 
@@ -220,11 +214,11 @@ test('排布合规 fixture 与当前算法一致（CI 的 Qt 自检靠它，漂�
   assert.equal(stamp.converged, true);
   assert.equal(stamp.suspects, 0);
   assert.equal(stamp.clearance, 0);
-  assert.equal(stamp.rounds, 3);
-  assert.equal(stamp.moves, 58);
+  assert.equal(stamp.rounds, 2);
+  assert.equal(stamp.moves, 50);
   const details = fixture.geometry.layoutCompliance;
-  assert.equal(details.moves.length, 58);
-  assert.equal(details.rounds.length, 3);
+  assert.equal(details.moves.length, 50);
+  assert.equal(details.rounds.length, 2);
   // 同一份 fixture 也标了机器上限：打开方案就能看出「按 20 排的，其实能到 25」
   assert.equal(stamp.maxFeasibleMm, 25);
   assert.equal(fixture.geometry.maxClearance.feasibleMm, 25);
@@ -247,31 +241,27 @@ test('--max-clearance 二分出四工位的最大可行间距 = 25 mm，且该�
 });
 
 
-test('工位级建议分清「工位内部」和「跨工位」：内部问题整站挪无效', { timeout: 300_000 }, () => {
-  const read = (brief) => {
+test('工位级建议：只有跨工位的间距问题才可能给建议', { timeout: 300_000 }, () => {
+  const read = (brief, threshold) => {
     const stdout = execFileSync(process.execPath,
-      [script, '--brief', brief, '--with-geometry', '--layout-compliance', '40'],
+      [script, '--brief', brief, '--with-geometry', '--layout-compliance', String(threshold)],
       { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
     return JSON.parse(stdout).geometry.layoutCompliance;
   };
 
-  // 四工位：40 mm 下差的全是工位内部（转台底座 × 转台台面），整站挪不会改变相对距离
-  const four = read('四工位点胶机，节拍 25 件/分钟');
-  assert.ok(four.advice.length > 0);
-  for (const item of four.advice) {
-    assert.equal(item.intraScope, true, `${item.scope} 应当是工位内部问题`);
-  }
+  // 四工位 40 mm：剩下的 2 处是重叠，不是间距 → 没有建议可说
+  const four = read('四工位点胶机，节拍 25 件/分钟', 40);
+  assert.equal(four.clearance, 0);
+  assert.ok(four.suspects > 0);
+  assert.equal((four.advice ?? []).length, 0, '没有间距问题时不该硬凑建议');
 
-  // 六工位：差的是跨工位的（工位之间 / 工位与门架），这类才该给「整站挪」按钮
-  const six = read('六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅');
+  // 六工位 40 mm：59 处间距问题，全是跨工位，且每条推完都会撞 → actionable=false
+  const six = read('六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅', 40);
   assert.ok(six.advice.length > 0);
-  assert.ok(six.advice.some((item) => item.intraScope === false), '六工位应当有跨工位建议');
-  for (const item of six.advice) {
-    assert.ok(['x', 'y', 'z'].includes(item.axis));
-    assert.ok(item.direction === 1 || item.direction === -1);
-  }
+  assert.ok(six.advice.every((item) => item.intraScope === false), '六工位应当全是跨工位问题');
+  assert.ok(six.advice.every((item) => item.actionable === false), '这台机器推哪都撞，不应有可执行建议');
+  assert.ok(six.advice.every((item) => item.overlapsAfter > 0), '要给出预计会撞几对');
 });
-
 
 test('建议的可执行性：actionable 只给「跨工位且推完不撞」的条目', { timeout: 300_000 }, () => {
   const brief = '六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅';

@@ -68,3 +68,28 @@ test('贴面（间隙 ≤0.5 mm）算接触，不报成间距不足', () => {
   const realGap = { parts: [box('a', [0, 0, 0], [100, 100, 100]), box('b', [103, 0, 0], [100, 100, 100])] };
   assert.equal(screenClearance(realGap, { thresholdMm: 20 }).count, 1, '3 mm 才算间距不足');
 });
+
+test('装配贴合 vs 间距问题：同站上下叠、间隙 ≤5 mm 归 contact，不计入 count', () => {
+  // 底座上放台面，隔 3 mm：这类是装配贴合，不该当「间距不足」报
+  const geometry = {
+    parts: [
+      box('st1-base', [0, 0, 0], [100, 100, 20]),
+      box('st1-table', [0, 0, 23], [100, 100, 20])
+    ]
+  };
+  const tight = screenClearance(geometry, { thresholdMm: 20 });
+  assert.equal(tight.count, 0, '贴面 3 mm 应当算 contact，不算间距问题');
+  assert.equal(tight.contacts, 1);
+
+  // 隔 12 mm 就真的是间距问题了（仍在阈值内）
+  const apart = {
+    parts: [
+      box('st1-base', [0, 0, 0], [100, 100, 20]),
+      box('st1-table', [0, 0, 32], [100, 100, 20])
+    ]
+  };
+  const loose = screenClearance(apart, { thresholdMm: 20 });
+  assert.equal(loose.count, 1);
+  assert.equal(loose.pairs[0].kind, 'intra');
+  assert.equal(loose.contacts, 0);
+});

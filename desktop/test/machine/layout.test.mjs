@@ -139,10 +139,11 @@ test('跨工位太近且空间充足：建议可执行，方向指向远离对�
 });
 
 test('工位内部太近：标 intraScope 且不可执行（整站挪不改变内部相对距离）', () => {
+  // 上下叠、间隙 15 mm：不是「贴面 5 mm 内」的接触，算工位内部的间距问题
   const geometry = {
     parts: [
       box('stA-base', [0, 0, 0], [100, 100, 20]),
-      box('stA-table', [0, 0, 25], [100, 100, 20])
+      box('stA-table', [0, 0, 35], [100, 100, 20])
     ]
   };
   const advice = buildAdvice(geometry, 40);

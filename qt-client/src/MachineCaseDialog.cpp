@@ -617,10 +617,11 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                                     first.value(QStringLiteral("b")).toString());
             }
             auto *clearanceLabel = new QLabel(
-                QStringLiteral("间距 < %1 mm：%2 处%3　（AABB 距离初筛，贴面 ≤0.5 mm 算接触）")
+                QStringLiteral("间距 < %1 mm：%2 处%3　（AABB 距离初筛；另有 %4 对是装配贴合，未计入）")
                     .arg(clearance.value(QStringLiteral("thresholdMm")).toInt())
                     .arg(clearance.value(QStringLiteral("count")).toInt())
-                    .arg(tightest), page);
+                    .arg(tightest)
+                    .arg(clearance.value(QStringLiteral("contacts")).toInt()), page);
             clearanceLabel->setWordWrap(true);
             clearanceLabel->setStyleSheet(QStringLiteral("color:#8a6d3b;"));
             auto *thresholdRow = new QHBoxLayout();

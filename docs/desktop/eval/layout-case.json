@@ -1668,14 +1668,14 @@
         "center": [
           -570,
           160,
-          953
+          933
         ],
         "rotationZDeg": 0,
         "estimated": true,
         "movedBy": [
           0,
           0,
-          42
+          22
         ]
       },
       {
@@ -1699,14 +1699,14 @@
         "center": [
           -540,
           160,
-          995
+          975
         ],
         "rotationZDeg": 0,
         "estimated": true,
         "movedBy": [
           0,
           0,
-          63
+          43
         ]
       },
       {
@@ -1915,14 +1915,14 @@
         "center": [
           -190,
           160,
-          953
+          933
         ],
         "rotationZDeg": 0,
         "estimated": true,
         "movedBy": [
           0,
           0,
-          42
+          22
         ]
       },
       {
@@ -1946,14 +1946,14 @@
         "center": [
           -160,
           160,
-          995
+          975
         ],
         "rotationZDeg": 0,
         "estimated": true,
         "movedBy": [
           0,
           0,
-          63
+          43
         ]
       },
       {
@@ -2162,14 +2162,14 @@
         "center": [
           190,
           160,
-          953
+          933
         ],
         "rotationZDeg": 0,
         "estimated": true,
         "movedBy": [
           0,
           0,
-          42
+          22
         ]
       },
       {
@@ -2193,14 +2193,14 @@
         "center": [
           220,
           160,
-          995
+          975
         ],
         "rotationZDeg": 0,
         "estimated": true,
         "movedBy": [
           0,
           0,
-          63
+          43
         ]
       },
       {
@@ -2409,14 +2409,14 @@
         "center": [
           570,
           160,
-          953
+          933
         ],
         "rotationZDeg": 0,
         "estimated": true,
         "movedBy": [
           0,
           0,
-          42
+          22
         ]
       },
       {
@@ -2440,14 +2440,14 @@
         "center": [
           600,
           160,
-          995
+          975
         ],
         "rotationZDeg": 0,
         "estimated": true,
         "movedBy": [
           0,
           0,
-          63
+          43
         ]
       },
       {
@@ -2758,37 +2758,37 @@
           "mm": 60,
           "converged": false,
           "rounds": 4,
-          "moves": 850
+          "moves": 920
         },
         {
           "mm": 33,
           "converged": false,
-          "rounds": 3,
-          "moves": 460
+          "rounds": 4,
+          "moves": 70
         },
         {
           "mm": 19,
           "converged": true,
-          "rounds": 3,
-          "moves": 58
+          "rounds": 2,
+          "moves": 42
         },
         {
           "mm": 26,
           "converged": false,
-          "rounds": 3,
-          "moves": 456
+          "rounds": 4,
+          "moves": 66
         },
         {
           "mm": 23,
           "converged": true,
-          "rounds": 3,
-          "moves": 66
+          "rounds": 2,
+          "moves": 58
         },
         {
           "mm": 25,
           "converged": true,
-          "rounds": 3,
-          "moves": 66
+          "rounds": 2,
+          "moves": 58
         }
       ],
       "minMm": 5,
@@ -2808,15 +2808,6 @@
         },
         {
           "round": 2,
-          "suspectsBefore": 4,
-          "clearanceBefore": 0,
-          "overlapMoves": 4,
-          "clearanceMoves": 4,
-          "suspectsAfter": 4,
-          "clearanceAfter": 0
-        },
-        {
-          "round": 3,
           "suspectsBefore": 4,
           "clearanceBefore": 0,
           "overlapMoves": 4,
@@ -3563,70 +3554,6 @@
           "kind": "overlap"
         },
         {
-          "partId": "st1-rotary-1-table",
-          "axis": "z",
-          "delta": 20,
-          "from": [
-            -570,
-            160,
-            933
-          ],
-          "to": [
-            -570,
-            160,
-            953
-          ],
-          "kind": "clearance"
-        },
-        {
-          "partId": "st2-rotary-1-table",
-          "axis": "z",
-          "delta": 20,
-          "from": [
-            -190,
-            160,
-            933
-          ],
-          "to": [
-            -190,
-            160,
-            953
-          ],
-          "kind": "clearance"
-        },
-        {
-          "partId": "st3-rotary-1-table",
-          "axis": "z",
-          "delta": 20,
-          "from": [
-            190,
-            160,
-            933
-          ],
-          "to": [
-            190,
-            160,
-            953
-          ],
-          "kind": "clearance"
-        },
-        {
-          "partId": "st4-rotary-1-table",
-          "axis": "z",
-          "delta": 20,
-          "from": [
-            570,
-            160,
-            933
-          ],
-          "to": [
-            570,
-            160,
-            953
-          ],
-          "kind": "clearance"
-        },
-        {
           "partId": "st1-rotary-1-fixture",
           "axis": "z",
           "delta": 13,
@@ -3640,7 +3567,7 @@
             160,
             975
           ],
-          "kind": "overlap"
+          "kind": "clearance"
         },
         {
           "partId": "st2-rotary-1-fixture",
@@ -3656,7 +3583,7 @@
             160,
             975
           ],
-          "kind": "overlap"
+          "kind": "clearance"
         },
         {
           "partId": "st3-rotary-1-fixture",
@@ -3672,7 +3599,7 @@
             160,
             975
           ],
-          "kind": "overlap"
+          "kind": "clearance"
         },
         {
           "partId": "st4-rotary-1-fixture",
@@ -3687,70 +3614,6 @@
             600,
             160,
             975
-          ],
-          "kind": "overlap"
-        },
-        {
-          "partId": "st1-rotary-1-fixture",
-          "axis": "z",
-          "delta": 20,
-          "from": [
-            -540,
-            160,
-            975
-          ],
-          "to": [
-            -540,
-            160,
-            995
-          ],
-          "kind": "clearance"
-        },
-        {
-          "partId": "st2-rotary-1-fixture",
-          "axis": "z",
-          "delta": 20,
-          "from": [
-            -160,
-            160,
-            975
-          ],
-          "to": [
-            -160,
-            160,
-            995
-          ],
-          "kind": "clearance"
-        },
-        {
-          "partId": "st3-rotary-1-fixture",
-          "axis": "z",
-          "delta": 20,
-          "from": [
-            220,
-            160,
-            975
-          ],
-          "to": [
-            220,
-            160,
-            995
-          ],
-          "kind": "clearance"
-        },
-        {
-          "partId": "st4-rotary-1-fixture",
-          "axis": "z",
-          "delta": 20,
-          "from": [
-            600,
-            160,
-            975
-          ],
-          "to": [
-            600,
-            160,
-            995
           ],
           "kind": "clearance"
         }
@@ -3819,8 +3682,8 @@
     "converged": true,
     "suspects": 0,
     "clearance": 0,
-    "rounds": 3,
-    "moves": 58,
+    "rounds": 2,
+    "moves": 50,
     "maxFeasibleMm": 25
   }
 }

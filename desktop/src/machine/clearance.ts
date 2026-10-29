@@ -6,9 +6,19 @@
 import { partBounds } from './interference.ts';
 import { declaredJoints, jointKey } from './joints.ts';
 
+/**
+ * contact = 同一工位内、沿 Z 上下叠着、间隙 ≤ 5 mm：多半是装配贴合（底座上放台面），
+ *           该在 joints 里声明成结构连接，不该当「间距不足」；
+ * intra   = 同一工位内部；
+ * cross   = 跨工位。
+ * 这是**启发式分类**，不是几何定理——贴面 5 mm 以内也可能真的需要间隙。
+ */
+export type ClearanceKind = 'contact' | 'intra' | 'cross';
+
 export interface ClearancePair {
   a: string;
   b: string;
+  kind: ClearanceKind;
   /** 两件 AABB 之间的真实距离（mm）：三个轴上的正间隙平方和开根 */
   gapMm: number;
   /** 哪个轴贡献的间隙最大（决定往哪边看） */
@@ -19,8 +29,11 @@ export interface ClearancePair {
 
 export interface ClearanceResult {
   thresholdMm: number;
+  /** 真正要处理的间距问题数（不含 contact） */
   count: number;
   pairs: ClearancePair[];
+  /** 被归为「装配贴合」的对数，单独计数，不计入 count */
+  contacts: number;
 }
 
 const AXES: Array<'x' | 'y' | 'z'> = ['x', 'y', 'z'];
@@ -71,9 +84,14 @@ export function screenClearance(geometry: any, options: { thresholdMm?: number }
       if (gapMm <= 0.5) continue;
       if (gapMm >= thresholdMm) continue;
       const axisName = AXES[axisIndex] ?? 'x';
+      const sameScope = leftId.split('-')[0] === rightId.split('-')[0];
+      const kind: ClearanceKind = !sameScope
+        ? 'cross'
+        : (axisName === 'z' && gapMm <= 5 ? 'contact' : 'intra');
       pairs.push({
         a: leftId,
         b: rightId,
+        kind,
         gapMm: Math.round(gapMm * 100) / 100,
         axis: axisName,
         detail: `沿 ${axisName.toUpperCase()} 间隙 ${gapMm.toFixed(1)} mm`
@@ -81,6 +99,8 @@ export function screenClearance(geometry: any, options: { thresholdMm?: number }
     }
   }
 
-  pairs.sort((left, right) => left.gapMm - right.gapMm);
-  return { thresholdMm, count: pairs.length, pairs };
+  const contacts = pairs.filter((pair) => pair.kind === 'contact').length;
+  const violations = pairs.filter((pair) => pair.kind !== 'contact');
+  violations.sort((left, right) => left.gapMm - right.gapMm);
+  return { thresholdMm, count: violations.length, pairs: violations, contacts };
 }
