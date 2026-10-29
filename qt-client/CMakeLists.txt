@@ -17,6 +17,7 @@ add_executable(automationcad-qt
     src/MainWindow.cpp
     src/StlViewport.cpp
     src/FeatureDialog.cpp
+    src/MachineCaseDialog.cpp
     src/MainWindow.h
 )
 target_link_libraries(automationcad-qt PRIVATE Qt6::Widgets Qt6::Network Qt6::OpenGLWidgets)

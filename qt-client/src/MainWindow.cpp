@@ -2,6 +2,7 @@
 // 不含 OCCT 头文件；视口是占位 QWidget，OCCT AIS 接入是后续里程碑。
 #include "MainWindow.h"
 #include "FeatureDialog.h"
+#include "MachineCaseDialog.h"
 
 #include <QAction>
 #include <QComboBox>
@@ -86,6 +87,20 @@ MainWindow::MainWindow(QWidget *parent)
     fileMenu->addAction(tr("退出装配视图"), this, [this]() { m_assemblyId.clear(); refreshNow(); });
     fileMenu->addSeparator();
     fileMenu->addAction(tr("导出 STL…"), this, &MainWindow::exportStlDialog);
+    fileMenu->addAction(tr("打开整机方案…"), this, [this]() {
+        const QString path = QFileDialog::getOpenFileName(this, tr("打开整机方案"), QString(),
+                                                          tr("整机方案 (*.json)"));
+        if (path.isEmpty()) return;
+        QJsonObject document;
+        QString error;
+        if (!MachineCaseDialog::loadFile(path, &document, &error)) {
+            QMessageBox::warning(this, tr("打不开整机方案"), error);
+            return;
+        }
+        statusBar()->showMessage(tr("整机方案：%1").arg(MachineCaseDialog::summarize(document)), 15000);
+        MachineCaseDialog dialog(document, this);
+        dialog.exec();
+    });
     auto *viewMenu = menuBar()->addMenu(tr("视图"));
     viewMenu->addAction(tr("等轴测"), this, [this]() { setViewportStandardView(0); });
     viewMenu->addAction(tr("正视"), this, [this]() { setViewportStandardView(1); });

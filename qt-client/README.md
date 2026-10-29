@@ -52,6 +52,9 @@
 | `docs/desktop/screenshots/qt-client-09-ctxmenu.png` | 特征右键菜单：「压缩 / 解除压缩」「删除特征（可撤销）」，都在服务端校验后执行 |
 | `docs/desktop/screenshots/qt-client-16-iso.png` | 默认等轴测视角（视图菜单可选等轴测/正视/俯视/右视/适合视图） |
 | `docs/desktop/screenshots/qt-client-17-top.png` | 俯视：8 个孔（4 沉头 + 4 通孔）和四角 R3 一眼可见——视口画的是服务端真几何，不是占位盒 |
+| `docs/desktop/screenshots/qt-client-31-machine-overview.png` | 整机方案概览：6 工位 / 31.75 件每分 / 达标 / 4.65 kW / 成本 34,489.91（3 项无价格） |
+| `docs/desktop/screenshots/qt-client-32-machine-bom.png` | 整机方案 BOM：12 项（含伺服驱动器 SV660P 750 W ×6） |
+| `docs/desktop/screenshots/qt-client-33-machine-io.png` | 整机方案 IO：19 点（ST1-PRX-S1 → I0.0 输入 接近开关 工位1） |
 | `docs/desktop/screenshots/qt-client-30-bom.png` | 装配清单（Ctrl+B / `--bom-selftest`）：钢 0.7392 kg×1 + 1.8558 kg×2 = 合计 3 件 4.4508 kg，与装配质量 4.4508 kg 对上 |
 | `docs/desktop/screenshots/qt-client-29-measure.png` | 点选平面测面积：状态栏「选中平面 · 面积 7770.38 mm²（命中点 -3.27, -22.37, 12.00 mm）」，与手算一致 |
 | `docs/desktop/screenshots/qt-client-28-edit-member.png` | 装配里双击成员 → 改 X/Y/Z 偏移与绕 Z 转角 → `PUT /v1/assemblies/{id}`，几何自动重新 fuse |
@@ -113,6 +116,15 @@ CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI �
 `--export-selftest --out <path>` 是无人值守版本。实测零件 330,284 B / 6,604 三角面，
 装配（3 个成员）990,684 B / 19,812 三角面 = 正好 3 倍。
 装配清单对话框里还有「导出 CSV…」（带 UTF-8 BOM，Excel 打开中文不乱码）。
+
+**整机方案（只读）**：`文件 → 打开整机方案…` 读 desktop 管线导出的 `machine-case` JSON
+（`schemaVersion=1`、`kind=machine-case`，校验不过会明确报「不是整机方案文件 / 不支持的版本」），
+弹窗分三页：概览（工位数/节拍/功率/成本）、BOM、IO。数字全部原样来自 JSON，客户端不重算、不补默认值。
+
+实测 `docs/desktop/eval/machine-case.json`：**6 工位 / BOM 12 项 / IO 19 点 / 4.650 kW / 31.75 件每分 / 达标 /
+成本 34,489.91（3 项无价格）**。`--machine-case <path>` 打印摘要，`--machine-case-ui <path>` 直接开窗口（截图用）。
+
+边界写在弹窗底部：方案级结果，没有 3D 几何、没有工程图、没有公差；节拍是估算，无价格项计 0 并单独计数。
 
 需要自绘视口时 `AUTOMATIONCAD_QT_OCCT=0`。
 

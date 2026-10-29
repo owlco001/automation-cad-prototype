@@ -2,6 +2,7 @@
 // 启动前需先启动 FeatureTree 契约服务（featuretree-service/server.mjs，默认 127.0.0.1:18080），
 // 否则主窗口状态栏会显示“服务未连接”，这是预期行为，不是崩溃。
 #include "MainWindow.h"
+#include "MachineCaseDialog.h"
 #include <QApplication>
 #include <QSurfaceFormat>
 #include <QDebug>
@@ -127,6 +128,40 @@ int main(int argc, char *argv[]) {
         }
         qInfo().noquote() << QStringLiteral("FT_QT_HISTORY_OK undo=r%1 redo=r%2 height=%3").arg(undoRevision).arg(redoRevision).arg(height);
         return 0;
+    }
+
+    // 整机方案自检：--machine-case <path>，只读解析并打印摘要（人肉核对/CI 都能用）
+    {
+        const int caseIndex = args.indexOf(QStringLiteral("--machine-case"));
+        if (caseIndex >= 0 && caseIndex + 1 < args.size()) {
+            QJsonObject document;
+            QString error;
+            if (!MachineCaseDialog::loadFile(args.at(caseIndex + 1), &document, &error)) {
+                qCritical().noquote() << "FT_QT_MACHINECASE_FAIL" << error;
+                return 1;
+            }
+            qInfo().noquote() << "FT_QT_MACHINECASE_OK" << MachineCaseDialog::summarize(document);
+            return 0;
+        }
+    }
+
+    // 整机方案窗口：--machine-case-ui <path>（给截图/人肉核对用，会停在窗口上）
+    {
+        const int uiIndex = args.indexOf(QStringLiteral("--machine-case-ui"));
+        if (uiIndex >= 0 && uiIndex + 1 < args.size()) {
+            QJsonObject document;
+            QString error;
+            if (!MachineCaseDialog::loadFile(args.at(uiIndex + 1), &document, &error)) {
+                qCritical().noquote() << "FT_QT_MACHINECASE_FAIL" << error;
+                return 1;
+            }
+            MainWindow window;
+            window.show();
+            MachineCaseDialog dialog(document, nullptr);
+            qInfo().noquote() << "FT_QT_MACHINECASE_UI_OPEN" << MachineCaseDialog::summarize(document);
+            dialog.exec();
+            return 0;
+        }
     }
 
     // 导出 STL 自检：--export-selftest --out <path> [--base URL] [assembly=DOC]
