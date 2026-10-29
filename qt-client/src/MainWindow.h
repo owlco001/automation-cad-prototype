@@ -76,6 +76,11 @@ public:
     void tunePlacementDialog();
     /// 方向键微调选中零件（3D 里点选后用）
     void nudgeSelectedPart(int dx, int dy, int dz);
+    /// 整站挪：同一前缀（st2-…）的所有零件一起平移
+    void nudgeStation(const QString &scope, int dx, int dy, int dz);
+public:
+    /// 同一工位前缀（st2-…）的零件 id 列表，顺序与文档一致（自检也用它）
+    static QStringList partsOfScope(const QJsonObject &document, const QString &scope);
     /// 无人值守：直接指定选中零件（--nudge-selftest 用）
     void selectPartForTest(const QString &partId) { m_selectedPartId = partId; }
     void designMachineDialog();

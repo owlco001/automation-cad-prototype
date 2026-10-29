@@ -223,6 +223,11 @@ CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI �
 若界面当前阈值与戳里的不同，会补一句「⚠ 界面当前阈值是 35 mm…需重新计算」——避免误以为这份方案是按现在的阈值查过的。
 没有跑过合规的方案显示「未检查」，不假装合规。
 
+3D 里点选零件后：**方向键**挪这一件（1 mm / Shift 10 mm / PgUp·PgDn 调 Z），
+**Ctrl + 方向键**挪整站——同前缀（`st2-…`）的所有零件一起平移，适合「一组件相对位置对、整体偏了」的情况。
+实测 `FT_QT_STATION_OK scope=st2 members=7 moved=7 others=unchanged`
+（7 件都 +10 mm，组外一件没动；组内缺伙伴会提示改用单件微调）。
+
 跑一条命令就能把 Qt 侧这批自检串起来：`--qt-smoke <fixture>`（概览戳 + CSV 行数一致；
 本地加 `--replay` 还会用 fixture 里的 brief 重跑管线，要求排布合规仍收敛）。
 实测 `QT_SMOKE_OK checks=3`，重放 `rounds=3 moves=58` 与 fixture 一致；CI 里跑不带 `--replay` 的版本（`checks=2`，不需要 node）。

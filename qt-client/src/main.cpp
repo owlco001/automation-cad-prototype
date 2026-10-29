@@ -453,6 +453,69 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    // 整站挪自检：--station-move-selftest "brief"（按前缀成组 + 整组平移 + 别的不动）
+    if (args.contains(QStringLiteral("--station-move-selftest"))) {
+        const int index = args.indexOf(QStringLiteral("--station-move-selftest"));
+        if (index + 1 >= args.size()) {
+            qCritical().noquote() << "FT_QT_STATION_FAIL 用法：--station-move-selftest \"brief\"";
+            return 2;
+        }
+        MainWindow window;
+        QJsonObject before;
+        QString error;
+        if (!window.designMachineFromBrief(args.at(index + 1), &before, &error)) {
+            qCritical().noquote() << "FT_QT_STATION_FAIL" << error;
+            return 1;
+        }
+        const QStringList members = MainWindow::partsOfScope(before, QStringLiteral("st2"));
+        if (members.size() < 2) {
+            qCritical().noquote() << "FT_QT_STATION_FAIL st2 只有" << members.size() << "个零件";
+            return 1;
+        }
+        QStringList moves;
+        for (const QString &id : members) moves << QStringLiteral("%1:10,0,0").arg(id);
+        QJsonObject after;
+        if (!window.designMachineFromBrief(args.at(index + 1), &after, &error, moves)) {
+            qCritical().noquote() << "FT_QT_STATION_FAIL" << error;
+            return 1;
+        }
+        // 组内每一件都要 +10，组外一件都不能动
+        const auto centers = [](const QJsonObject &document) {
+            QHash<QString, QJsonArray> map;
+            for (const QJsonValue &value : document.value(QStringLiteral("geometry")).toObject()
+                                                .value(QStringLiteral("parts")).toArray()) {
+                const QJsonObject part = value.toObject();
+                map.insert(part.value(QStringLiteral("id")).toString(),
+                           part.value(QStringLiteral("center")).toArray());
+            }
+            return map;
+        };
+        const QHash<QString, QJsonArray> beforeCenters = centers(before);
+        const QHash<QString, QJsonArray> afterCenters = centers(after);
+        int moved = 0;
+        for (auto it = beforeCenters.constBegin(); it != beforeCenters.constEnd(); ++it) {
+            const bool inScope = members.contains(it.key());
+            const QJsonArray oldCenter = it.value();
+            const QJsonArray newCenter = afterCenters.value(it.key());
+            const double dx = newCenter.at(0).toDouble() - oldCenter.at(0).toDouble();
+            const double dy = newCenter.at(1).toDouble() - oldCenter.at(1).toDouble();
+            const double dz = newCenter.at(2).toDouble() - oldCenter.at(2).toDouble();
+            if (inScope) {
+                if (qAbs(dx - 10.0) > 1e-6 || qAbs(dy) > 1e-6 || qAbs(dz) > 1e-6) {
+                    qCritical().noquote() << "FT_QT_STATION_FAIL" << it.key() << "位移不对：" << dx << dy << dz;
+                    return 1;
+                }
+                moved += 1;
+            } else if (qAbs(dx) > 1e-6 || qAbs(dy) > 1e-6 || qAbs(dz) > 1e-6) {
+                qCritical().noquote() << "FT_QT_STATION_FAIL 组外零件" << it.key() << "被挪了：" << dx;
+                return 1;
+            }
+        }
+        qInfo().noquote() << QStringLiteral("FT_QT_STATION_OK scope=st2 members=%1 moved=%2 others=unchanged")
+                                 .arg(members.size()).arg(moved);
+        return 0;
+    }
+
     // 统一冒烟入口：--qt-smoke <fixture.json>（把下面几条串起来，省得手敲一长串环境变量）
     {
         const int index = args.indexOf(QStringLiteral("--qt-smoke"));

@@ -811,6 +811,19 @@ void MainWindow::showMachineCase(const QJsonObject &document) {
 void MainWindow::keyPressEvent(QKeyEvent *event) {
     qInfo().noquote() << "FT_QT_KEY key=" << event->key() << "sel=" << m_selectedPartId;
     const int step = (event->modifiers() & Qt::ShiftModifier) ? 10 : 1;
+    // Ctrl + 方向键 = 整站挪（同前缀的所有零件一起动），单件微调调不好一组相对的件时用
+    if (!m_selectedPartId.isEmpty() && (event->modifiers() & Qt::ControlModifier)) {
+        const QString scope = m_selectedPartId.section(QLatin1Char('-'), 0, 0);
+        switch (event->key()) {
+        case Qt::Key_Left: nudgeStation(scope, -step, 0, 0); return;
+        case Qt::Key_Right: nudgeStation(scope, step, 0, 0); return;
+        case Qt::Key_Up: nudgeStation(scope, 0, step, 0); return;
+        case Qt::Key_Down: nudgeStation(scope, 0, -step, 0); return;
+        case Qt::Key_PageUp: nudgeStation(scope, 0, 0, step); return;
+        case Qt::Key_PageDown: nudgeStation(scope, 0, 0, -step); return;
+        default: break;
+        }
+    }
     if (!m_selectedPartId.isEmpty()) {
         switch (event->key()) {
         case Qt::Key_Left: nudgeSelectedPart(-step, 0, 0); return;
@@ -830,6 +843,55 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
         }
     }
     QMainWindow::keyPressEvent(event);
+}
+
+QStringList MainWindow::partsOfScope(const QJsonObject &document, const QString &scope) {
+    QStringList members;
+    const QJsonArray parts = document.value(QStringLiteral("geometry")).toObject()
+                                 .value(QStringLiteral("parts")).toArray();
+    for (const QJsonValue &value : parts) {
+        const QString id = value.toObject().value(QStringLiteral("id")).toString();
+        if (id.section(QLatin1Char('-'), 0, 0) == scope) members << id;
+    }
+    return members;
+}
+
+void MainWindow::nudgeStation(const QString &scope, int dx, int dy, int dz) {
+    if (m_lastBrief.trimmed().isEmpty()) {
+        statusBar()->showMessage(tr("需要先用 brief 生成方案，才知道怎么重算"), 8000);
+        return;
+    }
+    const QStringList members = partsOfScope(m_lastDocument, scope);
+    if (members.isEmpty()) {
+        statusBar()->showMessage(tr("这个零件没有同前缀的伙伴，按 Ctrl 挪没有意义（用单件微调）"), 8000);
+        return;
+    }
+    QStringList moves = m_lastMoves;
+    for (const QString &id : members) {
+        moves << QStringLiteral("%1:%2,%3,%4").arg(id).arg(dx).arg(dy).arg(dz);
+    }
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    QJsonObject updated;
+    QString error;
+    const bool ok = designMachineFromBrief(m_lastBrief, &updated, &error, moves);
+    QApplication::restoreOverrideCursor();
+    if (!ok) {
+        statusBar()->showMessage(tr("整站挪失败：%1").arg(error), 15000);
+        return;
+    }
+    m_lastDocument = updated;
+    m_lastMoves = moves;
+    int shapes = 0;
+    QString geometryError;
+    renderMachineGeometry(updated, &shapes, &geometryError);
+    const QJsonObject interference = updated.value(QStringLiteral("geometry")).toObject()
+                                        .value(QStringLiteral("interference")).toObject();
+    qInfo().noquote() << "FT_QT_STATION_MOVE scope=" << scope << "members=" << members.size()
+                      << "d=" << dx << dy << dz
+                      << "overlaps=" << interference.value(QStringLiteral("count")).toInt();
+    statusBar()->showMessage(tr("整站挪 %1（%2 件）(%3,%4,%5) · 重叠 %6 对")
+                                 .arg(scope).arg(members.size()).arg(dx).arg(dy).arg(dz)
+                                 .arg(interference.value(QStringLiteral("count")).toInt()), 15000);
 }
 
 void MainWindow::nudgeSelectedPart(int dx, int dy, int dz) {
