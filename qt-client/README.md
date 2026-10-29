@@ -52,6 +52,7 @@
 | `docs/desktop/screenshots/qt-client-09-ctxmenu.png` | 特征右键菜单：「压缩 / 解除压缩」「删除特征（可撤销）」，都在服务端校验后执行 |
 | `docs/desktop/screenshots/qt-client-16-iso.png` | 默认等轴测视角（视图菜单可选等轴测/正视/俯视/右视/适合视图） |
 | `docs/desktop/screenshots/qt-client-17-top.png` | 俯视：8 个孔（4 沉头 + 4 通孔）和四角 R3 一眼可见——视口画的是服务端真几何，不是占位盒 |
+| `docs/desktop/screenshots/qt-client-30-bom.png` | 装配清单（Ctrl+B / `--bom-selftest`）：钢 0.7392 kg×1 + 1.8558 kg×2 = 合计 3 件 4.4508 kg，与装配质量 4.4508 kg 对上 |
 | `docs/desktop/screenshots/qt-client-29-measure.png` | 点选平面测面积：状态栏「选中平面 · 面积 7770.38 mm²（命中点 -3.27, -22.37, 12.00 mm）」，与手算一致 |
 | `docs/desktop/screenshots/qt-client-28-edit-member.png` | 装配里双击成员 → 改 X/Y/Z 偏移与绕 Z 转角 → `PUT /v1/assemblies/{id}`，几何自动重新 fuse |
 | `docs/desktop/screenshots/qt-client-27-interference.png` | 「评估 → 装配干涉检查」(Ctrl+I)：真实布尔交集，状态栏/弹窗给出「1 对成员存在实体干涉」与每对的重叠体积 |

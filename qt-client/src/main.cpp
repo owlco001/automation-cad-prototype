@@ -129,6 +129,23 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    // 装配清单自检：--bom-selftest [--base URL]，直接把 Ctrl+B 的窗口弹出来（人肉截图/核对用）
+    if (args.contains(QStringLiteral("--bom-selftest"))) {
+        QString base = QStringLiteral("http://127.0.0.1:18781");
+        const int baseIndex = args.indexOf(QStringLiteral("--base"));
+        if (baseIndex >= 0 && baseIndex + 1 < args.size()) base = args.at(baseIndex + 1);
+        QString assemblyId = qEnvironmentVariable("AUTOMATIONCAD_QT_ASSEMBLY");
+        MainWindow window;
+        window.setServiceBase(base);
+        if (!assemblyId.isEmpty()) window.openAssembly(assemblyId);
+        QTimer::singleShot(1200, &window, [&window]() {
+            window.runAssemblyBom();
+            qInfo().noquote() << "FT_QT_BOM_DIALOG_OPEN";
+        });
+        window.show();
+        return app.exec();
+    }
+
     // 自动刷新自检：--watch-selftest [--base URL]
     // 读一次 → 打印 WATCH_READY → 外部改一次树 → 客户端应在 1.5s 内检测到新 revision 并打印 REFRESH_OK。
     if (args.contains(QStringLiteral("--watch-selftest"))) {

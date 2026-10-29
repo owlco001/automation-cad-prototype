@@ -61,6 +61,8 @@ public:
     /// 撤销/重做（走服务端 /v1/undo、/v1/redo，带 expectedRevision）
     void undoOnce();
     void redoOnce();
+    /// 装配清单（Ctrl+B 的同一入口，也给 --bom-selftest 用）
+    void runAssemblyBom();
 
 signals:
     /// 每次成功读到包络后发出（首次加载与后续变化都会发）
@@ -70,7 +72,6 @@ private slots:
     void loadTree();
     void reloadDocuments();
     void runInterferenceCheck();
-    void runAssemblyBom();
     void onCreateDocument();
     void onEventStreamReadyRead();
     void onEventStreamFinished();
