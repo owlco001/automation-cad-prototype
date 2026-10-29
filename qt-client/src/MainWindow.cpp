@@ -1387,9 +1387,19 @@ bool MainWindow::insertPartFromCatalog(const QString &type, const QVector3D &at,
     if (!designMachineFromBrief(m_lastBrief, &document, error, m_lastMoves, false, 0, false, -1, false, {}, spec)) {
         return false;
     }
-    const QJsonArray parts = document.value(QStringLiteral("geometry")).toObject()
-                                 .value(QStringLiteral("parts")).toArray();
+    const QJsonObject geometry = document.value(QStringLiteral("geometry")).toObject();
+    const QJsonArray parts = geometry.value(QStringLiteral("parts")).toArray();
     *partCount = parts.size();
+    // 插入后顺带跑一次**整机**间距初筛（不是只看新构件：最紧的一对可能跟它无关，这里如实报整机口径）
+    const QJsonObject clearance = geometry.value(QStringLiteral("clearance")).toObject();
+    const QJsonArray gapPairs = clearance.value(QStringLiteral("pairs")).toArray();
+    if (!gapPairs.isEmpty()) {
+        const QJsonObject tightest = gapPairs.first().toObject();
+        qInfo().noquote() << "FT_QT_INSERT_CLEARANCE count=" << clearance.value(QStringLiteral("count")).toInt()
+                          << "tightest=" << tightest.value(QStringLiteral("gapMm")).toDouble()
+                          << tightest.value(QStringLiteral("a")).toString()
+                          << tightest.value(QStringLiteral("b")).toString();
+    }
     m_lastDocument = document;
     int shapes = 0;
     QString renderError;
