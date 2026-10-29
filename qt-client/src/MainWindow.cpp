@@ -709,6 +709,7 @@ bool MainWindow::clipTestMetrics(double z, int *beforePixels, int *afterPixels, 
 
 bool MainWindow::renderMachineGeometry(const QJsonObject &document, int *shapeCount, QString *error) {
     const QJsonObject geometry = document.value(QStringLiteral("geometry")).toObject();
+    m_partBounds = geometry.value(QStringLiteral("bounds")).toArray();
     if (geometry.isEmpty()) {
         *error = tr("方案里没有 geometry（管线需 --with-geometry）");
         return false;
@@ -1431,7 +1432,36 @@ bool MainWindow::previewForTest(const QString &type, double x, double y, QString
         if (item.value(QStringLiteral("type")).toString() != type) continue;
         const QJsonArray size = item.value(QStringLiteral("shape")).toObject().value(QStringLiteral("size")).toArray();
         if (size.size() != 3) { *error = tr("构件 %1 没有盒体尺寸").arg(type); return false; }
-        m_occtViewport->showPreviewBox(size.at(0).toDouble(), size.at(1).toDouble(), size.at(2).toDouble(), x, y);
+        const double sx = size.at(0).toDouble();
+        const double sy = size.at(1).toDouble();
+        const double sz = size.at(2).toDouble();
+        // 本地 AABB 判定：候选盒 vs 文档里已有零件的包围盒
+        const double gapMm = 20.0;
+        double nearestGap = 1e9;
+        bool overlaps = false;
+        for (const QJsonValue &boundValue : m_partBounds) {
+            const QJsonObject bound = boundValue.toObject();
+            const QJsonArray min = bound.value(QStringLiteral("min")).toArray();
+            const QJsonArray max = bound.value(QStringLiteral("max")).toArray();
+            if (min.size() != 3 || max.size() != 3) continue;
+            double dx = 0, dy = 0, dz = 0;
+            const double cmin[3] = {x - sx / 2, y - sy / 2, 0.0};
+            const double cmax[3] = {x + sx / 2, y + sy / 2, sz};
+            bool hit = true;
+            for (int axis = 0; axis < 3; ++axis) {
+                const double low = min.at(axis).toDouble();
+                const double high = max.at(axis).toDouble();
+                const double gap = std::max({0.0, low - cmax[axis], cmin[axis] - high});
+                if (axis == 0) dx = gap; else if (axis == 1) dy = gap; else dz = gap;
+                if (gap <= 0.0) continue;
+                hit = false;
+            }
+            if (hit) { overlaps = true; break; }
+            nearestGap = std::min(nearestGap, std::sqrt(dx * dx + dy * dy + dz * dz));
+        }
+        const int state = overlaps ? 2 : (nearestGap < gapMm ? 1 : 0);
+        m_previewState = state;
+        m_occtViewport->showPreviewBox(sx, sy, sz, x, y, state);
         return true;
     }
     *error = tr("构件库里没有 %1").arg(type);

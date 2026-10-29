@@ -141,6 +141,22 @@ test('--boolean-recheck：连不上 sidecar 时如实标「未复核」，不冒
   assert.match(recheck.message, /无需复核/, '0 处疑似要说「不需要」，不能说「已复核」');
 });
 
+test('--with-geometry 输出 bounds，且与 parts 一一对应（Qt 拖动预览靠它本地判重叠）', { timeout: 120_000 }, () => {
+  const stdout = execFileSync(process.execPath,
+    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry'],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const geometry = JSON.parse(stdout).geometry;
+  const parts = geometry.parts;
+  const bounds = geometry.bounds;
+  assert.equal(bounds.length, parts.length, '每个零件都要有包围盒');
+  bounds.forEach((entry, index) => {
+    assert.equal(entry.id, parts[index].id);
+    assert.equal(entry.min.length, 3);
+    assert.equal(entry.max.length, 3);
+    entry.min.forEach((value, axis) => assert.ok(value <= entry.max[axis], `${entry.id} min<=max`));
+  });
+});
+
 test('线体加宽：CLI 把结论写进 geometry.widening，不可行时给带数字的原因', { timeout: 240_000 }, () => {
   const stdout = execFileSync(process.execPath,
     [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--min-widening', '40'],

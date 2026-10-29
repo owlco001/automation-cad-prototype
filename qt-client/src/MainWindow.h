@@ -76,6 +76,8 @@ public:
     bool screenPointToGroundForTest(int x, int y, double *worldX, double *worldY);
     /// 预览自检：按构件库尺寸画一个预览盒（不提交几何）
     bool previewForTest(const QString &type, double x, double y, QString *error);
+    /// 预览状态：0 绿 / 1 黄 / 2 红（用文档里的 bounds 本地判，不问求解器）
+    int previewStateForTest() const { return m_previewState; }
     bool previewVisibleForTest() const;
     /// 撤销最后一次插入：返回撤销后零件数，没有可撤销的返回 false
     bool undoLastInsert(int *partCount, QString *error);
@@ -201,6 +203,8 @@ private:        // 最近一次生成的整机方案（试摆位/导出用）
     QJsonArray m_catalogCache;
     /// 插入前快照：插入这类操作要能撤回，不能让用户手工再删一遍
     QVector<QJsonObject> m_insertHistory;
+    QJsonArray m_partBounds;
+    int m_previewState = 0;
     bool m_pendingRecomputeCompliance = false;
     int m_pendingRecomputeMm = 20;
     bool m_pendingShiftScope = false;

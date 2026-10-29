@@ -372,12 +372,16 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
             QCoreApplication::processEvents();
-            if (!window.previewForTest(args.at(index + 2), 300.0, 300.0, &error)) {
+            const double px = index + 3 < args.size() ? args.at(index + 3).toDouble() : 300.0;
+            const double py = index + 4 < args.size() ? args.at(index + 4).toDouble() : 300.0;
+            if (!window.previewForTest(args.at(index + 2), px, py, &error)) {
                 qCritical().noquote() << "FT_QT_PREVIEW_FAIL" << error;
                 return 1;
             }
             const bool shown = window.previewVisibleForTest();
-            qInfo().noquote() << QStringLiteral("FT_QT_PREVIEW_OK type=%1 shown=%2").arg(args.at(index + 2)).arg(shown ? 1 : 0);
+            qInfo().noquote() << QStringLiteral("FT_QT_PREVIEW_OK type=%1 at=%2,%3 state=%4 shown=%5")
+                                     .arg(args.at(index + 2)).arg(px).arg(py)
+                                     .arg(window.previewStateForTest()).arg(shown ? 1 : 0);
             if (!shown) return 1;
             return 0;
         }

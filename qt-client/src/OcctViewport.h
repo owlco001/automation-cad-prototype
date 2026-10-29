@@ -63,7 +63,8 @@ public:
     double clipZ() const { return m_clipZ; }
 
     /// 拖动预览盒：尺寸由调用方给（来自构件库），这里只负责画一个半透明体
-    void showPreviewBox(double sizeX, double sizeY, double sizeZ, double x, double y);
+    /// state: 0=正常(绿) 1=接近阈值(黄) 2=已重叠(红)
+    void showPreviewBox(double sizeX, double sizeY, double sizeZ, double x, double y, int state = 0);
     void clearPreviewBox();
     bool previewVisible() const { return m_previewActive; }
 

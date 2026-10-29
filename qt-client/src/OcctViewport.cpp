@@ -450,7 +450,7 @@ void OcctViewport::dragLeaveEvent(QDragLeaveEvent *event) {
     clearPreviewBox();
 }
 
-void OcctViewport::showPreviewBox(double sizeX, double sizeY, double sizeZ, double x, double y) {
+void OcctViewport::showPreviewBox(double sizeX, double sizeY, double sizeZ, double x, double y, int state) {
 #ifdef AUTOMATIONCAD_HAVE_OCCT
     if (!m_viewReady) return;
     clearPreviewBox();
@@ -459,7 +459,11 @@ void OcctViewport::showPreviewBox(double sizeX, double sizeY, double sizeZ, doub
     gp_Trsf placement;
     placement.SetTranslation(gp_Vec(x, y, 0));
     m_previewHandle = new AIS_Shape(BRepBuilderAPI_Transform(box, placement, true).Shape());
-    m_previewHandle->SetColor(Quantity_Color(0.35, 0.55, 0.85, Quantity_TOC_sRGB));
+    // 颜色即结论：绿=可以放、黄=贴近阈值、红=已经撞上（松手前就该看出来）
+    const Quantity_Color color = state == 2 ? Quantity_Color(0.85, 0.25, 0.25, Quantity_TOC_sRGB)
+                                : state == 1 ? Quantity_Color(0.90, 0.70, 0.20, Quantity_TOC_sRGB)
+                                             : Quantity_Color(0.30, 0.75, 0.35, Quantity_TOC_sRGB);
+    m_previewHandle->SetColor(color);
     m_previewHandle->SetTransparency(0.55);
     m_context->Display(m_previewHandle, AIS_Shaded, -1, false);
     m_previewActive = true;

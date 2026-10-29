@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { buildMachineCase } from '../src/machine/case.ts';
 import { generateMachineGeometry } from '../src/machine/geometry.ts';
-import { screenInterference } from '../src/machine/interference.ts';
+import { screenInterference, partBounds } from '../src/machine/interference.ts';
 import { resolveConflicts, resolveClearance } from '../src/machine/resolve.ts';
 import { resolveLayout, complianceStamp, maxFeasibleClearance } from '../src/machine/layout.ts';
 import { minWidening } from '../src/machine/widen.ts';
@@ -212,6 +212,11 @@ if (withGeometry) {
     caseData.geometry.clearance = screenClearance(caseData.geometry, { thresholdMm: clearanceThreshold });
   }
   caseData.geometry.interference = screenInterference(caseData.geometry);
+  // 包围盒一并输出：Qt 拖动预览要在本地快速判「会不会撞」，不能每次问求解器
+  caseData.geometry.bounds = caseData.geometry.parts.map((part) => ({
+    id: part.id,
+    ...partBounds(part)
+  }));
 }
 
 const json = `${JSON.stringify(caseData, null, 2)}\n`;
