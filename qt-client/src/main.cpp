@@ -249,6 +249,31 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 整机 BOM 导出自检：--machine-bom-selftest <case.json> --out <csv>
+    {
+        const int bomIndex = args.indexOf(QStringLiteral("--machine-bom-selftest"));
+        if (bomIndex >= 0 && bomIndex + 1 < args.size()) {
+            const int outIndex = args.indexOf(QStringLiteral("--out"));
+            if (outIndex < 0 || outIndex + 1 >= args.size()) {
+                qCritical().noquote() << "FT_QT_MACHINEBOM_FAIL" << "缺 --out <csv>";
+                return 1;
+            }
+            QJsonObject document;
+            QString error;
+            if (!MachineCaseDialog::loadFile(args.at(bomIndex + 1), &document, &error)) {
+                qCritical().noquote() << "FT_QT_MACHINEBOM_FAIL" << error;
+                return 1;
+            }
+            int rows = 0;
+            if (!MachineCaseDialog::writeBomCsv(document, args.at(outIndex + 1), &rows, &error)) {
+                qCritical().noquote() << "FT_QT_MACHINEBOM_FAIL" << error;
+                return 1;
+            }
+            qInfo().noquote() << QStringLiteral("FT_QT_MACHINEBOM_OK rows=%1 path=%2").arg(rows).arg(args.at(outIndex + 1));
+            return 0;
+        }
+    }
+
     // 整机方案窗口：--machine-case-ui <path>（给截图/人肉核对用，会停在窗口上）
     {
         const int uiIndex = args.indexOf(QStringLiteral("--machine-case-ui"));

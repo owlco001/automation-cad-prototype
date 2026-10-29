@@ -21,6 +21,9 @@ public:
     /// 摘要一行，供自检/状态栏输出
     static QString summarize(const QJsonObject &document);
 
+    /// 把 BOM 写成 CSV（UTF-8 BOM + 合计行）；返回写入行数，失败时 error 给原因
+    static bool writeBomCsv(const QJsonObject &document, const QString &path, int *rows, QString *error);
+
 private:
     QLabel *m_brief = nullptr;
     QTabWidget *m_tabs = nullptr;

@@ -2,6 +2,9 @@
 
 #include <QDialogButtonBox>
 #include <QFile>
+#include <QFileDialog>
+#include <QPushButton>
+#include <QTextStream>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -10,6 +13,7 @@
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QTabWidget>
+#include <QMessageBox>
 #include <QVBoxLayout>
 
 namespace {
@@ -90,6 +94,42 @@ QString MachineCaseDialog::summarize(const QJsonObject &document) {
         .arg(cost.value(QStringLiteral("missingCount")).toInt());
 }
 
+bool MachineCaseDialog::writeBomCsv(const QJsonObject &document, const QString &path, int *rows, QString *error) {
+    const QJsonArray items = document.value(QStringLiteral("bom")).toObject().value(QStringLiteral("items")).toArray();
+    if (items.isEmpty()) {
+        *error = QStringLiteral("方案里没有 BOM 行（bom.items 为空）");
+        return false;
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        *error = QStringLiteral("写文件失败：%1").arg(file.errorString());
+        return false;
+    }
+    QTextStream out(&file);
+    out.setEncoding(QStringConverter::Utf8);
+    out << "\xEF\xBB\xBF";  // Excel 打开中文不乱码
+    out << "类别,名称,型号,数量,来源\n";
+    int written = 0;
+    for (const QJsonValue &value : items) {
+        const QJsonObject item = value.toObject();
+        const QString note = item.value(QStringLiteral("note")).toString();
+        // CSV 里引号要转义，来源文案里有逗号
+        const QString escaped = QStringLiteral("\"%1\"").arg(QString(note).replace(QLatin1Char('"'), QStringLiteral("\"\"")));
+        out << item.value(QStringLiteral("kind")).toString() << ','
+            << item.value(QStringLiteral("name")).toString() << ','
+            << item.value(QStringLiteral("model")).toString() << ','
+            << item.value(QStringLiteral("qty")).toInt(1) << ','
+            << escaped << '\n';
+        ++written;
+    }
+    const QJsonObject cost = document.value(QStringLiteral("cost")).toObject();
+    // 金额固定两位小数：默认流输出会把 34489.91 印成 34489.9
+    out << "合计,,,," << QString::number(cost.value(QStringLiteral("total")).toDouble(0.0), 'f', 2) << '\n';
+    file.close();
+    *rows = written;
+    return true;
+}
+
 MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *parent) : QDialog(parent) {
     setWindowTitle(QStringLiteral("整机方案（只读）"));
     resize(760, 520);
@@ -164,6 +204,21 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
     layout->addWidget(boundary);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
+    QPushButton *exportCsv = buttons->addButton(QStringLiteral("导出 BOM CSV…"), QDialogButtonBox::ActionRole);
+    connect(exportCsv, &QPushButton::clicked, this, [this, document]() {
+        const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("导出整机 BOM"),
+                                                          QStringLiteral("machine-bom.csv"),
+                                                          QStringLiteral("CSV 文件 (*.csv)"));
+        if (path.isEmpty()) return;
+        int rows = 0;
+        QString error;
+        if (!writeBomCsv(document, path, &rows, &error)) {
+            QMessageBox::warning(this, QStringLiteral("导出失败"), error);
+            return;
+        }
+        // 不弹第二次框：写进标题栏，用户能立刻看到行数
+        setWindowTitle(windowTitle() + QStringLiteral(" · 已导出 %1 行").arg(rows));
+    });
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     layout->addWidget(buttons);
 }

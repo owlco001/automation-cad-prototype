@@ -138,6 +138,10 @@ CMake 里是**可选**的：找不到头文件就回退到 OpenGL 视口（CI �
 实测四工位点胶机：**70 个占位体 / 包络 2140×740×1177 mm / fidelity=conceptual-estimate**
 （`--geometry-selftest "一句话"` 无人值守输出 `FT_QT_GEOMETRY_OK`）。
 
+**导出整机 BOM CSV**：方案窗口底部按钮（或 `--machine-bom-selftest <case.json> --out x.csv`）。
+实测 `machine-case.json` → 12 行 + 表头 + 合计 = 14 行 5 列，来源文案里有逗号所以加了引号转义，
+`csv.reader` 解析回来每行都是 5 列；合计 `34489.91` 固定两位小数（默认流输出会印成 `34489.9`）。
+
 **导出整机示意 STL**：`文件 → 导出整机示意 STL…`（或 `--geometry-selftest "..." --out x.stl`）。
 实测四工位：**113,284 B / 2,264 三角面**，用 STL 二进制头部的三角面数反算长度 `84+50×2264` 与文件字节完全一致；
 三角面顶点反算出的包围盒 **1820×740×1177** 与管线给的 envelope 一字不差——说明摆位（中心点/绕 Z 转角）没有错位。
