@@ -539,6 +539,10 @@ bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *docum
     // 记住 brief 与累计位移：方向键微调/试摆位都用这两个，不能只靠调用方传
     m_lastBrief = brief;
     m_lastMoves = moves;
+    // 只记「真实戳」；降级成 stale 的事发生在手工挪动处（那里才知道几何真的变了）
+    if (object.contains(QStringLiteral("compliance"))) {
+        m_lastCompliance = object.value(QStringLiteral("compliance")).toObject();
+    }
     return true;
 }
 
@@ -846,6 +850,17 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
     QMainWindow::keyPressEvent(event);
 }
 
+QJsonObject MainWindow::withStaleStamp(const QJsonObject &document, const QJsonObject &stamp,
+                                      int movesSinceStamp) {
+    if (stamp.isEmpty()) return document;
+    QJsonObject updated = document;
+    QJsonObject stale = stamp;
+    stale.insert(QStringLiteral("stale"), true);
+    stale.insert(QStringLiteral("movesSinceStamp"), movesSinceStamp);
+    updated.insert(QStringLiteral("compliance"), stale);
+    return updated;
+}
+
 QStringList MainWindow::partsOfScope(const QJsonObject &document, const QString &scope) {
     QStringList members;
     const QJsonArray parts = document.value(QStringLiteral("geometry")).toObject()
@@ -901,8 +916,9 @@ void MainWindow::nudgeStation(const QString &scope, int dx, int dy, int dz) {
         statusBar()->showMessage(tr("整站挪失败：%1").arg(error), 15000);
         return;
     }
-    m_lastDocument = updated;
     m_lastMoves = moves;
+    updated = withStaleStamp(updated, m_lastCompliance, m_lastMoves.size());
+    m_lastDocument = updated;
     int shapes = 0;
     QString geometryError;
     renderMachineGeometry(updated, &shapes, &geometryError);
@@ -939,6 +955,9 @@ void MainWindow::nudgeSelectedPart(int dx, int dy, int dz) {
         statusBar()->showMessage(tr("微调失败：%1").arg(error), 15000);
         return;
     }
+    m_lastMoves = moves;   // 单件微调也要累计，否则「按建议挪」会把这次挪动覆盖掉
+    // 手工挪动后几何变了：旧合规戳降级成 stale，别再让用户拿它当现状
+    updated = withStaleStamp(updated, m_lastCompliance, m_lastMoves.size());
     m_lastDocument = updated;
     int shapes = 0;
     QString geometryError;

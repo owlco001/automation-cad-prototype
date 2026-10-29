@@ -454,6 +454,62 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    // 合规戳过期自检：--stale-stamp-selftest "brief"（合规后再手工挪，戳必须变 stale）
+    if (args.contains(QStringLiteral("--stale-stamp-selftest"))) {
+        const int index = args.indexOf(QStringLiteral("--stale-stamp-selftest"));
+        if (index + 1 >= args.size()) {
+            qCritical().noquote() << "FT_QT_STALE_FAIL 用法：--stale-stamp-selftest \"brief\"";
+            return 2;
+        }
+        MainWindow window;
+        QJsonObject compliant;
+        QString error;
+        if (!window.designMachineFromBrief(args.at(index + 1), &compliant, &error, {}, false, 0, true, 20)) {
+            qCritical().noquote() << "FT_QT_STALE_FAIL" << error;
+            return 1;
+        }
+        const QJsonObject freshStamp = compliant.value(QStringLiteral("compliance")).toObject();
+        if (freshStamp.value(QStringLiteral("stale")).toBool()) {
+            qCritical().noquote() << "FT_QT_STALE_FAIL 刚算完的戳就不该是 stale";
+            return 1;
+        }
+        const QStringList members = MainWindow::partsOfScope(compliant, QStringLiteral("st2"));
+        if (members.isEmpty()) {
+            qCritical().noquote() << "FT_QT_STALE_FAIL st2 没有零件";
+            return 1;
+        }
+        window.selectPartForTest(members.first());
+        window.nudgeSelectedPart(1, 0, 0);
+        const QJsonObject afterNudge = window.documentForTest();
+        const QJsonObject staleStamp = afterNudge.value(QStringLiteral("compliance")).toObject();
+        if (!staleStamp.value(QStringLiteral("stale")).toBool()) {
+            qCritical().noquote() << "FT_QT_STALE_FAIL 手工挪动后戳没被标成 stale";
+            return 1;
+        }
+        if (staleStamp.value(QStringLiteral("movesSinceStamp")).toInt() < 1) {
+            qCritical().noquote() << "FT_QT_STALE_FAIL movesSinceStamp 没记";
+            return 1;
+        }
+        // 概览页那一行也必须这么说，而不是只改 JSON
+        MachineCaseDialog dialog(afterNudge, nullptr, {}, {}, {}, {}, {}, {}, 20);
+        QString shown;
+        for (QTableWidget *table : dialog.findChildren<QTableWidget *>()) {
+            for (int row = 0; row < table->rowCount(); ++row) {
+                if (table->item(row, 0) && table->item(row, 0)->text() == QStringLiteral("排布合规")) {
+                    shown = table->item(row, 1) ? table->item(row, 1)->text() : QString();
+                }
+            }
+        }
+        if (!shown.contains(QStringLiteral("已过期"))) {
+            qCritical().noquote() << "FT_QT_STALE_FAIL 概览没提示过期：" << shown;
+            return 1;
+        }
+        qInfo().noquote() << QStringLiteral("FT_QT_STALE_OK moves=%1 shown=%2")
+                                 .arg(staleStamp.value(QStringLiteral("movesSinceStamp")).toInt())
+                                 .arg(shown);
+        return 0;
+    }
+
     // 方案存取往返自检：--case-save-selftest <case.json>（存→读→比对关键字段）
     {
         const int index = args.indexOf(QStringLiteral("--case-save-selftest"));

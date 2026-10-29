@@ -296,6 +296,11 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                 stampText += QStringLiteral("（还可放宽 %1 mm）").arg(maxFeasible - stampMm);
             }
         }
+        if (stamp.value(QStringLiteral("stale")).toBool()) {
+            stampText = QStringLiteral("已过期：%1 之后又手工调整了 %2 次，需重算才能当结论")
+                            .arg(stampText)
+                            .arg(stamp.value(QStringLiteral("movesSinceStamp")).toInt());
+        }
         if (uiClearanceMm > 0 && uiClearanceMm != stampMm) {
             stampText += QStringLiteral("　⚠ 界面当前阈值是 %1 mm，与这份方案的检查值不同，需重新计算")
                              .arg(uiClearanceMm);

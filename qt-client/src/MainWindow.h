@@ -80,10 +80,15 @@ public:
     /// 整站挪：同一前缀（st2-…）的所有零件一起平移
     void nudgeStation(const QString &scope, int dx, int dy, int dz);
 public:
+    /// 把旧合规戳标记为过期后挂到文档上（没有旧戳就原样返回）
+    static QJsonObject withStaleStamp(const QJsonObject &document, const QJsonObject &stamp,
+                                      int movesSinceStamp);
     /// 同一工位前缀（st2-…）的零件 id 列表，顺序与文档一致（自检也用它）
     static QStringList partsOfScope(const QJsonObject &document, const QString &scope);
     /// 无人值守：直接指定选中零件（--nudge-selftest 用）
     void selectPartForTest(const QString &partId) { m_selectedPartId = partId; }
+    /// 当前方案（自检读戳/几何用）
+    QJsonObject documentForTest() const { return m_lastDocument; }
     void designMachineDialog();
     /// 把方案里的示意几何画到 3D 视口（占位体拼装，客户端只摆位）
     bool renderMachineGeometry(const QJsonObject &document, int *shapeCount, QString *error);
@@ -153,6 +158,9 @@ private:
     QString m_assemblyId;
     QString m_lastBrief;               // 最近一次生成/打开的方案 brief（试摆位要用）
     QStringList m_lastMoves;
+    /// 最近一次真实的合规戳（带 maxFeasibleMm 等）。手工挪动后新文档不再带戳，
+    /// 就把它降级成 stale 带过去——「以前按 20 mm 查过」这件事本身有信息量，但不能当现状。
+    QJsonObject m_lastCompliance;
     QJsonObject m_lastDocument;
 public:
     /// 当前间距阈值（自检用）
