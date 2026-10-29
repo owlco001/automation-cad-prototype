@@ -287,8 +287,33 @@ MainWindow::MainWindow(QWidget *parent)
         const QString picked = QInputDialog::getItem(this, tr("插入构件"), tr("构件类型："), labels, 0, false, &ok);
         if (!ok || picked.isEmpty()) return;
         const QString type = types.at(labels.indexOf(picked));
+        // 尺寸可改：默认给出库里的默认值，用户回车即用默认
+        QString defaultSize;
+        for (const QJsonValue &entry : catalog) {
+            const QJsonObject item = entry.toObject();
+            if (item.value(QStringLiteral("type")).toString() != type) continue;
+            const QJsonArray size = item.value(QStringLiteral("shape")).toObject().value(QStringLiteral("size")).toArray();
+            if (size.size() == 3) {
+                defaultSize = QStringLiteral("%1x%2x%3").arg(size.at(0).toInt()).arg(size.at(1).toInt()).arg(size.at(2).toInt());
+            }
+            break;
+        }
+        bool sizeOk = false;
+        const QString sizeText = QInputDialog::getText(this, tr("构件尺寸"),
+                                                       tr("长x宽x高（mm，可改）："), QLineEdit::Normal,
+                                                       defaultSize, &sizeOk);
+        if (!sizeOk) return;
+        QVector3D sizeMm;
+        if (!sizeText.trimmed().isEmpty()) {
+            const QStringList parts3 = sizeText.toLower().split(QLatin1Char('x'), Qt::SkipEmptyParts);
+            if (parts3.size() != 3) {
+                QMessageBox::warning(this, tr("尺寸格式不对"), tr("要写成 长x宽x高，例如 60x60x1200"));
+                return;
+            }
+            sizeMm = QVector3D(parts3.at(0).toFloat(), parts3.at(1).toFloat(), parts3.at(2).toFloat());
+        }
         int count = 0;
-        if (!insertPartFromCatalog(type, QVector3D(0, 0, 0), &count, &error)) {
+        if (!insertPartFromCatalog(type, QVector3D(0, 0, 0), &count, &error, sizeMm)) {
             QMessageBox::warning(this, tr("插入失败"), error);
             return;
         }
@@ -627,7 +652,7 @@ bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *docum
                                         const QStringList &moves, bool resolveAll, int clearanceResolveMm,
                                         bool layoutCompliance, int clearanceMm,
                                         bool measureMaxClearance, const QStringList &ignorePairs,
-                                        const QString &insertPart) {
+                                        const QString &insertPart, const QString &partSize) {
     if (brief.trimmed().isEmpty()) {
         *error = tr("brief 不能为空");
         return false;
@@ -673,6 +698,9 @@ bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *docum
     // 复核确认的误报：交给求解器跳过，别为包围盒的假重叠白推距离
     if (!insertPart.isEmpty()) {
         arguments << QStringLiteral("--insert-part") << insertPart;
+    }
+    if (!partSize.isEmpty()) {
+        arguments << QStringLiteral("--part-size") << partSize;
     }
     if (!ignorePairs.isEmpty()) {
         arguments << QStringLiteral("--ignore-pairs") << ignorePairs.join(QStringLiteral(","));
@@ -1569,7 +1597,8 @@ bool MainWindow::previewVisibleForTest() const {
 #endif
 }
 
-bool MainWindow::insertPartFromCatalog(const QString &type, const QVector3D &at, int *partCount, QString *error) {
+bool MainWindow::insertPartFromCatalog(const QString &type, const QVector3D &at, int *partCount, QString *error,
+                                      const QVector3D &sizeMm) {
     if (m_lastBrief.trimmed().isEmpty()) {
         *error = tr("还没有整机方案：先用 文件 → 从一句话生成整机 建一台");
         return false;
@@ -1580,8 +1609,12 @@ bool MainWindow::insertPartFromCatalog(const QString &type, const QVector3D &at,
                              .arg(at.y(), 0, 'f', 1)
                              .arg(at.z(), 0, 'f', 1);
     if (!m_lastDocument.isEmpty()) m_insertHistory.append(m_lastDocument);
+    QString sizeSpec;
+    if (sizeMm.x() > 0 && sizeMm.y() > 0 && sizeMm.z() > 0) {
+        sizeSpec = QStringLiteral("%1x%2x%3").arg(sizeMm.x(), 0, 'f', 0).arg(sizeMm.y(), 0, 'f', 0).arg(sizeMm.z(), 0, 'f', 0);
+    }
     QJsonObject document;
-    if (!designMachineFromBrief(m_lastBrief, &document, error, m_lastMoves, false, 0, false, -1, false, {}, spec)) {
+    if (!designMachineFromBrief(m_lastBrief, &document, error, m_lastMoves, false, 0, false, -1, false, {}, spec, sizeSpec)) {
         m_insertHistory.removeLast();   // 插入失败就别留快照，否则撤销会倒退到同一个状态
         return false;
     }

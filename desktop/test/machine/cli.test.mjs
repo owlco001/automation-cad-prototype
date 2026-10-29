@@ -141,6 +141,18 @@ test('--boolean-recheck：连不上 sidecar 时如实标「未复核」，不冒
   assert.match(recheck.message, /无需复核/, '0 处疑似要说「不需要」，不能说「已复核」');
 });
 
+test('--insert-part 配 --part-size：零件按新尺寸落地，底面仍贴地', { timeout: 120_000 }, () => {
+  const stdout = execFileSync(process.execPath,
+    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry',
+     '--insert-part', 'upright@-900,0,0', '--part-size', '60x60x1200'],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const parts = JSON.parse(stdout).geometry.parts;
+  const inserted = parts.find((part) => part.id.startsWith('user-upright'));
+  assert.ok(inserted, '必须插入 user-upright-*');
+  assert.deepEqual(inserted.shape.size, [60, 60, 1200]);
+  assert.equal(inserted.center[2], 600, '中心 z = 高度/2，底面贴地');
+});
+
 test('--with-geometry 输出 bounds，且与 parts 一一对应（Qt 拖动预览靠它本地判重叠）', { timeout: 120_000 }, () => {
   const stdout = execFileSync(process.execPath,
     [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry'],

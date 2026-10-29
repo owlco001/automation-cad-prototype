@@ -71,7 +71,8 @@ public:
     /// 构件库清单（调 desktop --catalog 拿，Qt 不自己写死）
     bool loadCatalog(QJsonArray *catalog, QString *error);
     /// 插入一个构件实例：走管线 --insert-part，几何由 desktop 重算
-    bool insertPartFromCatalog(const QString &type, const QVector3D &at, int *partCount, QString *error);
+    bool insertPartFromCatalog(const QString &type, const QVector3D &at, int *partCount, QString *error,
+                               const QVector3D &sizeMm = QVector3D());
     /// 拖放自检：屏幕点转地面世界坐标
     bool screenPointToGroundForTest(int x, int y, double *worldX, double *worldY);
     /// 预览自检：按构件库尺寸画一个预览盒（不提交几何）
@@ -93,7 +94,8 @@ public:
                                 int clearanceResolveMm = 0, bool layoutCompliance = false,
                                 int clearanceMm = -1, bool measureMaxClearance = false,
                                 const QStringList &ignorePairs = {},
-                                const QString &insertPart = {});
+                                const QString &insertPart = {},
+                                const QString &partSize = {});
     /// 试摆位：在已生成的方案上挪一个零件，重跑管线并重算干涉
     void tunePlacementDialog();
     /// 方向键微调选中零件（3D 里点选后用）

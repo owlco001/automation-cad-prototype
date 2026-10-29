@@ -519,7 +519,13 @@ int main(int argc, char *argv[]) {
                                index + 5 < args.size() ? args.at(index + 4).toDouble() : 0.0,
                                index + 5 < args.size() ? args.at(index + 5).toDouble() : 0.0);
             int count = 0;
-            if (!window.insertPartFromCatalog(args.at(index + 2), at, &count, &error)) {
+            const QString sizeText = index + 6 < args.size() ? args.at(index + 6) : QString();
+            QVector3D sizeMm;
+            if (!sizeText.isEmpty()) {
+                const QStringList bits = sizeText.toLower().split(QLatin1Char('x'), Qt::SkipEmptyParts);
+                if (bits.size() == 3) sizeMm = QVector3D(bits.at(0).toFloat(), bits.at(1).toFloat(), bits.at(2).toFloat());
+            }
+            if (!window.insertPartFromCatalog(args.at(index + 2), at, &count, &error, sizeMm)) {
                 qCritical().noquote() << "FT_QT_INSERT_FAIL" << error;
                 return 1;
             }
