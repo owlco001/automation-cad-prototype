@@ -173,6 +173,49 @@ bool MachineCaseDialog::writeResolutionCsv(const QJsonObject &document, const QS
     return true;
 }
 
+bool MachineCaseDialog::writeLayoutCsv(const QJsonObject &document, const QString &path, int *rows, QString *error) {
+    const QJsonObject layout = document.value(QStringLiteral("geometry")).toObject()
+                                   .value(QStringLiteral("layoutCompliance")).toObject();
+    if (layout.isEmpty()) {
+        *error = QStringLiteral("这个方案没有排布合规结果（管线需 --layout-compliance 20）");
+        return false;
+    }
+    const QJsonArray moves = layout.value(QStringLiteral("moves")).toArray();
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        *error = QStringLiteral("写文件失败：%1").arg(file.errorString());
+        return false;
+    }
+    QTextStream out(&file);
+    out.setEncoding(QStringConverter::Utf8);
+    out << "\xEF\xBB\xBF";
+    out << "类型,零件,轴,位移(mm),原中心X,原中心Y,原中心Z,新中心X,新中心Y,新中心Z\n";
+    for (const QJsonValue &value : moves) {
+        const QJsonObject move = value.toObject();
+        const QJsonArray from = move.value(QStringLiteral("from")).toArray();
+        const QJsonArray to = move.value(QStringLiteral("to")).toArray();
+        const QString kind = move.value(QStringLiteral("kind")).toString();
+        out << (kind == QStringLiteral("overlap") ? QStringLiteral("解重叠") : QStringLiteral("推间距")) << ','
+            << move.value(QStringLiteral("partId")).toString() << ','
+            << move.value(QStringLiteral("axis")).toString() << ','
+            << QString::number(move.value(QStringLiteral("delta")).toDouble(), 'f', 1);
+        for (int axis = 0; axis < 3; ++axis) {
+            out << ',' << QString::number(from.at(axis).toDouble(), 'f', 1);
+        }
+        for (int axis = 0; axis < 3; ++axis) {
+            out << ',' << QString::number(to.at(axis).toDouble(), 'f', 1);
+        }
+        out << '\n';
+    }
+    out << "合计,,,,,,,,,"
+        << QStringLiteral("%1轮/%2次").arg(layout.value(QStringLiteral("rounds")).toArray().size())
+               .arg(moves.size())
+        << '\n';
+    file.close();
+    *rows = moves.size();
+    return true;
+}
+
 MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *parent,
                                      std::function<void(const QStringList &)> onHighlight,
                                      std::function<void(const QString &, int, double)> onApplyMove,
@@ -245,6 +288,91 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
     }
     ioTable->resizeColumnsToContents();
     m_tabs->addTab(ioTable, QStringLiteral("IO（%1）").arg(rows.size()));
+
+    // 排布合规：把「交替跑了几轮、每轮前后两类问题数、一共挪了几次」摆出来。
+    // 只有一行状态栏提示是不够的——用户看不到「第 1 轮推间距反而撞出 4 处重叠」这个过程。
+    const QJsonObject layoutInfo = document.value(QStringLiteral("geometry")).toObject()
+                                       .value(QStringLiteral("layoutCompliance")).toObject();
+    if (!layoutInfo.isEmpty()) {
+        const QJsonArray rounds = layoutInfo.value(QStringLiteral("rounds")).toArray();
+        auto *layoutTable = makeTable({QStringLiteral("轮次"), QStringLiteral("进轮·重叠"), QStringLiteral("出轮·重叠"),
+                                       QStringLiteral("进轮·间距不足"), QStringLiteral("出轮·间距不足"),
+                                       QStringLiteral("解重叠位移"), QStringLiteral("推间距位移")}, this);
+        for (const QJsonValue &value : rounds) {
+            const QJsonObject round = value.toObject();
+            appendRow(layoutTable, {
+                QString::number(round.value(QStringLiteral("round")).toInt()),
+                QString::number(round.value(QStringLiteral("suspectsBefore")).toInt()),
+                QString::number(round.value(QStringLiteral("suspectsAfter")).toInt()),
+                QString::number(round.value(QStringLiteral("clearanceBefore")).toInt()),
+                QString::number(round.value(QStringLiteral("clearanceAfter")).toInt()),
+                QString::number(round.value(QStringLiteral("overlapMoves")).toInt()),
+                QString::number(round.value(QStringLiteral("clearanceMoves")).toInt())
+            });
+        }
+        layoutTable->resizeColumnsToContents();
+        m_tabs->addTab(layoutTable, QStringLiteral("排布合规（%1 轮）").arg(rounds.size()));
+        if (qEnvironmentVariable("AUTOMATIONCAD_TAB") == QStringLiteral("layout")) {
+            m_tabs->setCurrentWidget(layoutTable);
+        }
+
+        auto *layoutPage = new QWidget(this);
+        auto *layoutPageLayout = new QVBoxLayout(layoutPage);
+        const bool converged = layoutInfo.value(QStringLiteral("converged")).toBool();
+        const QString stopReason = layoutInfo.value(QStringLiteral("stopReason")).toString();
+        auto *verdict = new QLabel(
+            converged
+                ? QStringLiteral("已合规：%1 轮共 %2 次位移，未声明重叠 %3、间距 < %4 mm %5 处。"
+                                 "位移明细可导出 CSV（含原/新中心坐标）。")
+                      .arg(rounds.size())
+                      .arg(layoutInfo.value(QStringLiteral("moves")).toArray().size())
+                      .arg(layoutInfo.value(QStringLiteral("suspects")).toInt())
+                      .arg(layoutInfo.value(QStringLiteral("clearanceMm")).toInt())
+                      .arg(layoutInfo.value(QStringLiteral("clearance")).toInt())
+                : QStringLiteral("**未收敛**：%1。剩余未声明重叠 %2、间距不足 %3 处。"
+                                 "这是 AABB 口径下的结果，不代表几何一定可制造。")
+                      .arg(stopReason)
+                      .arg(layoutInfo.value(QStringLiteral("suspects")).toInt())
+                      .arg(layoutInfo.value(QStringLiteral("clearance")).toInt()),
+            layoutPage);
+        verdict->setWordWrap(true);
+        verdict->setStyleSheet(converged ? QStringLiteral("color:#2e7d32;") : QStringLiteral("color:#b3261e;"));
+        layoutPageLayout->addWidget(verdict);
+        auto *exportLayout = new QPushButton(QStringLiteral("导出排布位移 CSV…"), layoutPage);
+        connect(exportLayout, &QPushButton::clicked, layoutPage, [this, document]() {
+            const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("导出排布位移"),
+                                                              QStringLiteral("machine-layout.csv"),
+                                                              QStringLiteral("CSV 文件 (*.csv)"));
+            if (path.isEmpty()) return;
+            int rows = 0;
+            QString error;
+            if (!writeLayoutCsv(document, path, &rows, &error)) {
+                QMessageBox::warning(this, QStringLiteral("导出失败"), error);
+                return;
+            }
+            setWindowTitle(windowTitle() + QStringLiteral(" · 已导出 %1 行").arg(rows));
+        });
+        layoutPageLayout->addWidget(exportLayout, 0, Qt::AlignLeft);
+        layoutPageLayout->addStretch(1);
+        auto *preview = makeTable({QStringLiteral("类型"), QStringLiteral("零件"), QStringLiteral("轴"),
+                                   QStringLiteral("位移(mm)")}, layoutPage);
+        for (const QJsonValue &value : layoutInfo.value(QStringLiteral("moves")).toArray()) {
+            const QJsonObject move = value.toObject();
+            appendRow(preview, {
+                move.value(QStringLiteral("kind")).toString() == QStringLiteral("overlap")
+                    ? QStringLiteral("解重叠") : QStringLiteral("推间距"),
+                move.value(QStringLiteral("partId")).toString(),
+                move.value(QStringLiteral("axis")).toString().toUpper(),
+                QString::number(move.value(QStringLiteral("delta")).toDouble(), 'f', 1)
+            });
+        }
+        preview->resizeColumnsToContents();
+        layoutPageLayout->addWidget(preview, 1);
+        m_tabs->addTab(layoutPage, QStringLiteral("位移明细（%1）").arg(preview->rowCount()));
+        qInfo().noquote() << "FT_QT_LAYOUT_PAGE rounds=" << rounds.size()
+                          << "moves=" << preview->rowCount()
+                          << "converged=" << converged;
+    }
 
     // 干涉初筛：AABB，只是「疑似」。必须把口径写在页签里，否则很容易被当成真实干涉体积
     const QJsonObject interference = document.value(QStringLiteral("geometry")).toObject()

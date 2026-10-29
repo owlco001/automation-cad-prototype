@@ -443,6 +443,31 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+    // 排布位移导出自检：--layout-csv-selftest <case.json> --out <csv>
+    {
+        const int index = args.indexOf(QStringLiteral("--layout-csv-selftest"));
+        if (index >= 0 && index + 1 < args.size()) {
+            const int outIndex = args.indexOf(QStringLiteral("--out"));
+            if (outIndex < 0 || outIndex + 1 >= args.size()) {
+                qCritical().noquote() << "FT_QT_LAYOUTCSV_FAIL" << "缺 --out <csv>";
+                return 1;
+            }
+            QJsonObject document;
+            QString error;
+            if (!MachineCaseDialog::loadFile(args.at(index + 1), &document, &error)) {
+                qCritical().noquote() << "FT_QT_LAYOUTCSV_FAIL" << error;
+                return 1;
+            }
+            int rows = 0;
+            if (!MachineCaseDialog::writeLayoutCsv(document, args.at(outIndex + 1), &rows, &error)) {
+                qCritical().noquote() << "FT_QT_LAYOUTCSV_FAIL" << error;
+                return 1;
+            }
+            qInfo().noquote() << QStringLiteral("FT_QT_LAYOUTCSV_OK rows=%1").arg(rows);
+            return 0;
+        }
+    }
+
     // 间距初筛自检：--clearance-selftest <case.json>
     {
         const int index = args.indexOf(QStringLiteral("--clearance-selftest"));

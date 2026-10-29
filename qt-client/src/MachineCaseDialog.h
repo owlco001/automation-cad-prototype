@@ -35,6 +35,9 @@ public:
     /// 把「批量解重叠」的调整清单写成 CSV（零件/轴/位移/原坐标/新坐标/解后剩余）
     static bool writeResolutionCsv(const QJsonObject &document, const QString &path, int *rows, QString *error);
 
+    /// 把「一键排布合规」的位移写成 CSV（类型=重叠/间距 · 零件 · 轴 · 位移 · 原/新中心）
+    static bool writeLayoutCsv(const QJsonObject &document, const QString &path, int *rows, QString *error);
+
 private:
     QLabel *m_brief = nullptr;
     QTabWidget *m_tabs = nullptr;
