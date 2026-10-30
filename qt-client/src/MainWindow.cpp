@@ -100,8 +100,10 @@ namespace {
 // 而同一份 exe 的“生成整机”却能跑——同一件事两套规则，很容易看着像坏了。
 QString resolvePipelineScript()
 {
+    // 显式配置优先且不静默回退：设了但指错，就照着它报错（报错里能看到指到哪），
+    // 而不是悄悄用自动探测到的另一个脚本——那种“配了却没生效”最难查。
     const QString fromEnv = qEnvironmentVariable("AUTOMATIONCAD_PIPELINE");
-    if (!fromEnv.isEmpty() && QFileInfo::exists(fromEnv)) return fromEnv;
+    if (!fromEnv.isEmpty()) return fromEnv;
 
     const QString rel = QStringLiteral("desktop/scripts/machine-design-cli.mjs");
     for (const QDir &start : {QDir(QCoreApplication::applicationDirPath()), QDir::current()}) {
@@ -1464,7 +1466,8 @@ bool MainWindow::exportMachineStlForTest(const QString &path, int *bytes, QStrin
 bool MainWindow::loadCatalog(QJsonArray *catalog, QString *error) {
     const QString script = resolvePipelineScript();
     if (script.isEmpty() || !QFileInfo::exists(script)) {
-        *error = tr("找不到整机管线脚本；设置 AUTOMATIONCAD_PIPELINE 指向 desktop/scripts/machine-design-cli.mjs");
+        *error = tr("找不到整机管线脚本（%1）；设置 AUTOMATIONCAD_PIPELINE 指向 desktop/scripts/machine-design-cli.mjs")
+                     .arg(script.isEmpty() ? tr("未设置且自动探测失败") : script);
         return false;
     }
     QProcess process;
