@@ -319,6 +319,34 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // 贴面文案自检：--touching-label-selftest <case.json>
+    {
+        const int index = args.indexOf(QStringLiteral("--touching-label-selftest"));
+        if (index >= 0 && index + 1 < args.size()) {
+            QJsonObject document;
+            QString error;
+            if (!MachineCaseDialog::loadFile(args.at(index + 1), &document, &error)) {
+                qCritical().noquote() << "FT_QT_TOUCHING_FAIL" << error;
+                return 1;
+            }
+            MachineCaseDialog dialog(document);
+            QString found;
+            for (QLabel *label : dialog.findChildren<QLabel *>()) {
+                if (label->text().contains(QStringLiteral("贴面对"))) { found = label->text(); break; }
+            }
+            if (found.isEmpty()) {
+                qCritical().noquote() << "FT_QT_TOUCHING_FAIL 干涉页没有贴面对文案";
+                return 1;
+            }
+            QString line;
+            for (const QString &candidate : found.split(QStringLiteral("\n"))) {
+                if (candidate.contains(QStringLiteral("贴面对"))) { line = candidate; break; }
+            }
+            qInfo().noquote() << QStringLiteral("FT_QT_TOUCHING_OK %1").arg(line);
+            return 0;
+        }
+    }
+
     // 尺寸 + 撤销自检：--size-undo-selftest "brief" <type> <WxHxL>
     {
         const int index = args.indexOf(QStringLiteral("--size-undo-selftest"));

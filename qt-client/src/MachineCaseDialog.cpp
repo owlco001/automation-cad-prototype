@@ -616,6 +616,14 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
                                      "AABB 初筛也不等于真实干涉")
                           .arg(pairs.size()).arg(suspects).arg(declared);
         }
+        // 贴面对：不进 suspect（装配贴合不算撞），但必须让人看见，否则等于没报
+        const int touching = interference.value(QStringLiteral("touching")).toInt();
+        const int undeclaredTouching = interference.value(QStringLiteral("undeclaredTouching")).toInt();
+        if (touching > 0) {
+            verdict += QStringLiteral("\n贴面对 %1 对（其中 %2 对未在 joints 中声明连接——是装配贴合还是装错位置，需要人看一眼）")
+                           .arg(touching).arg(undeclaredTouching);
+        }
+
         const QString jointSource = interference.value(QStringLiteral("jointSource")).toString();
         verdict += QStringLiteral("\n连接来源：%1").arg(
             jointSource == QStringLiteral("generator")
