@@ -253,6 +253,31 @@ jobs:
           grep -qE "FT_QT_PREVIEW_OK" /tmp/occt-preview.log
           run drop --drop-selftest "$BRIEF" gripper
           grep -qE "FT_QT_DROP_OK" /tmp/occt-drop.log
+  # Windows 侧一直只有老王人工验证，仓库里没有任何 Windows 产物。
+  # 这个 job 至少保证「Windows 上能编译」这件事不再靠人肉发现。
+  qt-windows:
+    name: Qt 客户端（Windows 编译）
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 Qt6（MSVC 2022 x64）
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2022_64'
+          cache: true
+      - name: 配置与编译（无 OCCT）
+        run: |
+          cmake -S qt-client -B build-win -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DAUTOMATIONCAD_OCCT=OFF
+          cmake --build build-win --config Release
+      - name: 可执行文件与版本
+        shell: pwsh
+        run: |
+          if (-not (Test-Path build-win/Release/automationcad-qt.exe)) { throw "没产出 automationcad-qt.exe" }
+          ./build-win/Release/automationcad-qt.exe --version
   featuretree-geometry:
     name: FeatureTree real geometry (build123d)
     runs-on: ubuntu-latest
