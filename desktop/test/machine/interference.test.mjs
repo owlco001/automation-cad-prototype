@@ -166,3 +166,20 @@ test('ignorePairs：只跳过明确名单里的对，其余照旧算 suspect', a
   assert.equal(after.suspects, 2, '只跳过 a|b');
   assert.ok(!after.pairs.some((pair) => [pair.a, pair.b].sort().join('|') === 'a|b'));
 });
+
+test('贴面对：既不进 suspect，也不能静默丢掉（touching / undeclaredTouching）', async () => {
+  const { screenInterference } = await import('../../src/machine/interference.ts');
+  const geometry = {
+    parts: [
+      // 底块 z 0..10
+      { id: 'base', shape: { type: 'box', size: [20, 20, 10] }, center: [0, 0, 5] },
+      // 正上方，底面正好落在 base 顶面 z=10（纯贴面，不重叠）
+      { id: 'brick', shape: { type: 'box', size: [10, 10, 10] }, center: [0, 0, 15] }
+    ]
+  };
+  const result = screenInterference(geometry);
+  assert.equal(result.suspects, 0, '贴面不算重叠');
+  assert.equal(result.touching, 1, '但必须被数出来');
+  assert.equal(result.undeclaredTouching, 1, '没声明过就是 1');
+  assert.equal(result.touchingPairs[0].a, 'base');
+});

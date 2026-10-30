@@ -35,6 +35,11 @@ export interface ScreenResult {
   /** 按判定拆分：declared=已声明连接，suspect=需人工确认 */
   declared: number;
   suspects: number;
+  /** 贴面（一轴≈0、另两轴重叠）的对数；这类既不是重叠也不该被静默丢掉 */
+  touching: number;
+  /** 贴面但没在 joints 里声明连接——值得人看一眼 */
+  undeclaredTouching: number;
+  touchingPairs: Array<{ a: string; b: string; declared: boolean }>;
   /** 声明连接的数量（可能比 overlapping 的多：声明了但没重叠） */
   declaredJoints: number;
   /** generator = 由几何生成器产出；rules = 退回命名规则（老数据） */
@@ -109,6 +114,7 @@ export function screenInterference(geometry: any, options: ScreenOptions = {}): 
   }
   const jointSource = generatorJoints.length > 0 ? 'generator' : 'rules';
   const pairs: ScreenPair[] = [];
+  const touching: Array<{ a: string; b: string; declared: boolean }> = [];
   const EPS = 0.5;  // mm：小于这个量的接触（贴面/装配面）不算
   for (let i = 0; i < boxes.length; i += 1) {
     for (let j = i + 1; j < boxes.length; j += 1) {
@@ -117,7 +123,20 @@ export function screenInterference(geometry: any, options: ScreenOptions = {}): 
       const dx = Math.min(a.max[0], b.max[0]) - Math.max(a.min[0], b.min[0]);
       const dy = Math.min(a.max[1], b.max[1]) - Math.max(a.min[1], b.min[1]);
       const dz = Math.min(a.max[2], b.max[2]) - Math.max(a.min[2], b.min[2]);
-      if (dx <= EPS || dy <= EPS || dz <= EPS) continue;
+      if (dx <= EPS || dy <= EPS || dz <= EPS) {
+        // 贴面（一轴 ≈0、另两轴真重叠）：以前直接丢掉，等于静默漏报。
+        // 立柱顶面贴顶框这类是正常装配，但**没在 joints 里声明的贴面**值得人看一眼。
+        const spans = [dx, dy, dz];
+        const flat = spans.filter((value) => Math.abs(value) <= EPS).length;
+        const overlapping = spans.filter((value) => value > EPS).length;
+        if (flat === 1 && overlapping === 2) {
+          const idA = String(boxes[i].part.id);
+          const idB = String(boxes[j].part.id);
+          const declaredReason = declared.get(jointKey(idA, idB));
+          touching.push({ a: idA, b: idB, declared: declaredReason !== undefined });
+        }
+        continue;
+      }
       if (ignored.has(jointKey(String(boxes[i].part.id), String(boxes[j].part.id)))) continue;
       const reason = declared.get(jointKey(String(boxes[i].part.id), String(boxes[j].part.id)));
       // 分开代价最小的方案：逐轴算「往 + / 往 -」各自要挪多远，取全局最小。
@@ -180,12 +199,16 @@ export function screenInterference(geometry: any, options: ScreenOptions = {}): 
   // 需人工确认的排前面：结构共位是常态，先看 suspect 才有意义
   pairs.sort((x, y) => (x.kind === y.kind ? y.overlapMm3 - x.overlapMm3 : x.kind === 'suspect' ? -1 : 1));
   const suspects = pairs.filter((pair) => pair.kind === 'suspect').length;
+  const undeclaredTouching = touching.filter((item) => !item.declared).length;
   return {
     mode: 'aabb',
     partCount: parts.length,
     pairs,
     count: pairs.length,
     declared: pairs.length - suspects,
+    touching: touching.length,
+    undeclaredTouching,
+    touchingPairs: touching,
     suspects,
     declaredJoints: declared.size,
     jointSource,
