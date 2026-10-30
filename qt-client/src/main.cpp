@@ -704,9 +704,10 @@ int main(int argc, char *argv[]) {
     // 构件库失败态自检：把管线指到不存在的路径，看面板是否给出可复制命令 + 重试
     if (args.contains(QStringLiteral("--catalog-hint-selftest"))) {
         qputenv("AUTOMATIONCAD_PIPELINE", QByteArray("/nonexistent/machine-design-cli.mjs"));
+        // 不 show()：offscreen 平台上 OpenGL 视口建不出上下文会段错误，
+        // 而这个自检要验的是构件库面板的失败态，不需要真的显示窗口。
         MainWindow window;
         window.resize(1200, 800);
-        window.show();
         QTimer::singleShot(1500, &window, [&window]() {
             auto *list = window.findChild<QListWidget *>();
             if (!list) {
