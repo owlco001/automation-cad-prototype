@@ -269,15 +269,21 @@ jobs:
           target: 'desktop'
           arch: 'win64_msvc2022_64'
           cache: true
+      # windows-latest 上 "Visual Studio 17 2022" 生成器不一定可用（实测报 could not find any instance），
+      # 改成显式进入 MSVC 环境 + Ninja，不依赖具体 VS 版本号。
+      - name: 进入 MSVC 环境
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
       - name: 配置与编译（无 OCCT）
         run: |
-          cmake -S qt-client -B build-win -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DAUTOMATIONCAD_OCCT=OFF
-          cmake --build build-win --config Release
+          cmake -S qt-client -B build-win -G Ninja -DCMAKE_BUILD_TYPE=Release -DAUTOMATIONCAD_OCCT=OFF
+          cmake --build build-win
       - name: 可执行文件与版本
         shell: pwsh
         run: |
-          if (-not (Test-Path build-win/Release/automationcad-qt.exe)) { throw "没产出 automationcad-qt.exe" }
-          ./build-win/Release/automationcad-qt.exe --version
+          if (-not (Test-Path build-win/automationcad-qt.exe)) { throw "没产出 automationcad-qt.exe" }
+          ./build-win/automationcad-qt.exe --version
   featuretree-geometry:
     name: FeatureTree real geometry (build123d)
     runs-on: ubuntu-latest
