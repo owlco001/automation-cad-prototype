@@ -321,15 +321,26 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // 贴面文案自检：--touching-label-selftest <case.json>
+    // 贴面文案自检：--touching-label-selftest <case.json | "brief">
+    // 传 brief 时现场跑管线：仓库里的 fixture 是旧版本（没有 touching 字段），
+    // 拿它验等于验一个早已不存在的世界。
     {
         const int index = args.indexOf(QStringLiteral("--touching-label-selftest"));
         if (index >= 0 && index + 1 < args.size()) {
             QJsonObject document;
             QString error;
-            if (!MachineCaseDialog::loadFile(args.at(index + 1), &document, &error)) {
-                qCritical().noquote() << "FT_QT_TOUCHING_FAIL" << error;
-                return 1;
+            const QString target = args.at(index + 1);
+            if (target.endsWith(QStringLiteral(".json"))) {
+                if (!MachineCaseDialog::loadFile(target, &document, &error)) {
+                    qCritical().noquote() << "FT_QT_TOUCHING_FAIL" << error;
+                    return 1;
+                }
+            } else {
+                MainWindow window;
+                if (!window.designMachineFromBrief(target, &document, &error)) {
+                    qCritical().noquote() << "FT_QT_TOUCHING_FAIL" << error;
+                    return 1;
+                }
             }
             MachineCaseDialog dialog(document);
             QString found;

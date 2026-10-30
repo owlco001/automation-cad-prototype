@@ -127,6 +127,9 @@ jobs:
           grep -qE "FT_QT_STALE_OK" /tmp/qt-stale-stamp.log
           run recheck-skip --recheck-skip-selftest docs/desktop/eval/machine-case.json
           grep -qE "FT_QT_RECHECK_SKIP_OK" /tmp/qt-recheck-skip.log
+          # 贴面文案：用 brief 现场跑管线，别拿旧的 fixture（它没有 touching 字段）
+          run touching-label --touching-label-selftest "六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅"
+          grep -qE "FT_QT_TOUCHING_OK" /tmp/qt-touching-label.log
       - name: Qt 客户端 ↔ 契约服务自检
         timeout-minutes: 5
         run: |
