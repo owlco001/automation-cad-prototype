@@ -1743,41 +1743,6 @@ export function generateMachineGeometry(
     }
   }
 
-  // 工位底板坐在台面上：这是真实装配关系，之前没声明，导致 4 个工位底板被当成「未声明贴面」。
-  // 只声明这一种形态（stN-plate × frame-top），不要顺手把别的贴面也放进来。
-  for (const part of parts) {
-    if (/^st\d+-plate$/.test(part.id)) addJoint(part.id, 'frame-top', '工位底板坐台面');
-  }
-  // 工位内的竖向叠装链：底板 → 转台底座 → 转台面 → 夹具；以及底板 → 传感器支架、台面 → 输送线框。
-  // 这些都写在生成器里（生成器自己就是按这个顺序叠的），不是看包围盒猜的。
-  const byId = new Map(parts.map((part) => [part.id, part]));
-  const stackPairs: Array<[RegExp, RegExp, string]> = [
-    [/^st\d+-plate$/, /^st\d+-rotary-\d+-base$/, '底板上装转台底座'],
-    [/^st\d+-rotary-\d+-base$/, /^st\d+-rotary-\d+-table$/, '转台底座上装转台面'],
-    [/^st\d+-rotary-\d+-table$/, /^st\d+-rotary-\d+-fixture$/, '转台面上装夹具'],
-    // 传感器支架的 id 是 sensor-stN-…，前缀不是 stN，单列一段处理
-  ];
-  for (const part of parts) {
-    for (const other of parts) {
-      if (part.id === other.id) continue;
-      for (const [lower, upper, reason] of stackPairs) {
-        if (lower.test(part.id) && upper.test(other.id) && part.id.split('-')[0] === other.id.split('-')[0]) {
-          addJoint(part.id, other.id, reason);
-        }
-      }
-    }
-  }
-  if (byId.has('conveyor-frame')) addJoint('frame-top', 'conveyor-frame', '输送线框坐台面');
-  for (const part of parts) {
-    const plate = /^(st\d+)-plate$/.exec(part.id);
-    if (!plate) continue;
-    for (const other of parts) {
-      if (other.id.includes(`-${plate[1]}-`) && other.id.startsWith('sensor-') && other.id.endsWith('-bracket')) {
-        addJoint(part.id, other.id, '底板上装传感器支架');
-      }
-    }
-  }
-
   const structureBom = buildStructureBom(allParts, bays + 1, frameLength, frameWidth, legH);
   if (layout === 'dial' && config.stations.length > 6) {
     warnings.push(`分度转盘 ${config.stations.length} 工位，整机直径较大，建议评估改为直线输送布局。`);
