@@ -18,6 +18,7 @@
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QProcess>
+#include <QStandardPaths>
 #include <QDrag>
 #include <QDockWidget>
 #include <QFileDialog>
@@ -282,9 +283,15 @@ MainWindow::MainWindow(QWidget *parent)
         QString error;
         if (!loadCatalog(&catalog, &error)) {
             catalogList->addItem(tr("构件库不可用：%1").arg(error));
-            const QString command = QStringLiteral("export AUTOMATIONCAD_PIPELINE=%1")
-                                        .arg(QStringLiteral("$(pwd)/desktop/scripts/machine-design-cli.mjs"));
-            auto *copy = new QListWidgetItem(tr("▶ 复制修复命令（在仓库根执行）"), catalogList);
+            // 修复命令要跟着失败原因走：node 没装时给“export 管线路径”是错的指引
+            const bool nodeMissing = error.contains(QStringLiteral("node"));
+            const QString command = nodeMissing
+                ? QStringLiteral("node -v || echo '请先安装 Node.js 并确保 node 在 PATH 中'")
+                : QStringLiteral("export AUTOMATIONCAD_PIPELINE=%1")
+                      .arg(QStringLiteral("$(pwd)/desktop/scripts/machine-design-cli.mjs"));
+            auto *copy = new QListWidgetItem(nodeMissing ? tr("▶ 复制检查命令（先确认 node 可用）")
+                                                         : tr("▶ 复制修复命令（在仓库根执行）"),
+                                              catalogList);
             copy->setData(Qt::UserRole, QStringLiteral("__copy__"));
             copy->setData(Qt::UserRole + 1, command);
             copy->setToolTip(command);
@@ -1470,11 +1477,26 @@ bool MainWindow::loadCatalog(QJsonArray *catalog, QString *error) {
                      .arg(script.isEmpty() ? tr("未设置且自动探测失败") : script);
         return false;
     }
+    // 三种失败要分开报：脚本没找到 / node 没装 / 脚本自己跑挂了。
+    // 之前一律报“找不到整机管线脚本”，会把人引到完全错误的方向。
+    if (QStandardPaths::findExecutable(QStringLiteral("node")).isEmpty()) {
+        *error = tr("找不到 node 运行时（构件库由 Node 脚本提供）；装 Node.js 或把 node 加进 PATH 后点重试");
+        return false;
+    }
     QProcess process;
     process.start(QStringLiteral("node"), {script, QStringLiteral("--catalog")});
+    if (!process.waitForStarted(10'000)) {
+        *error = tr("启动 node 失败：%1").arg(process.errorString());
+        return false;
+    }
     if (!process.waitForFinished(20'000)) {
         process.kill();
-        *error = tr("读取构件库超时");
+        *error = tr("读取构件库超时（20 s）；脚本可能是 %1").arg(script);
+        return false;
+    }
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        const QString stderrText = QString::fromUtf8(process.readAllStandardError()).trimmed().left(300);
+        *error = tr("构件库脚本执行失败（exit %1）：%2").arg(process.exitCode()).arg(stderrText.isEmpty() ? tr("没有错误输出") : stderrText);
         return false;
     }
     const QJsonDocument parsed = QJsonDocument::fromJson(process.readAllStandardOutput());
