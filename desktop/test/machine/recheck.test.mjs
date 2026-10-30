@@ -36,14 +36,17 @@ test('沿 Z 的圆柱：offset 就是中心，直径 = 2×半径', () => {
   assert.deepEqual(result.member.ops, [{ op: 'cylinder', diameter: 10, height: 40 }]);
 });
 
-test('沿 X/Y 的圆柱与带转角的件：如实说复核不了，不假装复核过', () => {
+test('沿 X 的圆柱：如实说复核不了，不假装复核过', () => {
   const alongX = partToMember(part({ shape: { type: 'cylinder', radius: 5, length: 40, axis: 'x' } }));
   assert.equal(alongX.ok, false);
   assert.match(alongX.reason, /X/);
+});
 
+test('带转角的方块：现在能复核（居中 → 绕自身转 Z → 平移），不再说复核不了', () => {
   const rotated = partToMember(part({ rotationZDeg: 90 }));
-  assert.equal(rotated.ok, false);
-  assert.match(rotated.reason, /90/);
+  assert.equal(rotated.ok, true);
+  assert.equal(rotated.member.ops.at(-1).op, 'move');
+  assert.equal(rotated.member.ops.at(-2).deg, 90);
 });
 
 test('连不上 sidecar 时必须报「不可用」，不能把每对都记成误报', async () => {
