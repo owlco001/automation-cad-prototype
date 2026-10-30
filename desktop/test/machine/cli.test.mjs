@@ -153,6 +153,22 @@ test('--insert-part 配 --part-size：零件按新尺寸落地，底面仍贴地
   assert.equal(inserted.center[2], 600, '中心 z = 高度/2，底面贴地');
 });
 
+test('--move 后给出该件最近邻居（贴合/重叠为 0），与插入口径对等', { timeout: 180_000 }, () => {
+  const read = (move) => {
+    const stdout = execFileSync(process.execPath,
+      [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--move', move],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+    return JSON.parse(stdout).geometry.moveNearest;
+  };
+  const touching = read('frame-leg-1:840,0,0');
+  assert.equal(touching.partId, 'frame-leg-1');
+  assert.equal(touching.nearGapMm, 0, '挪到贴住别的件，间隙必须是 0');
+  assert.ok(touching.nearPart.length > 0);
+
+  const far = read('frame-leg-1:-870,-330,0');
+  assert.ok(far.nearGapMm > 100, `挪远后间隙应大于 100，实际 ${far.nearGapMm}`);
+});
+
 test('--insert-part 会给出新件最近邻居与间隙（重叠时 0）', { timeout: 180_000 }, () => {
   const read = (spec) => {
     const stdout = execFileSync(process.execPath,

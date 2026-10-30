@@ -228,6 +228,34 @@ if (withGeometry) {
     id: part.id,
     ...partBounds(part)
   }));
+  // 移动视角：挪完之后这个件离谁最近（拖动与插入要有对等的可测结论）
+  const moveSpecs = [];
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] !== '--move') continue;
+    const spec = args[i + 1] ?? '';
+    const [partId] = spec.split(':');
+    if (partId) moveSpecs.push(partId);
+  }
+  if (moveSpecs.length) {
+    const movedId = moveSpecs[moveSpecs.length - 1];
+    const moved = caseData.geometry.bounds.find((entry) => entry.id === movedId);
+    if (moved) {
+      let best = Number.POSITIVE_INFINITY;
+      let bestId;
+      for (const other of caseData.geometry.bounds) {
+        if (other.id === movedId) continue;
+        const gaps = [0, 1, 2].map((axis) => Math.max(0, other.min[axis] - moved.max[axis], moved.min[axis] - other.max[axis]));
+        const gap = Math.hypot(gaps[0], gaps[1], gaps[2]);
+        if (gap < best) { best = gap; bestId = other.id; }
+      }
+      caseData.geometry.moveNearest = {
+        partId: movedId,
+        nearPart: bestId,
+        nearGapMm: Number.isFinite(best) ? Math.round(best * 10) / 10 : null
+      };
+    }
+  }
+
   // 新件视角：离谁最近、差多少（CI 要守住这条，不能只在 Qt 日志里）
   if (caseData.geometry.inserted) {
     const selfId = caseData.geometry.inserted.partId;
