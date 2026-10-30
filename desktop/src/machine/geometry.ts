@@ -1763,6 +1763,27 @@ export function generateMachineGeometry(
     }
   }
   if (parts.some((part) => part.id === 'conveyor-frame')) addJoint('frame-top', 'conveyor-frame', '输送线框坐台面', true);
+  // frame-top 不在 parts 里，跟它配对的要单独处理（之前写在循环里等于没生效）
+  for (const part of parts) {
+    if (/^sensor-st\d+-safe-/.test(part.id)) addJoint('frame-top', part.id, '台面上装安全光栅', true);
+  }
+  if (parts.some((part) => part.id === 'dial-indexer')) {
+    addJoint('frame-top', 'dial-indexer', '台面上装分度器', true);
+    if (parts.some((part) => part.id === 'dial-plate')) addJoint('dial-indexer', 'dial-plate', '分度器上装转盘', true);
+    for (const part of parts) {
+      if (/^dial-nest-\d+$/.test(part.id)) addJoint('dial-plate', part.id, '转盘上装定位座', true);
+    }
+  }
+
+  // 六工位这类组合机还有几层：气爪本体→夹爪、横梁→气爪座、底板→气爪座
+  for (const lower of parts) {
+    for (const upper of parts) {
+      if (lower.id === upper.id) continue;
+      if (/^st\d+-gripper-\d+-body$/.test(lower.id) && /^st\d+-gripper-\d+-jaw-[lr]$/.test(upper.id)) addJoint(lower.id, upper.id, '气爪本体上装夹爪', true);
+      if (/^st\d+-beam$/.test(lower.id) && /^st\d+-gripper-\d+-mount$/.test(upper.id)) addJoint(lower.id, upper.id, '横梁上装气爪座', true);
+      if (/^st\d+-plate$/.test(lower.id) && /^st\d+-gripper-\d+-nest$/.test(upper.id)) addJoint(lower.id, upper.id, '底板上装定位座', true);
+    }
+  }
 
   const structureBom = buildStructureBom(allParts, bays + 1, frameLength, frameWidth, legH);
   if (layout === 'dial' && config.stations.length > 6) {

@@ -202,6 +202,30 @@ test('--move 后给出该件最近邻居（贴合/重叠为 0），与插入口�
   assert.ok(far.nearGapMm > 100, `挪远后间隙应大于 100，实际 ${far.nearGapMm}`);
 });
 
+test('声明叠装链后：未声明贴面为 0，但真重叠与最大可行间距结论不许变', { timeout: 240_000 }, () => {
+  const read = (brief, extra) => {
+    const stdout = execFileSync(process.execPath,
+      [script, '--brief', brief, '--with-geometry', ...extra],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+    return JSON.parse(stdout).geometry;
+  };
+  const four = read('四工位点胶机，节拍 25 件/分钟', ['--clearance', '20']);
+  assert.equal(four.interference.undeclaredTouching, 0, '叠装链应全部声明');
+  assert.ok(four.interference.touching > 0, '贴合仍要被计数');
+  assert.equal(four.interference.suspects, 0);
+
+  // 声明不能把真重叠洗掉：40 mm 排布仍未收敛、最大可行间距仍是 25
+  const maxc = read('四工位点胶机，节拍 25 件/分钟', ['--max-clearance']);
+  assert.equal(maxc.maxClearance.feasibleMm, 25, '最大可行间距必须仍是 25');
+  const l40 = read('四工位点胶机，节拍 25 件/分钟', ['--layout-compliance', '40']);
+  assert.equal(l40.layoutCompliance.converged, false, '40 mm 仍必须报不收敛');
+  assert.equal(l40.layoutCompliance.suspects, 2, '40 mm 的真重叠仍必须报出来');
+
+  const six = read('六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅', []);
+  assert.equal(six.interference.undeclaredTouching, 0);
+  assert.equal(six.interference.suspects, 8, '六工位原有重叠不能被声明洗掉');
+});
+
 test('--insert-part 会给出新件最近邻居与间隙（重叠时 0）', { timeout: 180_000 }, () => {
   const read = (spec) => {
     const stdout = execFileSync(process.execPath,
