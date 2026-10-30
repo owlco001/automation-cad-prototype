@@ -434,6 +434,11 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
             qInfo().noquote() << QStringLiteral("FT_QT_MOVE_UNDO_OK parts=%1").arg(undoParts);
+            if (window.lastMoveNearestForTest().isEmpty()) {
+                qCritical().noquote() << "FT_QT_MOVE_PART_FAIL 拖动后没有给出最近邻居";
+                return 1;
+            }
+            qInfo().noquote() << QStringLiteral("FT_QT_MOVE_NEAREST_OK %1").arg(window.lastMoveNearestForTest());
             return 0;
         }
     }

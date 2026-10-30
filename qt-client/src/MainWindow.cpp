@@ -1532,6 +1532,16 @@ bool MainWindow::movePartTo(const QString &partId, double x, double y, int *part
     int shapes = 0;
     QString renderError;
     renderMachineGeometry(document, &shapes, &renderError);
+    // 拖动完成后同样要有「离谁最近」的结论，和插入对等
+    const QJsonObject nearest = document.value(QStringLiteral("geometry")).toObject()
+                                    .value(QStringLiteral("moveNearest")).toObject();
+    if (!nearest.isEmpty()) {
+        const double gap = nearest.value(QStringLiteral("nearGapMm")).toDouble();
+        const QString nearId = nearest.value(QStringLiteral("nearPart")).toString();
+        m_lastMoveNearest = gap <= 0.0 ? tr("%1 现在与 %2 贴合/重叠").arg(partId, nearId)
+                                      : tr("%1 现在离 %2 最近，差 %3 mm").arg(partId, nearId).arg(gap, 0, 'f', 1);
+        qInfo().noquote() << "FT_QT_MOVE_NEAREST" << partId << nearId << gap;
+    }
     qInfo().noquote() << "FT_QT_PART_MOVED" << partId << "dx=" << dx << "dy=" << dy;
     return true;
 }
