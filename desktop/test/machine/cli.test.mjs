@@ -153,6 +153,23 @@ test('--insert-part 配 --part-size：零件按新尺寸落地，底面仍贴地
   assert.equal(inserted.center[2], 600, '中心 z = 高度/2，底面贴地');
 });
 
+test('--touching-report：未声明贴面列成可处置清单（带轴与建议）', { timeout: 180_000 }, () => {
+  const stdout = execFileSync(process.execPath,
+    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--touching-report'],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const geometry = JSON.parse(stdout).geometry;
+  const report = geometry.touchingReport;
+  assert.ok(Array.isArray(report) && report.length > 0, '必须有清单');
+  assert.equal(report.length, geometry.touchingReportCount);
+  for (const item of report) {
+    assert.equal(item.declared, false, '只列未声明的');
+    assert.ok(['x', 'y', 'z'].includes(item.axis));
+    assert.ok(item.suggestion.length > 0, '每条都要给处置建议');
+  }
+  // 这台机器上未声明贴面全是「工位底板贴顶框」这一种形态
+  assert.ok(report.every((item) => item.axis === 'z'), '四工位的贴面都在 Z 上');
+});
+
 test('relation 分清 overlap / touching / clear（0 mm 不等于撞了）', { timeout: 180_000 }, () => {
   const read = (flag, value) => {
     const stdout = execFileSync(process.execPath,

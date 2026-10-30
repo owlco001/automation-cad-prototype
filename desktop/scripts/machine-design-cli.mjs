@@ -242,6 +242,32 @@ if (withGeometry) {
     id: part.id,
     ...partBounds(part)
   }));
+  // 未声明贴面的处置清单：列出是哪两件、贴在哪一轴，并给出建议（供人确认后补 joints）
+  if (args.includes('--touching-report')) {
+    const boundsById = new Map(caseData.geometry.bounds.map((entry) => [entry.id, entry]));
+    caseData.geometry.touchingReport = (caseData.geometry.interference.touchingPairs ?? [])
+      .filter((pair) => !pair.declared)
+      .map((pair) => {
+        const a = boundsById.get(pair.a);
+        const b = boundsById.get(pair.b);
+        if (!a || !b) return { ...pair, axis: null, suggestion: '找不到包围盒' };
+        let axis = 'z';
+        let bestOverlap = Number.POSITIVE_INFINITY;
+        for (const [index, name] of [[0, 'x'], [1, 'y'], [2, 'z']]) {
+          const overlap = Math.min(a.max[index], b.max[index]) - Math.max(a.min[index], b.min[index]);
+          if (Math.abs(overlap) < bestOverlap) { bestOverlap = Math.abs(overlap); axis = name; }
+        }
+        return {
+          ...pair,
+          axis,
+          suggestion: axis === 'z'
+            ? '上下贴合：若确实是承载/安装关系，补进 joints.ts'
+            : '侧向贴合：确认是否装错位置（同类件应留间隙）'
+        };
+      });
+    caseData.geometry.touchingReportCount = caseData.geometry.touchingReport.length;
+  }
+
   // 移动视角：挪完之后这个件离谁最近（拖动与插入要有对等的可测结论）
   const moveSpecs = [];
   for (let i = 0; i < args.length; i += 1) {
