@@ -211,7 +211,8 @@ test('声明叠装链后：未声明贴面为 0，但真重叠与最大可行间
   };
   const four = read('四工位点胶机，节拍 25 件/分钟', ['--clearance', '20']);
   assert.equal(four.interference.undeclaredTouching, 0, '叠装链应全部声明');
-  assert.ok(four.interference.touching > 0, '贴合仍要被计数');
+  // 覆盖率反向检查：贴合对总数钉死。生成器以后新增构件却没写声明规则时，这个数会变，测试报警。
+  assert.equal(four.interference.touching, 57, '四工位贴合对总数漂了：要么新增了构件，要么声明规则漏了');
   assert.equal(four.interference.suspects, 0);
 
   // 声明不能把真重叠洗掉：40 mm 排布仍未收敛、最大可行间距仍是 25
@@ -223,6 +224,7 @@ test('声明叠装链后：未声明贴面为 0，但真重叠与最大可行间
 
   const six = read('六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅', []);
   assert.equal(six.interference.undeclaredTouching, 0);
+  assert.equal(six.interference.touching, 102, '六工位贴合对总数漂了：查新增构件是否漏声明');
   assert.equal(six.interference.suspects, 8, '六工位原有重叠不能被声明洗掉');
 });
 
