@@ -153,6 +153,20 @@ test('--insert-part 配 --part-size：零件按新尺寸落地，底面仍贴地
   assert.equal(inserted.center[2], 600, '中心 z = 高度/2，底面贴地');
 });
 
+test('relation 分清 overlap / touching / clear（0 mm 不等于撞了）', { timeout: 180_000 }, () => {
+  const read = (flag, value) => {
+    const stdout = execFileSync(process.execPath,
+      [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', flag, value],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+    const geometry = JSON.parse(stdout).geometry;
+    return geometry.inserted ?? geometry.moveNearest;
+  };
+  assert.equal(read('--insert-part', 'gripper@-870,-330,0').relation, 'overlap');
+  assert.equal(read('--insert-part', 'gripper@0,0,0').relation, 'clear');
+  assert.equal(read('--move', 'frame-leg-1:840,0,0').relation, 'touching', '立柱顶面贴顶框属于贴合');
+  assert.equal(read('--move', 'frame-leg-1:-870,-330,0').relation, 'clear');
+});
+
 test('--move 后给出该件最近邻居（贴合/重叠为 0），与插入口径对等', { timeout: 180_000 }, () => {
   const read = (move) => {
     const stdout = execFileSync(process.execPath,

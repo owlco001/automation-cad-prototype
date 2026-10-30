@@ -14,6 +14,20 @@ import { recheckPairs } from '../src/machine/recheck.ts';
 import { CATALOG, buildInsertPart } from '../src/machine/catalog.ts';
 import { screenClearance } from '../src/machine/clearance.ts';
 
+
+/** 两个 AABB 的关系：三轴都真交叠=overlap；有一轴只贴面（≤0.5mm）=touching；其余=clear */
+function relationOf(a, b) {
+  const EPS = 0.5;
+  let touching = false;
+  for (let axis = 0; axis < 3; axis += 1) {
+    const overlap = Math.min(a.max[axis], b.max[axis]) - Math.max(a.min[axis], b.min[axis]);
+    if (overlap > EPS) continue;
+    if (overlap >= -EPS) { touching = true; continue; }
+    return 'clear';
+  }
+  return touching ? 'touching' : 'overlap';
+}
+
 const args = process.argv.slice(2);
 
 // 构件库清单：Qt / 拖拽面板都从这里取，不要各自写死一份
@@ -248,10 +262,12 @@ if (withGeometry) {
         const gap = Math.hypot(gaps[0], gaps[1], gaps[2]);
         if (gap < best) { best = gap; bestId = other.id; }
       }
+      const nearBound = caseData.geometry.bounds.find((entry) => entry.id === bestId);
       caseData.geometry.moveNearest = {
         partId: movedId,
         nearPart: bestId,
-        nearGapMm: Number.isFinite(best) ? Math.round(best * 10) / 10 : null
+        nearGapMm: Number.isFinite(best) ? Math.round(best * 10) / 10 : null,
+        relation: nearBound ? relationOf(moved, nearBound) : null
       };
     }
   }
@@ -271,6 +287,8 @@ if (withGeometry) {
       }
       caseData.geometry.inserted.nearPart = bestId;
       caseData.geometry.inserted.nearGapMm = Number.isFinite(best) ? Math.round(best * 10) / 10 : null;
+      const bestBound = caseData.geometry.bounds.find((entry) => entry.id === bestId);
+      caseData.geometry.inserted.relation = bestBound ? relationOf(self, bestBound) : null;
     }
   }
 }
