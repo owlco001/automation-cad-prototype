@@ -5,6 +5,7 @@
 #include "MachineCaseDialog.h"
 #include <functional>
 #include <QApplication>
+#include <QListWidget>
 #include <QPushButton>
 #include <QSurfaceFormat>
 #include <QDebug>
@@ -700,6 +701,43 @@ int main(int argc, char *argv[]) {
     }
 
     // 整机示意 3D 窗口：--geometry-ui "一句话"（停在窗口上，供截图/人肉核对）
+    // 构件库失败态自检：把管线指到不存在的路径，看面板是否给出可复制命令 + 重试
+    if (args.contains(QStringLiteral("--catalog-hint-selftest"))) {
+        qputenv("AUTOMATIONCAD_PIPELINE", QByteArray("/nonexistent/machine-design-cli.mjs"));
+        MainWindow window;
+        window.resize(1200, 800);
+        window.show();
+        QTimer::singleShot(1500, &window, [&window]() {
+            auto *list = window.findChild<QListWidget *>();
+            if (!list) {
+                qCritical().noquote() << "FT_QT_CATALOG_HINT_FAIL 找不到构件库列表";
+                QCoreApplication::exit(1);
+                return;
+            }
+            QStringList texts;
+            QString command;
+            for (int i = 0; i < list->count(); ++i) {
+                QListWidgetItem *item = list->item(i);
+                texts << item->text();
+                if (item->data(Qt::UserRole).toString() == QStringLiteral("__copy__")) {
+                    command = item->data(Qt::UserRole + 1).toString();
+                }
+            }
+            const bool hasReason = list->count() >= 3 && texts.first().contains(QStringLiteral("构件库不可用"));
+            const bool hasCopy = !command.isEmpty() && command.contains(QStringLiteral("AUTOMATIONCAD_PIPELINE"));
+            const bool hasRetry = texts.join(QLatin1Char('|')).contains(QStringLiteral("重试读取"));
+            if (!hasReason || !hasCopy || !hasRetry) {
+                qCritical().noquote() << "FT_QT_CATALOG_HINT_FAIL items=" << texts.join(QLatin1Char('|'))
+                                      << "command=" << command;
+                QCoreApplication::exit(1);
+                return;
+            }
+            qInfo().noquote() << "FT_QT_CATALOG_HINT_OK items=" << texts.size() << "command=" << command;
+            QCoreApplication::exit(0);
+        });
+        return app.exec();
+    }
+
     if (args.contains(QStringLiteral("--geometry-ui"))) {
         const int geoIndex = args.indexOf(QStringLiteral("--geometry-ui"));
         if (geoIndex + 1 < args.size()) {

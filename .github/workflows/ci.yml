@@ -90,6 +90,9 @@ jobs:
           # 方案存盘往返（不依赖 node）：存到临时文件再回读比对
           ./build-qt/automationcad-qt --case-save-selftest docs/desktop/eval/layout-case.json 2>&1 | tee /tmp/qt-roundtrip.log
           grep -qE "FT_QT_CASE_RT_OK" /tmp/qt-roundtrip.log
+          # 构件库失败态：必须给出原因 + 可复制命令 + 重试，不能是空列表
+          ./build-qt/automationcad-qt --catalog-hint-selftest 2>&1 | tee /tmp/qt-catalog-hint.log
+          grep -qE "FT_QT_CATALOG_HINT_OK" /tmp/qt-catalog-hint.log
       - name: Qt 客户端 ↔ 契约服务自检
         timeout-minutes: 5
         run: |

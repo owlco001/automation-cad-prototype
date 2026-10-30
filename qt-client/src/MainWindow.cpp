@@ -2,6 +2,7 @@
 // 不含 OCCT 头文件；视口是占位 QWidget，OCCT AIS 接入是后续里程碑。
 #include "MainWindow.h"
 
+#include <QClipboard>
 #include <QGuiApplication>
 #include "FeatureDialog.h"
 #include "MachineCaseDialog.h"
@@ -271,12 +272,23 @@ MainWindow::MainWindow(QWidget *parent)
     catalogList->setDragDropMode(QAbstractItemView::DragOnly);
     catalogDock->setWidget(catalogList);
     addDockWidget(Qt::LeftDockWidgetArea, catalogDock);
-    QJsonArray catalogCache;
-    QTimer::singleShot(600, this, [this, catalogList]() {
+    // 构件库加载：成功就列条目；失败不留一个“空列表 + 看着像坏了”的界面，
+    // 直接把原因和**能复制的修复命令**摆在面板里（新手不可能猜到要设环境变量）。
+    const auto loadInto = [this, catalogList]() {
+        catalogList->clear();
         QJsonArray catalog;
         QString error;
         if (!loadCatalog(&catalog, &error)) {
-            catalogList->addItem(tr("（读取构件库失败：%1）").arg(error));
+            catalogList->addItem(tr("构件库不可用：%1").arg(error));
+            const QString command = QStringLiteral("export AUTOMATIONCAD_PIPELINE=%1")
+                                        .arg(QStringLiteral("$(pwd)/desktop/scripts/machine-design-cli.mjs"));
+            auto *copy = new QListWidgetItem(tr("▶ 复制修复命令（在仓库根执行）"), catalogList);
+            copy->setData(Qt::UserRole, QStringLiteral("__copy__"));
+            copy->setData(Qt::UserRole + 1, command);
+            copy->setToolTip(command);
+            auto *retry = new QListWidgetItem(tr("▶ 重试读取"), catalogList);
+            retry->setData(Qt::UserRole, QStringLiteral("__retry__"));
+            qInfo().noquote() << "FT_QT_CATALOG_UNAVAILABLE" << error;
             return;
         }
         m_catalogCache = catalog;
@@ -285,6 +297,17 @@ MainWindow::MainWindow(QWidget *parent)
             auto *row = new QListWidgetItem(item.value(QStringLiteral("label")).toString(), catalogList);
             row->setData(Qt::UserRole, item.value(QStringLiteral("type")).toString());
             row->setToolTip(tr("拖到 3D 视口即可插入（落点按 10 mm 网格吸附、底面贴地）"));
+        }
+        qInfo().noquote() << "FT_QT_CATALOG_READY items=" << catalog.size();
+    };
+    QTimer::singleShot(600, this, loadInto);
+    connect(catalogList, &QListWidget::itemClicked, this, [this, loadInto](QListWidgetItem *item) {
+        const QString action = item->data(Qt::UserRole).toString();
+        if (action == QStringLiteral("__copy__")) {
+            QGuiApplication::clipboard()->setText(item->data(Qt::UserRole + 1).toString());
+            statusBar()->showMessage(tr("修复命令已复制到剪贴板"), 8000);
+        } else if (action == QStringLiteral("__retry__")) {
+            loadInto();
         }
     });
     connect(catalogList, &QListWidget::itemPressed, this, [catalogList](QListWidgetItem *item) {
