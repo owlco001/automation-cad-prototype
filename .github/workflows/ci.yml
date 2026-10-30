@@ -187,6 +187,51 @@ jobs:
         timeout-minutes: 5
         run: node qt-client/tests/sse.mjs --binary build-qt/automationcad-qt
 
+  # 之前的 Qt job 从不编译 OCCT 分支（OcctViewport/剖切/STL/AIS 全在 #ifdef 里），
+  # 等于「CI 绿、但这部分代码没编译过」。这个 job 专治它。
+  qt-occt:
+    name: Qt + OCCT 视口
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 Qt6 + OCCT 开发包 + Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qt6-base-dev libqt6opengl6-dev \
+            libocct-foundation-dev libocct-modeling-data-dev libocct-modeling-algorithms-dev \
+            libocct-visualization-dev libocct-data-exchange-dev libocct-ocaf-dev \
+            libgl1-mesa-dri libglx-mesa0 xvfb cmake g++
+      - name: 配置与编译（OCCT=ON）
+        run: |
+          cmake -S qt-client -B build-occt -DCMAKE_BUILD_TYPE=Release -DAUTOMATIONCAD_OCCT=ON 2>&1 | tee /tmp/cmake-occt.log
+          # 找不到头文件时 CMake 会静默回退到无 OCCT —— 那这个 job 就白跑了，必须显式断言
+          grep -q "OCCT AIS 视口：启用" /tmp/cmake-occt.log || { echo "OCCT 没启用，检查 apt 包名"; exit 1; }
+          cmake --build build-occt -j4
+      - name: OCCT 视口自检（xvfb）
+        timeout-minutes: 15
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          BRIEF="四工位点胶机，节拍 25 件/分钟"
+          run() {
+            name="$1"; shift
+            xvfb-run -a -s "-screen 0 1400x900x24" ./build-occt/automationcad-qt "$@" > "/tmp/occt-$name.log" 2>&1 || { echo "FAIL $name"; cat "/tmp/occt-$name.log"; return 1; }
+            echo "OK $name"
+          }
+          # 剖切：走 BRepAlgoAPI_Cut，判据看体积下降（曾用 ClipPlane 无效）
+          run clip --clip-selftest "$BRIEF" 400
+          grep -qE "FT_QT_CLIP_OK" /tmp/occt-clip.log
+          # 整机 STL 导出：必须有真实字节数
+          run geometry --geometry-selftest "$BRIEF" --out /tmp/machine.stl
+          grep -qE "FT_QT_GEOMETRY_OK" /tmp/occt-geometry.log
+          test "$(stat -c %s /tmp/machine.stl)" -gt 100000
+          run move-part --move-part-selftest "$BRIEF" frame-leg-1 70 30
+          grep -qE "FT_QT_MOVE" /tmp/occt-move-part.log
+          run undo-insert --undo-insert-selftest "$BRIEF" upright
+          grep -qE "FT_QT_UNDO_INSERT_OK" /tmp/occt-undo-insert.log
+          run size-undo --size-undo-selftest "$BRIEF" upright 60x60x1200
+          grep -qE "FT_QT_SIZE_UNDO_OK" /tmp/occt-size-undo.log
   featuretree-geometry:
     name: FeatureTree real geometry (build123d)
     runs-on: ubuntu-latest
