@@ -20,6 +20,7 @@
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QAbstractButton>
+#include <QTemporaryFile>
 #include <QTimer>
 
 #include <cstdio>
@@ -706,16 +707,29 @@ int main(int argc, char *argv[]) {
         const int index = args.indexOf(QStringLiteral("--catalog-hint-selftest"));
         // 第一个参数是场景：默认「脚本找不到」；node 场景清空 PATH 逼出「node 没装」
         const bool nodeCase = index + 1 < args.size() && args.at(index + 1) == QStringLiteral("node");
+        const bool crashCase = index + 1 < args.size() && args.at(index + 1) == QStringLiteral("crash");
         qputenv("AUTOMATIONCAD_PIPELINE", QByteArray("/nonexistent/machine-design-cli.mjs"));
         if (nodeCase) {
             qputenv("PATH", QByteArray("/nonexistent-bin"));
             qputenv("AUTOMATIONCAD_PIPELINE", QByteArray(QCoreApplication::applicationFilePath().toUtf8()));
         }
+        QTemporaryFile crashScript(QDir::tempPath() + QStringLiteral("/catalog-crash-XXXXXX.mjs"));
+        if (crashCase) {
+            // 造一个“能跑但立刻非零退出”的脚本：验证 exit code 与 stderr 真的被带出来
+            crashScript.setAutoRemove(false);
+            if (!crashScript.open()) {
+                qCritical().noquote() << "FT_QT_CATALOG_HINT_FAIL 无法创建临时脚本";
+                return 1;
+            }
+            crashScript.write("console.error('模拟脚本崩溃：catalog 读不出来');\nprocess.exit(7);\n");
+            crashScript.close();
+            qputenv("AUTOMATIONCAD_PIPELINE", crashScript.fileName().toUtf8());
+        }
         // 不 show()：offscreen 平台上 OpenGL 视口建不出上下文会段错误，
         // 而这个自检要验的是构件库面板的失败态，不需要真的显示窗口。
         MainWindow window;
         window.resize(1200, 800);
-        QTimer::singleShot(1500, &window, [&window]() {
+        QTimer::singleShot(1500, &window, [&window, crashCase]() {
             auto *list = window.findChild<QListWidget *>();
             if (!list) {
                 qCritical().noquote() << "FT_QT_CATALOG_HINT_FAIL 找不到构件库列表";
@@ -731,7 +745,11 @@ int main(int argc, char *argv[]) {
                     command = item->data(Qt::UserRole + 1).toString();
                 }
             }
-            const bool hasReason = list->count() >= 3 && texts.first().contains(QStringLiteral("构件库不可用"));
+            bool hasReason = list->count() >= 3 && texts.first().contains(QStringLiteral("构件库不可用"));
+            if (crashCase) {
+                hasReason = hasReason && texts.first().contains(QStringLiteral("exit 7"))
+                            && texts.first().contains(QStringLiteral("模拟脚本崩溃"));
+            }
             const bool nodeCase = QCoreApplication::arguments().contains(QStringLiteral("node"));
             const bool hasCopy = nodeCase ? command.contains(QStringLiteral("node -v"))
                                           : command.contains(QStringLiteral("AUTOMATIONCAD_PIPELINE"));

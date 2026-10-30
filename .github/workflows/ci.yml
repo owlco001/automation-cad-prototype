@@ -96,6 +96,9 @@ jobs:
           # 换一种失败：node 不可用时提示必须指向 node，而不是让人去设管线路径
           ./build-qt/automationcad-qt --catalog-hint-selftest node 2>&1 | tee /tmp/qt-catalog-hint-node.log
           grep -qE "FT_QT_CATALOG_HINT_OK" /tmp/qt-catalog-hint-node.log
+          # 第三种：脚本能跑但非零退出，必须带出 exit code 与 stderr
+          ./build-qt/automationcad-qt --catalog-hint-selftest crash 2>&1 | tee /tmp/qt-catalog-hint-crash.log
+          grep -qE "FT_QT_CATALOG_HINT_OK" /tmp/qt-catalog-hint-crash.log
       - name: Qt 客户端 ↔ 契约服务自检
         timeout-minutes: 5
         run: |
