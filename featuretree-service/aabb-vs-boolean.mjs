@@ -60,6 +60,30 @@ const cases = [
     ],
     aabbMm3: aabbOverlap(plateBox, boxOfCylinder(10, 40, 6)),
     analyticMm3: 0 // φ10 穿过 φ11 的孔：真实交集为 0
+  },
+  {
+    // 回归用例：`anchor:'center'` 曾被实现成「把本来就居中的盒子再平移半个尺寸」，
+    // 于是带转角的复核件整体偏了 (L/2,W/2,H/2)，凭空造出交集体积——
+    // 我据此误报过「六工位 4 对真干涉 2928 mm³」。把小探针放在被测件几何中心：
+    // 位置对 → 交集就是探针体积 1000 mm³；位置错 → 交集接近 0。
+    id: 'C-转角件居中',
+    note: 'anchor:center + rotate + move 必须把几何中心放到指定点（探针落在中心 = 1000 mm³）',
+    members: [
+      {
+        ops: [
+          { op: 'box', length: 50, width: 50, height: 300, anchor: 'center' },
+          { op: 'rotate', deg: 60 },
+          { op: 'move', x: 0, y: 0, z: 150 }
+        ],
+        offset: [0, 0, 0]
+      },
+      {
+        ops: [{ op: 'box', length: 10, width: 10, height: 10, anchor: 'center' }],
+        offset: [0, 0, 150]
+      }
+    ],
+    aabbMm3: 1000,
+    analyticMm3: 1000
   }
 ];
 
@@ -106,7 +130,7 @@ try {
       const falsePositive = item.aabbMm3;
       console.log(`AABB_VS_BOOLEAN_OK ${item.id} aabb=${falsePositive.toFixed(2)} boolean=${booleanMm3} → AABB 误报 ${(falsePositive).toFixed(0)} mm³（真实为 0）`);
     } else {
-      if (!(item.aabbMm3 > booleanMm3)) fail(`${item.id}：AABB ${item.aabbMm3} 不该小于真实布尔 ${booleanMm3}`);
+      if (!(item.aabbMm3 >= booleanMm3)) fail(`${item.id}：AABB ${item.aabbMm3} 不该小于真实布尔 ${booleanMm3}`);
       const ratio = item.aabbMm3 / booleanMm3;
       console.log(`AABB_VS_BOOLEAN_OK ${item.id} aabb=${item.aabbMm3.toFixed(2)} boolean=${booleanMm3} analytic=${item.analyticMm3.toFixed(2)} 高估=x${ratio.toFixed(3)}`);
     }

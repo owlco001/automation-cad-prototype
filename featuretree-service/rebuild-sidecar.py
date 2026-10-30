@@ -50,7 +50,24 @@ def build(ops, density, document_id='demo-adapter'):
             if min(length, width, height) <= 0:
                 return {"ok": False, "message": "box 的 length/width/height 必须大于 0"}
             box = Box(length, width, height, align=BOX_ALIGN)
+            # anchor='center'：把几何中心放到原点（BOX_ALIGN 是 XY 居中、Z 贴地），
+            # 复核带转角的零件时必须这样——否则 rotate 是绕角落里转，位置整体偏掉。
+            if str(op.get("anchor") or "min").lower() == "center":
+                box = Pos(0, 0, -height / 2) * box
             solid = box if solid is None else solid + box
+        elif kind == "rotate":
+            if solid is None:
+                return {"ok": False, "message": "rotate 之前必须有实体"}
+            deg = op.get("deg")
+            if isinstance(deg, bool) or not isinstance(deg, (int, float)):
+                return {"ok": False, "message": "rotate.deg 必须是数字"}
+            from build123d import Rot  # noqa: PLC0415
+            solid = Rot(0, 0, float(deg)) * solid
+        elif kind == "move":
+            if solid is None:
+                return {"ok": False, "message": "move 之前必须有实体"}
+            x, y, z = (float(op.get(k, 0) or 0) for k in ("x", "y", "z"))
+            solid = Pos(x, y, z) * solid
         elif kind in ("holes", "counterbore"):
             if solid is None:
                 return {"ok": False, "message": "孔特征缺少基体（先有 box）"}

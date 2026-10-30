@@ -64,7 +64,10 @@ def build(ops: list[dict]):
             z = 0.0 if centered else H / 2
             base = bd.Pos(0, 0, z) * bd.Box(L, W, H)
             if anchor == "center":
-                base = bd.Pos(-L / 2, -W / 2, -H / 2 if centered else 0) * base
+                # build123d 的 Box 默认就是几何中心在原点（align=CENTER），
+                # 所以这里**不需要**再平移半个尺寸——之前多移了一次，
+                # 导致带转角的复核件整体偏了 (L/2, W/2, H/2)，凭空造出交集体积。
+                pass
             shape = base if shape is None else shape + base
         elif kind == "rotate":
             # 绕原点转 Z（度）。配合 box.anchor=center 使用即为绕零件自身中心旋转。

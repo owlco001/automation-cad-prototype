@@ -26,6 +26,24 @@ st4-rotary-1-table  同上
 正确修法不是禁止所有 Z 位移（实测那样会把 20 mm 的收敛也搞坏、最大可行间距从 25 掉到 5），
 而是「Z 位移不得减少与其声明支撑件的间距」。这条留作后续工作，未实现。
 
+## 更正：六工位那 8 对「真干涉 2928 mm³」是工具 bug 造成的误判
+
+#122 给 sidecar 加 `anchor:'center'` 时，把**本来就居中**的 build123d Box 又平移了半个尺寸，
+于是带转角的复核件整体偏了 (L/2, W/2, H/2) —— 凭空造出 2928.59 mm³ 的「交集」。
+
+修好后走 sidecar + `recheck.ts` 端到端复核（`--case` 六工位）：
+
+```
+BOOLEAN_RECHECK_OK checked=8 confirmed=0 misreported=8 unchecked=0
+```
+
+8 对全是 AABB 误报（0 mm³），**六工位没有真实碰撞**，之前「4 真 / 4 误」的结论作废。
+根因是 AABB 把 60° 旋转的 50×50 立柱撑成 68×68，与 φ140 转台的包围盒在 X/Y 都相交，
+但真实几何最近点还有 4.6 mm 余量。
+
+防回归：`aabb-vs-boolean.mjs` 新增用例 `C-转角件居中`——探针放在被测件几何中心，
+交集必须正好 1000 mm³；位置一偏这个数就塌。
+
 ## 待办（按优先级）
 
 - **P0：Windows 更新真实验收**：维护者配置并保护代码签名证书/密码、核对 Authenticode Subject；在隔离 Windows 环境验证 stable/beta 升级、签名与 SHA-512 拒绝、blockmap 失败回退、断网/磁盘不足及安装恢复。当前本地 mock/Linux smoke 不替代此项，未通过前不发布。
