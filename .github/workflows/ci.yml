@@ -99,6 +99,34 @@ jobs:
           # 第三种：脚本能跑但非零退出，必须带出 exit code 与 stderr
           ./build-qt/automationcad-qt --catalog-hint-selftest crash 2>&1 | tee /tmp/qt-catalog-hint-crash.log
           grep -qE "FT_QT_CATALOG_HINT_OK" /tmp/qt-catalog-hint-crash.log
+      # 整机交互自检：这些不依赖 OCCT，但此前从没进过 CI——
+      # 构件库插入、最大间距、排布、间距阈值、整站挪、过期戳、复核跳过，
+      # 都是最近改过的功能，靠人手跑等于没有守卫。
+      - name: 整机交互自检（headless，无 OCCT）
+        timeout-minutes: 10
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          export QT_QPA_PLATFORM=offscreen
+          BRIEF="四工位点胶机，节拍 25 件/分钟"
+          run() {
+            name="$1"; shift
+            ./build-qt/automationcad-qt "$@" > "/tmp/qt-$name.log" 2>&1 || { echo "FAIL $name"; cat "/tmp/qt-$name.log"; return 1; }
+            echo "OK $name"
+          }
+          run insert --insert-selftest "$BRIEF" upright
+          grep -qE "FT_QT_INSERT_OK" /tmp/qt-insert.log
+          run max-clearance --max-clearance-selftest "$BRIEF"
+          grep -qE "FT_QT_MAXCLEARANCE_OK feasible=25" /tmp/qt-max-clearance.log
+          run layout --layout-selftest docs/desktop/eval/layout-case.json
+          grep -qE "FT_QT_LAYOUT_OK" /tmp/qt-layout.log
+          run threshold --threshold-selftest "$BRIEF"
+          grep -qE "FT_QT_THRESHOLD_OK" /tmp/qt-threshold.log
+          run station-move --station-move-selftest "$BRIEF"
+          grep -qE "FT_QT_STATION_OK" /tmp/qt-station-move.log
+          run stale-stamp --stale-stamp-selftest docs/desktop/eval/layout-case.json
+          grep -qE "FT_QT_STALE_OK" /tmp/qt-stale-stamp.log
+          run recheck-skip --recheck-skip-selftest docs/desktop/eval/machine-case.json
+          grep -qE "FT_QT_RECHECK_SKIP_OK" /tmp/qt-recheck-skip.log
       - name: Qt 客户端 ↔ 契约服务自检
         timeout-minutes: 5
         run: |
