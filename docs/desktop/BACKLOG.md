@@ -10,6 +10,22 @@
 - 2026-10-26 整机设计向导改进、整机布局 3D 编辑（feat/layout-editor）、无限画布工作台方案：原文见 [BACKLOG-HISTORY.md](BACKLOG-HISTORY.md)。
 - 2026-10-25 整机设计向导首轮及 0.4.2（`bfdaa37`）：详情见 [BACKLOG-HISTORY.md](BACKLOG-HISTORY.md)。
 
+## 已知问题：排布求解器对叠装件沿 Z 来回挪（活锁）
+
+`resolveLayout` 在 40 mm 下对四工位收敛不了，**不是布局放不下，是求解器自己造的重叠**：
+
+```
+st1-rotary-1-table  z +13 (clearance) → z -13 (overlap) → z +13 → ...  直到轮数用尽
+st4-rotary-1-table  同上
+```
+
+转台面在「抬起来满足间距」和「压回底座产生重叠」之间反复。为此 `layoutCompliance`
+新增了 `remainingPairs`（a/b/axis/deltaMm），至少让 CLI 与界面能说清「还剩哪两对」，
+而不是只说一句「没排开」。
+
+正确修法不是禁止所有 Z 位移（实测那样会把 20 mm 的收敛也搞坏、最大可行间距从 25 掉到 5），
+而是「Z 位移不得减少与其声明支撑件的间距」。这条留作后续工作，未实现。
+
 ## 待办（按优先级）
 
 - **P0：Windows 更新真实验收**：维护者配置并保护代码签名证书/密码、核对 Authenticode Subject；在隔离 Windows 环境验证 stable/beta 升级、签名与 SHA-512 拒绝、blockmap 失败回退、断网/磁盘不足及安装恢复。当前本地 mock/Linux smoke 不替代此项，未通过前不发布。

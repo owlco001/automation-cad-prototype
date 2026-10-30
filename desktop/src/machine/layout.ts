@@ -58,6 +58,11 @@ export interface LayoutResult {
   stopReason?: string;
   /** 没收敛时给「还差多少、要动哪个工位」，收敛时为空 */
   advice?: LayoutAdvice[];
+  /**
+   * 还没解开的重叠对。没有它的话，converged:false 的界面就只能说“没排开”——
+   * 而每一对其实都带着建议位移，用户却拿不到（实测四工位 40 mm 就是这样：suspects=2、advice=0）。
+   */
+  remainingPairs?: Array<{ a: string; b: string; axis: string | null; deltaMm: number | null }>;
 }
 
 export interface LayoutOptions {
@@ -128,7 +133,8 @@ export function resolveLayout(geometry: any, options: LayoutOptions): LayoutResu
         converged: false,
         stopReason: `连续 ${stallRounds} 轮没有进展（仍有 ${suspectsAfter} 处重叠、${clearanceAfter} 处间距不足）：`
                     + `这个 ${options.clearanceMm} mm 间距在当前布局下放不下，需要加宽工位或减少零件`,
-        advice: buildAdvice(finalWorking, options.clearanceMm)
+        advice: buildAdvice(finalWorking, options.clearanceMm),
+        remainingPairs: remainingSuspects(finalWorking, ignorePairs)
       };
     }
 
@@ -154,9 +160,23 @@ export function resolveLayout(geometry: any, options: LayoutOptions): LayoutResu
     ? base
     : { ...base,
         stopReason: `交替 ${maxRounds} 轮后仍有 ${suspects} 处重叠、${clearance} 处间距不足`,
-        advice: buildAdvice(finalWorking, options.clearanceMm) };
+        advice: buildAdvice(finalWorking, options.clearanceMm),
+        remainingPairs: remainingSuspects(finalWorking, ignorePairs) };
 }
 
+
+
+function remainingSuspects(geometry: any, ignorePairs?: string[]) {
+  const screened = screenInterference(geometry, ignorePairs?.length ? { ignorePairs } : {});
+  return screened.pairs
+    .filter((pair: any) => pair.kind === 'suspect')
+    .map((pair: any) => ({
+      a: String(pair.a),
+      b: String(pair.b),
+      axis: pair.suggestion?.axis ?? null,
+      deltaMm: typeof pair.suggestion?.delta === 'number' ? pair.suggestion.delta : null
+    }));
+}
 
 // 把「还差多少」落到具体工位上：零件 id 形如 st2-gripper-1-nest / frame-top / conveyor-motor，
 // 取第一段作为 scope（st2 / frame / conveyor）。同一对跨两个 scope 时算到两个 scope 都行——

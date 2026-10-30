@@ -953,9 +953,29 @@ int main(int argc, char *argv[]) {
         const QJsonObject layoutInfo = loose.value(QStringLiteral("geometry")).toObject()
                                            .value(QStringLiteral("layoutCompliance")).toObject();
         const QJsonArray advice = layoutInfo.value(QStringLiteral("advice")).toArray();
-        if (advice.isEmpty()) {
-            qCritical().noquote() << "FT_QT_SHIFT_FAIL 40 mm 下应当放不下并给建议";
+        // 40 mm 的真相：间距已清零（advice 为空），剩下的是重叠对——它们不该变成“间距建议”。
+        // 这里钉住的是「没收敛必须说清还剩哪几对」，而不是「必须有间距建议」。
+        const QJsonArray remaining = layoutInfo.value(QStringLiteral("remainingPairs")).toArray();
+        if (layoutInfo.value(QStringLiteral("converged")).toBool()) {
+            qCritical().noquote() << "FT_QT_SHIFT_FAIL 40 mm 不该收敛";
             return 1;
+        }
+        if (remaining.isEmpty()) {
+            qCritical().noquote() << "FT_QT_SHIFT_FAIL 没收敛却说不出还剩哪几对";
+            return 1;
+        }
+        if (remaining.size() != layoutInfo.value(QStringLiteral("suspects")).toInt()) {
+            qCritical().noquote() << "FT_QT_SHIFT_FAIL 剩余对数量与 suspects 不一致";
+            return 1;
+        }
+        for (const QJsonValue &value : remaining) {
+            const QJsonObject pair = value.toObject();
+            if (pair.value(QStringLiteral("a")).toString().isEmpty()
+                || pair.value(QStringLiteral("b")).toString().isEmpty()
+                || pair.value(QStringLiteral("axis")).toString().isEmpty()) {
+                qCritical().noquote() << "FT_QT_SHIFT_FAIL 剩余对缺少 a/b/axis";
+                return 1;
+            }
         }
         int intra = 0;
         int cross = 0;

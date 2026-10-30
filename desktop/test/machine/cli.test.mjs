@@ -370,6 +370,21 @@ test('排布合规 fixture 与当前算法一致（CI 的 Qt 自检靠它，漂�
 });
 
 
+test('排布没收敛时必须给出“还剩哪几对、往哪挪多少”（不能只说没排开）', { timeout: 300_000 }, () => {
+  const stdout = execFileSync(process.execPath,
+    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--layout-compliance', '40'],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const layout = JSON.parse(stdout).geometry.layoutCompliance;
+  assert.equal(layout.converged, false);
+  assert.ok(layout.remainingPairs.length > 0, '未收敛时必须列出剩余重叠对');
+  assert.equal(layout.remainingPairs.length, layout.suspects, '剩余对数量必须与 suspects 一致');
+  for (const pair of layout.remainingPairs) {
+    assert.ok(typeof pair.a === 'string' && typeof pair.b === 'string');
+    assert.ok(['x', 'y', 'z'].includes(pair.axis), '每对都要有轴');
+    assert.ok(Number.isFinite(pair.deltaMm) && pair.deltaMm !== 0, '每对都要有非零位移');
+  }
+});
+
 test('--max-clearance 二分出四工位的最大可行间距 = 25 mm，且该值复算确实收敛', { timeout: 300_000 }, () => {
   const stdout = execFileSync(process.execPath,
     [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--max-clearance'],
