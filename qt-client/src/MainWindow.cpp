@@ -93,6 +93,28 @@ QJsonObject readReply(QNetworkReply *reply) {
 }
 } // namespace
 
+namespace {
+// 管线脚本定位：环境变量 → exe 目录向上 → 当前工作目录向上。
+// 之前两处各写一份、都不看 cwd，所以在仓库外构建（/tmp/qt-occt）时构件库读不到，
+// 而同一份 exe 的“生成整机”却能跑——同一件事两套规则，很容易看着像坏了。
+QString resolvePipelineScript()
+{
+    const QString fromEnv = qEnvironmentVariable("AUTOMATIONCAD_PIPELINE");
+    if (!fromEnv.isEmpty() && QFileInfo::exists(fromEnv)) return fromEnv;
+
+    const QString rel = QStringLiteral("desktop/scripts/machine-design-cli.mjs");
+    for (const QDir &start : {QDir(QCoreApplication::applicationDirPath()), QDir::current()}) {
+        QDir probe(start);
+        for (int depth = 0; depth < 8; ++depth) {
+            const QString candidate = QFileInfo(probe.filePath(rel)).absoluteFilePath();
+            if (QFileInfo::exists(candidate)) return candidate;
+            if (!probe.cdUp()) break;
+        }
+    }
+    return fromEnv;  // 环境变量设了但不存在：原样返回，报错里能看出它指向哪
+}
+}  // namespace
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), m_net(new QNetworkAccessManager(this)) {
     setWindowTitle(tr("AutomationCAD · Qt 工作台（v0.1 壳子）"));
@@ -662,29 +684,7 @@ bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *docum
         *error = tr("brief 不能为空");
         return false;
     }
-    // 管线脚本位置：优先环境变量，其次仓库内约定路径（app 在 build 目录时向上找）
-    QString script = qEnvironmentVariable("AUTOMATIONCAD_PIPELINE");
-    if (script.isEmpty()) {
-        const QString rel = QStringLiteral("desktop/scripts/machine-design-cli.mjs");
-        QStringList candidates{
-            QDir(QCoreApplication::applicationDirPath()).filePath(rel),
-            QDir::current().filePath(rel)
-        };
-        // exe 可能在仓库外的任意构建目录（D:\build\qt-occt-deploy），
-        // 从 exe 所在目录一层层往上找仓库根，找到 desktop/scripts 为止
-        QDir probe(QCoreApplication::applicationDirPath());
-        for (int depth = 0; depth < 8; ++depth) {
-            candidates << probe.filePath(rel);
-            if (!probe.cdUp()) break;
-        }
-        for (const QString &candidate : candidates) {
-            const QString absolute = QFileInfo(candidate).absoluteFilePath();
-            if (QFileInfo::exists(absolute)) {
-                script = absolute;
-                break;
-            }
-        }
-    }
+    const QString script = resolvePipelineScript();
     if (script.isEmpty() || !QFileInfo::exists(script)) {
         *error = tr("找不到整机管线脚本（%1）；设置环境变量 AUTOMATIONCAD_PIPELINE 指向 desktop/scripts/machine-design-cli.mjs")
                      .arg(script.isEmpty() ? tr("未设置") : script);
@@ -1439,18 +1439,9 @@ bool MainWindow::exportMachineStlForTest(const QString &path, int *bytes, QStrin
 }
 
 bool MainWindow::loadCatalog(QJsonArray *catalog, QString *error) {
-    QString script = qEnvironmentVariable("AUTOMATIONCAD_PIPELINE");
-    if (script.isEmpty()) {
-        QDir probe(QCoreApplication::applicationDirPath());
-        const QString rel = QStringLiteral("desktop/scripts/machine-design-cli.mjs");
-        for (int depth = 0; depth < 8; ++depth) {
-            const QString candidate = QFileInfo(probe.filePath(rel)).absoluteFilePath();
-            if (QFileInfo::exists(candidate)) { script = candidate; break; }
-            if (!probe.cdUp()) break;
-        }
-    }
+    const QString script = resolvePipelineScript();
     if (script.isEmpty() || !QFileInfo::exists(script)) {
-        *error = tr("找不到整机管线脚本；设置 AUTOMATIONCAD_PIPELINE");
+        *error = tr("找不到整机管线脚本；设置 AUTOMATIONCAD_PIPELINE 指向 desktop/scripts/machine-design-cli.mjs");
         return false;
     }
     QProcess process;
