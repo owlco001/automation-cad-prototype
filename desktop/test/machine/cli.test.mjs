@@ -159,15 +159,17 @@ test('--touching-report：未声明贴面列成可处置清单（带轴与建议
     { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
   const geometry = JSON.parse(stdout).geometry;
   const report = geometry.touchingReport;
-  assert.ok(Array.isArray(report) && report.length > 0, '必须有清单');
+  assert.ok(Array.isArray(report), '必须有清单字段');
   assert.equal(report.length, geometry.touchingReportCount);
+  assert.equal(report.length, geometry.interference.undeclaredTouching, '清单条数必须等于未声明数');
   for (const item of report) {
     assert.equal(item.declared, false, '只列未声明的');
     assert.ok(['x', 'y', 'z'].includes(item.axis));
     assert.ok(item.suggestion.length > 0, '每条都要给处置建议');
   }
-  // 这台机器上未声明贴面全是「工位底板贴顶框」这一种形态
-  assert.ok(report.every((item) => item.axis === 'z'), '四工位的贴面都在 Z 上');
+  // 叠装链声明后四工位不应再有未声明贴面；但贴合本身仍要被计数（不是被删掉）
+  assert.equal(geometry.interference.undeclaredTouching, 0);
+  assert.ok(geometry.interference.touching > 0, '贴合对仍必须计数');
 });
 
 test('relation 分清 overlap / touching / clear（0 mm 不等于撞了）', { timeout: 180_000 }, () => {

@@ -1714,9 +1714,9 @@ export function generateMachineGeometry(
   // 结构连接由生成器直接产出：立柱↔台面、立柱↔下横梁、横梁交汇。
   // 干涉初筛只放行这里声明过的对，新增构件类型必须在这里登记，否则会被报成「需人工确认」（有意为之）。
   const frameJoints: GeomJoint[] = [];
-  const addJoint = (a: string, b: string, reason: string): void => {
+  const addJoint = (a: string, b: string, reason: string, contactOnly = false): void => {
     if (a === b) return;
-    frameJoints.push({ a, b, reason });
+    frameJoints.push({ a, b, reason, ...(contactOnly ? { contactOnly: true } : {}) });
   };
   const legIds = frameParts.filter((part) => part.id.startsWith('frame-leg-')).map((part) => part.id);
   const stringerIds = frameParts.filter((part) => part.id.startsWith('frame-stringer-')).map((part) => part.id);
@@ -1742,6 +1742,27 @@ export function generateMachineGeometry(
       boundsMax[axis] = Math.max(boundsMax[axis] as number, box.max[axis] as number);
     }
   }
+
+  // 叠装关系：声明成「只许贴合」。它们本来就面贴面，允许贴合但**不允许互穿**——
+  // 否则一张白名单会把「工位底板被推穿台面」也当成已声明连接放过去（实测会让 40 mm 排布假装收敛）。
+  for (const part of parts) {
+    if (/^st\d+-plate$/.test(part.id)) addJoint(part.id, 'frame-top', '工位底板坐台面', true);
+  }
+  const stationOf = (id: string): string | null => {
+    const match = /^(?:st(\d+)-|sensor-st(\d+)-)/.exec(id);
+    return match ? (match[1] ?? match[2] ?? null) : null;
+  };
+  for (const lower of parts) {
+    for (const upper of parts) {
+      if (lower.id === upper.id) continue;
+      if (stationOf(lower.id) !== stationOf(upper.id)) continue;
+      if (/^st\d+-plate$/.test(lower.id) && /^st\d+-rotary-\d+-base$/.test(upper.id)) addJoint(lower.id, upper.id, '底板上装转台底座', true);
+      if (/^st\d+-rotary-\d+-base$/.test(lower.id) && /^st\d+-rotary-\d+-table$/.test(upper.id)) addJoint(lower.id, upper.id, '转台底座上装转台面', true);
+      if (/^st\d+-rotary-\d+-table$/.test(lower.id) && /^st\d+-rotary-\d+-fixture$/.test(upper.id)) addJoint(lower.id, upper.id, '转台面上装夹具', true);
+      if (/^st\d+-plate$/.test(lower.id) && /^sensor-st\d+-.*-bracket$/.test(upper.id)) addJoint(lower.id, upper.id, '底板上装传感器支架', true);
+    }
+  }
+  if (parts.some((part) => part.id === 'conveyor-frame')) addJoint('frame-top', 'conveyor-frame', '输送线框坐台面', true);
 
   const structureBom = buildStructureBom(allParts, bays + 1, frameLength, frameWidth, legH);
   if (layout === 'dial' && config.stations.length > 6) {

@@ -104,18 +104,23 @@ export function screenInterference(geometry: any, options: ScreenOptions = {}): 
   // 优先用生成器自己产出的 joints（几何=唯一事实来源）；
   // 老数据/外部 geometry 没有 joints 字段时，退回按命名规则的表，并在结果里标出来源。
   const generatorJoints = Array.isArray(geometry?.joints) ? geometry.joints : [];
-  const declared = new Map<string, string>();
+  const declared = new Map<string, { reason: string; contactOnly: boolean }>();
   for (const joint of declaredJoints(parts)) {
-    declared.set(jointKey(joint.a, joint.b), joint.reason);
+    declared.set(jointKey(joint.a, joint.b), { reason: joint.reason, contactOnly: false });
   }
   for (const joint of generatorJoints) {
     if (typeof joint?.a !== 'string' || typeof joint?.b !== 'string') continue;
-    declared.set(jointKey(joint.a, joint.b), String(joint.reason ?? '生成器声明的结构连接'));
+    declared.set(jointKey(joint.a, joint.b), {
+      reason: String(joint.reason ?? '生成器声明的结构连接'),
+      // contactOnly：只允许贴合，不允许互穿（叠装关系就是这样）
+      contactOnly: joint.contactOnly === true
+    });
   }
   const jointSource = generatorJoints.length > 0 ? 'generator' : 'rules';
   const pairs: ScreenPair[] = [];
   const touching: Array<{ a: string; b: string; declared: boolean }> = [];
   const EPS = 0.5;  // mm：小于这个量的接触（贴面/装配面）不算
+  const CONTACT_TOLERANCE_MM = 1.0;  // 声明为贴合的连接，最多容忍 1 mm 互穿
   for (let i = 0; i < boxes.length; i += 1) {
     for (let j = i + 1; j < boxes.length; j += 1) {
       const a = boxes[i].bounds;
@@ -138,7 +143,15 @@ export function screenInterference(geometry: any, options: ScreenOptions = {}): 
         continue;
       }
       if (ignored.has(jointKey(String(boxes[i].part.id), String(boxes[j].part.id)))) continue;
-      const reason = declared.get(jointKey(String(boxes[i].part.id), String(boxes[j].part.id)));
+      const declaration = declared.get(jointKey(String(boxes[i].part.id), String(boxes[j].part.id)));
+      // 声明为「只许贴合」的连接：穿模超过容差**仍要算 suspect**。
+      // 之前只改了文案没改 kind，结果照样被当成 declared —— 等于没修。
+      const penetration = Math.min(dx, dy, dz);
+      const violatesContact = declaration?.contactOnly === true && penetration > CONTACT_TOLERANCE_MM;
+      const reason = violatesContact ? undefined : declaration?.reason;
+      const suspectNote = violatesContact
+        ? `${declaration?.reason ?? '已声明连接'}，但穿模 ${penetration.toFixed(1)} mm`
+        : undefined;
       // 分开代价最小的方案：逐轴算「往 + / 往 -」各自要挪多远，取全局最小。
       // 注意不能直接拿重叠量当位移：移动件一旦越过对方边界，所需位移会比重叠量更大
       //（实测下横梁 40mm 重叠却要挪 51mm 才真的分开）。
@@ -184,6 +197,7 @@ export function screenInterference(geometry: any, options: ScreenOptions = {}): 
       pairs.push({
         kind: reason ? 'declared' : 'suspect',
         ...(reason ? { reason } : {}),
+        ...(suspectNote ? { note: suspectNote, penetrationMm: Math.round(penetration * 10) / 10 } : {}),
         a: boxes[i].part.id,
         b: boxes[j].part.id,
         aName: boxes[i].part.name,

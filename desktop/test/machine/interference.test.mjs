@@ -183,3 +183,22 @@ test('贴面对：既不进 suspect，也不能静默丢掉（touching / undecla
   assert.equal(result.undeclaredTouching, 1, '没声明过就是 1');
   assert.equal(result.touchingPairs[0].a, 'base');
 });
+
+test('contactOnly 声明：贴合放行，穿模仍报（不能被白名单洗掉）', async () => {
+  const { screenInterference } = await import('../../src/machine/interference.ts');
+  const make = (topZ) => ({
+    joints: [{ a: 'base', b: 'brick', reason: '叠装', contactOnly: true }],
+    parts: [
+      { id: 'base', shape: { type: 'box', size: [20, 20, 10] }, center: [0, 0, 5] },
+      { id: 'brick', shape: { type: 'box', size: [10, 10, 10] }, center: [0, 0, topZ] }
+    ]
+  });
+  // 恰好贴合（brick 底面 = base 顶面 z=10）
+  const touching = screenInterference(make(15));
+  assert.equal(touching.suspects, 0, '贴合必须放行');
+  // 往下压 3 mm（brick z 7..17 vs base 0..10）：穿模 3 mm > 1 mm 容差
+  const penetrating = screenInterference(make(12));
+  assert.equal(penetrating.suspects, 1, '穿模仍要报');
+  const pair = penetrating.pairs.find((item) => item.kind === 'suspect');
+  assert.match(pair.note ?? '', /穿模 3/);
+});
