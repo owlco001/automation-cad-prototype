@@ -4,7 +4,8 @@
 // 所以初筛只能说「疑似」，结论要落到真实布尔上。
 //
 // 能复核什么：`box`（无旋转）与沿 Z 的 `cylinder`——sidecar 的算子就能表达这两个。
-// 不能复核的（沿 X/Y 的圆柱、带转角 `rotationZDeg` 的件）如实标 `unsupported`，不假装复核过。
+// 能复核：`box`（含 `rotationZDeg`：居中→绕自身转→平移）、沿 Z 的 `cylinder`（绕 Z 自转不影响形状）。
+// 不能复核的（沿 X/Y 的圆柱）如实标 `unsupported`，不假装复核过。
 
 import type { GeomPart, Vec3 } from './geometry.ts';
 
@@ -27,10 +28,23 @@ export interface MemberResult {
  */
 export function partToMember(part: GeomPart): MemberResult {
   const rotation = ((part.rotationZDeg % 360) + 360) % 360;
-  if (rotation !== 0) {
-    return { ok: false, reason: `零件 ${part.id} 有 ${part.rotationZDeg}° 转角，sidecar 只能绕原点转 Z，复核口径对不上` };
-  }
   if (part.shape.type === 'box') {
+    if (rotation !== 0) {
+      // 带转角的方块：先把盒子的几何中心放到原点 → 绕原点转 Z（= 绕自身中心转）→ 平移到实际中心。
+      // 之前这里一律标 unsupported，结果六工位那 8 对（整机整体转 60°）永远复核不了。
+      const [sx, sy, sz] = part.shape.size;
+      return {
+        ok: true,
+        member: {
+          ops: [
+            { op: 'box', length: sx, width: sy, height: sz, anchor: 'center' },
+            { op: 'rotate', deg: rotation },
+            { op: 'move', x: part.center[0], y: part.center[1], z: part.center[2] }
+          ],
+          offset: [0, 0, 0]
+        }
+      };
+    }
     const [sx, sy, sz] = part.shape.size;
     return {
       ok: true,
@@ -44,6 +58,7 @@ export function partToMember(part: GeomPart): MemberResult {
   if (shape.axis !== 'z') {
     return { ok: false, reason: `零件 ${part.id} 是沿 ${shape.axis.toUpperCase()} 的圆柱，sidecar 只支持沿 Z` };
   }
+  // 沿 Z 的圆柱绕 Z 自转形状不变，rotationZDeg 可以忽略（不是“不支持”）
   return {
     ok: true,
     member: {
