@@ -130,6 +130,9 @@ jobs:
           # 贴面文案：用 brief 现场跑管线，别拿旧的 fixture（它没有 touching 字段）
           run touching-label --touching-label-selftest "六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅"
           grep -qE "FT_QT_TOUCHING_OK" /tmp/qt-touching-label.log
+          # PLC 体检：缺口→补齐→步序→程序↔3D 对账（不需要 OCCT，纯数据）
+          run plc-audit --plc-audit-selftest "$BRIEF"
+          grep -qE "FT_QT_PLC_AUDIT_OK .*reconGaps=0" /tmp/qt-plc-audit.log
           # 建议位移 / 过期重算 / 工位级建议范围：都是改过排布逻辑后最该盯的
           run apply-hint --apply-hint-selftest "$BRIEF"
           grep -qE "FT_QT_APPLY_HINT_OK" /tmp/qt-apply-hint.log

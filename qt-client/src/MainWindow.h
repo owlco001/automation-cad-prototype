@@ -130,6 +130,10 @@ public:
     bool loadLinkage(const QString &brief, QJsonObject *linkage, QString *error);
     /// 自检用：把第 index 帧套到视口上，返回被摆动的零件数
     int applyLinkageFrameForTest(const QJsonObject &linkage, int index);
+    /// PLC 体检：缺口诊断 / 补齐 / 步序 / 程序↔3D 对账（不需要 OCCT）
+    bool loadPlcAudit(const QString &brief, QJsonObject *audit, QString *error);
+    void openPlcAudit();
+
 #ifdef AUTOMATIONCAD_HAVE_OCCT
     /// 打开联动调试窗口（播放 desktop 给的时间线）
     void openLinkageDebug();

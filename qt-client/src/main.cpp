@@ -2,6 +2,7 @@
 // 启动前需先启动 FeatureTree 契约服务（featuretree-service/server.mjs，默认 127.0.0.1:18080），
 // 否则主窗口状态栏会显示“服务未连接”，这是预期行为，不是崩溃。
 #include "LinkageDialog.h"
+#include "PlcAuditDialog.h"
 #include "MainWindow.h"
 #include "MachineCaseDialog.h"
 #include <functional>
@@ -359,6 +360,73 @@ int main(int argc, char *argv[]) {
             qInfo().noquote() << QStringLiteral("FT_QT_TOUCHING_OK %1").arg(line);
             return 0;
         }
+    }
+
+    // PLC 体检窗口（截图/人工看/自检用）：--plc-audit-ui "brief"
+    if (args.contains(QStringLiteral("--plc-audit-ui"))) {
+        const int index = args.indexOf(QStringLiteral("--plc-audit-ui"));
+        if (index + 1 >= args.size()) {
+            qCritical().noquote() << "FT_QT_PLC_AUDIT_FAIL 用法：--plc-audit-ui \"brief\"";
+            return 2;
+        }
+        MainWindow window;
+        window.resize(1400, 900);
+        window.show();
+        QJsonObject audit;
+        QString error;
+        if (!window.loadPlcAudit(args.at(index + 1), &audit, &error)) {
+            qCritical().noquote() << "FT_QT_PLC_AUDIT_FAIL" << error;
+            return 1;
+        }
+        auto *dialog = new PlcAuditDialog(audit, &window);
+        dialog->show();
+        qInfo().noquote() << "FT_QT_PLC_AUDIT_UI_OPEN" << dialog->summaryText();
+        return app.exec();
+    }
+
+    // PLC 体检自检：--plc-audit-selftest "brief"
+    // 断言：工程生成成功、联动点位全部被 PLC 驱动、对账无缺口、结论行可读
+    if (args.contains(QStringLiteral("--plc-audit-selftest"))) {
+        const int index = args.indexOf(QStringLiteral("--plc-audit-selftest"));
+        if (index + 1 >= args.size()) {
+            qCritical().noquote() << "FT_QT_PLC_AUDIT_FAIL 用法：--plc-audit-selftest \"brief\"";
+            return 2;
+        }
+        MainWindow window;
+        QJsonObject audit;
+        QString error;
+        if (!window.loadPlcAudit(args.at(index + 1), &audit, &error)) {
+            qCritical().noquote() << "FT_QT_PLC_AUDIT_FAIL" << error;
+            return 1;
+        }
+        PlcAuditDialog dialog(audit);
+        const bool generated = audit.value(QStringLiteral("generated")).toBool();
+        const int applied = audit.value(QStringLiteral("applied")).toArray().size();
+        const int steps = audit.value(QStringLiteral("sequenceSteps")).toInt();
+        const QJsonObject recon = audit.value(QStringLiteral("audit")).toObject();
+        const int points = recon.value(QStringLiteral("linkagePoints")).toInt();
+        const int driven = recon.value(QStringLiteral("pointsDriven")).toInt();
+        const int reconGaps = recon.value(QStringLiteral("gaps")).toArray().size();
+        if (!generated) {
+            qCritical().noquote() << "FT_QT_PLC_AUDIT_FAIL PLC 工程没生成出来";
+            return 1;
+        }
+        if (points == 0 || driven != points) {
+            qCritical().noquote() << QStringLiteral("FT_QT_PLC_AUDIT_FAIL 联动点位 %1，被驱动 %2").arg(points).arg(driven);
+            return 1;
+        }
+        if (reconGaps != 0) {
+            qCritical().noquote() << "FT_QT_PLC_AUDIT_FAIL 对账缺口" << reconGaps;
+            return 1;
+        }
+        if (dialog.summaryText().isEmpty()) {
+            qCritical().noquote() << "FT_QT_PLC_AUDIT_FAIL 结论行为空";
+            return 1;
+        }
+        qInfo().noquote() << QStringLiteral("FT_QT_PLC_AUDIT_OK gaps=%1 applied=%2 steps=%3 driven=%4/%5 reconGaps=0")
+                                 .arg(audit.value(QStringLiteral("gapsFound")).toInt())
+                                 .arg(applied).arg(steps).arg(driven).arg(points);
+        return 0;
     }
 
     // 3D 联动调试窗口（截图/人工看用）：--linkage-ui "brief" [--at <frame>]

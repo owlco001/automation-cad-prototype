@@ -5,6 +5,7 @@
 #include <QClipboard>
 #include <QGuiApplication>
 #include "FeatureDialog.h"
+#include "PlcAuditDialog.h"
 #ifdef AUTOMATIONCAD_HAVE_OCCT
 #include "LinkageDialog.h"
 #endif
@@ -414,6 +415,7 @@ MainWindow::MainWindow(QWidget *parent)
     evalMenu->addAction(tr("试摆位（移动零件重算干涉）…"), this, &MainWindow::tunePlacementDialog);
     QAction *assemblyBom = evalMenu->addAction(tr("装配清单"), this, &MainWindow::runAssemblyBom);
     assemblyBom->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
+    evalMenu->addAction(tr("PLC 体检（缺口 / 步序 / 对账）…"), this, &MainWindow::openPlcAudit);
 #ifdef AUTOMATIONCAD_HAVE_OCCT
     evalMenu->addAction(tr("3D 联动调试（播放动作与 IO）…"), this, &MainWindow::openLinkageDebug);
 #else
@@ -828,6 +830,68 @@ bool MainWindow::clipTestMetrics(double z, int *beforePixels, int *afterPixels, 
 #endif
 }
 
+
+
+bool MainWindow::loadPlcAudit(const QString &brief, QJsonObject *audit, QString *error)
+{
+    const QString script = resolvePipelineScript();
+    if (script.isEmpty() || !QFileInfo::exists(script)) {
+        *error = tr("找不到整机管线脚本（%1）").arg(script.isEmpty() ? tr("未设置") : script);
+        return false;
+    }
+    if (QStandardPaths::findExecutable(QStringLiteral("node")).isEmpty()) {
+        *error = tr("找不到 node 运行时，PLC 体检需要它");
+        return false;
+    }
+    QProcess process;
+    process.setProcessChannelMode(QProcess::SeparateChannels);
+    process.start(QStringLiteral("node"),
+                  {script, QStringLiteral("--brief"), brief,
+                   QStringLiteral("--with-geometry"), QStringLiteral("--plc-audit")});
+    if (!process.waitForStarted(10'000)) {
+        *error = tr("启动 node 失败：%1").arg(process.errorString());
+        return false;
+    }
+    if (!process.waitForFinished(180'000)) {
+        process.kill();
+        *error = tr("PLC 体检超时（180 s）");
+        return false;
+    }
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        const QString stderrText = QString::fromUtf8(process.readAllStandardError()).trimmed().left(300);
+        *error = tr("管线执行失败（exit %1）：%2").arg(process.exitCode()).arg(stderrText);
+        return false;
+    }
+    const QJsonDocument parsed = QJsonDocument::fromJson(process.readAllStandardOutput());
+    if (!parsed.isObject()) {
+        *error = tr("管线输出不是 JSON");
+        return false;
+    }
+    const QJsonObject block = parsed.object().value(QStringLiteral("plcAudit")).toObject();
+    if (block.isEmpty()) {
+        *error = tr("方案里没有 plcAudit（管线需 --plc-audit）");
+        return false;
+    }
+    *audit = block;
+    return true;
+}
+
+void MainWindow::openPlcAudit()
+{
+    QString brief = QInputDialog::getText(this, tr("PLC 体检"),
+                                          tr("一句话描述整机（用于生成方案并体检 PLC）："),
+                                          QLineEdit::Normal, m_lastBrief, nullptr);
+    if (brief.trimmed().isEmpty()) return;
+
+    QJsonObject audit;
+    QString error;
+    if (!loadPlcAudit(brief, &audit, &error)) {
+        QMessageBox::warning(this, tr("PLC 体检不可用"), error);
+        return;
+    }
+    PlcAuditDialog dialog(audit, this);
+    dialog.exec();
+}
 
 bool MainWindow::loadLinkage(const QString &brief, QJsonObject *linkage, QString *error)
 {
