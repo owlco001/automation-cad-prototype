@@ -290,6 +290,27 @@ jobs:
         run: |
           if (-not (Test-Path build-win/automationcad-qt.exe)) { throw "没产出 automationcad-qt.exe" }
           ./build-win/automationcad-qt.exe --version
+      # 之前 Windows 只编不打包，装机包一直停在 v0.4.2。这一步把 exe + Qt 运行库收成一个 zip，
+      # 作为 CI 产物上传，至少让「Windows 版能拿到手」不再是空白。
+      - name: 打包（windeployqt + zip）
+        shell: pwsh
+        run: |
+          $dist = "dist/automationcad-qt"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item build-win/automationcad-qt.exe $dist
+          windeployqt --release --no-translations "$dist/automationcad-qt.exe"
+          Compress-Archive -Path "$dist/*" -DestinationPath "dist/automationcad-qt-windows-x64.zip" -Force
+          $zip = Get-Item "dist/automationcad-qt-windows-x64.zip"
+          if ($zip.Length -lt 5MB) { throw "安装包只有 $($zip.Length) 字节，windeployqt 可能没把 Qt 运行库带全" }
+          Write-Host "PACKAGE_OK bytes=$($zip.Length)"
+          Get-ChildItem $dist | Measure-Object | ForEach-Object { Write-Host "PACKAGE_FILES files=$($_.Count)" }
+      - name: 上传 Windows 安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: automationcad-qt-windows-x64
+          path: dist/automationcad-qt-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 14
   featuretree-geometry:
     name: FeatureTree real geometry (build123d)
     runs-on: ubuntu-latest
