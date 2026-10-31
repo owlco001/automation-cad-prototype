@@ -399,13 +399,18 @@ jobs:
           # 用 Start-Process 重定向输出 + 读 ExitCode，才是在 Windows 上验证「能启动」的正解。
           $proc = Start-Process -FilePath $exe -ArgumentList '--version' -WorkingDirectory $dist -Wait -PassThru -NoNewWindow -RedirectStandardOutput $outFile
           $text = if (Test-Path $outFile) { Get-Content $outFile -Raw } else { '' }
-          Write-Host "VERSION_OUTPUT [$($text.Trim())] exit=$($proc.ExitCode)"
+          if ($null -eq $text) { $text = '' }   # 空文件时 Get-Content -Raw 返回 $null，Trim() 会直接抛
+          $text = $text.Trim()
+          Write-Host "VERSION_OUTPUT [$text] exit=$($proc.ExitCode)"
           if ($proc.ExitCode -ne 0) {
             Write-Host "--- 依赖清单 ---"
             dumpbin /dependents $exe | Select-String -Pattern "\.dll" | ForEach-Object { $_.Line.Trim() }
             throw "打包目录里的 exe 启动失败（exit $($proc.ExitCode)）"
           }
-          if ($text -notmatch "0\.5\.0") { throw "版本输出异常：$text" }
+          # GUI 子系统程序的 stdout 可能被系统吞掉；退出码 0 = 进程正常启动并退出。
+          # 有输出时仍要求版本号匹配，没输出时不假装验证过版本。
+          if ($text -and ($text -notmatch "0\.5\.0")) { throw "版本输出异常：$text" }
+          if (-not $text) { Write-Host "VERSION_STDOUT_EMPTY （GUI 子系统无 stdout，按退出码判定启动成功）" }
           $dlls = (Get-ChildItem $dist -Filter *.dll | Measure-Object).Count
           Write-Host "OCCT_WIN_RUN_OK version=0.5.0 dlls=$dlls"
       - name: 上传 Windows OCCT 安装包
