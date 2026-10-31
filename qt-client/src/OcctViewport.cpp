@@ -18,11 +18,12 @@
 #include <WNT_Window.hxx>
 #else
 #include <Aspect_NeutralWindow.hxx>
+#endif
+// 这几个是「剖切 / 包围盒」用到的算法头，和平台无关：
+// 之前误放在 #else 分支里，导致 Windows + OCCT 构建直接编不过（C2653 BRepBndLib / C3861 BRepAlgoAPI_Cut）。
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepBndLib.hxx>
-#include <BRepPrimAPI_MakeBox.hxx>
 #include <Bnd_Box.hxx>
-#endif
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
