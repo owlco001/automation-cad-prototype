@@ -393,19 +393,20 @@ jobs:
         shell: pwsh
         run: |
           $dist = (Resolve-Path "dist/automationcad-qt-occt").Path
-          Push-Location $dist
-          try {
-            $version = & "$dist\automationcad-qt.exe" --version 2>&1
-            $code = $LASTEXITCODE
-            Write-Host "VERSION_OUTPUT [$version] exit=$code"
-            if ($code -ne 0) {
-              Write-Host "--- 依赖清单（找缺失 DLL）---"
-              dumpbin /dependents "$dist\automationcad-qt.exe" | Select-String -Pattern "\.dll" | ForEach-Object { $_.Line.Trim() }
-              throw "打包目录里的 exe 启动失败（exit $code）"
-            }
-            if (-not ($version -match "0\.5\.0")) { throw "版本输出异常：$version" }
-          } finally { Pop-Location }
-          $dlls = (Get-ChildItem "$dist" -Filter *.dll | Measure-Object).Count
+          $exe = Join-Path $dist 'automationcad-qt.exe'
+          $outFile = Join-Path $dist 'version.txt'
+          # Qt 是 GUI 子系统程序：直接 & exe 拿不到 stdout，$LASTEXITCODE 也不可信。
+          # 用 Start-Process 重定向输出 + 读 ExitCode，才是在 Windows 上验证「能启动」的正解。
+          $proc = Start-Process -FilePath $exe -ArgumentList '--version' -WorkingDirectory $dist -Wait -PassThru -NoNewWindow -RedirectStandardOutput $outFile
+          $text = if (Test-Path $outFile) { Get-Content $outFile -Raw } else { '' }
+          Write-Host "VERSION_OUTPUT [$($text.Trim())] exit=$($proc.ExitCode)"
+          if ($proc.ExitCode -ne 0) {
+            Write-Host "--- 依赖清单 ---"
+            dumpbin /dependents $exe | Select-String -Pattern "\.dll" | ForEach-Object { $_.Line.Trim() }
+            throw "打包目录里的 exe 启动失败（exit $($proc.ExitCode)）"
+          }
+          if ($text -notmatch "0\.5\.0") { throw "版本输出异常：$text" }
+          $dlls = (Get-ChildItem $dist -Filter *.dll | Measure-Object).Count
           Write-Host "OCCT_WIN_RUN_OK version=0.5.0 dlls=$dlls"
       - name: 上传 Windows OCCT 安装包
         uses: actions/upload-artifact@v4
