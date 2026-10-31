@@ -342,15 +342,27 @@ jobs:
             --no-deps
             occt
           init-shell: powershell
+      # conda 的 Windows 包布局是 <prefix>/Library/{include/opencascade,lib,bin}，
+      # 不是 <prefix>/{include,lib}。这里两种布局都探一遍，再把 OCCT_ROOT 指到真正的根。
       - name: 校验 OCCT 头文件与库
         shell: pwsh
         run: |
-          $prefix = $env:MAMBA_PREFIX_OCCT
-          if (-not $prefix) { $prefix = $env:CONDA_PREFIX }
-          if (-not $prefix) { throw "拿不到 micromamba 环境前缀（MAMBA_PREFIX_OCCT / CONDA_PREFIX 都为空）" }
-          "OCCT_PREFIX=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          if (-not (Test-Path "$prefix/include/opencascade/Standard.hxx")) { throw "缺 Standard.hxx：$prefix" }
-          Get-ChildItem "$prefix/lib" -Filter "TKV3d*" | Select-Object -First 3 | ForEach-Object { Write-Host "lib: $($_.Name)" }
+          $roots = @()
+          foreach ($base in @($env:MAMBA_PREFIX_OCCT, $env:CONDA_PREFIX, "$env:MAMBA_ROOT_PREFIX\envs\occt")) {
+            if ($base -and (Test-Path $base)) {
+              $roots += $base
+              $roots += (Join-Path $base 'Library')
+            }
+          }
+          $root = $roots | Where-Object { Test-Path (Join-Path $_ 'include/opencascade/Standard.hxx') } | Select-Object -First 1
+          if (-not $root) {
+            Write-Host "探过的根：$($roots -join ', ')"
+            throw "找不到 OCCT 头文件 include/opencascade/Standard.hxx"
+          }
+          "OCCT_PREFIX=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "OCCT_ROOT=$root"
+          Get-ChildItem (Join-Path $root 'lib') -Filter "TKV3d*" | Select-Object -First 3 | ForEach-Object { Write-Host "lib: $($_.Name)" }
+          Get-ChildItem (Join-Path $root 'bin') -Filter "TKV3d*" -ErrorAction SilentlyContinue | Select-Object -First 3 | ForEach-Object { Write-Host "bin: $($_.Name)" }
       - name: 配置（OCCT=ON）与编译
         shell: pwsh
         run: |
