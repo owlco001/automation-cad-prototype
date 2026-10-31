@@ -377,9 +377,37 @@ jobs:
         shell: pwsh
         run: |
           if (-not (Test-Path build-win-occt/automationcad-qt.exe)) { throw "没产出 automationcad-qt.exe" }
-          ./build-win-occt/automationcad-qt.exe --version
+          # 带 OCCT 的 exe 在启动时就要加载 TKV3d/TKService 等 DLL；不把 OCCT bin 放进 PATH 会直接 exit 1
+          $env:PATH = "$env:OCCT_PREFIX\bin;$env:PATH"
+          $version = ./build-win-occt/automationcad-qt.exe --version 2>&1
+          Write-Host "VERSION_OUTPUT $version"
+          if ($LASTEXITCODE -ne 0) { throw "带 OCCT 的 exe 启动失败（exit $LASTEXITCODE）" }
           $dlls = Get-ChildItem "$env:OCCT_PREFIX/bin" -Filter *.dll | Measure-Object
           Write-Host "OCCT_WIN_BUILD_OK occtDlls=$($dlls.Count)"
+      # 打包：Qt 运行库 + OCCT 运行库一起收进 zip；缺 TKV3d.dll 说明包出来也用不了，直接失败。
+      - name: 打包（windeployqt + OCCT DLL + zip）
+        shell: pwsh
+        run: |
+          $dist = "dist/automationcad-qt-occt"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item build-win-occt/automationcad-qt.exe $dist
+          windeployqt --release --no-translations "$dist/automationcad-qt.exe"
+          $occtBin = Join-Path $env:OCCT_PREFIX 'bin'
+          Copy-Item (Join-Path $occtBin '*.dll') $dist -Force
+          Copy-Item (Join-Path $occtBin '*.dll') $dist -Force
+          if (-not (Test-Path (Join-Path $dist 'TKV3d.dll'))) { throw "包里缺 TKV3d.dll（OCCT 视口不会可用）" }
+          Compress-Archive -Path "$dist/*" -DestinationPath "dist/automationcad-qt-windows-x64-occt.zip" -Force
+          $zip = Get-Item "dist/automationcad-qt-windows-x64-occt.zip"
+          if ($zip.Length -lt 30MB) { throw "OCCT 包只有 $($zip.Length) 字节，明显不对" }
+          $count = (Get-ChildItem $dist | Measure-Object).Count
+          Write-Host "PACKAGE_OCCT_OK bytes=$($zip.Length) files=$count tkv3d=1"
+      - name: 上传 Windows OCCT 安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: automationcad-qt-windows-x64-occt
+          path: dist/automationcad-qt-windows-x64-occt.zip
+          if-no-files-found: error
+          retention-days: 14
   featuretree-geometry:
     name: FeatureTree real geometry (build123d)
     runs-on: ubuntu-latest
