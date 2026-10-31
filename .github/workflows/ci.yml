@@ -332,18 +332,25 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
-      - uses: conda-incubator/setup-miniconda@v3
+      # setup-miniconda + `bash -el` 在 windows-latest 上实测 exit 2（conda 没在期望的 shell 里）。
+      # 换成 micromamba：它在 Windows 上更稳，且能直接把 prefix 暴露给后续步骤。
+      - uses: mamba-org/setup-micromamba@v1
         with:
-          miniconda-version: latest
-          auto-activate-base: true
-          activate-environment: occt
-      - name: 取 OCCT（conda-forge，--no-deps）
-        shell: bash -el {0}
+          environment-name: occt
+          create-args: >-
+            -c conda-forge
+            --no-deps
+            occt
+          init-shell: powershell
+      - name: 校验 OCCT 头文件与库
+        shell: pwsh
         run: |
-          conda install -y -c conda-forge --no-deps occt
-          echo "OCCT_PREFIX=$CONDA_PREFIX" >> "$GITHUB_ENV"
-          ls "$CONDA_PREFIX/include/opencascade/Standard.hxx"
-          ls "$CONDA_PREFIX/lib" | grep -iE "TKV3d|TKernel" | head -5
+          $prefix = $env:MAMBA_PREFIX_OCCT
+          if (-not $prefix) { $prefix = $env:CONDA_PREFIX }
+          if (-not $prefix) { throw "拿不到 micromamba 环境前缀（MAMBA_PREFIX_OCCT / CONDA_PREFIX 都为空）" }
+          "OCCT_PREFIX=$prefix" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if (-not (Test-Path "$prefix/include/opencascade/Standard.hxx")) { throw "缺 Standard.hxx：$prefix" }
+          Get-ChildItem "$prefix/lib" -Filter "TKV3d*" | Select-Object -First 3 | ForEach-Object { Write-Host "lib: $($_.Name)" }
       - name: 配置（OCCT=ON）与编译
         shell: pwsh
         run: |
