@@ -10,6 +10,7 @@ import { SyncClient } from '../src/sync/client.ts';
 import { mergeSyncConfig, publicSyncConfig, readSyncConfig, writeSyncConfig } from '../src/sync/config.ts';
 import { buildDesignPackage, parseDesignPackage } from '../src/sync/package.ts';
 import { validateMachineConfig } from '../src/commission/machine-config.ts';
+import { loadMachineLinkage, loadPlcAudit } from './machine-linkage.ts';
 import type { DesignBomRow, SyncConfig, SyncPlcUploadPayload, SyncUploadPayload } from '../src/sync/types.ts';
 import {
   EXPORT_EXTENSIONS,
@@ -1520,6 +1521,26 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
       };
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : String(error), rows: [], csv: '' };
+    }
+  });
+
+  // 几何联动（Electron 端）：与 Qt 同源，数据全部由 desktop 纯函数算
+  handle('machine:linkage', async (_event, brief: string) => {
+    try {
+      const linkage = await loadMachineLinkage(app.getAppPath(), String(brief ?? ''), 120);
+      return { ok: true, linkage };
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error), linkage: null };
+    }
+  });
+
+  // PLC 体检：缺口 / 最小补齐 / 步序 / 程序↔3D 对账
+  handle('machine:plc-audit', async (_event, brief: string) => {
+    try {
+      const audit = await loadPlcAudit(app.getAppPath(), String(brief ?? ''));
+      return { ok: true, audit };
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error), audit: null };
     }
   });
 

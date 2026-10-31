@@ -1,3 +1,4 @@
+import { loadMachineLinkage } from './machine-linkage.ts';
 import { app, BrowserWindow, dialog, ipcMain, Menu, type IpcMainInvokeEvent, type MenuItemConstructorOptions } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
@@ -3041,6 +3042,23 @@ function createWindow(): BrowserWindow {
         }
         console.log(`SMOKE_MACHINE_APPLY_OK machine=${applied.machineId} stations=3 bom=7 undo=1`);
         console.log(`SMOKE_MACHINE_GEOMETRY_OK layout=${machineGeometry.layout} parts=${machineGeometry.parts} axes=${machineGeometry.movingAxes} envelope=${(machineGeometry.envelopeMm ?? []).map((value) => Math.round(value)).join('x')} chunks=${machineGeometry.sidecarChunks} scene=${appliedGeometry?.parts}`);
+
+        // 几何联动（Electron 端与 Qt 同源）：时间线 + 帧 + 运动包络
+        try {
+          const linkage = await loadMachineLinkage(app.getAppPath(), '六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅', 120);
+          const io = linkage.io ?? {};
+          const motion = linkage.motion ?? {};
+          if (!linkage.steps?.length || !linkage.frames?.length) {
+            console.error('SMOKE_FAIL machine_linkage', JSON.stringify({ steps: linkage.steps?.length, frames: linkage.frames?.length }));
+            setTimeout(() => app.exit(1), 100);
+            return;
+          }
+          console.log(`SMOKE_MACHINE_LINKAGE_OK axes=${linkage.axisCount} steps=${linkage.steps.length} cycleMs=${linkage.cycleMs} frames=${linkage.frames.length} ioMissing=${(io.missing ?? []).length} motionSuspects=${(motion.suspects ?? []).length} intra=${motion.intraStation ?? 0}`);
+        } catch (error) {
+          console.error('SMOKE_FAIL machine_linkage', error instanceof Error ? error.message : String(error));
+          setTimeout(() => app.exit(1), 100);
+          return;
+        }
 
         const kbResult = await activeTools.call('search_docs', { query: 'D2', limit: 1 }) as {
           ok?: boolean;

@@ -93,7 +93,9 @@ const desktopApi = {
   },
   machine: {
     active: () => ipcRenderer.invoke('machine:active'),
-    ioMap: () => ipcRenderer.invoke('machine:io-map')
+    ioMap: () => ipcRenderer.invoke('machine:io-map'),
+    linkage: (brief: string) => ipcRenderer.invoke('machine:linkage', brief),
+    plcAudit: (brief: string) => ipcRenderer.invoke('machine:plc-audit', brief)
   },
   packs: {
     list: () => ipcRenderer.invoke('packs:list'),
