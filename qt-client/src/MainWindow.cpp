@@ -5,7 +5,9 @@
 #include <QClipboard>
 #include <QGuiApplication>
 #include "FeatureDialog.h"
+#ifdef AUTOMATIONCAD_HAVE_OCCT
 #include "LinkageDialog.h"
+#endif
 #include "MachineCaseDialog.h"
 
 #include <QAction>
@@ -412,7 +414,13 @@ MainWindow::MainWindow(QWidget *parent)
     evalMenu->addAction(tr("试摆位（移动零件重算干涉）…"), this, &MainWindow::tunePlacementDialog);
     QAction *assemblyBom = evalMenu->addAction(tr("装配清单"), this, &MainWindow::runAssemblyBom);
     assemblyBom->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
+#ifdef AUTOMATIONCAD_HAVE_OCCT
     evalMenu->addAction(tr("3D 联动调试（播放动作与 IO）…"), this, &MainWindow::openLinkageDebug);
+#else
+    QAction *linkageAction = evalMenu->addAction(tr("3D 联动调试（播放动作与 IO）…"));
+    linkageAction->setEnabled(false);
+    linkageAction->setToolTip(tr("这个构建没有 OCCT 视口"));
+#endif
     interference->setShortcut(QKeySequence(QStringLiteral("Ctrl+I")));
 
     auto *editMenu = menuBar()->addMenu(tr("编辑"));
@@ -869,6 +877,7 @@ bool MainWindow::loadLinkage(const QString &brief, QJsonObject *linkage, QString
 
 int MainWindow::applyLinkageFrameForTest(const QJsonObject &linkage, int index)
 {
+#ifdef AUTOMATIONCAD_HAVE_OCCT
     if (!m_occtViewport) return 0;
     const QJsonArray frames = linkage.value(QStringLiteral("frames")).toArray();
     if (frames.isEmpty()) return 0;
@@ -876,8 +885,14 @@ int MainWindow::applyLinkageFrameForTest(const QJsonObject &linkage, int index)
     m_occtViewport->applyLinkagePose(frame.value(QStringLiteral("offsets")).toObject(),
                                      frame.value(QStringLiteral("rotZDeg")).toObject());
     return m_occtViewport->lastLinkageMoved();
+#else
+    Q_UNUSED(linkage);
+    Q_UNUSED(index);
+    return 0;   // 没有 OCCT 的构建没有 3D 视口，联动调试不可用
+#endif
 }
 
+#ifdef AUTOMATIONCAD_HAVE_OCCT
 void MainWindow::openLinkageDebug()
 {
     QString brief = QInputDialog::getText(this, tr("3D 联动调试"),
@@ -902,6 +917,7 @@ void MainWindow::openLinkageDebug()
     dialog.exec();
     m_occtViewport->clearLinkagePose();
 }
+#endif
 
 bool MainWindow::renderMachineGeometry(const QJsonObject &document, int *shapeCount, QString *error) {
     const QJsonObject geometry = document.value(QStringLiteral("geometry")).toObject();

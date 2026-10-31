@@ -362,6 +362,7 @@ int main(int argc, char *argv[]) {
     }
 
     // 3D 联动调试窗口（截图/人工看用）：--linkage-ui "brief" [--at <frame>]
+#ifdef AUTOMATIONCAD_HAVE_OCCT
     if (args.contains(QStringLiteral("--linkage-ui"))) {
         const int index = args.indexOf(QStringLiteral("--linkage-ui"));
         if (index + 1 >= args.size()) {
@@ -392,9 +393,16 @@ int main(int argc, char *argv[]) {
         qInfo().noquote() << "FT_QT_LINKAGE_UI_OPEN frames=" << dialog->frameCount() << "at=" << frame;
         return app.exec();
     }
+#else
+    if (args.contains(QStringLiteral("--linkage-ui"))) {
+        qCritical().noquote() << "FT_QT_LINKAGE_UI_FAIL 这个构建没有 OCCT 视口";
+        return 3;
+    }
+#endif
 
     // 3D 联动调试自检：--linkage-selftest "brief"
     // 验三件事：拿到时间线、施加某一帧真的动了零件、整段里确实有零件在动。
+#ifdef AUTOMATIONCAD_HAVE_OCCT
     if (args.contains(QStringLiteral("--linkage-selftest"))) {
         const int index = args.indexOf(QStringLiteral("--linkage-selftest"));
         if (index + 1 >= args.size()) {
@@ -445,6 +453,12 @@ int main(int argc, char *argv[]) {
                                  .arg(frames).arg(cycleMs).arg(axes).arg(movedQuarter).arg(movedMid);
         return 0;
     }
+#else
+    if (args.contains(QStringLiteral("--linkage-selftest"))) {
+        qCritical().noquote() << "FT_QT_LINKAGE_FAIL 这个构建没有 OCCT 视口";
+        return 3;
+    }
+#endif
 
     // 尺寸 + 撤销自检：--size-undo-selftest "brief" <type> <WxHxL>
     {

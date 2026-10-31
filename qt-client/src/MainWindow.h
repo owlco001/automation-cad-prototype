@@ -130,10 +130,12 @@ public:
     bool loadLinkage(const QString &brief, QJsonObject *linkage, QString *error);
     /// 自检用：把第 index 帧套到视口上，返回被摆动的零件数
     int applyLinkageFrameForTest(const QJsonObject &linkage, int index);
+#ifdef AUTOMATIONCAD_HAVE_OCCT
     /// 打开联动调试窗口（播放 desktop 给的时间线）
     void openLinkageDebug();
-    /// 自检/截图用：暴露 OCCT 视口（没有 OCCT 构建时返回空）
+    /// 自检/截图用：暴露 OCCT 视口
     OcctViewport *occtViewportForTest() const { return m_occtViewport; }
+#endif
     /// 无人值守导出整机示意 STL（--geometry-selftest --out 用）
     bool exportMachineStlForTest(const QString &path, int *bytes, QString *error);
 
