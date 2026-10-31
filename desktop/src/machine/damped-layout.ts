@@ -168,7 +168,7 @@ export function solveDampedLayout(
     lastViolation = maxViolation;
   }
 
-  const finalViolation = history.length > 0 ? history[history.length - 1] : 0;
+  const finalViolation = history.length > 0 ? (history[history.length - 1] ?? 0) : 0;
   return {
     converged: finalViolation <= tolerance,
     iterations: maxIterations,
