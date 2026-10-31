@@ -14,6 +14,9 @@ import { recheckPairs } from '../src/machine/recheck.ts';
 import { CATALOG, buildInsertPart } from '../src/machine/catalog.ts';
 import { screenClearance } from '../src/machine/clearance.ts';
 import { buildLinkage, poseAt, cycleMsFromThroughput } from '../src/machine/linkage.ts';
+import { planPlcGaps, repairPlcConfig } from '../src/plcgen/machine-gaps.ts';
+import { buildSequenceFromLinkage, auditLinkageVsProgram } from '../src/plcgen/linkage-program.ts';
+import { generateProject } from '../src/plcgen/generate.ts';
 
 
 /** 两个 AABB 的关系：三轴都真交叠=overlap；有一轴只贴面（≤0.5mm）=touching；其余=clear */
@@ -250,6 +253,46 @@ if (withGeometry) {
       }
     };
   }
+  // PLC 深度体检：预检缺口 → 最小补齐 → 用联动时间线生成步序 → 生成工程 → 程序↔3D 对账
+  if (args.indexOf('--plc-audit') >= 0) {
+    if (!caseData.design?.config) {
+      process.stderr.write('--plc-audit 需要整机方案里的 design.config\n');
+      process.exit(2);
+    }
+    const throughput = Number(caseData.cycleAnalysis?.throughputPerMin ?? 0);
+    const linkageCycle = cycleMsFromThroughput(throughput) ?? undefined;
+    const linkage = buildLinkage(caseData.geometry, linkageCycle ? { cycleMs: linkageCycle } : {});
+    const plan = planPlcGaps(caseData.design.config);
+    const repair = repairPlcConfig(caseData.design.config, plan);
+    const sequence = buildSequenceFromLinkage(linkage, repair.config);
+    const configWithSequence = { ...repair.config, sequence };
+    const generated = generateProject({ config: configWithSequence, namePrefix: 'audit' });
+    const auditBlock = {
+      gapsFound: plan.errors.length,
+      autoFixable: plan.autoFixable,
+      fixes: plan.errors.map((gap) => ({ code: gap.code, message: gap.message, fix: gap.fix?.detail ?? null })),
+      applied: repair.applied,
+      remainingErrors: repair.remainingErrors,
+      generated: generated.ok,
+      sequenceSteps: sequence.length,
+      generateErrors: generated.ok ? [] : generated.errors.map((error) => ({ code: error.code, message: error.message }))
+    };
+    if (generated.ok) {
+      const mapping = JSON.parse(generated.files.find((file) => file.path === 'mapping.json').content);
+      const programText = generated.files
+        .filter((file) => file.path === 'src/FC_AutoSequence.st' || file.path === 'src/FC_Safety.st')
+        .map((file) => file.content)
+        .join('\n');
+      const audit = auditLinkageVsProgram(linkage, mapping.points ?? [], programText, sequence.length);
+      Object.assign(auditBlock, {
+        files: generated.files.length,
+        plcPoints: (mapping.points ?? []).length,
+        audit
+      });
+    }
+    caseData.plcAudit = auditBlock;
+  }
+
   const linkageAtIndex = args.indexOf('--linkage-at');
   if (linkageAtIndex >= 0) {
     const atMs = Number(args[linkageAtIndex + 1]);
