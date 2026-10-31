@@ -13,6 +13,7 @@ import { minWidening } from '../src/machine/widen.ts';
 import { recheckPairs } from '../src/machine/recheck.ts';
 import { CATALOG, buildInsertPart } from '../src/machine/catalog.ts';
 import { screenClearance } from '../src/machine/clearance.ts';
+import { buildLinkage, poseAt, cycleMsFromThroughput } from '../src/machine/linkage.ts';
 
 
 /** 两个 AABB 的关系：三轴都真交叠=overlap；有一轴只贴面（≤0.5mm）=touching；其余=clear */
@@ -216,6 +217,42 @@ if (withGeometry) {
         : {})
     };
   }
+  // 3D 联动调试：把几何里的运动轴排成时间线，并把 IO 点位与 PLC IO 表对账
+  const linkageIndex = args.indexOf('--linkage');
+  if (linkageIndex >= 0) {
+    const throughput = Number(caseData.cycleAnalysis?.throughputPerMin ?? 0);
+    const cycleMs = cycleMsFromThroughput(throughput) ?? undefined;
+    const linkage = buildLinkage(caseData.geometry, cycleMs ? { cycleMs } : {});
+    const ioRows = Array.isArray(caseData.ioMap?.rows) ? caseData.ioMap.rows : [];
+    const ioPoints = new Set(ioRows.map((row) => String(row.point)));
+    const used = [...new Set(linkage.steps.flatMap((step) => step.io))];
+    caseData.linkage = {
+      cycleMs: linkage.cycleMs,
+      cycleMsSource: cycleMs ? 'cycleAnalysis.throughputPerMin' : 'computed-from-axis-durations',
+      axisCount: linkage.axes.length,
+      stepCount: linkage.steps.length,
+      steps: linkage.steps,
+      io: {
+        used,
+        // 运动轴引用的点位必须在 PLC IO 表里；缺了就是「3D 动了但 PLC 没这个点」
+        missing: used.filter((point) => ioPoints.size > 0 && !ioPoints.has(point)),
+        matched: used.filter((point) => ioPoints.has(point)).length
+      }
+    };
+  }
+  const linkageAtIndex = args.indexOf('--linkage-at');
+  if (linkageAtIndex >= 0) {
+    const atMs = Number(args[linkageAtIndex + 1]);
+    if (!Number.isFinite(atMs) || atMs < 0) {
+      process.stderr.write('--linkage-at 需要非负毫秒数\n');
+      process.exit(2);
+    }
+    const throughput = Number(caseData.cycleAnalysis?.throughputPerMin ?? 0);
+    const cycleMs = cycleMsFromThroughput(throughput) ?? undefined;
+    const linkage = buildLinkage(caseData.geometry, cycleMs ? { cycleMs } : {});
+    caseData.linkagePose = { atMs, ...poseAt(linkage, atMs) };
+  }
+
   const clearanceResolveIndex = args.indexOf('--resolve-clearance');
   if (clearanceResolveIndex >= 0) {
     const threshold = Number(args[clearanceResolveIndex + 1]);
