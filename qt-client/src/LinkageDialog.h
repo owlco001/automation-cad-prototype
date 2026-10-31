@@ -29,6 +29,16 @@ public:
     int seekFrame(int index);
     int frameCount() const;
 
+    /// 单步：跳到上/下一个动作边界（暂停播放）。返回当前所处步号（没有步则 0）。
+    int stepForward();
+    int stepBackward();
+    /// 当前所处步号（0 = 不在任何动作窗口内）
+    int currentStepNo() const;
+    /// 自检用：单步文案
+    QString stepText() const;
+    /// 自检用：当前帧对应时刻（ms）
+    int currentTimeMs() const;
+
 private:
     void showFrame(int index);
     void togglePlay();
@@ -37,6 +47,9 @@ private:
     OcctViewport *m_viewport = nullptr;
     QSlider *m_slider = nullptr;
     QPushButton *m_playButton = nullptr;
+    QPushButton *m_prevStep = nullptr;
+    QPushButton *m_nextStep = nullptr;
+    QLabel *m_stepLabel = nullptr;
     QLabel *m_timeLabel = nullptr;
     QLabel *m_ioLabel = nullptr;
     QLabel *m_actionLabel = nullptr;

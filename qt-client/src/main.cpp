@@ -18,6 +18,8 @@
 #include <QJsonObject>
 #include <QStringList>
 #include <QSpinBox>
+#include <QSet>
+#include <algorithm>
 #include <QLabel>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -533,6 +535,48 @@ int main(int argc, char *argv[]) {
             qCritical().noquote() << "FT_QT_LINKAGE_FAIL 联动窗口没有显示运动包络结论";
             return 1;
         }
+        // 单步执行：按「动作结束边界」逐步前进，时刻必须严格递增，最后停在循环末尾
+        QSet<int> boundaries;
+        for (const QJsonValue &value : linkage.value(QStringLiteral("steps")).toArray()) {
+            boundaries.insert(value.toObject().value(QStringLiteral("endMs")).toInt());
+        }
+        QList<int> ordered = boundaries.values();
+        std::sort(ordered.begin(), ordered.end());
+        dialog.seekFrame(0);
+        int lastTime = dialog.currentTimeMs();
+        int advances = 0;
+        for (int i = 0; i < ordered.size() + 4; ++i) {
+            const int before = dialog.currentTimeMs();
+            dialog.stepForward();
+            const int after = dialog.currentTimeMs();
+            if (after <= before) break;
+            lastTime = after;
+            ++advances;
+        }
+        if (advances != ordered.size()) {
+            qCritical().noquote() << QStringLiteral("FT_QT_LINKAGE_FAIL 单步 %1 次，应有 %2 个动作边界")
+                                         .arg(advances).arg(ordered.size());
+            return 1;
+        }
+        // 帧是离散的：最后一帧的时刻略小于循环末尾（1890 × 119/120 = 1874），允许一帧的误差
+        const int frameStep = frames > 0 ? int(std::ceil(double(cycleMs) / frames)) : 0;
+        if (lastTime + frameStep < ordered.last()) {
+            qCritical().noquote() << QStringLiteral("FT_QT_LINKAGE_FAIL 单步终点 %1 ms，应为 %2 ms（允许 %3 ms 帧误差）")
+                                         .arg(lastTime).arg(ordered.last()).arg(frameStep);
+            return 1;
+        }
+        if (!dialog.stepText().contains(QStringLiteral("S"))) {
+            qCritical().noquote() << "FT_QT_LINKAGE_FAIL 单步文案没有步号：" << dialog.stepText();
+            return 1;
+        }
+        const int backTime = (dialog.stepBackward(), dialog.currentTimeMs());
+        if (backTime >= lastTime) {
+            qCritical().noquote() << QStringLiteral("FT_QT_LINKAGE_FAIL 上一步没退回去（%1 ms）").arg(backTime);
+            return 1;
+        }
+        qInfo().noquote() << QStringLiteral("FT_QT_LINKAGE_STEP_OK boundaries=%1 last=%2 back=%3")
+                                 .arg(advances).arg(lastTime).arg(backTime);
+
         qInfo().noquote() << QStringLiteral("FT_QT_LINKAGE_OK frames=%1 cycleMs=%2 axes=%3 ioMissing=0 movedQuarter=%4 movedMid=%5 motionSuspects=%6 intra=%7 swept=%8")
                                  .arg(frames).arg(cycleMs).arg(axes).arg(movedQuarter).arg(movedMid)
                                  .arg(suspects).arg(intra).arg(swept);
