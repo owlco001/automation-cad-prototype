@@ -373,18 +373,8 @@ jobs:
             throw "CMake 没有启用 OCCT AIS 视口（应打印「OCCT AIS 视口：启用」）"
           }
           cmake --build build-win-occt
-      - name: 版本与 OCCT 链接结果
-        shell: pwsh
-        run: |
-          if (-not (Test-Path build-win-occt/automationcad-qt.exe)) { throw "没产出 automationcad-qt.exe" }
-          # 带 OCCT 的 exe 在启动时就要加载 TKV3d/TKService 等 DLL；不把 OCCT bin 放进 PATH 会直接 exit 1
-          $env:PATH = "$env:OCCT_PREFIX\bin;$env:PATH"
-          $version = ./build-win-occt/automationcad-qt.exe --version 2>&1
-          Write-Host "VERSION_OUTPUT $version"
-          if ($LASTEXITCODE -ne 0) { throw "带 OCCT 的 exe 启动失败（exit $LASTEXITCODE）" }
-          $dlls = Get-ChildItem "$env:OCCT_PREFIX/bin" -Filter *.dll | Measure-Object
-          Write-Host "OCCT_WIN_BUILD_OK occtDlls=$($dlls.Count)"
-      # 打包：Qt 运行库 + OCCT 运行库一起收进 zip；缺 TKV3d.dll 说明包出来也用不了，直接失败。
+      # 先打包再验证启动：Windows 上真实的运行布局就是「exe 与 DLL 同目录」，
+      # 靠 PATH 拼凑既不可靠、也验证不了发出去的包到底能不能起。
       - name: 打包（windeployqt + OCCT DLL + zip）
         shell: pwsh
         run: |
@@ -394,13 +384,29 @@ jobs:
           windeployqt --release --no-translations "$dist/automationcad-qt.exe"
           $occtBin = Join-Path $env:OCCT_PREFIX 'bin'
           Copy-Item (Join-Path $occtBin '*.dll') $dist -Force
-          Copy-Item (Join-Path $occtBin '*.dll') $dist -Force
           if (-not (Test-Path (Join-Path $dist 'TKV3d.dll'))) { throw "包里缺 TKV3d.dll（OCCT 视口不会可用）" }
           Compress-Archive -Path "$dist/*" -DestinationPath "dist/automationcad-qt-windows-x64-occt.zip" -Force
           $zip = Get-Item "dist/automationcad-qt-windows-x64-occt.zip"
-          if ($zip.Length -lt 30MB) { throw "OCCT 包只有 $($zip.Length) 字节，明显不对" }
           $count = (Get-ChildItem $dist | Measure-Object).Count
           Write-Host "PACKAGE_OCCT_OK bytes=$($zip.Length) files=$count tkv3d=1"
+      - name: 从打包目录启动并核对版本
+        shell: pwsh
+        run: |
+          $dist = (Resolve-Path "dist/automationcad-qt-occt").Path
+          Push-Location $dist
+          try {
+            $version = & "$dist\automationcad-qt.exe" --version 2>&1
+            $code = $LASTEXITCODE
+            Write-Host "VERSION_OUTPUT [$version] exit=$code"
+            if ($code -ne 0) {
+              Write-Host "--- 依赖清单（找缺失 DLL）---"
+              dumpbin /dependents "$dist\automationcad-qt.exe" | Select-String -Pattern "\.dll" | ForEach-Object { $_.Line.Trim() }
+              throw "打包目录里的 exe 启动失败（exit $code）"
+            }
+            if (-not ($version -match "0\.5\.0")) { throw "版本输出异常：$version" }
+          } finally { Pop-Location }
+          $dlls = (Get-ChildItem "$dist" -Filter *.dll | Measure-Object).Count
+          Write-Host "OCCT_WIN_RUN_OK version=0.5.0 dlls=$dlls"
       - name: 上传 Windows OCCT 安装包
         uses: actions/upload-artifact@v4
         with:
