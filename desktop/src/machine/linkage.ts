@@ -45,6 +45,8 @@ export interface Linkage {
   cycleMs: number;
   steps: LinkageStep[];
   axes: MovingAxis[];
+  /** 零件初始中心（旋转轴要绕 pivot 转，零件中心会跟着走） */
+  centers: Record<string, Vec3>;
   /** 轴没给 durationMs 时的兜底值，写出来便于核对 */
   defaultDurationMs: number;
 }
@@ -130,7 +132,13 @@ export function buildLinkage(geometry: any, options: { cycleMs?: number } = {}):
   steps.sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
   steps.forEach((step, index) => { step.stepNo = index + 1; });
 
-  return { cycleMs, steps, axes, defaultDurationMs: DEFAULT_DURATION_MS };
+  const centers: Record<string, Vec3> = {};
+  for (const part of (Array.isArray(geometry?.parts) ? geometry.parts : [])) {
+    const center = Array.isArray(part?.center) ? part.center : null;
+    if (part?.id && center) centers[String(part.id)] = [Number(center[0]) || 0, Number(center[1]) || 0, Number(center[2]) || 0];
+  }
+
+  return { cycleMs, steps, axes, centers, defaultDurationMs: DEFAULT_DURATION_MS };
 }
 
 const clamp01 = (value: number): number => Math.min(1, Math.max(0, value));
@@ -169,8 +177,23 @@ export function poseAt(linkage: Linkage, tMs: number): Pose {
     const axis = linkage.axes.find((item) => item.actuatorId === step.actuatorId);
     if (!axis) return;
     if (step.kind === 'rotary') {
+      // 分度台绕自身轴转：零件中心跟着绕 pivot 走（不是原地自转，否则扫掠检测会低估）
+      const pivot = Array.isArray(axis.pivot) ? axis.pivot : [0, 0, 0];
+      const deg = (Number(axis.rangeDeg) || 0) * amount;
+      const radians = (deg * Math.PI) / 180;
+      const cos = Math.cos(radians);
+      const sin = Math.sin(radians);
       for (const partId of axis.partIds) {
-        rotZDeg[partId] = round1((Number(axis.rangeDeg) || 0) * amount);
+        const center = linkage.centers[partId];
+        rotZDeg[partId] = round1(deg);
+        if (!center) continue;
+        const dx = center[0] - (pivot[0] ?? 0);
+        const dy = center[1] - (pivot[1] ?? 0);
+        offsets[partId] = [
+          round1(dx * cos - dy * sin - dx),
+          round1(dx * sin + dy * cos - dy),
+          0
+        ];
       }
       return;
     }

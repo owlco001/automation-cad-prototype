@@ -14,6 +14,7 @@ import { recheckPairs } from '../src/machine/recheck.ts';
 import { CATALOG, buildInsertPart } from '../src/machine/catalog.ts';
 import { screenClearance } from '../src/machine/clearance.ts';
 import { buildLinkage, poseAt, cycleMsFromThroughput } from '../src/machine/linkage.ts';
+import { checkMotionEnvelope } from '../src/machine/motion-envelope.ts';
 import { planPlcGaps, repairPlcConfig } from '../src/plcgen/machine-gaps.ts';
 import { buildSequenceFromLinkage, auditLinkageVsProgram } from '../src/plcgen/linkage-program.ts';
 import { generateProject } from '../src/plcgen/generate.ts';
@@ -329,6 +330,15 @@ if (withGeometry) {
         unmatched: rows.filter((row) => !row[3]).map((row) => row[2])
       };
     }
+  }
+
+  // 运动包络初筛：静态不撞 ≠ 运动中不撞
+  if (args.indexOf('--motion-check') >= 0) {
+    const throughput = Number(caseData.cycleAnalysis?.throughputPerMin ?? 0);
+    const cycleMs = cycleMsFromThroughput(throughput) ?? undefined;
+    const linkage = buildLinkage(caseData.geometry, cycleMs ? { cycleMs } : {});
+    const result = checkMotionEnvelope(caseData.geometry, linkage);
+    caseData.motionCheck = { cycleMs: linkage.cycleMs, ...result };
   }
 
   const linkageAtIndex = args.indexOf('--linkage-at');
