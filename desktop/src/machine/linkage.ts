@@ -27,6 +27,8 @@ export interface MovingAxis {
 }
 
 export interface LinkageStep {
+  /** 程序步号：与 PLC 步序一一对应（S1、S2…），顺序与 startMs 一致 */
+  stepNo: number;
   actuatorId: string;
   stationId: string;
   kind: string;
@@ -113,6 +115,7 @@ export function buildLinkage(geometry: any, options: { cycleMs?: number } = {}):
       const duration = Number(axis.durationMs) || DEFAULT_DURATION_MS;
       const amount = axis.kind === 'rotary' ? Number(axis.rangeDeg) || 0 : Number(axis.strokeMm) || 0;
       steps.push({
+        stepNo: 0,   // 排序后再编号，避免站间错开导致编号乱序
         actuatorId: axis.actuatorId,
         stationId,
         kind: axis.kind,
@@ -125,6 +128,7 @@ export function buildLinkage(geometry: any, options: { cycleMs?: number } = {}):
     }
   });
   steps.sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
+  steps.forEach((step, index) => { step.stepNo = index + 1; });
 
   return { cycleMs, steps, axes, defaultDurationMs: DEFAULT_DURATION_MS };
 }

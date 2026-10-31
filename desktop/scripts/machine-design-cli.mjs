@@ -291,6 +291,44 @@ if (withGeometry) {
       });
     }
     caseData.plcAudit = auditBlock;
+
+    // 调试时序表：每个点位在循环里的 ON 区间，现场调试/示波器对点用
+    const timingIndex = args.indexOf('--linkage-timing-csv');
+    if (timingIndex >= 0 && generated.ok) {
+      const targetPath = args[timingIndex + 1];
+      if (!targetPath) {
+        process.stderr.write('--linkage-timing-csv 需要输出路径\n');
+        process.exit(2);
+      }
+      const mapping = JSON.parse(generated.files.find((file) => file.path === 'mapping.json').content);
+      const byPoint = new Map((mapping.points ?? []).map((point) => [point.point, point]));
+      const header = ['步号', '执行机构', '点位', '地址', '变量', '开始ms', '结束ms', '时长ms'];
+      const rows = [];
+      for (const step of [...linkage.steps].sort((a, b) => a.startMs - b.startMs)) {
+        for (const point of step.io) {
+          const mapped = byPoint.get(point) ?? {};
+          rows.push([
+            `S${step.stepNo}`,
+            step.actuatorId,
+            point,
+            mapped.address ?? '',
+            mapped.variable ?? '',
+            String(step.startMs),
+            String(step.endMs),
+            String(step.endMs - step.startMs)
+          ]);
+        }
+      }
+      const csv = '\uFEFF' + [header, ...rows].map((row) => row.join(',')).join('\r\n') + '\r\n';
+      writeFileSync(targetPath, csv, 'utf8');
+      caseData.linkageTiming = {
+        path: targetPath,
+        rows: rows.length,
+        steps: linkage.steps.length,
+        cycleMs: linkage.cycleMs,
+        unmatched: rows.filter((row) => !row[3]).map((row) => row[2])
+      };
+    }
   }
 
   const linkageAtIndex = args.indexOf('--linkage-at');
