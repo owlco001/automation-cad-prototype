@@ -506,6 +506,16 @@ int main(int argc, char *argv[]) {
             qCritical().noquote() << "FT_QT_LINKAGE_FAIL 有 IO 点不在 PLC 表里：" << missing;
             return 1;
         }
+        // 运动包络必须一起带回来（静态不撞 ≠ 运动中不撞），否则联动窗口看不出跨工位风险
+        const QJsonObject motion = linkage.value(QStringLiteral("motion")).toObject();
+        if (motion.isEmpty()) {
+            qCritical().noquote() << "FT_QT_LINKAGE_FAIL 联动数据里没有运动包络（motion）";
+            return 1;
+        }
+        const int suspects = motion.value(QStringLiteral("suspects")).toArray().size();
+        const int intra = motion.value(QStringLiteral("intraStation")).toInt();
+        const int swept = motion.value(QStringLiteral("frames")).toInt();
+
         const int movedHome = window.applyLinkageFrameForTest(linkage, 0);
         const int movedQuarter = window.applyLinkageFrameForTest(linkage, frames / 4);
         const int movedMid = window.applyLinkageFrameForTest(linkage, frames / 2);
@@ -517,8 +527,15 @@ int main(int argc, char *argv[]) {
             qCritical().noquote() << "FT_QT_LINKAGE_FAIL 整段没有零件在动";
             return 1;
         }
-        qInfo().noquote() << QStringLiteral("FT_QT_LINKAGE_OK frames=%1 cycleMs=%2 axes=%3 ioMissing=0 movedQuarter=%4 movedMid=%5")
-                                 .arg(frames).arg(cycleMs).arg(axes).arg(movedQuarter).arg(movedMid);
+        LinkageDialog dialog(linkage, window.occtViewportForTest(), &window);
+        const QLabel *motionLabel = dialog.findChild<QLabel *>(QStringLiteral("motionEnvelopeLabel"));
+        if (!motionLabel || !motionLabel->text().contains(QStringLiteral("运动包络"))) {
+            qCritical().noquote() << "FT_QT_LINKAGE_FAIL 联动窗口没有显示运动包络结论";
+            return 1;
+        }
+        qInfo().noquote() << QStringLiteral("FT_QT_LINKAGE_OK frames=%1 cycleMs=%2 axes=%3 ioMissing=0 movedQuarter=%4 movedMid=%5 motionSuspects=%6 intra=%7 swept=%8")
+                                 .arg(frames).arg(cycleMs).arg(axes).arg(movedQuarter).arg(movedMid)
+                                 .arg(suspects).arg(intra).arg(swept);
         return 0;
     }
 #else

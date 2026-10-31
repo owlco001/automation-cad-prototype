@@ -910,6 +910,7 @@ bool MainWindow::loadLinkage(const QString &brief, QJsonObject *linkage, QString
     process.start(QStringLiteral("node"),
                   {script, QStringLiteral("--brief"), brief,
                    QStringLiteral("--with-geometry"), QStringLiteral("--linkage"),
+                   QStringLiteral("--motion-check"),
                    QStringLiteral("--linkage-frames"), QStringLiteral("60")});
     if (!process.waitForStarted(10'000)) {
         *error = tr("启动 node 失败：%1").arg(process.errorString());

@@ -30,6 +30,35 @@ LinkageDialog::LinkageDialog(const QJsonObject &linkage, OcctViewport *viewport,
     summary->setWordWrap(true);
     layout->addWidget(summary);
 
+    // 运动包络：跨工位疑似碰撞 ≠ 静态布局问题，单独一行，避免和间距/干涉混在一起
+    const QJsonObject motion = m_linkage.value(QStringLiteral("motion")).toObject();
+    if (!motion.isEmpty()) {
+        const QJsonArray suspects = motion.value(QStringLiteral("suspects")).toArray();
+        QString text = tr("运动包络：跨工位疑似 %1 处（最深 %2 mm）· 同工位接触 %3 对 · %4 帧扫掠")
+                           .arg(suspects.size())
+                           .arg(motion.value(QStringLiteral("maxDepthMm")).toDouble())
+                           .arg(motion.value(QStringLiteral("intraStation")).toInt())
+                           .arg(motion.value(QStringLiteral("frames")).toInt());
+        if (!suspects.isEmpty()) {
+            QStringList top;
+            for (int i = 0; i < suspects.size() && i < 3; ++i) {
+                const QJsonObject hit = suspects.at(i).toObject();
+                top << tr("%1×%2 %3 %4 mm @%5 ms")
+                           .arg(hit.value(QStringLiteral("a")).toString())
+                           .arg(hit.value(QStringLiteral("b")).toString())
+                           .arg(hit.value(QStringLiteral("axis")).toString())
+                           .arg(hit.value(QStringLiteral("depthMm")).toDouble())
+                           .arg(hit.value(QStringLiteral("tMs")).toInt());
+            }
+            text += tr("　最深三处：%1").arg(top.join(QStringLiteral("；")));
+        }
+        text += tr("　（AABB 初筛，确认需真实布尔）");
+        auto *motionLabel = new QLabel(text, this);
+        motionLabel->setWordWrap(true);
+        motionLabel->setObjectName(QStringLiteral("motionEnvelopeLabel"));
+        layout->addWidget(motionLabel);
+    }
+
     m_timeLabel = new QLabel(this);
     m_actionLabel = new QLabel(this);
     m_actionLabel->setWordWrap(true);

@@ -239,7 +239,9 @@ if (withGeometry) {
       const pose = poseAt(linkage, t);
       frames.push({ tMs: t, offsets: pose.offsets, rotZDeg: pose.rotZDeg, activeIO: pose.activeIO, activeSteps: pose.activeSteps });
     }
+    const motionWanted = args.indexOf('--motion-check') >= 0;
     caseData.linkage = {
+      ...(motionWanted ? { motion: checkMotionEnvelope(caseData.geometry, linkage) } : {}),
       cycleMs: linkage.cycleMs,
       cycleMsSource: cycleMs ? 'cycleAnalysis.throughputPerMin' : 'computed-from-axis-durations',
       axisCount: linkage.axes.length,
