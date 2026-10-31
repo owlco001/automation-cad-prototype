@@ -339,7 +339,6 @@ jobs:
           environment-name: occt
           create-args: >-
             -c conda-forge
-            --no-deps
             occt
           init-shell: powershell
       # conda 的 Windows 包布局是 <prefix>/Library/{include/opencascade,lib,bin}，
@@ -384,6 +383,10 @@ jobs:
           windeployqt --release --no-translations "$dist/automationcad-qt.exe"
           $occtBin = Join-Path $env:OCCT_PREFIX 'bin'
           Copy-Item (Join-Path $occtBin '*.dll') $dist -Force
+          Write-Host "OCCT_DLL_COUNT $((Get-ChildItem (Join-Path $occtBin '*.dll') | Measure-Object).Count)"
+          foreach ($dep in @('tbb12.dll','freetype.dll','zlib.dll')) {
+            if (Test-Path (Join-Path $occtBin $dep)) { Write-Host "DEP_PRESENT $dep" }
+          }
           if (-not (Test-Path (Join-Path $dist 'TKV3d.dll'))) { throw "包里缺 TKV3d.dll（OCCT 视口不会可用）" }
           Compress-Archive -Path "$dist/*" -DestinationPath "dist/automationcad-qt-windows-x64-occt.zip" -Force
           $zip = Get-Item "dist/automationcad-qt-windows-x64-occt.zip"
