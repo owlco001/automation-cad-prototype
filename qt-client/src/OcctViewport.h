@@ -41,6 +41,14 @@ public:
     /// 高亮一组零件（干涉对用：同时点亮两端）
     void highlightParts(const QStringList &partIds);
 
+    /// 联动调试：按 desktop 预生成的帧摆零件（客户端只摆位，不算运动）。
+    /// offsets: partId → [dx,dy,dz]；rotZDeg: partId → 绕自身中心的 Z 转角。
+    void applyLinkagePose(const QJsonObject &offsets, const QJsonObject &rotZDeg);
+    /// 复位：清掉所有联动位移/转角（回到初始摆位）
+    void clearLinkagePose();
+    /// 自检用：上一帧里被摆动的零件数
+    int lastLinkageMoved() const { return m_linkageMoved; }
+
     /// 把当前整机示意几何导出成 STL（二进制/ASCII 由 OCCT 决定）。
     /// 注意：这是**摆位后的概念占位体**，不是制造几何。
     bool exportMachineStl(const QString &path, int *bytes, QString *error);
@@ -130,6 +138,8 @@ private:
     Handle(AIS_Shape) m_shape;
     QVector<Handle(AIS_Shape)> m_shapes;
     QStringList m_shapePartIds;      // 与 m_shapes 一一对应的 partId
+    QVector<QVector3D> m_shapeCenters;  // 零件初始中心（联动旋转要绕自身中心）
+    int m_linkageMoved = 0;
     QVector<QColor> m_shapeColors;   // 原始颜色（高亮后要能还原，不能一律变默认灰）
     QString m_highlighted;
     QJsonObject m_lastGeometry;  // 最近一次整机示意几何（导出 STL 用）  // 整机示意：每个零件一个 AIS 对象（各自颜色）

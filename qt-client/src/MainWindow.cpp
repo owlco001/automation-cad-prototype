@@ -5,6 +5,7 @@
 #include <QClipboard>
 #include <QGuiApplication>
 #include "FeatureDialog.h"
+#include "LinkageDialog.h"
 #include "MachineCaseDialog.h"
 
 #include <QAction>
@@ -411,6 +412,7 @@ MainWindow::MainWindow(QWidget *parent)
     evalMenu->addAction(tr("试摆位（移动零件重算干涉）…"), this, &MainWindow::tunePlacementDialog);
     QAction *assemblyBom = evalMenu->addAction(tr("装配清单"), this, &MainWindow::runAssemblyBom);
     assemblyBom->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
+    evalMenu->addAction(tr("3D 联动调试（播放动作与 IO）…"), this, &MainWindow::openLinkageDebug);
     interference->setShortcut(QKeySequence(QStringLiteral("Ctrl+I")));
 
     auto *editMenu = menuBar()->addMenu(tr("编辑"));
@@ -816,6 +818,89 @@ bool MainWindow::clipTestMetrics(double z, int *beforePixels, int *afterPixels, 
     *error = tr("这个构建没有 OCCT（-DAUTOMATIONCAD_OCCT=OFF），剖切不可用");
     return false;
 #endif
+}
+
+
+bool MainWindow::loadLinkage(const QString &brief, QJsonObject *linkage, QString *error)
+{
+    const QString script = resolvePipelineScript();
+    if (script.isEmpty() || !QFileInfo::exists(script)) {
+        *error = tr("找不到整机管线脚本（%1）").arg(script.isEmpty() ? tr("未设置") : script);
+        return false;
+    }
+    if (QStandardPaths::findExecutable(QStringLiteral("node")).isEmpty()) {
+        *error = tr("找不到 node 运行时，联动调试需要它生成运动时间线");
+        return false;
+    }
+    QProcess process;
+    process.setProcessChannelMode(QProcess::SeparateChannels);
+    // 帧数给足 60 帧：Qt 只按帧播放，不插值
+    process.start(QStringLiteral("node"),
+                  {script, QStringLiteral("--brief"), brief,
+                   QStringLiteral("--with-geometry"), QStringLiteral("--linkage"),
+                   QStringLiteral("--linkage-frames"), QStringLiteral("60")});
+    if (!process.waitForStarted(10'000)) {
+        *error = tr("启动 node 失败：%1").arg(process.errorString());
+        return false;
+    }
+    if (!process.waitForFinished(180'000)) {
+        process.kill();
+        *error = tr("生成联动时间线超时（180 s）");
+        return false;
+    }
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        const QString stderrText = QString::fromUtf8(process.readAllStandardError()).trimmed().left(300);
+        *error = tr("管线执行失败（exit %1）：%2").arg(process.exitCode()).arg(stderrText);
+        return false;
+    }
+    const QJsonDocument parsed = QJsonDocument::fromJson(process.readAllStandardOutput());
+    if (!parsed.isObject()) {
+        *error = tr("管线输出不是 JSON");
+        return false;
+    }
+    const QJsonObject linkageObject = parsed.object().value(QStringLiteral("linkage")).toObject();
+    if (linkageObject.isEmpty()) {
+        *error = tr("方案里没有 linkage（管线需 --linkage）");
+        return false;
+    }
+    *linkage = linkageObject;
+    return true;
+}
+
+int MainWindow::applyLinkageFrameForTest(const QJsonObject &linkage, int index)
+{
+    if (!m_occtViewport) return 0;
+    const QJsonArray frames = linkage.value(QStringLiteral("frames")).toArray();
+    if (frames.isEmpty()) return 0;
+    const QJsonObject frame = frames.at(qBound(0, index, frames.size() - 1)).toObject();
+    m_occtViewport->applyLinkagePose(frame.value(QStringLiteral("offsets")).toObject(),
+                                     frame.value(QStringLiteral("rotZDeg")).toObject());
+    return m_occtViewport->lastLinkageMoved();
+}
+
+void MainWindow::openLinkageDebug()
+{
+    QString brief = QInputDialog::getText(this, tr("3D 联动调试"),
+                                          tr("一句话描述整机（用于生成运动时间线）："),
+                                          QLineEdit::Normal, m_lastBrief, nullptr);
+    if (brief.trimmed().isEmpty()) return;
+
+    QJsonObject linkage;
+    QString error;
+    if (!loadLinkage(brief, &linkage, &error)) {
+        QMessageBox::warning(this, tr("联动调试不可用"), error);
+        return;
+    }
+    QJsonObject document;
+    int shapes = 0;
+    if (!designMachineFromBrief(brief, &document, &error)
+        || !renderMachineGeometry(document, &shapes, &error)) {
+        QMessageBox::warning(this, tr("3D 视口未就绪"), error);
+        return;
+    }
+    LinkageDialog dialog(linkage, m_occtViewport, this);
+    dialog.exec();
+    m_occtViewport->clearLinkagePose();
 }
 
 bool MainWindow::renderMachineGeometry(const QJsonObject &document, int *shapeCount, QString *error) {

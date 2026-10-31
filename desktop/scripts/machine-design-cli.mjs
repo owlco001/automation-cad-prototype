@@ -226,12 +226,22 @@ if (withGeometry) {
     const ioRows = Array.isArray(caseData.ioMap?.rows) ? caseData.ioMap.rows : [];
     const ioPoints = new Set(ioRows.map((row) => String(row.point)));
     const used = [...new Set(linkage.steps.flatMap((step) => step.io))];
+    // 预生成整段动画的帧：Qt 只按帧显示，不在客户端做运动学插值
+    const framesIndex = args.indexOf('--linkage-frames');
+    const frameCount = framesIndex >= 0 ? Math.max(2, Math.min(600, Number(args[framesIndex + 1]) || 60)) : 60;
+    const frames = [];
+    for (let i = 0; i < frameCount; i += 1) {
+      const t = Math.round((linkage.cycleMs * i) / frameCount);
+      const pose = poseAt(linkage, t);
+      frames.push({ tMs: t, offsets: pose.offsets, rotZDeg: pose.rotZDeg, activeIO: pose.activeIO, activeSteps: pose.activeSteps });
+    }
     caseData.linkage = {
       cycleMs: linkage.cycleMs,
       cycleMsSource: cycleMs ? 'cycleAnalysis.throughputPerMin' : 'computed-from-axis-durations',
       axisCount: linkage.axes.length,
       stepCount: linkage.steps.length,
       steps: linkage.steps,
+      frames,
       io: {
         used,
         // 运动轴引用的点位必须在 PLC IO 表里；缺了就是「3D 动了但 PLC 没这个点」

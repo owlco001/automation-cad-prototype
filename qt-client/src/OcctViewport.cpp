@@ -237,6 +237,7 @@ bool OcctViewport::showMachineGeometry(const QJsonObject &geometry, int *shapeCo
         m_context->Display(shapeHandle, AIS_Shaded, -1, false);
         m_shapes.append(shapeHandle);
         m_shapePartIds.append(part.value(QStringLiteral("id")).toString());
+        m_shapeCenters.append(QVector3D(center.at(0).toDouble(), center.at(1).toDouble(), center.at(2).toDouble()));
         m_shapeColors.append(color);
         ++count;
     }
@@ -325,6 +326,54 @@ void OcctViewport::keyPressEvent(QKeyEvent *event) {
     default: break;
     }
     QWidget::keyPressEvent(event);
+}
+
+
+void OcctViewport::applyLinkagePose(const QJsonObject &offsets, const QJsonObject &rotZDeg)
+{
+    int moved = 0;
+    for (int i = 0; i < m_shapes.size(); ++i) {
+        const QString id = m_shapePartIds.at(i);
+        const QJsonArray offset = offsets.value(id).toArray();
+        const double deg = rotZDeg.value(id).toDouble();
+        if (offset.size() != 3 && qFuzzyIsNull(deg)) {
+            if (m_shapes.at(i)->LocalTransformation().Form() != gp_Identity) m_shapes.at(i)->SetLocalTransformation(gp_Trsf());
+            continue;
+        }
+        gp_Trsf translation;
+        if (offset.size() == 3) {
+            translation.SetTranslation(gp_Vec(offset.at(0).toDouble(), offset.at(1).toDouble(), offset.at(2).toDouble()));
+        }
+        gp_Trsf transform = translation;
+        if (!qFuzzyIsNull(deg)) {
+            const QVector3D center = m_shapeCenters.value(i);
+            gp_Trsf rotation;
+            rotation.SetRotation(gp_Ax1(gp_Pnt(center.x(), center.y(), center.z()), gp_Dir(0, 0, 1)), deg * M_PI / 180.0);
+            transform = translation * rotation;
+        }
+        m_shapes.at(i)->SetLocalTransformation(transform);
+        ++moved;
+    }
+    m_linkageMoved = moved;
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    if (m_context) {
+        m_context->UpdateCurrentViewer();
+    }
+#endif
+}
+
+void OcctViewport::clearLinkagePose()
+{
+    for (const Handle(AIS_Shape) &shape : m_shapes) {
+        if (shape.IsNull()) continue;
+        if (shape->LocalTransformation().Form() != gp_Identity) shape->SetLocalTransformation(gp_Trsf());
+    }
+    m_linkageMoved = 0;
+#ifdef AUTOMATIONCAD_HAVE_OCCT
+    if (m_context) {
+        m_context->UpdateCurrentViewer();
+    }
+#endif
 }
 
 bool OcctViewport::exportMachineStl(const QString &path, int *bytes, QString *error) {

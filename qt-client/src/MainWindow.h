@@ -125,6 +125,15 @@ public:
     void designMachineDialog();
     /// 把方案里的示意几何画到 3D 视口（占位体拼装，客户端只摆位）
     bool renderMachineGeometry(const QJsonObject &document, int *shapeCount, QString *error);
+
+    /// 3D 联动调试：取 desktop 的运动时间线（含预生成帧）。客户端不自己算运动。
+    bool loadLinkage(const QString &brief, QJsonObject *linkage, QString *error);
+    /// 自检用：把第 index 帧套到视口上，返回被摆动的零件数
+    int applyLinkageFrameForTest(const QJsonObject &linkage, int index);
+    /// 打开联动调试窗口（播放 desktop 给的时间线）
+    void openLinkageDebug();
+    /// 自检/截图用：暴露 OCCT 视口（没有 OCCT 构建时返回空）
+    OcctViewport *occtViewportForTest() const { return m_occtViewport; }
     /// 无人值守导出整机示意 STL（--geometry-selftest --out 用）
     bool exportMachineStlForTest(const QString &path, int *bytes, QString *error);
 

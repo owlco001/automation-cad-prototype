@@ -1,6 +1,7 @@
 // AutomationCAD Qt 客户端入口 v0.1（壳子）。
 // 启动前需先启动 FeatureTree 契约服务（featuretree-service/server.mjs，默认 127.0.0.1:18080），
 // 否则主窗口状态栏会显示“服务未连接”，这是预期行为，不是崩溃。
+#include "LinkageDialog.h"
 #include "MainWindow.h"
 #include "MachineCaseDialog.h"
 #include <functional>
@@ -358,6 +359,91 @@ int main(int argc, char *argv[]) {
             qInfo().noquote() << QStringLiteral("FT_QT_TOUCHING_OK %1").arg(line);
             return 0;
         }
+    }
+
+    // 3D 联动调试窗口（截图/人工看用）：--linkage-ui "brief" [--at <frame>]
+    if (args.contains(QStringLiteral("--linkage-ui"))) {
+        const int index = args.indexOf(QStringLiteral("--linkage-ui"));
+        if (index + 1 >= args.size()) {
+            qCritical().noquote() << "FT_QT_LINKAGE_UI_FAIL 用法：--linkage-ui \"brief\" [--at <frame>]";
+            return 2;
+        }
+        MainWindow window;
+        window.resize(1400, 900);
+        window.show();
+        QJsonObject document;
+        QString error;
+        int shapes = 0;
+        if (!window.designMachineFromBrief(args.at(index + 1), &document, &error)
+            || !window.renderMachineGeometry(document, &shapes, &error)) {
+            qCritical().noquote() << "FT_QT_LINKAGE_UI_FAIL" << error;
+            return 1;
+        }
+        QJsonObject linkage;
+        if (!window.loadLinkage(args.at(index + 1), &linkage, &error)) {
+            qCritical().noquote() << "FT_QT_LINKAGE_UI_FAIL" << error;
+            return 1;
+        }
+        auto *dialog = new LinkageDialog(linkage, window.occtViewportForTest(), &window);
+        const int atIndex = args.indexOf(QStringLiteral("--at"));
+        const int frame = atIndex >= 0 && atIndex + 1 < args.size() ? args.at(atIndex + 1).toInt() : 0;
+        dialog->seekFrame(frame);
+        dialog->show();
+        qInfo().noquote() << "FT_QT_LINKAGE_UI_OPEN frames=" << dialog->frameCount() << "at=" << frame;
+        return app.exec();
+    }
+
+    // 3D 联动调试自检：--linkage-selftest "brief"
+    // 验三件事：拿到时间线、施加某一帧真的动了零件、整段里确实有零件在动。
+    if (args.contains(QStringLiteral("--linkage-selftest"))) {
+        const int index = args.indexOf(QStringLiteral("--linkage-selftest"));
+        if (index + 1 >= args.size()) {
+            qCritical().noquote() << "FT_QT_LINKAGE_FAIL 用法：--linkage-selftest \"brief\"";
+            return 2;
+        }
+        MainWindow window;
+        window.resize(1400, 900);
+        window.show();
+        QJsonObject document;
+        QString error;
+        int shapes = 0;
+        if (!window.designMachineFromBrief(args.at(index + 1), &document, &error)
+            || !window.renderMachineGeometry(document, &shapes, &error)) {
+            qCritical().noquote() << "FT_QT_LINKAGE_FAIL 视口未就绪：" << error;
+            return 1;
+        }
+        QJsonObject linkage;
+        if (!window.loadLinkage(args.at(index + 1), &linkage, &error)) {
+            qCritical().noquote() << "FT_QT_LINKAGE_FAIL 时间线不可用：" << error;
+            return 1;
+        }
+        const int frames = linkage.value(QStringLiteral("frames")).toArray().size();
+        const int cycleMs = linkage.value(QStringLiteral("cycleMs")).toInt();
+        const int axes = linkage.value(QStringLiteral("axisCount")).toInt();
+        const int missing = linkage.value(QStringLiteral("io")).toObject()
+                                .value(QStringLiteral("missing")).toArray().size();
+        if (frames < 10) {
+            qCritical().noquote() << "FT_QT_LINKAGE_FAIL 帧数太少：" << frames;
+            return 1;
+        }
+        if (missing != 0) {
+            qCritical().noquote() << "FT_QT_LINKAGE_FAIL 有 IO 点不在 PLC 表里：" << missing;
+            return 1;
+        }
+        const int movedHome = window.applyLinkageFrameForTest(linkage, 0);
+        const int movedQuarter = window.applyLinkageFrameForTest(linkage, frames / 4);
+        const int movedMid = window.applyLinkageFrameForTest(linkage, frames / 2);
+        if (movedHome != 0) {
+            qCritical().noquote() << "FT_QT_LINKAGE_FAIL 第 0 帧不该有零件被挪：" << movedHome;
+            return 1;
+        }
+        if (qMax(movedQuarter, movedMid) == 0) {
+            qCritical().noquote() << "FT_QT_LINKAGE_FAIL 整段没有零件在动";
+            return 1;
+        }
+        qInfo().noquote() << QStringLiteral("FT_QT_LINKAGE_OK frames=%1 cycleMs=%2 axes=%3 ioMissing=0 movedQuarter=%4 movedMid=%5")
+                                 .arg(frames).arg(cycleMs).arg(axes).arg(movedQuarter).arg(movedMid);
+        return 0;
     }
 
     // 尺寸 + 撤销自检：--size-undo-selftest "brief" <type> <WxHxL>

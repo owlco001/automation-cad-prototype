@@ -253,6 +253,8 @@ jobs:
           grep -qE "FT_QT_PREVIEW_OK" /tmp/occt-preview.log
           run drop --drop-selftest "$BRIEF" gripper
           grep -qE "FT_QT_DROP_OK" /tmp/occt-drop.log
+          run linkage --linkage-selftest "$BRIEF"
+          grep -qE "FT_QT_LINKAGE_OK .*ioMissing=0" /tmp/occt-linkage.log
   # Windows 侧一直只有老王人工验证，仓库里没有任何 Windows 产物。
   # 这个 job 至少保证「Windows 上能编译」这件事不再靠人肉发现。
   qt-windows:
