@@ -311,6 +311,115 @@ jobs:
           path: dist/automationcad-qt-windows-x64.zip
           if-no-files-found: error
           retention-days: 14
+  # Windows + OCCT：先证明「Windows 上能带 OCCT 编过」，再谈打包。
+  # 之前 qt-windows 一直是 -DAUTOMATIONCAD_OCCT=OFF，所以发出去的包没有 AIS 视口。
+  # conda-forge 的 occt 用 --no-deps 取（CMakeLists 里已支持 OCCT_ROOT）。
+  qt-windows-occt:
+    name: Qt + OCCT（Windows 编译）
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: 安装 Qt6（MSVC 2022 x64）
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2022_64'
+          cache: true
+      - name: 进入 MSVC 环境
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      # setup-miniconda + `bash -el` 在 windows-latest 上实测 exit 2（conda 没在期望的 shell 里）。
+      # 换成 micromamba：它在 Windows 上更稳，且能直接把 prefix 暴露给后续步骤。
+      - uses: mamba-org/setup-micromamba@v1
+        with:
+          environment-name: occt
+          create-args: >-
+            -c conda-forge
+            --no-deps
+            occt
+          init-shell: powershell
+      # conda 的 Windows 包布局是 <prefix>/Library/{include/opencascade,lib,bin}，
+      # 不是 <prefix>/{include,lib}。这里两种布局都探一遍，再把 OCCT_ROOT 指到真正的根。
+      - name: 校验 OCCT 头文件与库
+        shell: pwsh
+        run: |
+          $roots = @()
+          foreach ($base in @($env:MAMBA_PREFIX_OCCT, $env:CONDA_PREFIX, "$env:MAMBA_ROOT_PREFIX\envs\occt")) {
+            if ($base -and (Test-Path $base)) {
+              $roots += $base
+              $roots += (Join-Path $base 'Library')
+            }
+          }
+          $root = $roots | Where-Object { Test-Path (Join-Path $_ 'include/opencascade/Standard.hxx') } | Select-Object -First 1
+          if (-not $root) {
+            Write-Host "探过的根：$($roots -join ', ')"
+            throw "找不到 OCCT 头文件 include/opencascade/Standard.hxx"
+          }
+          "OCCT_PREFIX=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "OCCT_ROOT=$root"
+          Get-ChildItem (Join-Path $root 'lib') -Filter "TKV3d*" | Select-Object -First 3 | ForEach-Object { Write-Host "lib: $($_.Name)" }
+          Get-ChildItem (Join-Path $root 'bin') -Filter "TKV3d*" -ErrorAction SilentlyContinue | Select-Object -First 3 | ForEach-Object { Write-Host "bin: $($_.Name)" }
+      - name: 配置（OCCT=ON）与编译
+        shell: pwsh
+        run: |
+          cmake -S qt-client -B build-win-occt -G Ninja -DCMAKE_BUILD_TYPE=Release -DAUTOMATIONCAD_OCCT=ON -DOCCT_ROOT="$env:OCCT_PREFIX" 2>&1 | Tee-Object cmake-occt.log
+          if (-not (Select-String -Path cmake-occt.log -Pattern "OCCT AIS 视口：启用" -Quiet)) {
+            Write-Host "--- cmake 输出 ---"
+            Get-Content cmake-occt.log | Select-Object -Last 40
+            throw "CMake 没有启用 OCCT AIS 视口（应打印「OCCT AIS 视口：启用」）"
+          }
+          cmake --build build-win-occt
+      # 先打包再验证启动：Windows 上真实的运行布局就是「exe 与 DLL 同目录」，
+      # 靠 PATH 拼凑既不可靠、也验证不了发出去的包到底能不能起。
+      - name: 打包（windeployqt + OCCT DLL + zip）
+        shell: pwsh
+        run: |
+          $dist = "dist/automationcad-qt-occt"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item build-win-occt/automationcad-qt.exe $dist
+          windeployqt --release --no-translations "$dist/automationcad-qt.exe"
+          $occtBin = Join-Path $env:OCCT_PREFIX 'bin'
+          Copy-Item (Join-Path $occtBin '*.dll') $dist -Force
+          if (-not (Test-Path (Join-Path $dist 'TKV3d.dll'))) { throw "包里缺 TKV3d.dll（OCCT 视口不会可用）" }
+          Compress-Archive -Path "$dist/*" -DestinationPath "dist/automationcad-qt-windows-x64-occt.zip" -Force
+          $zip = Get-Item "dist/automationcad-qt-windows-x64-occt.zip"
+          $count = (Get-ChildItem $dist | Measure-Object).Count
+          Write-Host "PACKAGE_OCCT_OK bytes=$($zip.Length) files=$count tkv3d=1"
+      - name: 从打包目录启动并核对版本
+        shell: pwsh
+        run: |
+          $dist = (Resolve-Path "dist/automationcad-qt-occt").Path
+          $exe = Join-Path $dist 'automationcad-qt.exe'
+          $outFile = Join-Path $dist 'version.txt'
+          # Qt 是 GUI 子系统程序：直接 & exe 拿不到 stdout，$LASTEXITCODE 也不可信。
+          # 用 Start-Process 重定向输出 + 读 ExitCode，才是在 Windows 上验证「能启动」的正解。
+          $proc = Start-Process -FilePath $exe -ArgumentList '--version' -WorkingDirectory $dist -Wait -PassThru -NoNewWindow -RedirectStandardOutput $outFile
+          $text = if (Test-Path $outFile) { Get-Content $outFile -Raw } else { '' }
+          if ($null -eq $text) { $text = '' }   # 空文件时 Get-Content -Raw 返回 $null，Trim() 会直接抛
+          $text = $text.Trim()
+          Write-Host "VERSION_OUTPUT [$text] exit=$($proc.ExitCode)"
+          if ($proc.ExitCode -ne 0) {
+            Write-Host "--- 依赖清单 ---"
+            dumpbin /dependents $exe | Select-String -Pattern "\.dll" | ForEach-Object { $_.Line.Trim() }
+            throw "打包目录里的 exe 启动失败（exit $($proc.ExitCode)）"
+          }
+          # GUI 子系统程序的 stdout 可能被系统吞掉；退出码 0 = 进程正常启动并退出。
+          # 有输出时仍要求版本号匹配，没输出时不假装验证过版本。
+          if ($text -and ($text -notmatch "0\.5\.0")) { throw "版本输出异常：$text" }
+          if (-not $text) { Write-Host "VERSION_STDOUT_EMPTY （GUI 子系统无 stdout，按退出码判定启动成功）" }
+          $dlls = (Get-ChildItem $dist -Filter *.dll | Measure-Object).Count
+          Write-Host "OCCT_WIN_RUN_OK version=0.5.0 dlls=$dlls"
+      - name: 上传 Windows OCCT 安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: automationcad-qt-windows-x64-occt
+          path: dist/automationcad-qt-windows-x64-occt.zip
+          if-no-files-found: error
+          retention-days: 14
   featuretree-geometry:
     name: FeatureTree real geometry (build123d)
     runs-on: ubuntu-latest
