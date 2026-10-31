@@ -385,6 +385,35 @@ test('排布没收敛时必须给出“还剩哪几对、往哪挪多少”（�
   }
 });
 
+test('排布求解器不得在两张布局之间来回挪：必须识别活锁并如实说明', { timeout: 300_000 }, () => {
+  const run = (args) => JSON.parse(execFileSync(process.execPath, [script, ...args],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 })).geometry.layoutCompliance;
+
+  // 40 mm：实测会在 st1/st4-rotary-1-table 的 z 上来回 +13/-13，直到轮数用尽
+  const forty = run(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--layout-compliance', '40']);
+  assert.equal(forty.converged, false);
+  assert.match(forty.stopReason, /来回挪|回到第 \d+ 轮/, '必须点明是来回挪，而不是含糊说“没进展”');
+  assert.match(forty.stopReason, /第 \d+ 轮回到了第 \d+ 轮/, '要说清是在哪两轮之间循环');
+  assert.match(forty.stopReason, /rotary-1-table/, '必须点名是哪几件在来回挪');
+  assert.equal(forty.remainingPairs.length, forty.suspects);
+
+  // 同一件同一轴被推的次数必须有界：这是「别无限来回蹭」的底线守卫，
+  // 不是精确值——真正的结构约束（位移不得减少与支撑件的间隙）还没做。
+  const perAxis = new Map();
+  for (const move of forty.moves ?? []) {
+    const key = `${move.partId}|${move.axis}`;
+    perAxis.set(key, (perAxis.get(key) ?? 0) + 1);
+  }
+  for (const [key, count] of perAxis) {
+    assert.ok(count <= 6, `${key} 被挪了 ${count} 次，像是没止住的来回蹭`);
+  }
+
+  // 20 mm 仍然必须收敛（别为了防活锁把正常情况也卡死）
+  const twenty = run(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--layout-compliance', '20']);
+  assert.equal(twenty.converged, true);
+  assert.equal(twenty.suspects, 0);
+});
+
 test('--max-clearance 二分出四工位的最大可行间距 = 25 mm，且该值复算确实收敛', { timeout: 300_000 }, () => {
   const stdout = execFileSync(process.execPath,
     [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--max-clearance'],

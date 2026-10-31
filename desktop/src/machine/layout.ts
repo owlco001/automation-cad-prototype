@@ -81,8 +81,15 @@ export function resolveLayout(geometry: any, options: LayoutOptions): LayoutResu
   const moves: LayoutResult['moves'] = [];
   let bestTotal = Number.POSITIVE_INFINITY;
   let stallRounds = 0;
+  // 位置指纹 → 轮次。求解器会在两套布局之间来回切换（实测 st1/st4-rotary-1-table 的 z +13/-13），
+  // 只看「问题数有没有降」会把它误判成「没进展」，其实是原地打转。
+  const seenLayouts = new Map<string, number>();
+  const fingerprintOf = (list: any[]): string => list
+    .map((part) => `${part.id}:${(part.center as number[]).map((value) => value.toFixed(1)).join(',')}`)
+    .join(';');
 
   for (let round = 1; round <= maxRounds; round += 1) {
+    const roundMoveStart = moves.length;
     const working = { ...geometry, parts };
     const suspectsBefore = screenInterference(working, { ignorePairs }).suspects;
     const clearanceBefore = screenClearance(working, { thresholdMm: options.clearanceMm }).count;
@@ -112,6 +119,38 @@ export function resolveLayout(geometry: any, options: LayoutOptions): LayoutResu
       suspectsAfter,
       clearanceAfter
     });
+
+    const fingerprint = fingerprintOf(parts);
+    const repeatedRound = seenLayouts.get(fingerprint);
+    if (repeatedRound !== undefined) {
+      // 点名：把这一轮里「同一件同一轴两个方向都挪过」的列出来，别只说“没进展”
+      const signs = new Map<string, Set<number>>();
+      for (const move of moves.slice(roundMoveStart)) {
+        const key = `${move.partId}|${move.axis}`;
+        const bucket = signs.get(key) ?? new Set<number>();
+        bucket.add(Math.sign(move.delta));
+        signs.set(key, bucket);
+      }
+      const oscillating = [...signs.entries()]
+        .filter(([, values]) => values.has(1) && values.has(-1))
+        .map(([key]) => key)
+        .slice(0, 4);
+      const detail = oscillating.length > 0 ? `（来回挪的是 ${oscillating.join('、')}）` : '';
+      return {
+        parts,
+        rounds: rounds.filter((entry) => entry.round < round),
+        moves,
+        suspects: suspectsAfter,
+        clearance: clearanceAfter,
+        clearanceMm: options.clearanceMm,
+        converged: false,
+        stopReason: `第 ${round} 轮回到了第 ${repeatedRound} 轮的布局：求解器在两张布局之间来回挪${detail}，`
+                    + `不是因为放不下（当前仍有 ${suspectsAfter} 处重叠、${clearanceAfter} 处间距不足）`,
+        advice: buildAdvice(finalWorking, options.clearanceMm),
+        remainingPairs: remainingSuspects(finalWorking, ignorePairs)
+      };
+    }
+    seenLayouts.set(fingerprint, round);
 
     // 「这轮和上轮一样」不等于卡住：20 mm 时实测是 4 → 4 → 0，中间那轮没变但下一轮清了。
     // 只有**连续两轮都没刷新最好成绩**才判空转（阈值 30 时 8 轮 1458 次位移、问题数一动不动）。
