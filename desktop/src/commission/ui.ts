@@ -14,6 +14,7 @@ import { diagnose, type Diagnosis } from './diagnose.ts';
 import { recordDiagnosticError } from '../shared/diagnostics.ts';
 import { demoMachineConfig, validateMachineConfig, type MachineConfig } from './machine-config.ts';
 import { buildMachineIoMap, type MachineIoMapRow } from '../machine/io-map.ts';
+import { registerLinkagePoseBridge } from './linkage-bridge.ts';
 import { createScene3D, type Commission3DStats, type CommissionKinematicsMode, type CommissionScene3D } from './scene3d.ts';
 import type { GeomLayout } from '../machine/geometry.ts';
 import type { KinematicsAnnotation } from '../cad/kinematics-ui.ts';
@@ -22,12 +23,10 @@ import commissionStyles from './commission.css?inline';
 
 /**
  * 把当前 3D 场景暴露给联动面板（src/agent/ui.ts 里的播放按钮）：
- * 面板只负责按帧推进时间，位姿一律交给这里套用；视口重建后要重新挂一次。
+ * 每次调用现取 scene3d，视口重建后不会指向已 dispose 的旧实例（见 linkage-bridge.ts 单测）。
  */
 function exposeLinkagePoseBridge(): void {
-  (window as any).__cadApplyLinkagePose = (pose: { offsets?: Record<string, number[]>; rotZDeg?: Record<string, number> }) => {
-    scene3d?.applyLinkagePose(pose ?? {});
-  };
+  registerLinkagePoseBridge(window as any, () => scene3d);
 }
 
 const COMMISSION_ICON = '<svg viewBox="0 0 16 16"><path d="M2.5 13.5h11M4 13.5V8h2.5v5.5M8 13.5V4.5h2.5v9M11.5 13.5V6.5H14v7"/><path d="M3.5 5.5l2.5-2 2 1.2 3.5-2.5"/></svg>';
