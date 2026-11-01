@@ -3,6 +3,8 @@ Thumbs.db
 *.log
 node_modules
 desktop/vendor/dwg/
+desktop/vendor/qt/
+desktop/vendor/pipeline/
 .venv/
 .iteration/
 
