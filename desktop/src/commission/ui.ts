@@ -27,6 +27,8 @@ import commissionStyles from './commission.css?inline';
  */
 function exposeLinkagePoseBridge(): void {
   registerLinkagePoseBridge(window as any, () => scene3d);
+  // 冒烟/自检读取入口：位姿是否真的落到 mesh 上，只能靠读回坐标来证
+  (window as any).__cadLinkageDebugSnapshot = () => scene3d?.debugPositions() ?? null;
 }
 
 const COMMISSION_ICON = '<svg viewBox="0 0 16 16"><path d="M2.5 13.5h11M4 13.5V8h2.5v5.5M8 13.5V4.5h2.5v9M11.5 13.5V6.5H14v7"/><path d="M3.5 5.5l2.5-2 2 1.2 3.5-2.5"/></svg>';

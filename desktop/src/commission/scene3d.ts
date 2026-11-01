@@ -554,6 +554,17 @@ export class CommissionScene3D {
     return applied;
   }
 
+  /** 自检/冒烟用：读回每个零件当前场景坐标，证明位姿真的被套用了 */
+  debugPositions(): Record<string, [number, number, number]> {
+    const out: Record<string, [number, number, number]> = {};
+    for (const visual of this.annotationVisuals) {
+      const id = String((visual.part as any).id ?? (visual.part as any).partId ?? '');
+      const p = visual.mesh.position;
+      out[id] = [p.x, p.y, p.z];
+    }
+    return out;
+  }
+
   private sync(): void {
     const shouldRun = this.enabled && this.active;
     if (shouldRun && !this.initialized) this.initialize();
