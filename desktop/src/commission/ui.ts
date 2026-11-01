@@ -20,6 +20,16 @@ import type { KinematicsAnnotation } from '../cad/kinematics-ui.ts';
 import { toStepReport, type CommissionCaseReport, type CommissionReport } from './types.ts';
 import commissionStyles from './commission.css?inline';
 
+/**
+ * 把当前 3D 场景暴露给联动面板（src/agent/ui.ts 里的播放按钮）：
+ * 面板只负责按帧推进时间，位姿一律交给这里套用；视口重建后要重新挂一次。
+ */
+function exposeLinkagePoseBridge(): void {
+  (window as any).__cadApplyLinkagePose = (pose: { offsets?: Record<string, number[]>; rotZDeg?: Record<string, number> }) => {
+    scene3d?.applyLinkagePose(pose ?? {});
+  };
+}
+
 const COMMISSION_ICON = '<svg viewBox="0 0 16 16"><path d="M2.5 13.5h11M4 13.5V8h2.5v5.5M8 13.5V4.5h2.5v9M11.5 13.5V6.5H14v7"/><path d="M3.5 5.5l2.5-2 2 1.2 3.5-2.5"/></svg>';
 let machineConfig = demoMachineConfig();
 let machineIoRows: MachineIoMapRow[] = buildMachineIoMap(machineConfig).rows;
@@ -973,6 +983,7 @@ function buildPanel(): void {
     summary: get<HTMLElement>('#commissionSummary')
   };
   scene3d = createScene3D(elements.scene3dHost, machineConfig);
+  exposeLinkagePoseBridge();
   const machineNote = drawer.root.querySelector<HTMLElement>('#commission3dMachine');
   if (machineNote) machineNote.textContent = machineSummary();
   scene3d.setEnabled(elements.scene3dToggle.checked);
@@ -1017,6 +1028,7 @@ export function initCommissionPanel(options: PanelOptions): CommissionPanelHandl
     scene3d?.dispose();
     elements.scene3dHost.innerHTML = '';
     scene3d = createScene3D(elements.scene3dHost, machineConfig, undefined, machineLayout);
+    exposeLinkagePoseBridge();
     const summary = elements.drawer.querySelector<HTMLElement>('#commission3dMachine');
     if (summary) summary.textContent = machineSummary();
     scene3d.setEnabled(elements.scene3dToggle.checked);
