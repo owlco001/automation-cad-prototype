@@ -1637,6 +1637,54 @@ int main(int argc, char *argv[]) {
             const QJsonObject recheck = document.value(QStringLiteral("geometry")).toObject()
                                             .value(QStringLiteral("booleanRecheck")).toObject();
             const int misreported = recheck.value(QStringLiteral("misreported")).toInt();
+
+            // 负例：available=false + misreported>0 → 不能有「按复核结论重排」按钮。
+            // 变体从同一份 document 就地构造，不需要额外 fixture 文件：
+            // 弹窗上面写「未复核」，再并排一个「按复核结论重排」会让人以为整批都复核完了。
+            // 强制保证 misreported>0（fixture 里本来是 0 时补一对），否则这条负例恒真、等于没测。
+            {
+                QJsonObject unavailableDocument = document;
+                QJsonObject unavailableGeometry = unavailableDocument.value(QStringLiteral("geometry")).toObject();
+                QJsonObject unavailableRecheck = unavailableGeometry.value(QStringLiteral("booleanRecheck")).toObject();
+                unavailableRecheck.insert(QStringLiteral("available"), false);
+                if (unavailableRecheck.value(QStringLiteral("misreported")).toInt() <= 0) {
+                    unavailableRecheck.insert(QStringLiteral("misreported"), 1);
+                    QJsonArray pairs = unavailableRecheck.value(QStringLiteral("pairs")).toArray();
+                    QJsonObject extraPair;
+                    extraPair.insert(QStringLiteral("a"), QStringLiteral("selftest-unavailable-a"));
+                    extraPair.insert(QStringLiteral("b"), QStringLiteral("selftest-unavailable-b"));
+                    extraPair.insert(QStringLiteral("verdict"), QStringLiteral("misreported"));
+                    extraPair.insert(QStringLiteral("overlapMm3"), 0);
+                    pairs.append(extraPair);
+                    unavailableRecheck.insert(QStringLiteral("pairs"), pairs);
+                }
+                unavailableGeometry.insert(QStringLiteral("booleanRecheck"), unavailableRecheck);
+                unavailableDocument.insert(QStringLiteral("geometry"), unavailableGeometry);
+
+                QStringList unusedKeys;
+                MachineCaseDialog unavailableDialog(
+                    unavailableDocument, nullptr,
+                    std::function<void(const QStringList &)>{},
+                    std::function<void(const QString &, int, double)>{},
+                    std::function<void()>{}, std::function<void()>{}, std::function<void()>{},
+                    std::function<void(int)>{}, -1,
+                    std::function<void()>{}, std::function<void(int)>{},
+                    std::function<void(const QString &, double, const QString &)>{},
+                    [&unusedKeys](const QStringList &keys) { unusedKeys = keys; });
+                int straySkipButtons = 0;
+                for (QPushButton *button : unavailableDialog.findChildren<QPushButton *>()) {
+                    if (button->text().startsWith(QStringLiteral("按复核结论重排"))) straySkipButtons += 1;
+                }
+                if (straySkipButtons != 0) {
+                    qCritical().noquote() << "FT_QT_RECHECK_SKIP_FAIL available=false 却出现"
+                                          << straySkipButtons << "个「按复核结论重排」按钮";
+                    return 1;
+                }
+                qInfo().noquote()
+                    << QStringLiteral("FT_QT_RECHECK_UNAVAILABLE_OK available=false misreported=%1 buttons=0")
+                           .arg(unavailableRecheck.value(QStringLiteral("misreported")).toInt());
+            }
+
             if (misreported == 0) {
                 if (skip) {
                     qCritical().noquote() << "FT_QT_RECHECK_SKIP_FAIL 没有误报却出现按钮";
