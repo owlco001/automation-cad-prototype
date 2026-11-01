@@ -380,9 +380,20 @@ jobs:
           $dist = "dist/automationcad-qt-occt"
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
           Copy-Item build-win-occt/automationcad-qt.exe $dist
-          windeployqt --release --no-translations "$dist/automationcad-qt.exe"
+          # 体积：软光栅 21MB、翻译包、D3D 编译器、VC 运行库安装器一律不带（用户机有 VC 运行库；
+          # 没有的话在 Release 说明里给 vc_redist 链接，而不是把 18MB 安装器塞进每个包）
+          windeployqt --release --no-opengl-sw --no-translations --no-system-d3d-compiler --no-compiler-runtime "$dist/automationcad-qt.exe"
           $occtBin = Join-Path $env:OCCT_PREFIX 'bin'
-          Copy-Item (Join-Path $occtBin '*.dll') $dist -Force
+          # OCCT 只带白名单：STEP 解析 / B-Rep 布尔 / AIS 视口 / 基础与可视化服务。
+          # 全量 169 个 DLL 里有大量 DataExchange 格式（DWG/DXF/glTF/VRML…）我们用不到。
+          $keep = @('TKernel','TKMath','TKG2d','TKG3d','TKGeomBase','TKGeomAlgo','TKBRep','TKTopAlgo','TKPrim',
+                    'TKBO','TKBool','TKFillet','TKOffset','TKService','TKV3d','TKOpenGl','TKShHealing','TKXSBase','TKSTEP','TKSTEPBase','TKSTEPAttr')
+          $copied = 0
+          foreach ($lib in $keep) {
+            $file = Join-Path $occtBin "$lib.dll"
+            if (Test-Path $file) { Copy-Item $file $dist -Force; $copied++ }
+          }
+          Write-Host "OCCT_WHITELIST_COPIED $copied" 
           Write-Host "OCCT_DLL_COUNT $((Get-ChildItem (Join-Path $occtBin '*.dll') | Measure-Object).Count)"
           foreach ($dep in @('tbb12.dll','freetype.dll','zlib.dll')) {
             if (Test-Path (Join-Path $occtBin $dep)) { Write-Host "DEP_PRESENT $dep" }
