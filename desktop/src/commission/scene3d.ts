@@ -202,6 +202,21 @@ export class MachineMotion {
   }
 }
 
+/**
+ * 联动帧 → 场景坐标（纯函数，便于单测）。
+ * 场景里 mm→m：x 直接映射、y↔z 互换并取反（与 basePosition 的换算口径一致）。
+ * 这里**只做换算**，不插值、不推导运动——位移由 desktop 的 linkage 算好再传进来。
+ */
+export function linkagePosition(
+  base: readonly number[],
+  offsetMm: readonly number[] | undefined,
+  scale: number
+): [number, number, number] {
+  const [bx = 0, by = 0, bz = 0] = base;
+  const [dx = 0, dy = 0, dz = 0] = offsetMm ?? [];
+  return [bx + dx * scale, by + dz * scale, bz - dy * scale];
+}
+
 export class CommissionScene3D {
   private readonly container: HTMLElement;
   private readonly config: MachineConfig;
@@ -494,6 +509,7 @@ export class CommissionScene3D {
     this.applyAnnotationTransforms();
   }
 
+
   private applyAnnotationTransforms(): void {
     for (const visual of this.annotationVisuals) {
       const part = visual.part;
@@ -512,6 +528,30 @@ export class CommissionScene3D {
       visual.mesh.quaternion.setFromAxisAngle(axisVector, rotationRad);
       visual.mesh.position.copy(visual.basePosition).add(offset);
     }
+  }
+
+
+  /**
+   * 应用一帧联动位姿（来自 desktop `poseAt()`）：只套用位移/转角，不在这里算运动。
+   * 返回真正被摆动的零件数，便于自检断言。
+   */
+  applyLinkagePose(pose: { offsets?: Record<string, number[]>; rotZDeg?: Record<string, number> } = {}): number {
+    const offsets = pose.offsets ?? {};
+    const rotations = pose.rotZDeg ?? {};
+    let applied = 0;
+    for (const visual of this.annotationVisuals) {
+      const id = String((visual.part as any).id ?? (visual.part as any).partId ?? '');
+      const position = linkagePosition(
+        [visual.basePosition.x, visual.basePosition.y, visual.basePosition.z],
+        offsets[id],
+        this.annotationScale
+      );
+      visual.mesh.position.set(position[0], position[1], position[2]);
+      if (Array.isArray(offsets[id])) applied += 1;
+      const deg = rotations[id] ?? 0;
+      visual.mesh.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), (deg * Math.PI) / 180);
+    }
+    return applied;
   }
 
   private sync(): void {
