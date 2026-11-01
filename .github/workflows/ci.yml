@@ -385,19 +385,80 @@ jobs:
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
           Copy-Item build-win-occt/automationcad-qt.exe $dist
           # 体积：软光栅 21MB、翻译包、D3D 编译器一律不带。
-          # VC++ 运行时（约 1.2MB）必须带：去掉 --no-compiler-runtime，否则没装 VC++ Redist
-          # 的工控机会缺 VCRUNTIME140_1.dll / MSVCP140.dll，启动直接 0xc0000135。
+          # VC++ 运行时（约 1.2MB）必须带：没装 VC++ Redist 的工控机会缺
+          # VCRUNTIME140_1.dll / MSVCP140.dll，启动直接 0xc0000135。
           windeployqt --release --no-opengl-sw --no-translations --no-system-d3d-compiler "$dist/automationcad-qt.exe"
-          # 去掉开关只是「允许它带」，不代表真带了：windeployqt 6.x 在 --compiler-runtime 下
-          # 可能只丢一份 vc_redist.x64.exe 安装器（+18MB）而不放 DLL，纯净机仍然起不来。
-          # 这一步在 windows-latest 上跑，runner 自带 VC 运行库，靠「启动核对」证明不了，必须回验文件。
+          # 去掉 --no-compiler-runtime 只是「允许它带」，不代表真带了：windeployqt 6.8.3 在
+          # windows-latest 上实测只丢一份 vc_redist.x64.exe 安装器（+18MB），三个 CRT DLL 一个都不放
+          # （run 41317009763 就是这么红的：Updating vc_redist.x64.exe. 之后 dist 里没有 vcruntime140.dll）。
+          # runner 自带 VC 运行库，靠「启动核对」也证明不了包里有没有，所以不指望 windeployqt 顺手带，
+          # 直接去 Visual Studio 的 CRT 可再分发目录把 DLL 拷进来。
+          # 下面这段用 VC_RUNTIME_BLOCK 标记包起来：desktop/test/ci-qt-package.test.mjs 按这对标记
+          # 原样截取本段，在 mock 目录上跑「拷贝 + 三档守卫」，所以标记别删、别改名字。
+          # >>> VC_RUNTIME_BLOCK_BEGIN
           $vcRuntime = @('vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll')
-          foreach ($rt in $vcRuntime) {
-            if (-not (Test-Path (Join-Path $dist $rt))) {
-              throw "缺 VC++ 运行库 $rt（windeployqt 没带，或只放了 vc_redist 安装器）"
+          # CRT 可再分发目录：真正放 DLL 的是 <msvc redist root>\x64\Microsoft.VC*.CRT。
+          # ① 首选环境变量 $env:VCToolsRedistDir（MSVC 开发者 shell / ilammy/msvc-dev-cmd 之后存在，
+          #    形如 C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC\14.44.35207\）
+          # ② 兜底按 glob 搜 VS 2022 各 edition 的 Redist\MSVC\*，Sort-Object Name -Descending 取版本号最大的
+          # ③ 再兜底用 vswhere 拿 installationPath 拼同一条路径（VS 装在非默认盘时才有用）
+          $vsRedistRoots = @()
+          if ($env:VCToolsRedistDir) { $vsRedistRoots += $env:VCToolsRedistDir }
+          $vsRedistRoots += @(Get-ChildItem -Path 'C:\Program Files\Microsoft Visual Studio\2022\*\VC\Redist\MSVC\*' -ErrorAction SilentlyContinue |
+            Where-Object { $_.PSIsContainer } | Sort-Object Name -Descending | ForEach-Object { $_.FullName })
+          $vswhere = $null
+          if (${env:ProgramFiles(x86)}) { $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe' }
+          if ($vswhere -and (Test-Path $vswhere)) {
+            $vsInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            if ($vsInstall) {
+              $vsRedistRoots += @(Get-ChildItem -Path (Join-Path $vsInstall 'VC\Redist\MSVC\*') -ErrorAction SilentlyContinue |
+                Where-Object { $_.PSIsContainer } | Sort-Object Name -Descending | ForEach-Object { $_.FullName })
             }
           }
-          Write-Host "VC_RUNTIME_OK $($vcRuntime -join ',')"
+          $crtDirs = @()
+          foreach ($root in @($vsRedistRoots | Select-Object -Unique)) {
+            if (-not (Test-Path $root)) { continue }
+            $crtDirs += @(Get-ChildItem -Path (Join-Path $root 'x64') -Filter 'Microsoft.VC*.CRT' -Directory -ErrorAction SilentlyContinue |
+              Sort-Object Name -Descending | ForEach-Object { $_.FullName })
+          }
+          $crtDirs = @($crtDirs | Select-Object -Unique)
+          # 挑第一个「真有 vcruntime140.dll + msvcp140.dll」的目录，不认第一个存在的目录 ——
+          # VS 的 Redist 下可能残留半装的旧版本目录。
+          $crtSrc = $null
+          foreach ($dir in $crtDirs) {
+            if ((Test-Path (Join-Path $dir 'vcruntime140.dll')) -and (Test-Path (Join-Path $dir 'msvcp140.dll'))) { $crtSrc = $dir; break }
+          }
+          if ($crtSrc) {
+            Write-Host "VC_RUNTIME_SRC $crtSrc"
+            foreach ($rt in $vcRuntime) {
+              $src = Join-Path $crtSrc $rt
+              if (-not (Test-Path $src)) { Write-Host "VC_RUNTIME_SRC_MISSING $rt <- $crtSrc"; continue }
+              Copy-Item $src $dist -Force
+              if (-not (Test-Path (Join-Path $dist $rt))) { throw "VC++ 运行库 $rt 没能复制进打包目录（源：$src）" }
+              Write-Host "VC_RUNTIME_COPIED $rt"
+            }
+          } else {
+            Write-Host "VC_RUNTIME_SRC_NOT_FOUND 探过的目录：$($crtDirs -join ',')"
+          }
+          # 守卫分三档，不再「缺一个就 throw」——那样在 windeployqt 只给 vc_redist 的 runner 上是必然误红：
+          #   三件 DLL 都到位                    → VC_RUNTIME_OK，绿；
+          #   没全到但包里有 vc_redist.x64.exe   → VC_RUNTIME_REDIST_ONLY 告警后继续：便携包用户双击
+          #                                        包里的 vc_redist.x64.exe 装完即可启动（windeployqt
+          #                                        的默认行为，不能因为它把整个打包 job 打红）；
+          #   两者都没有                        → throw：纯净 Windows 机启动必然 0xc0000135。
+          $vcMissing = @()
+          foreach ($name in $vcRuntime) {
+            if (-not (Test-Path (Join-Path $dist $name))) { $vcMissing += $name }
+          }
+          $vcRedist = Join-Path $dist 'vc_redist.x64.exe'
+          if ($vcMissing.Count -eq 0) {
+            Write-Host "VC_RUNTIME_OK $($vcRuntime -join ',')"
+          } elseif (Test-Path $vcRedist) {
+            Write-Host "VC_RUNTIME_REDIST_ONLY 缺 $($vcMissing -join ',')，但包内有 vc_redist.x64.exe：便携包用户需自行安装 VC++ 运行库后才能启动"
+          } else {
+            throw "缺 VC++ 运行库 $($vcMissing -join ',')：VS CRT 目录里没找到、也没拷进打包目录，包里也没有 vc_redist.x64.exe —— 纯净 Windows 机启动即 0xc0000135"
+          }
+          # <<< VC_RUNTIME_BLOCK_END
           $occtBin = Join-Path $env:OCCT_PREFIX 'bin'
           # OCCT 只带白名单：B-Rep 布尔 / AIS 视口 / 基础与可视化服务（STEP 交换库单独处理）。
           # 全量 169 个 DLL 里有大量 DataExchange 格式（DWG/DXF/glTF/VRML…）我们用不到。
@@ -536,7 +597,7 @@ jobs:
           Compress-Archive -Path "$dist/*" -DestinationPath "dist/automationcad-qt-windows-x64-occt.zip" -Force
           $zip = Get-Item "dist/automationcad-qt-windows-x64-occt.zip"
           $count = (Get-ChildItem $dist | Measure-Object).Count
-          Write-Host "PACKAGE_OCCT_OK bytes=$($zip.Length) files=$count tkv3d=1 stl=$($stlCopied.Count) step=$($stepCopied.Count) deps=$depsCopied vcrt=$($vcRuntime.Count)"
+          Write-Host "PACKAGE_OCCT_OK bytes=$($zip.Length) files=$count tkv3d=1 stl=$($stlCopied.Count) step=$($stepCopied.Count) deps=$depsCopied vcrt=$(($vcRuntime.Count - $vcMissing.Count))/$($vcRuntime.Count)"
       - name: 从打包目录启动并核对版本
         shell: pwsh
         run: |

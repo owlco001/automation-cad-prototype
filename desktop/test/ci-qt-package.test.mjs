@@ -148,20 +148,64 @@ function hasStlGuard(text) {
   }
 }
 
-/** ③ VC++ 运行库回验：必须在 windeployqt 之后、三个 DLL 逐个 Test-Path、缺则 throw。 */
-function hasVcRuntimeCheck(text) {
-  const lines = text.split('\n');
-  const deployAt = lines.findIndex((l) => /^\s*windeployqt(\s|$)/.test(l));
-  const arrayAt = lines.findIndex((l) => /^\s*\$vcRuntime\s*=\s*@\(/.test(l));
-  if (deployAt < 0 || arrayAt < 0 || arrayAt < deployAt) return false;
+/**
+ * ③-a VC++ 运行库必须「从 VS 的 CRT 可再分发目录主动拷」进 $dist。
+ * 只断言 windeployqt 带开关是不够的：实测 windeployqt 6.8.3 在 windows-latest 上
+ * 只丢 vc_redist.x64.exe，三个 CRT DLL 一个不放（run 41317009763）。
+ */
+function hasVcRuntimeCopy(text) {
+  try {
+    // 目录发现三件套：环境变量优先，glob 与 vswhere 兜底，最终都落到 x64\Microsoft.VC*.CRT。
+    // 断言都卡在「代码形状」上，不认注释里的同一句话。
+    if (!/if\s*\(\s*\$env:VCToolsRedistDir\s*\)/.test(text)) return false;
+    if (!/-Filter\s+'Microsoft\.VC\*\.CRT'/.test(text)) return false;
+    if (!/vswhere[\s\S]*-requires\s+Microsoft\.VisualStudio\.Component\.VC\.Tools\.x86\.x64/.test(text)) return false;
+    if (!/Join-Path\s+\$root\s+'x64'/.test(text)) return false;
+    const arr = arrayLiteral(text, 'vcRuntime');
+    for (const rt of ['vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll']) {
+      if (!arr.includes(`'${rt}'`) && !arr.includes(`"${rt}"`)) return false;
+    }
+    // 真的 Copy-Item 进 $dist，并且回验落地、打印 VC_RUNTIME_COPIED（不是只 Write-Host 源路径）。
+    const loop = bodyOf(text, /foreach\s*\(\s*\$rt\s+in\s+\$vcRuntime\s*\)\s*\{/, 'CRT DLL 拷贝循环');
+    if (!/Copy-Item\s+\$src\s+\$dist/.test(loop)) return false;
+    if (!/Test-Path\s*\(\s*Join-Path\s+\$dist\s+\$rt\s*\)/.test(loop)) return false;
+    if (!/VC_RUNTIME_COPIED/.test(loop)) return false;
+    // 必须在 windeployqt 之后跑：先部署再用 CRT 目录里的真 DLL 覆盖，顺序反了会被覆盖回去。
+    const lines = text.split('\n');
+    const deployAt = lines.findIndex((l) => /^\s*windeployqt(\s|$)/.test(l));
+    const copyAt = lines.findIndex((l) => /^\s*\$vcRuntime\s*=\s*@\(/.test(l));
+    return deployAt >= 0 && copyAt > deployAt;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * ③-b 守卫必须是三档，而不是「缺一个就 throw」：
+ *   三件都到位 → VC_RUNTIME_OK；没全到但有 vc_redist.x64.exe → VC_RUNTIME_REDIST_ONLY 且不抛；
+ *   两者都没有 → throw（且报错里带 $vcMissing 与 vc_redist）。
+ */
+function hasVcRuntimeGuard(text) {
   try {
     const arr = arrayLiteral(text, 'vcRuntime');
     for (const rt of ['vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll']) {
       if (!arr.includes(`'${rt}'`) && !arr.includes(`"${rt}"`)) return false;
     }
-    const loop = bodyOf(text, /foreach\s*\(\s*\$rt\s+in\s+\$vcRuntime\s*\)\s*\{/, 'VC++ 运行库回验循环');
-    if (!/Test-Path\s*\(\s*Join-Path\s+\$dist\s+\$rt\s*\)/.test(loop)) return false;
-    return /throw/.test(loop);
+    const loop = bodyOf(text, /foreach\s*\(\s*\$name\s+in\s+\$vcRuntime\s*\)\s*\{/, '运行库落盘回验循环');
+    if (!/Test-Path\s*\(\s*Join-Path\s+\$dist\s+\$name\s*\)/.test(loop)) return false;
+    if (!/\$vcMissing\s*\+=/.test(loop)) return false;
+    if (/throw/.test(loop)) return false;   // 单个 DLL 缺失就直接 throw = 误红的老写法
+
+    const ok = bodyOf(text, /if\s*\(\s*\$vcMissing\.Count\s+-eq\s+0\s*\)\s*\{/, '三件齐备分支');
+    if (!/VC_RUNTIME_OK/.test(ok)) return false;
+
+    const redist = bodyOf(text, /elseif\s*\(\s*Test-Path\s+\$vcRedist\s*\)\s*\{/, 'vc_redist 兜底分支');
+    if (!/VC_RUNTIME_REDIST_ONLY/.test(redist)) return false;
+    if (/throw/.test(redist)) return false;   // 包里有安装器就放行，这是本用例要保的行为
+
+    const fatal = bodyOf(text,
+      /elseif\s*\(\s*Test-Path\s+\$vcRedist\s*\)\s*\{[\s\S]*?\}\s*else\s*\{/, '两者都缺的 throw 分支');
+    return /throw/.test(fatal) && /\$vcMissing/.test(fatal) && /vc_redist/.test(fatal);
   } catch {
     return false;
   }
@@ -254,18 +298,46 @@ test('③ 去掉 --no-compiler-runtime 必须与「VC++ 运行库真落地」绑
   assert.doesNotMatch(executable, /--no-compiler-runtime/,
     `${CI_PATH_DISPLAY} 的可执行命令行里仍出现 --no-compiler-runtime`);
 
-  // 绑定点：光去掉开关只是「允许它带」。windeployqt 6.x 可能只丢 vc_redist 安装器
-  // （+18MB）而不放 DLL，所以必须有 vcruntime140/140_1/msvcp140 的逐文件回验。
-  assert.ok(hasVcRuntimeCheck(PACKAGING),
-    'windeployqt 之后没有 VC++ 运行库回验（vcruntime140.dll / vcruntime140_1.dll / msvcp140.dll 逐个 Test-Path + throw）：'
-    + '去掉 --no-compiler-runtime 可能只换来一个 vc_redist 安装器，纯净机仍然缺 VCRUNTIME140_1.dll');
+  // 绑定点 1：光去掉开关只是「允许它带」。windeployqt 6.8.3 在 windows-latest 上实测只丢
+  // vc_redist 安装器（+18MB）而不放 DLL（run 41317009763），所以必须主动从 VS 的 CRT
+  // 可再分发目录把 vcruntime140/140_1/msvcp140 拷进 $dist。
+  assert.ok(hasVcRuntimeCopy(PACKAGING),
+    'windeployqt 之后没有「从 VS CRT 目录拷 DLL」的逻辑：需要 $env:VCToolsRedistDir / '
+    + 'Microsoft.VC*.CRT 目录发现 + 逐个 Copy-Item 进 $dist + Test-Path 回验 + VC_RUNTIME_COPIED');
+  // 绑定点 2：缺一个就 throw 的守卫在「windeployqt 只给安装器」的 runner 上必然误红，
+  // 必须改成三档（三件齐 → 绿 / 只有 vc_redist → 告警 / 都没有 → throw）。
+  assert.ok(hasVcRuntimeGuard(PACKAGING),
+    'VC++ 运行库守卫不是三档：需要「三件齐 → VC_RUNTIME_OK；缺但包内有 vc_redist.x64.exe → '
+    + 'VC_RUNTIME_REDIST_ONLY 不抛；两者都没有 → throw」');
+  assert.match(PACKAGING, /VC_RUNTIME_REDIST_ONLY/,
+    '打包段没有 VC_RUNTIME_REDIST_ONLY 告警分支：只有 vc_redist 安装器时会被误判成红');
 
-  // 负向自证 1：把运行库数组删掉 → 判定必须变红（证明这条断言不是空转）。
+  // 负向自证 1：把运行库数组删掉 → 两个判定都必须变红（证明断言不是空转）。
   const noRuntime = PACKAGING.replace(/\$vcRuntime\s*=\s*@\([^)]*\)/, '');
   assert.notEqual(noRuntime, PACKAGING, '变异没生效：没找到 $vcRuntime 数组定义');
-  assert.equal(hasVcRuntimeCheck(noRuntime), false, '删掉 VC++ 运行库回验后判定仍为通过');
+  assert.equal(hasVcRuntimeCopy(noRuntime), false, '删掉运行库数组后「拷贝」判定仍为通过');
+  assert.equal(hasVcRuntimeGuard(noRuntime), false, '删掉运行库数组后「三档守卫」判定仍为通过');
 
-  // 负向自证 2：把开关加回去 → 本用例的 --no-compiler-runtime 断言必须能抓到。
+  // 负向自证 2：整块拷贝逻辑删掉（只留原样 windeployqt + 守卫）→ 必须变红。
+  const noCopy = dropBlock(PACKAGING, 'if ($crtSrc)');
+  assert.notEqual(noCopy, PACKAGING, '变异没生效：没找到 $crtSrc 拷贝块');
+  assert.equal(hasVcRuntimeCopy(noCopy), false, '删掉「从 CRT 目录拷贝」整块后判定仍为通过');
+
+  // 负向自证 3：守卫倒退回「单个 DLL 缺失就 throw」→ 必须变红（这正是本轮要修掉的误红写法）。
+  const eagerThrow = PACKAGING.replace(
+    'if (-not (Test-Path (Join-Path $dist $name))) { $vcMissing += $name }',
+    'if (-not (Test-Path (Join-Path $dist $name))) { throw "缺 VC++ 运行库 $name" }');
+  assert.notEqual(eagerThrow, PACKAGING, '变异没生效：没找到运行库回验循环体');
+  assert.equal(hasVcRuntimeGuard(eagerThrow), false, '退回「缺一个就 throw」后判定仍为通过');
+
+  // 负向自证 4：把 vc_redist 兜底分支的条件去掉（elseif ($true) = 只要缺就用安装器顶过去，
+  // 装器也不看）→ 必须变红：throw 分支必须真的要求「DLL 与 vc_redist 都没有」。
+  const noRedistCheck = PACKAGING.replace('elseif (Test-Path $vcRedist) {', 'elseif ($true) {');
+  assert.notEqual(noRedistCheck, PACKAGING, '变异没生效：没找到 vc_redist 兜底分支');
+  assert.equal(hasVcRuntimeGuard(noRedistCheck), false,
+    '去掉「包里真有 vc_redist.x64.exe」这个条件后判定仍为通过（throw 分支形同虚设）');
+
+  // 负向自证 5：把开关加回去 → 本用例的 --no-compiler-runtime 断言必须能抓到。
   const regressed = PACKAGING.replace('windeployqt --release',
     'windeployqt --no-compiler-runtime --release');
   assert.notEqual(regressed, PACKAGING, '变异没生效：没找到 windeployqt --release');
