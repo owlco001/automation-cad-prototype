@@ -73,6 +73,14 @@ jobs:
           gh run download $runId -R $repo -n $name -D $dest
           if ($LASTEXITCODE -ne 0) { throw "gh run download 失败（run $runId, exit $LASTEXITCODE）" }
 
+          # ci.yml 上传的 artifact 是「一个 zip 文件」（Compress-Archive 的产物），不是散文件：
+          # gh run download 只把这个 zip 落地，必须先解压出 exe + DLL 再做后续检查。
+          $archives = @(Get-ChildItem -Path $dest -Filter '*.zip' -Recurse -File -ErrorAction SilentlyContinue)
+          foreach ($arc in $archives) {
+            Write-Host "QT_DIST_EXPAND $($arc.FullName)"
+            Expand-Archive -Path $arc.FullName -DestinationPath $dest -Force
+          }
+
           # ci.yml 的 zip 是「exe + DLL 摊在根」，gh 解压后一般直接落 $dest；
           # 但 -n 单产物在某些 gh 版本会多套一层与 artifact 同名的目录，这里两种情况都收。
           $exe = Join-Path $dest 'automationcad-qt.exe'
