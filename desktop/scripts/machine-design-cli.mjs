@@ -209,7 +209,8 @@ if (withGeometry) {
       ...(ignorePairs.length ? { ignoredPairs: ignorePairs.length, ignoredKeys: ignorePairs } : {}),
       ...(layout.advice ? { advice: layout.advice } : {}),
       // 还差多少对：converged:false 时界面要给得出“哪几对、往哪挪多少”，而不是只说没排开
-      ...(layout.remainingPairs ? { remainingPairs: layout.remainingPairs } : {})
+      ...(layout.remainingPairs ? { remainingPairs: layout.remainingPairs } : {}),
+      ...(layout.remainingClearances ? { remainingClearances: layout.remainingClearances } : {})
     };
     // 同时把结论写到文档顶层：打开方案时不用翻 geometry 也知道「按多少 mm 检查过、结论如何」
     caseData.compliance = {
