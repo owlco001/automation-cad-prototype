@@ -63,6 +63,12 @@ export interface LayoutResult {
    * 而每一对其实都带着建议位移，用户却拿不到（实测四工位 40 mm 就是这样：suspects=2、advice=0）。
    */
   remainingPairs?: Array<{ a: string; b: string; axis: string | null; deltaMm: number | null }>;
+  /**
+   * 还没达到阈值的间距对（按间隙从小到大取前 10 对）。
+   * 只有 remainingPairs 不够：实测四工位 40 mm 是「0 处重叠、55 处间距不足」，
+   * 这时候重叠清单是空的，用户看到的仍是一句“没排开”，拿不到半条可处置信息。
+   */
+  remainingClearances?: Array<{ a: string; b: string; axis: string; gapMm: number; kind: string }>;
 }
 
 export interface LayoutOptions {
@@ -147,7 +153,8 @@ export function resolveLayout(geometry: any, options: LayoutOptions): LayoutResu
         stopReason: `第 ${round} 轮回到了第 ${repeatedRound} 轮的布局：求解器在两张布局之间来回挪${detail}，`
                     + `不是因为放不下（当前仍有 ${suspectsAfter} 处重叠、${clearanceAfter} 处间距不足）`,
         advice: buildAdvice(finalWorking, options.clearanceMm),
-        remainingPairs: remainingSuspects(finalWorking, ignorePairs)
+        remainingPairs: remainingSuspects(finalWorking, ignorePairs),
+        remainingClearances: remainingClearances(finalWorking, options.clearanceMm)
       };
     }
     seenLayouts.set(fingerprint, round);
@@ -173,7 +180,8 @@ export function resolveLayout(geometry: any, options: LayoutOptions): LayoutResu
         stopReason: `连续 ${stallRounds} 轮没有进展（仍有 ${suspectsAfter} 处重叠、${clearanceAfter} 处间距不足）：`
                     + `这个 ${options.clearanceMm} mm 间距在当前布局下放不下，需要加宽工位或减少零件`,
         advice: buildAdvice(finalWorking, options.clearanceMm),
-        remainingPairs: remainingSuspects(finalWorking, ignorePairs)
+        remainingPairs: remainingSuspects(finalWorking, ignorePairs),
+        remainingClearances: remainingClearances(finalWorking, options.clearanceMm)
       };
     }
 
@@ -200,10 +208,25 @@ export function resolveLayout(geometry: any, options: LayoutOptions): LayoutResu
     : { ...base,
         stopReason: `交替 ${maxRounds} 轮后仍有 ${suspects} 处重叠、${clearance} 处间距不足`,
         advice: buildAdvice(finalWorking, options.clearanceMm),
-        remainingPairs: remainingSuspects(finalWorking, ignorePairs) };
+        remainingPairs: remainingSuspects(finalWorking, ignorePairs),
+        remainingClearances: remainingClearances(finalWorking, options.clearanceMm) };
 }
 
 
+
+function remainingClearances(geometry: any, thresholdMm: number) {
+  return screenClearance(geometry, { thresholdMm }).pairs
+    .slice()
+    .sort((x: any, y: any) => x.gapMm - y.gapMm)
+    .slice(0, 10)
+    .map((pair: any) => ({
+      a: String(pair.a),
+      b: String(pair.b),
+      axis: String(pair.axis),
+      gapMm: Math.round(Number(pair.gapMm) * 10) / 10,
+      kind: String(pair.kind)
+    }));
+}
 
 function remainingSuspects(geometry: any, ignorePairs?: string[]) {
   const screened = screenInterference(geometry, ignorePairs?.length ? { ignorePairs } : {});
