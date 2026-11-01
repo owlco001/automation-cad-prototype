@@ -91,6 +91,8 @@ export interface RecheckResult {
 
 interface RecheckOptions {
   buildUrl: string;
+  /** sidecar 的 Bearer token（app.py 用 Authorization: Bearer 校验）；不给则按无鉴权处理 */
+  token?: string;
   /** 只复核前 N 对（初筛可能有几十对，全量跑很慢） */
   limit?: number;
   timeoutMs?: number;
@@ -136,7 +138,10 @@ export async function recheckPairs(
     try {
       response = await fetch(`${options.buildUrl.replace(/\/$/, '')}/interfere`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(options.token ? { Authorization: `Bearer ${options.token}` } : {})
+        },
         body: JSON.stringify({ members: [memberA.member, memberB.member] }),
         signal: AbortSignal.timeout(timeoutMs)
       });
