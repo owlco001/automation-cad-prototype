@@ -326,9 +326,18 @@ test('killActiveQt：两次 launch 的 pid 都被收掉（真 SIGTERM），记�
 
   await sleep(50);
   assert.equal(exits.length, 1, '退出事件只该来一次');
-  assert.equal(exits[0].code, null, '被信号终止时没有退出码');
-  assert.equal(exits[0].signal, 'SIGTERM');
-  assert.match(exits[0].message, /被信号终止/);
+  // 重点是上面两条 waitDead：pid 用 process.kill(pid, 0) 探活失败才算真收掉。
+  // 终止方式跨平台：POSIX 走 SIGTERM（code=null + signal=SIGTERM），Windows 走 taskkill /T /F
+  // （没有 POSIX 信号，node 只看到退出码 1、signal=null），文案随之不同。
+  if (process.platform === 'win32') {
+    assert.equal(exits[0].code, 1, 'Windows 上 taskkill /F 结束的进程退出码为 1');
+    assert.equal(exits[0].signal, null, 'Windows 没有 POSIX 信号，signal 恒为 null');
+    assert.match(exits[0].message, /异常退出（0x1）/);
+  } else {
+    assert.equal(exits[0].code, null, '被信号终止时没有退出码');
+    assert.equal(exits[0].signal, 'SIGTERM');
+    assert.match(exits[0].message, /被信号终止/);
+  }
   assert.equal(killActiveQt(process.platform), false, '没有活着的 Qt 时返回 false');
 });
 

@@ -45,6 +45,28 @@ jobs:
           $dest = Join-Path $env:GITHUB_WORKSPACE 'qt-dist'
           $missingMsg = "本 commit 还没有 ci.yml 的 Qt 产物，请先等 ci 绿（$sha）"
 
+          # 刚推完 commit 就手动触发时，本 SHA 的 ci 可能还在跑：等它，而不是立刻判红
+          # （实测踩过两次：一次是 artifact 是 zip 没解压，一次是推送后 SHA 变了、ci 还没绿）。
+          # 最多等 40 分钟，超时仍按失败处理 —— 宁可红，也不要打一个没有 Qt 的包。
+          $deadline = (Get-Date).AddMinutes(40)
+          while ($true) {
+            $probe = gh api "repos/$repo/actions/workflows/ci.yml/runs?head_sha=$sha&per_page=20" --jq '[.workflow_runs[] | {id: .id, status: .status, conclusion: .conclusion}]' 2>$null
+            if ($LASTEXITCODE -ne 0) { Write-Host "CI_PROBE_RETRY gh api 失败，稍后重试"; Start-Sleep -Seconds 30; continue }
+            $probeRuns = @((@($probe) -join '') | ConvertFrom-Json)
+            $okRun = @($probeRuns | Where-Object { $_.status -eq 'completed' -and $_.conclusion -eq 'success' })
+            if ($okRun.Count -gt 0) { Write-Host "CI_WAIT_OK sha=$sha runs=$($okRun.Count)"; break }
+            $running = @($probeRuns | Where-Object { $_.status -ne 'completed' })
+            $failed = @($probeRuns | Where-Object { $_.status -eq 'completed' -and $_.conclusion -ne 'success' })
+            if ($running.Count -eq 0 -and $failed.Count -gt 0) {
+              throw "本 commit 的 ci.yml 已结束但没有成功 run（$sha）：先修 ci 再打包"
+            }
+            if ((Get-Date) -gt $deadline) {
+              throw "等待本 commit 的 ci.yml 超时（40 分钟，$sha）：请确认 ci 是否卡住"
+            }
+            Write-Host "CI_WAIT sha=$sha running=$($running.Count) 等待 60s"
+            Start-Sleep -Seconds 60
+          }
+
           # 只认成功、且 head_sha 完全一致（不是「最新一次成功」——那可能是别的 commit 的 Qt，
           # 装进包里就是版本漂移）。per_page=20 覆盖同 SHA 的多次重跑。
           $runsJson = gh api "repos/$repo/actions/workflows/ci.yml/runs?head_sha=$sha&status=success&per_page=20" `

@@ -52,7 +52,9 @@ test('真 FreeCAD 自带 Python 跑同一套自检（--pass --self-test，确认
 
 test('脚本自检入口：freecadcmd 下 __name__ 非 __main__ 时 --self-test 参数也能触发', () => {
   const source = readFileSync(SCRIPT, 'utf8');
-  assert.match(source, /"--self-test" in sys\.argv:\n/);
+  // Windows 检出（autocrlf / 编辑器保存）会是 CRLF，行尾必须兼容，否则断言在 win 上必然失败。
+  // 语义不变：仍要求 `"--self-test" in sys.argv:` 独占一整行（后面紧跟换行，不是子串）。
+  assert.match(source.replace(/\r\n/g, '\n'), /"--self-test" in sys\.argv:\n/);
   assert.ok(source.includes('--pass --self-test'));
 });
 
