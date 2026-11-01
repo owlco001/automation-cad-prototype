@@ -100,3 +100,24 @@ test('AABB 说撞、真实布尔说不撞：圆柱贴着板角，AABB 12 mm³ �
     sidecar.kill('SIGKILL');
   }
 });
+
+test('sidecar 返回 401：必须明说鉴权失败，不能伪装成「复核不了」', async () => {
+  const { createServer } = await import('node:http');
+  const { recheckPairs } = await import('../../src/machine/recheck.ts');
+  const server = createServer((req, res) => {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: false, error: 'unauthorized' }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const parts = [
+    { id: 'a', shape: { type: 'box', size: [20, 20, 20] }, center: [0, 0, 0], rotationZDeg: 0 },
+    { id: 'b', shape: { type: 'box', size: [20, 20, 20] }, center: [5, 0, 0], rotationZDeg: 0 }
+  ];
+  const suspects = [{ a: 'a', b: 'b', axis: 'x', depthMm: 5 }];
+  const result = await recheckPairs(parts, suspects, { buildUrl: `http://127.0.0.1:${port}` });
+  server.close();
+  assert.equal(result.available, false);
+  assert.match(result.message, /401|拒绝访问/);
+  assert.match(result.message, /token/i);
+});

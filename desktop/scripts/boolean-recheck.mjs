@@ -21,6 +21,8 @@ const document = JSON.parse(readFileSync(casePath, 'utf8'));
 const geometry = document.geometry ?? document;
 const parts = geometry.parts ?? [];
 const buildUrl = valueOf('--url', process.env.FT_BUILD_URL ?? '');
+// sidecar 启动时会打印 token；不带就会 401（实测：能连上但每对都「sidecar 返回失败」）
+const buildToken = valueOf('--token', process.env.FT_BUILD_TOKEN ?? '');
 const limit = Number(valueOf('--limit', '40'));
 
 const screen = screenInterference(geometry, []);
@@ -35,7 +37,7 @@ if (!buildUrl) {
   process.exit(0);
 }
 
-const result = await recheckPairs(parts, suspects, { buildUrl, limit });
+const result = await recheckPairs(parts, suspects, { buildUrl, limit, ...(buildToken ? { token: buildToken } : {}) });
 if (!result.available) {
   console.log(`BOOLEAN_RECHECK_UNAVAILABLE ${result.message}`);
   process.exit(1);
