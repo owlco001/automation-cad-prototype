@@ -126,7 +126,11 @@ const ignoredAdvisorIds = new Set<string>();
 let advisorRefreshSeq = 0;
 let usageState: DesktopAgentUsage | null = null;
 import { formatLinkageView } from '../machine/linkage-view.ts';
-import { renderLinkagePanelHtml } from './linkage-panel.ts';
+import {
+  abortLinkagePlayback,
+  renderLinkagePanelHtml,
+  startLinkagePlayback
+} from './linkage-panel.ts';
 
 const machineDesignCards = new Map<string, { design: Record<string, unknown> }>();
 const appliedMachineCards = new Map<string, string>();
@@ -783,6 +787,8 @@ function renderMachineCard(call: DesktopAgentToolCall, result: DesktopAgentChatM
  * 没有帧就不给「播放」假象——按钮禁用并说明原因。
  */
 async function openMachineLinkage(callId: string): Promise<void> {
+  // 切机型卡片 / 重开面板：先掐掉上一条循环，别让两条 tick 争抢同一场景
+  abortLinkagePlayback();
   const card = machineDesignCards.get(callId);
   const slot = body?.querySelector<HTMLElement>(`[data-linkage-slot="${CSS.escape(callId)}"]`);
   const machine = (window as any).machine;
@@ -804,24 +810,24 @@ async function openMachineLinkage(callId: string): Promise<void> {
     if (!play || !clock || frames.length === 0) return;
     play.addEventListener('click', () => {
       play.disabled = true;
-      const started = performance.now();
       const total = Number(linkage?.cycleMs ?? 0);
-      const tick = (now: number) => {
-        const tMs = total > 0 ? Math.min(total, now - started) : 0;
-        clock.textContent = `${Math.round(tMs)} / ${total} ms`;
-        const frame = frames.filter((f) => Number(f?.tMs ?? 0) <= tMs).pop() ?? frames[0];
-        slot.querySelectorAll<HTMLElement>('[data-linkage-step]').forEach((row) => {
-          row.classList.toggle('is-active', Number(row.dataset.linkageStep) === Number(frame?.stepNo));
-        });
-        // 3D 视口挂上了就套位姿；没挂上就只走时间轴，不假装动过
-        const apply = (window as any).__cadApplyLinkagePose;
-        // CLI 的帧把 offsets/rotZDeg 放在顶层（不是 frame.pose）；两种形状都认，别静默不动
-        const pose = (frame as any)?.pose ?? { offsets: (frame as any)?.offsets, rotZDeg: (frame as any)?.rotZDeg };
-        if (typeof apply === 'function' && pose) apply(pose);
-        if (tMs < total) requestAnimationFrame(tick);
-        else play.disabled = false;
-      };
-      requestAnimationFrame(tick);
+      // 单例控制器：帧间 ~300ms 线性插值，末帧精确落在目标帧；再次开播会先 abort 旧循环
+      startLinkagePlayback({
+        frames,
+        cycleMs: total,
+        onSample: ({ tMs, stepNo, pose }) => {
+          clock.textContent = `${Math.round(tMs)} / ${total} ms`;
+          slot.querySelectorAll<HTMLElement>('[data-linkage-step]').forEach((row) => {
+            row.classList.toggle('is-active', Number(row.dataset.linkageStep) === Number(stepNo));
+          });
+          // 3D 视口挂上了就套位姿；没挂上就只走时间轴，不假装动过
+          const apply = (window as any).__cadApplyLinkagePose;
+          if (typeof apply === 'function') apply(pose);
+        },
+        onDone: () => {
+          play.disabled = false;
+        }
+      });
     });
   } catch (error) {
     slot.innerHTML = `<div class="acp-linkage-error">联动不可用：${escapeHtml((error as Error).message)}`
@@ -1066,6 +1072,8 @@ function renderAssistantBubble(content: string): string {
 }
 
 function renderMessages(): void {
+  // 对话区重绘会把联动面板整个换掉（clock/步序行都成游离节点）：先把旧循环停掉
+  abortLinkagePlayback();
   const log = body?.querySelector<HTMLElement>('#agentChatLog');
   const count = body?.querySelector<HTMLElement>('#agentChatCount');
   if (!log) return;
@@ -2439,6 +2447,8 @@ async function refresh(): Promise<void> {
 
 export function initAgentPanel(): void {
   if (drawer) return;
+  // 面板重建（关掉再开）时旧联动循环挂在已丢弃的 DOM 上，先取消
+  abortLinkagePlayback();
   ensurePanelStyles();
   disposeProgress?.();
   disposeProgress = window.desktop?.agent.onProgress?.(applyProgress) ?? null;
@@ -2448,6 +2458,9 @@ export function initAgentPanel(): void {
     void refresh();
   });
   drawer = createDrawer('agentDrawer', '智能体', '对话 · 工具调用 · 模型设置');
+  // 抽屉只 hidden 不销毁：面板被 ×/Esc/再点入口收起时，必须把仍在跑的联动循环停掉，
+  // 否则面板关了 3D 里机器还在动，而播放按钮整段 disabled，用户无法停止。
+  drawer.onClose = abortLinkagePlayback;
   body = drawer.body;
   drawer.footer.innerHTML = '<button type="button" class="acp-btn acp-btn-primary" id="agentRefresh">刷新</button><span class="acp-pill">LLM 工具调用</span><span class="acp-pill">密钥仅主进程</span>';
   refreshButton = drawer.footer.querySelector<HTMLButtonElement>('#agentRefresh');
