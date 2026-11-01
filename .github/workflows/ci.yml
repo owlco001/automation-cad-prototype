@@ -434,7 +434,10 @@ jobs:
           $clipErr = Join-Path $dist 'clip.err.log'
           # clip-selftest 需要 brief（用法：--clip-selftest "brief" [z]）；stderr 也要收，用法错误只进 stderr
           $clip = Start-Process -FilePath $exe -ArgumentList '--clip-selftest','三工位锁螺丝机，节拍 25 件/分钟' -WorkingDirectory $dist -Wait -PassThru -NoNewWindow -RedirectStandardOutput $clipLog -RedirectStandardError $clipErr
-          $clipText = (if (Test-Path $clipLog) { Get-Content $clipLog -Raw } else { '' }) + (if (Test-Path $clipErr) { Get-Content $clipErr -Raw } else { '' })
+          # PowerShell 5.1 里 if 不是表达式，不能写成 (if ...) + (if ...)
+          $clipText = ''
+          if (Test-Path $clipLog) { $clipText += (Get-Content $clipLog -Raw) }
+          if (Test-Path $clipErr) { $clipText += (Get-Content $clipErr -Raw) }
           if ($null -eq $clipText) { $clipText = '' }
           Write-Host "CLIP_SELFTEST exit=$($clip.ExitCode) out=$($clipText.Trim())"
           if ($clip.ExitCode -ne 0 -or $clipText -notmatch 'FT_QT_CLIP_OK') {
