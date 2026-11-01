@@ -98,3 +98,17 @@ BOOLEAN_RECHECK_OK checked=8 confirmed=0 misreported=8 unchecked=0
 
 
 > 长期迭代与仓库推送约定见 [DEVELOPMENT-PLAN.md](DEVELOPMENT-PLAN.md#夜间迭代与仓库操作约定)。
+
+## 阻尼求解器接入（#142 已合，接线未做）
+
+`desktop/src/machine/damped-layout.ts` 已在 main（纯函数 + 6 条守卫）。接线点已定位：
+- `desktop/src/machine/layout.ts:91` 的 `for (let round = 1; round <= maxRounds; ...)` 交替循环（先 `resolveConflicts` 再 `resolveClearance`）
+- `layout.ts:86` 的 `seenLayouts` 只做活锁识别，不参与位移决策
+
+接法：在每轮结束、写回 `working` 之前，把「本轮的零件位移」按工位聚成簇（同工位叠装链一个簇、机架/分度盘 `pinned`），
+用 `solveDampedLayout` 重算一次位移增量再落盘；保留 `seenLayouts` 作为最后一道"仍不收敛就点名"的守卫。
+
+验收（必须真实跑出来，不许只跑单测）：
+- 四工位 brief + `--layout-compliance --clearance 40`：`converged=true`（当前是 false，`st1/st4-rotary-1-table|z` 在 ±13 mm 来回）
+- 六工位 brief + 默认 20 mm：不得出现同件同轴往复；`remainingPairs` 为空或给出可处置清单
+- 若不达标：如实保留 `converged=false` + 剩余对，不调低阈值凑绿
