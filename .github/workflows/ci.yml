@@ -431,8 +431,10 @@ jobs:
           # 这里在离线/无窗口下跑一次布尔剖切自检（走 BRepAlgoAPI_Cut → TKBO/TKBRep/TKTopAlgo）。
           $env:QT_QPA_PLATFORM = 'offscreen'
           $clipLog = Join-Path $dist 'clip.log'
-          $clip = Start-Process -FilePath $exe -ArgumentList '--clip-selftest' -WorkingDirectory $dist -Wait -PassThru -NoNewWindow -RedirectStandardOutput $clipLog
-          $clipText = if (Test-Path $clipLog) { Get-Content $clipLog -Raw } else { '' }
+          $clipErr = Join-Path $dist 'clip.err.log'
+          # clip-selftest 需要 brief（用法：--clip-selftest "brief" [z]）；stderr 也要收，用法错误只进 stderr
+          $clip = Start-Process -FilePath $exe -ArgumentList '--clip-selftest','三工位锁螺丝机，节拍 25 件/分钟' -WorkingDirectory $dist -Wait -PassThru -NoNewWindow -RedirectStandardOutput $clipLog -RedirectStandardError $clipErr
+          $clipText = (if (Test-Path $clipLog) { Get-Content $clipLog -Raw } else { '' }) + (if (Test-Path $clipErr) { Get-Content $clipErr -Raw } else { '' })
           if ($null -eq $clipText) { $clipText = '' }
           Write-Host "CLIP_SELFTEST exit=$($clip.ExitCode) out=$($clipText.Trim())"
           if ($clip.ExitCode -ne 0 -or $clipText -notmatch 'FT_QT_CLIP_OK') {
