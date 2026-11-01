@@ -603,11 +603,17 @@ jobs:
         run: |
           $dist = (Resolve-Path "dist/automationcad-qt-occt").Path
           $exe = Join-Path $dist 'automationcad-qt.exe'
-          $outFile = Join-Path $dist 'version.txt'
+          $outFile = Join-Path $dist 'version.out.txt'
+          $errFile = Join-Path $dist 'version.err.txt'
           # Qt 是 GUI 子系统程序：直接 & exe 拿不到 stdout，$LASTEXITCODE 也不可信。
           # 用 Start-Process 重定向输出 + 读 ExitCode，才是在 Windows 上验证「能启动」的正解。
-          $proc = Start-Process -FilePath $exe -ArgumentList '--version' -WorkingDirectory $dist -Wait -PassThru -NoNewWindow -RedirectStandardOutput $outFile
-          $text = if (Test-Path $outFile) { Get-Content $outFile -Raw } else { '' }
+          # qt-client/src/main.cpp 的 qInstallMessageHandler 把 qInfo 强写 stderr（Windows 默认走
+          # OutputDebugString），只收 stdout 只会拿到空串 —— 两个流都要收，版本断言才不是死的。
+          $proc = Start-Process -FilePath $exe -ArgumentList '--version' -WorkingDirectory $dist -Wait -PassThru -NoNewWindow -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+          $text = ''
+          foreach ($f in @($outFile, $errFile)) {
+            if (Test-Path $f) { $text += (Get-Content $f -Raw) }
+          }
           if ($null -eq $text) { $text = '' }   # 空文件时 Get-Content -Raw 返回 $null，Trim() 会直接抛
           $text = $text.Trim()
           Write-Host "VERSION_OUTPUT [$text] exit=$($proc.ExitCode)"
@@ -616,12 +622,11 @@ jobs:
             dumpbin /dependents $exe | Select-String -Pattern "\.dll" | ForEach-Object { $_.Line.Trim() }
             throw "打包目录里的 exe 启动失败（exit $($proc.ExitCode)）"
           }
-          # GUI 子系统程序的 stdout 可能被系统吞掉；退出码 0 = 进程正常启动并退出。
-          # 有输出时仍要求版本号匹配，没输出时不假装验证过版本。
-          if ($text -and ($text -notmatch "0\.5\.1")) { throw "版本输出异常：$text" }
-          if (-not $text) { Write-Host "VERSION_STDOUT_EMPTY （GUI 子系统无 stdout，按退出码判定启动成功）" }
+          # 没有「空就跳过」的退路：stdout+stderr 都空 = 拿不到版本，直接判失败（否则这步等于没验版本）。
+          if (-not $text) { throw "VERSION_OUTPUT_EMPTY：exe --version 的 stdout/stderr 都是空的，无法证明打进去的是 0.6.0" }
+          if ($text -notmatch "0\.6\.0") { throw "版本输出异常：$text" }
           $dlls = (Get-ChildItem $dist -Filter *.dll | Measure-Object).Count
-          Write-Host "OCCT_WIN_RUN_OK version=0.5.1 dlls=$dlls"
+          Write-Host "OCCT_WIN_RUN_OK version=0.6.0 dlls=$dlls"
           # 只验 --version 不够：白名单砍掉 DLL 后，真正的风险是「能启动但一用几何就崩」。
           # 这里在离线/无窗口下跑一次布尔剖切自检（走 BRepAlgoAPI_Cut → TKBO/TKBRep/TKTopAlgo）。
           $env:QT_QPA_PLATFORM = 'offscreen'
