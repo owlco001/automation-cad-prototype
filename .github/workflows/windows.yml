@@ -132,6 +132,12 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
+      # DWG 转换模块（LibreDWG WASM，~12MB）刻意不进 devDependencies：
+      # 平时 `npm ci` + 单测不需要它，只有打包要。缺了它 vendor-dwg.mjs 会失败，
+      # 打出来的包就没有 DWG 导入能力 —— 所以发布包必须装。
+      - name: 安装 DWG 转换模块（仅打包需要）
+        run: npm i --no-save @mlightcad/libredwg-web@0.8.3
+
       - name: 发行签名与渠道前置检查
         id: release-preflight
         if: startsWith(github.ref, 'refs/tags/v')
