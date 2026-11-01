@@ -125,6 +125,9 @@ let advisorSuggestions: AdvisorSuggestion[] = [];
 const ignoredAdvisorIds = new Set<string>();
 let advisorRefreshSeq = 0;
 let usageState: DesktopAgentUsage | null = null;
+import { formatLinkageView } from '../machine/linkage-view.ts';
+import { renderLinkagePanelHtml } from './linkage-panel.ts';
+
 const machineDesignCards = new Map<string, { design: Record<string, unknown> }>();
 const appliedMachineCards = new Map<string, string>();
 
@@ -769,8 +772,59 @@ function renderMachineCard(call: DesktopAgentToolCall, result: DesktopAgentChatM
           ${appliedName ? '已应用到工程' : '应用到工程'}
         </button>
         <span class="acp-machine-hint">确认后写入 machine/&lt;id&gt;.json，并刷新 3D / BOM</span>
+        <button type="button" class="acp-btn" data-linkage-machine="${escapeHtml(call.id)}">联动调试…</button>
       </div>
+      <div class="acp-linkage-slot" data-linkage-slot="${escapeHtml(call.id)}"></div>
     </div>`;
+}
+
+/**
+ * 联动调试：结论/步序全由主进程跑 CLI 得到，前端只做时间轴推进。
+ * 没有帧就不给「播放」假象——按钮禁用并说明原因。
+ */
+async function openMachineLinkage(callId: string): Promise<void> {
+  const card = machineDesignCards.get(callId);
+  const slot = body?.querySelector<HTMLElement>(`[data-linkage-slot="${CSS.escape(callId)}"]`);
+  const machine = (window as any).machine;
+  if (!card || !slot || !machine) return;
+  const brief = typeof (card.design as any).brief === 'string' && (card.design as any).brief.trim()
+    ? String((card.design as any).brief)
+    : String((card.design as any).name ?? '整机方案');
+  slot.innerHTML = '<div class="acp-linkage-loading">正在生成联动时间线…</div>';
+  try {
+    const linkage = await machine.linkage(brief);
+    const frames: any[] = Array.isArray(linkage?.frames) ? linkage.frames : [];
+    const view = formatLinkageView(linkage);
+    const reason = frames.length === 0
+      ? (linkage?.cycleMs ? '主进程没有返回帧（需 --linkage-frames）' : '方案缺循环时间，无法生成帧')
+      : undefined;
+    slot.innerHTML = renderLinkagePanelHtml(view, { canPlay: frames.length > 0, disabledReason: reason });
+    const play = slot.querySelector<HTMLButtonElement>('[data-linkage-play]');
+    const clock = slot.querySelector<HTMLElement>('[data-linkage-clock]');
+    if (!play || !clock || frames.length === 0) return;
+    play.addEventListener('click', () => {
+      play.disabled = true;
+      const started = performance.now();
+      const total = Number(linkage?.cycleMs ?? 0);
+      const tick = (now: number) => {
+        const tMs = total > 0 ? Math.min(total, now - started) : 0;
+        clock.textContent = `${Math.round(tMs)} / ${total} ms`;
+        const frame = frames.filter((f) => Number(f?.tMs ?? 0) <= tMs).pop() ?? frames[0];
+        slot.querySelectorAll<HTMLElement>('[data-linkage-step]').forEach((row) => {
+          row.classList.toggle('is-active', Number(row.dataset.linkageStep) === Number(frame?.stepNo));
+        });
+        // 3D 视口挂上了就套位姿；没挂上就只走时间轴，不假装动过
+        const apply = (window as any).__cadApplyLinkagePose;
+        if (typeof apply === 'function' && frame?.pose) apply(frame.pose);
+        if (tMs < total) requestAnimationFrame(tick);
+        else play.disabled = false;
+      };
+      requestAnimationFrame(tick);
+    });
+  } catch (error) {
+    slot.innerHTML = `<div class="acp-linkage-error">联动不可用：${escapeHtml((error as Error).message)}`
+      + '<button type="button" class="acp-btn" data-linkage-machine="' + escapeHtml(callId) + '">重试</button></div>';
+  }
 }
 
 async function applyMachineDesignCard(callId: string): Promise<void> {
@@ -2299,6 +2353,11 @@ function bindControls(): void {
     renderAudit();
   });
   body?.querySelector<HTMLElement>('#agentChatLog')?.addEventListener('click', (event) => {
+    const linkageButton = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-linkage-machine]');
+    if (linkageButton) {
+      void openMachineLinkage(linkageButton.dataset.linkageMachine ?? '');
+      return;
+    }
     const applyButton = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-apply-machine]');
     if (applyButton) {
       void applyMachineDesignCard(applyButton.dataset.applyMachine ?? '');

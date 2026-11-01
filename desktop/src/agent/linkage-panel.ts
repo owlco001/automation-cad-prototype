@@ -19,7 +19,7 @@ const escapeHtml = (value: unknown): string =>
 export interface LinkagePanelOptions {
   /** 播放按钮是否可用：没有步序或没有循环时间时禁用，而不是点了没反应 */
   canPlay: boolean;
-  disabledReason?: string;
+  disabledReason?: string | undefined;
 }
 
 export function renderLinkagePanelHtml(view: LinkageView, options: LinkagePanelOptions = { canPlay: true }): string {
