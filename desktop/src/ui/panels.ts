@@ -18,9 +18,17 @@ export function ensurePanelStyles(): void {
   stylesInjected = true;
 }
 
+/** 元素 → 句柄：`closeDrawerElement` 只拿到元素，靠这张表找回句柄上的关闭钩子。 */
+const drawerHandles = new WeakMap<HTMLElement, DrawerHandle>();
+
 function closeDrawerElement(element: HTMLElement): void {
+  // 已经是收起状态就别再触发一次钩子（同一抽屉被连关两次不应该重复回调）
+  const wasOpen = !element.hidden;
   element.hidden = true;
   element.classList.remove('is-open');
+  // 所有关闭路径都收敛到这里：× 按钮、Esc、再点工具栏入口、被新抽屉挤掉。
+  // 调用方（如智能体面板）在这里取消仍在跑的后台循环，否则面板关了场景还在动。
+  if (wasOpen) drawerHandles.get(element)?.onClose?.();
 }
 
 /**
@@ -106,6 +114,11 @@ export interface DrawerHandle {
   root: HTMLElement;
   body: HTMLElement;
   footer: HTMLElement;
+  /**
+   * 抽屉被收起时调用一次（× 按钮、Esc、再点工具栏入口、被新抽屉挤掉都算）。
+   * 面板只 `hidden`、不销毁 DOM，所以后台循环必须靠这个钩子自己停。
+   */
+  onClose?: () => void;
   open(): void;
   close(): void;
   isOpen(): boolean;
@@ -138,22 +151,7 @@ export function createDrawer(id: string, title: string, subtitle: string): Drawe
   const footer = root.querySelector<HTMLElement>('.acp-drawer-foot');
   if (!body || !footer) throw new Error(`面板结构不完整：${id}`);
 
-  const close = (): void => {
-    root.hidden = true;
-    root.classList.remove('is-open');
-  };
-  root.querySelector('[data-acp-close]')?.addEventListener('click', close);
-  root.addEventListener('pointerdown', (event) => event.stopPropagation());
-  root.addEventListener('wheel', (event) => event.stopPropagation(), { passive: true });
-  window.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && !root.hidden) {
-      event.preventDefault();
-      event.stopPropagation();
-      close();
-    }
-  }, true);
-
-  return {
+  const handle: DrawerHandle = {
     root,
     body,
     footer,
@@ -162,11 +160,27 @@ export function createDrawer(id: string, title: string, subtitle: string): Drawe
       root.hidden = false;
       root.classList.add('is-open');
     },
-    close,
+    close(): void {
+      closeDrawerElement(root);
+    },
     isOpen(): boolean {
       return !root.hidden;
     }
   };
+  // 先登记再挂监听：×/Esc 的回调都走 handle.close()，钩子读的是同一份句柄
+  drawerHandles.set(root, handle);
+  root.querySelector('[data-acp-close]')?.addEventListener('click', () => handle.close());
+  root.addEventListener('pointerdown', (event) => event.stopPropagation());
+  root.addEventListener('wheel', (event) => event.stopPropagation(), { passive: true });
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !root.hidden) {
+      event.preventDefault();
+      event.stopPropagation();
+      handle.close();
+    }
+  }, true);
+
+  return handle;
 }
 
 export function notify(message: string, error = false): void {

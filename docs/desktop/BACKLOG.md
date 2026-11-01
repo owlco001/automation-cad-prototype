@@ -99,16 +99,23 @@ BOOLEAN_RECHECK_OK checked=8 confirmed=0 misreported=8 unchecked=0
 
 > 长期迭代与仓库推送约定见 [DEVELOPMENT-PLAN.md](DEVELOPMENT-PLAN.md#夜间迭代与仓库操作约定)。
 
-## 阻尼求解器接入（#142 已合，接线未做）
+## 阻尼求解器接入（#142 已合；接线尝试已回滚，2026-11-01）
 
-`desktop/src/machine/damped-layout.ts` 已在 main（纯函数 + 6 条守卫）。接线点已定位：
-- `desktop/src/machine/layout.ts:91` 的 `for (let round = 1; round <= maxRounds; ...)` 交替循环（先 `resolveConflicts` 再 `resolveClearance`）
-- `layout.ts:86` 的 `seenLayouts` 只做活锁识别，不参与位移决策
+`desktop/src/machine/damped-layout.ts` 已在 main（纯函数 + 6 条守卫）。**接线做了一版，审查后回滚，不合并**，原因是采纳判据不成立：
 
-接法：在每轮结束、写回 `working` 之前，把「本轮的零件位移」按工位聚成簇（同工位叠装链一个簇、机架/分度盘 `pinned`），
-用 `solveDampedLayout` 重算一次位移增量再落盘；保留 `seenLayouts` 作为最后一道"仍不收敛就点名"的守卫。
+- 尝试版的采纳判据是 `total = suspects + clearance`，把「未声明重叠」按 1:1 折成「间距缺口」。
+- 六工位 25 mm 实测：收口 8/59 → **32/32** 被采纳（重叠翻 4 倍换 27 处缺口），最终 `suspects` 4 → 10。
+- 决定性实验：判据改成硬约束 `after.suspects <= before.suspects`（或与 `buildAdvice` 同口径按重叠 10 倍计权），六工位 5 个阈值输出**逐位退回 HEAD**，收口 19~35 步全部被拒 —— 说明该版收益全部来自拿重叠换间距，没有别的来源。
+- 活锁也没解决：HEAD 是 `st2-gripper-1-nest|y` 来回挪，接完变成另一个零件被推 580 次、单件累计 4067 mm。
+- 补丁与测试归档在 `night-reports/w1-rejected.patch`（仓库外）。
+
+### 重新开工的前提（三条都要满足）
+1. **采纳判据必须是硬约束**：`suspects` 不得增加（重叠是不可接受解，不接受与间距等权折价）。
+2. **先搞清 `converged=false` 的真因**：六工位 40 mm 下报出的 102 对里 62 对是生成器自己设计的结构间隙（转盘底座×治具 12 mm、门架顶×立柱 15 mm），只有 8 对 ≤5 mm 是该补进 `joints.ts` 白名单的漏项。拿 40 mm 卡结构性间隙必然全红——这是口径问题，不是求解器不努力。
+3. **活锁要按工位刚体簇解**，不是按零件推：同工位叠装链（支架+滑台+气缸+夹爪）锁成单一刚体簇，只移动工位根基准；机架/分度盘 `pinned`。
 
 验收（必须真实跑出来，不许只跑单测）：
-- 四工位 brief + `--layout-compliance --clearance 40`：`converged=true`（当前是 false，`st1/st4-rotary-1-table|z` 在 ±13 mm 来回）
+- 四工位 brief + `--layout-compliance --clearance 40`：`converged=true`（当前 false，`st1/st4-rotary-1-table|z` 在 ±13 mm 来回）
 - 六工位 brief + 默认 20 mm：不得出现同件同轴往复；`remainingPairs` 为空或给出可处置清单
+- **`suspects` 不增**（硬门槛，不接受用重叠换间距）
 - 若不达标：如实保留 `converged=false` + 剩余对，不调低阈值凑绿

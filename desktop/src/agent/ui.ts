@@ -125,6 +125,13 @@ let advisorSuggestions: AdvisorSuggestion[] = [];
 const ignoredAdvisorIds = new Set<string>();
 let advisorRefreshSeq = 0;
 let usageState: DesktopAgentUsage | null = null;
+import { formatLinkageView } from '../machine/linkage-view.ts';
+import {
+  abortLinkagePlayback,
+  renderLinkagePanelHtml,
+  startLinkagePlayback
+} from './linkage-panel.ts';
+
 const machineDesignCards = new Map<string, { design: Record<string, unknown> }>();
 const appliedMachineCards = new Map<string, string>();
 
@@ -769,8 +776,63 @@ function renderMachineCard(call: DesktopAgentToolCall, result: DesktopAgentChatM
           ${appliedName ? '已应用到工程' : '应用到工程'}
         </button>
         <span class="acp-machine-hint">确认后写入 machine/&lt;id&gt;.json，并刷新 3D / BOM</span>
+        <button type="button" class="acp-btn" data-linkage-machine="${escapeHtml(call.id)}">联动调试…</button>
       </div>
+      <div class="acp-linkage-slot" data-linkage-slot="${escapeHtml(call.id)}"></div>
     </div>`;
+}
+
+/**
+ * 联动调试：结论/步序全由主进程跑 CLI 得到，前端只做时间轴推进。
+ * 没有帧就不给「播放」假象——按钮禁用并说明原因。
+ */
+async function openMachineLinkage(callId: string): Promise<void> {
+  // 切机型卡片 / 重开面板：先掐掉上一条循环，别让两条 tick 争抢同一场景
+  abortLinkagePlayback();
+  const card = machineDesignCards.get(callId);
+  const slot = body?.querySelector<HTMLElement>(`[data-linkage-slot="${CSS.escape(callId)}"]`);
+  const machine = (window as any).machine;
+  if (!card || !slot || !machine) return;
+  const brief = typeof (card.design as any).brief === 'string' && (card.design as any).brief.trim()
+    ? String((card.design as any).brief)
+    : String((card.design as any).name ?? '整机方案');
+  slot.innerHTML = '<div class="acp-linkage-loading">正在生成联动时间线…</div>';
+  try {
+    const linkage = await machine.linkage(brief);
+    const frames: any[] = Array.isArray(linkage?.frames) ? linkage.frames : [];
+    const view = formatLinkageView(linkage);
+    const reason = frames.length === 0
+      ? (linkage?.cycleMs ? '主进程没有返回帧（需 --linkage-frames）' : '方案缺循环时间，无法生成帧')
+      : undefined;
+    slot.innerHTML = renderLinkagePanelHtml(view, { canPlay: frames.length > 0, disabledReason: reason });
+    const play = slot.querySelector<HTMLButtonElement>('[data-linkage-play]');
+    const clock = slot.querySelector<HTMLElement>('[data-linkage-clock]');
+    if (!play || !clock || frames.length === 0) return;
+    play.addEventListener('click', () => {
+      play.disabled = true;
+      const total = Number(linkage?.cycleMs ?? 0);
+      // 单例控制器：帧间 ~300ms 线性插值，末帧精确落在目标帧；再次开播会先 abort 旧循环
+      startLinkagePlayback({
+        frames,
+        cycleMs: total,
+        onSample: ({ tMs, stepNo, pose }) => {
+          clock.textContent = `${Math.round(tMs)} / ${total} ms`;
+          slot.querySelectorAll<HTMLElement>('[data-linkage-step]').forEach((row) => {
+            row.classList.toggle('is-active', Number(row.dataset.linkageStep) === Number(stepNo));
+          });
+          // 3D 视口挂上了就套位姿；没挂上就只走时间轴，不假装动过
+          const apply = (window as any).__cadApplyLinkagePose;
+          if (typeof apply === 'function') apply(pose);
+        },
+        onDone: () => {
+          play.disabled = false;
+        }
+      });
+    });
+  } catch (error) {
+    slot.innerHTML = `<div class="acp-linkage-error">联动不可用：${escapeHtml((error as Error).message)}`
+      + '<button type="button" class="acp-btn" data-linkage-machine="' + escapeHtml(callId) + '">重试</button></div>';
+  }
 }
 
 async function applyMachineDesignCard(callId: string): Promise<void> {
@@ -1010,6 +1072,8 @@ function renderAssistantBubble(content: string): string {
 }
 
 function renderMessages(): void {
+  // 对话区重绘会把联动面板整个换掉（clock/步序行都成游离节点）：先把旧循环停掉
+  abortLinkagePlayback();
   const log = body?.querySelector<HTMLElement>('#agentChatLog');
   const count = body?.querySelector<HTMLElement>('#agentChatCount');
   if (!log) return;
@@ -2299,6 +2363,11 @@ function bindControls(): void {
     renderAudit();
   });
   body?.querySelector<HTMLElement>('#agentChatLog')?.addEventListener('click', (event) => {
+    const linkageButton = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-linkage-machine]');
+    if (linkageButton) {
+      void openMachineLinkage(linkageButton.dataset.linkageMachine ?? '');
+      return;
+    }
     const applyButton = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-apply-machine]');
     if (applyButton) {
       void applyMachineDesignCard(applyButton.dataset.applyMachine ?? '');
@@ -2378,6 +2447,8 @@ async function refresh(): Promise<void> {
 
 export function initAgentPanel(): void {
   if (drawer) return;
+  // 面板重建（关掉再开）时旧联动循环挂在已丢弃的 DOM 上，先取消
+  abortLinkagePlayback();
   ensurePanelStyles();
   disposeProgress?.();
   disposeProgress = window.desktop?.agent.onProgress?.(applyProgress) ?? null;
@@ -2387,6 +2458,9 @@ export function initAgentPanel(): void {
     void refresh();
   });
   drawer = createDrawer('agentDrawer', '智能体', '对话 · 工具调用 · 模型设置');
+  // 抽屉只 hidden 不销毁：面板被 ×/Esc/再点入口收起时，必须把仍在跑的联动循环停掉，
+  // 否则面板关了 3D 里机器还在动，而播放按钮整段 disabled，用户无法停止。
+  drawer.onClose = abortLinkagePlayback;
   body = drawer.body;
   drawer.footer.innerHTML = '<button type="button" class="acp-btn acp-btn-primary" id="agentRefresh">刷新</button><span class="acp-pill">LLM 工具调用</span><span class="acp-pill">密钥仅主进程</span>';
   refreshButton = drawer.footer.querySelector<HTMLButtonElement>('#agentRefresh');

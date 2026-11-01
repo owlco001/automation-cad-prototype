@@ -658,8 +658,12 @@ MachineCaseDialog::MachineCaseDialog(const QJsonObject &document, QWidget *paren
             // 插到页首：之前 addWidget 加在表格和按钮行之后，被窗口高度挤到看不见的地方
             pageLayout->insertWidget(0, recheckLabel);
 
-            // 「误报」不只是告知：把复核结论直接变成忽略名单，省掉手抄 jointKey
-            if (onSkipMisreports && recheck.value(QStringLiteral("misreported")).toInt() > 0) {
+            // 「误报」不只是告知：把复核结论直接变成忽略名单，省掉手抄 jointKey。
+            // 但只有整批复核**可用**时才给按钮：中途失败（available:false）时上面那行写的是
+            // 「未复核 —— …」，再并排一个「按复核结论重排（跳过 N 处误报）」会让人以为整批都复核完了；
+            // 而且此时 pairs 里只列出了中断前的那几对，按钮上的 N 和「共 M 处疑似」也对不上。
+            if (onSkipMisreports && recheck.value(QStringLiteral("available")).toBool(true) &&
+                recheck.value(QStringLiteral("misreported")).toInt() > 0) {
                 QStringList keys;
                 for (const QJsonValue &entry : recheck.value(QStringLiteral("pairs")).toArray()) {
                     const QJsonObject pair = entry.toObject();

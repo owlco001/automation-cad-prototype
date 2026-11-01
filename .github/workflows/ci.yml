@@ -337,9 +337,13 @@ jobs:
       - uses: mamba-org/setup-micromamba@v1
         with:
           environment-name: occt
+          # 版本必须 pin：不写版本约束时 solver 跟着 conda-forge 最新版走，上游一发新版（ABI/库名变动）
+          # CI 就无预兆红。8.0 的 win-64 实测解析到 occt-8.0.1-novtk_h6bfc850_101
+          # （该 build 的 bin 里是 TKDESTEP/TKDESTL，已由 $stepCandidates/$stlCandidates 覆盖）。
+          # 升级 OCCT 是动作，不是意外：改这一行 + 重跑打包 job 才算升级。
           create-args: >-
             -c conda-forge
-            occt
+            occt=8.0.*
           init-shell: powershell
       # conda 的 Windows 包布局是 <prefix>/Library/{include/opencascade,lib,bin}，
       # 不是 <prefix>/{include,lib}。这里两种布局都探一遍，再把 OCCT_ROOT 指到真正的根。
@@ -380,29 +384,220 @@ jobs:
           $dist = "dist/automationcad-qt-occt"
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
           Copy-Item build-win-occt/automationcad-qt.exe $dist
-          # 体积：软光栅 21MB、翻译包、D3D 编译器、VC 运行库安装器一律不带（用户机有 VC 运行库；
-          # 没有的话在 Release 说明里给 vc_redist 链接，而不是把 18MB 安装器塞进每个包）
-          windeployqt --release --no-opengl-sw --no-translations --no-system-d3d-compiler --no-compiler-runtime "$dist/automationcad-qt.exe"
+          # 体积：软光栅 21MB、翻译包、D3D 编译器一律不带。
+          # VC++ 运行时（约 1.2MB）必须带：没装 VC++ Redist 的工控机会缺
+          # VCRUNTIME140_1.dll / MSVCP140.dll，启动直接 0xc0000135。
+          windeployqt --release --no-opengl-sw --no-translations --no-system-d3d-compiler "$dist/automationcad-qt.exe"
+          # 去掉 --no-compiler-runtime 只是「允许它带」，不代表真带了：windeployqt 6.8.3 在
+          # windows-latest 上实测只丢一份 vc_redist.x64.exe 安装器（+18MB），三个 CRT DLL 一个都不放
+          # （run 41317009763 就是这么红的：Updating vc_redist.x64.exe. 之后 dist 里没有 vcruntime140.dll）。
+          # runner 自带 VC 运行库，靠「启动核对」也证明不了包里有没有，所以不指望 windeployqt 顺手带，
+          # 直接去 Visual Studio 的 CRT 可再分发目录把 DLL 拷进来。
+          # 下面这段用 VC_RUNTIME_BLOCK 标记包起来：desktop/test/ci-qt-package.test.mjs 按这对标记
+          # 原样截取本段，在 mock 目录上跑「拷贝 + 三档守卫」，所以标记别删、别改名字。
+          # >>> VC_RUNTIME_BLOCK_BEGIN
+          $vcRuntime = @('vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll')
+          # CRT 可再分发目录：真正放 DLL 的是 <msvc redist root>\x64\Microsoft.VC*.CRT。
+          # ① 首选环境变量 $env:VCToolsRedistDir（MSVC 开发者 shell / ilammy/msvc-dev-cmd 之后存在，
+          #    形如 C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC\14.44.35207\）
+          # ② 兜底按 glob 搜 VS 2022 各 edition 的 Redist\MSVC\*，Sort-Object Name -Descending 取版本号最大的
+          # ③ 再兜底用 vswhere 拿 installationPath 拼同一条路径（VS 装在非默认盘时才有用）
+          $vsRedistRoots = @()
+          if ($env:VCToolsRedistDir) { $vsRedistRoots += $env:VCToolsRedistDir }
+          $vsRedistRoots += @(Get-ChildItem -Path 'C:\Program Files\Microsoft Visual Studio\2022\*\VC\Redist\MSVC\*' -ErrorAction SilentlyContinue |
+            Where-Object { $_.PSIsContainer } | Sort-Object Name -Descending | ForEach-Object { $_.FullName })
+          $vswhere = $null
+          if (${env:ProgramFiles(x86)}) { $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe' }
+          if ($vswhere -and (Test-Path $vswhere)) {
+            $vsInstall = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+            if ($vsInstall) {
+              $vsRedistRoots += @(Get-ChildItem -Path (Join-Path $vsInstall 'VC\Redist\MSVC\*') -ErrorAction SilentlyContinue |
+                Where-Object { $_.PSIsContainer } | Sort-Object Name -Descending | ForEach-Object { $_.FullName })
+            }
+          }
+          $crtDirs = @()
+          foreach ($root in @($vsRedistRoots | Select-Object -Unique)) {
+            if (-not (Test-Path $root)) { continue }
+            $crtDirs += @(Get-ChildItem -Path (Join-Path $root 'x64') -Filter 'Microsoft.VC*.CRT' -Directory -ErrorAction SilentlyContinue |
+              Sort-Object Name -Descending | ForEach-Object { $_.FullName })
+          }
+          $crtDirs = @($crtDirs | Select-Object -Unique)
+          # 挑第一个「真有 vcruntime140.dll + msvcp140.dll」的目录，不认第一个存在的目录 ——
+          # VS 的 Redist 下可能残留半装的旧版本目录。
+          $crtSrc = $null
+          foreach ($dir in $crtDirs) {
+            if ((Test-Path (Join-Path $dir 'vcruntime140.dll')) -and (Test-Path (Join-Path $dir 'msvcp140.dll'))) { $crtSrc = $dir; break }
+          }
+          if ($crtSrc) {
+            Write-Host "VC_RUNTIME_SRC $crtSrc"
+            foreach ($rt in $vcRuntime) {
+              $src = Join-Path $crtSrc $rt
+              if (-not (Test-Path $src)) { Write-Host "VC_RUNTIME_SRC_MISSING $rt <- $crtSrc"; continue }
+              Copy-Item $src $dist -Force
+              if (-not (Test-Path (Join-Path $dist $rt))) { throw "VC++ 运行库 $rt 没能复制进打包目录（源：$src）" }
+              Write-Host "VC_RUNTIME_COPIED $rt"
+            }
+          } else {
+            Write-Host "VC_RUNTIME_SRC_NOT_FOUND 探过的目录：$($crtDirs -join ',')"
+          }
+          # 守卫分三档，不再「缺一个就 throw」——那样在 windeployqt 只给 vc_redist 的 runner 上是必然误红：
+          #   三件 DLL 都到位                    → VC_RUNTIME_OK，绿；
+          #   没全到但包里有 vc_redist.x64.exe   → VC_RUNTIME_REDIST_ONLY 告警后继续：便携包用户双击
+          #                                        包里的 vc_redist.x64.exe 装完即可启动（windeployqt
+          #                                        的默认行为，不能因为它把整个打包 job 打红）；
+          #   两者都没有                        → throw：纯净 Windows 机启动必然 0xc0000135。
+          $vcMissing = @()
+          foreach ($name in $vcRuntime) {
+            if (-not (Test-Path (Join-Path $dist $name))) { $vcMissing += $name }
+          }
+          $vcRedist = Join-Path $dist 'vc_redist.x64.exe'
+          if ($vcMissing.Count -eq 0) {
+            Write-Host "VC_RUNTIME_OK $($vcRuntime -join ',')"
+          } elseif (Test-Path $vcRedist) {
+            Write-Host "VC_RUNTIME_REDIST_ONLY 缺 $($vcMissing -join ',')，但包内有 vc_redist.x64.exe：便携包用户需自行安装 VC++ 运行库后才能启动"
+          } else {
+            throw "缺 VC++ 运行库 $($vcMissing -join ',')：VS CRT 目录里没找到、也没拷进打包目录，包里也没有 vc_redist.x64.exe —— 纯净 Windows 机启动即 0xc0000135"
+          }
+          # <<< VC_RUNTIME_BLOCK_END
           $occtBin = Join-Path $env:OCCT_PREFIX 'bin'
-          # OCCT 只带白名单：STEP 解析 / B-Rep 布尔 / AIS 视口 / 基础与可视化服务。
+          # OCCT 只带白名单：B-Rep 布尔 / AIS 视口 / 基础与可视化服务（STEP 交换库单独处理）。
           # 全量 169 个 DLL 里有大量 DataExchange 格式（DWG/DXF/glTF/VRML…）我们用不到。
+          # OCCT 8.0.1 的 8 个传递依赖也必须进包：qt-client 不直接链接它们，但 TKV3d 静态导入
+          # TKMesh/TKHLR，TKDESTEP/TKDESTL 静态导入 TKDE/TKXCAF/TKLCAF/TKCAF/TKVCAF/TKCDF。
+          # 漏一个的现象最难查：exe --version 正常、上面这些启动核对也全绿，到客户机上点视口
+          # 或导 STEP 才 0xc0000135（STATUS_DLL_NOT_FOUND）。所以它们同样走「缺任一就 throw」。
           $keep = @('TKernel','TKMath','TKG2d','TKG3d','TKGeomBase','TKGeomAlgo','TKBRep','TKTopAlgo','TKPrim',
-                    'TKBO','TKBool','TKFillet','TKOffset','TKService','TKV3d','TKOpenGl','TKShHealing','TKXSBase','TKSTEP','TKSTEPBase','TKSTEPAttr')
+                    'TKBO','TKBool','TKFillet','TKOffset','TKService','TKV3d','TKOpenGl','TKShHealing','TKXSBase',
+                    'TKMesh','TKHLR','TKDE','TKXCAF','TKLCAF','TKCAF','TKVCAF','TKCDF')
           $copied = 0
+          $missing = @()
           foreach ($lib in $keep) {
             $file = Join-Path $occtBin "$lib.dll"
-            if (Test-Path $file) { Copy-Item $file $dist -Force; $copied++ }
+            if (-not (Test-Path $file)) { $missing += $file; continue }
+            Copy-Item $file $dist -Force
+            $copied++
           }
-          Write-Host "OCCT_WHITELIST_COPIED $copied" 
+          # 核心库缺一个都不许静默过：白名单砍错一个，包能启动但一用几何就崩。
+          if ($missing.Count -gt 0) {
+            throw "打包缺核心 OCCT 库（未找到）：$($missing -join '; ')"
+          }
+          Write-Host "OCCT_WHITELIST_COPIED $copied/$($keep.Count)"
           Write-Host "OCCT_DLL_COUNT $((Get-ChildItem (Join-Path $occtBin '*.dll') | Measure-Object).Count)"
-          foreach ($dep in @('tbb12.dll','freetype.dll','zlib.dll')) {
-            if (Test-Path (Join-Path $occtBin $dep)) { Write-Host "DEP_PRESENT $dep" }
+          # STL 读写库：qt-client 用 find_library(NAMES TKSTL TKDESTL) 显式链进 target
+          # （OCCT 8.0 起 STL 从 TKSTL 拆到 TKDESTL），MSVC 是隐式链接 —— 包里缺 TKSTL.dll
+          # 会在进程启动阶段 STATUS_DLL_NOT_FOUND，而上面的 $keep 守卫只覆盖白名单，抓不到这条。
+          $stlCandidates = @('TKSTL','TKDESTL')
+          $stlCopied = @()
+          foreach ($name in $stlCandidates) {
+            $file = Join-Path $occtBin "$name.dll"
+            if (-not (Test-Path $file)) { continue }
+            Copy-Item $file $dist -Force
+            if (-not (Test-Path (Join-Path $dist "$name.dll"))) { throw "STL 读写库 $name.dll 没能复制进打包目录" }
+            $stlCopied += $name
+          }
+          if ($stlCopied.Count -eq 0) {
+            throw "OCCT bin 里找不到 STL 读写库（试过 $($stlCandidates -join '/')）：$occtBin —— qt-client 显式链接它，缺了 exe 启动即 STATUS_DLL_NOT_FOUND"
+          }
+          Write-Host "STL_LIBS_COPIED $($stlCopied -join ',')"
+          # STEP 交换库改过名：OCCT 7.x 是 TKSTEP / TKSTEPBase / TKSTEPAttr，
+          # OCCT 7.8+ 起并成 TKDE（DataExchange 内核）+ TKDESTEP（STEP 协议），
+          # 7.9+ 的 STEPCAFControl_Reader（带装配/颜色/名称的 XDE 读入）还要 TKXDESTEP。
+          # 三套命名都认，但一个都没匹配到就 throw —— 没有 STEP 库的包导入 STEP 必然失败。
+          $stepCandidates = @('TKXDESTEP','TKDESTEP','TKDE','TKSTEP','TKSTEPBase','TKSTEPAttr')
+          $stepCopied = @()
+          foreach ($name in $stepCandidates) {
+            $file = Join-Path $occtBin "$name.dll"
+            if (-not (Test-Path $file)) { continue }
+            Copy-Item $file $dist -Force
+            if (-not (Test-Path (Join-Path $dist "$name.dll"))) { throw "STEP 交换库 $name.dll 没能复制进打包目录" }
+            $stepCopied += $name
+          }
+          if ($stepCopied.Count -eq 0) {
+            throw "OCCT bin 里找不到任何 STEP 交换库（试过 $($stepCandidates -join '/')）：$occtBin"
+          }
+          Write-Host "STEP_LIBS_COPIED $($stepCopied -join ',')"
+          # 第三方运行库：tbb / freetype / zlib / libpng16 漏一个，纯净 Windows 机就 0xc0000135。
+          # 这些不一定在 OCCT 的 bin 里（conda 是 <prefix>/Library/bin），所以把候选目录全探一遍。
+          $depDirs = @($occtBin, (Join-Path $env:OCCT_PREFIX 'lib'))
+          foreach ($base in @($env:CONDA_PREFIX, $env:MAMBA_PREFIX_OCCT)) {
+            if (-not $base) { continue }
+            foreach ($sub in @('', 'Library/bin', 'Library/lib', 'bin', 'lib')) {
+              # 不用 if 当表达式（PS 5.1 语义容易踩坑），先赋值再覆盖。
+              $dir = $base
+              if ($sub) { $dir = Join-Path $base $sub }
+              if (Test-Path $dir) { $depDirs += $dir }
+            }
+          }
+          $depDirs = @($depDirs | Select-Object -Unique | Where-Object { Test-Path $_ })
+          # tbb 不在 $deps 里：它的 DLL 名带 soname（tbb12 → 将来 tbb13），写死名字在升级后就是
+          # 「全不命中 → 只告警 → 包里没有 tbb 却全绿」，改由下面的 tbb*.dll 通配块处理。
+          # FreeImage.dll 是 TKService.dll 的静态导入（不是可选插件，实测 8.0.1 的导入表里有它），
+          # 缺了 TKService → TKV3d 连锁加载失败，同样是 0xc0000135。
+          $deps = @('FreeImage.dll','freetype.dll','zlib.dll','libpng16.dll')
+          # 硬依赖：TKV3d / 基础几何库无条件链接这几个，缺任何一个纯净 Windows 机就 0xc0000135，
+          # 没有「这台机器碰巧有」的余地 —— 一律 throw，不再只打印告警。
+          $depsRequired = @('FreeImage.dll','freetype.dll','libpng16.dll','zlib.dll')
+          $depsCopied = 0
+          $depsAbsent = @()
+          $depsRequiredMissing = @()
+          foreach ($dep in $deps) {
+            $src = $null
+            foreach ($dir in $depDirs) {
+              if (Test-Path (Join-Path $dir $dep)) { $src = Join-Path $dir $dep; break }
+            }
+            if (-not $src) {
+              $depsAbsent += $dep
+              if ($depsRequired -contains $dep) { $depsRequiredMissing += $dep }
+              Write-Host "DEP_ABSENT $dep（候选目录 $($depDirs -join ',') 都没有）"
+              continue
+            }
+            # 真的复制，不是打印：留在包里的每个依赖都要 Copy-Item 进 $dist 并回验落地。
+            Copy-Item $src $dist -Force
+            if (-not (Test-Path (Join-Path $dist $dep))) { throw "第三方依赖 $dep 没能复制进打包目录（源：$src）" }
+            Write-Host "DEP_COPIED $dep <- $src"
+            $depsCopied++
+          }
+          # tbb 按通配找，不写死版本名：DLL 名带 soname（tbb12 → 将来 tbb13），固定名一旦升版就是
+          # 「全不命中 → 只告警 → 包里没有 tbb 却全绿」。
+          # 「到底要不要 tbb」不按版本号猜，直接看已进包的 OCCT 库导入表里有没有 tbb\d*.dll：
+          # conda-forge 的 occt 有 novtk_* / all_* 两种 build，只有 all_* 链 tbb（8.0.1 novtk 实测没有），
+          # 一刀切 throw 会把本来能跑绿的 job 变红。
+          $tbbRequired = $false
+          foreach ($dll in (Get-ChildItem -Path $dist -Filter 'TK*.dll' -ErrorAction SilentlyContinue)) {
+            try { $bytes = [System.IO.File]::ReadAllBytes($dll.FullName) } catch { continue }
+            if ([System.Text.Encoding]::ASCII.GetString($bytes) -match '(?i)tbb\d+\.dll') {
+              $tbbRequired = $true
+              Write-Host "TBB_IMPORTED_BY $($dll.Name)"
+              break
+            }
+          }
+          $tbbDlls = @(Get-ChildItem -Path $depDirs -Filter 'tbb*.dll' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notlike '*_debug*' } | Sort-Object Name -Unique)
+          Write-Host "TBB_CHECK required=$tbbRequired found=$($tbbDlls.Count)"
+          if ($tbbDlls.Count -eq 0) {
+            if ($tbbRequired) {
+              throw "找不到 tbb*.dll（包里已有库导入 tbb）：候选目录 $($depDirs -join ',') —— 纯净 Windows 机启动即 0xc0000135"
+            }
+            Write-Host "TBB_ABSENT_OK 没有 OCCT 库导入 tbb，无需进包"
+          }
+          foreach ($tbb in $tbbDlls) {
+            Copy-Item $tbb.FullName $dist -Force
+            if (-not (Test-Path (Join-Path $dist $tbb.Name))) { throw "tbb $($tbb.Name) 没能复制进打包目录（源：$($tbb.FullName)）" }
+            Write-Host "TBB_COPIED $($tbb.Name)"
+            $depsCopied++
+          }
+          Write-Host "THIRDPARTY_COPIED $depsCopied/$($deps.Count) absent=$($depsAbsent -join ',') tbb=$($tbbDlls.Count)"
+          if ($depsRequiredMissing.Count -gt 0) {
+            throw "缺第三方硬依赖：$($depsRequiredMissing -join ', ')（候选目录 $($depDirs -join ',')）—— 纯净 Windows 机启动即 0xc0000135"
+          }
+          if ($depsCopied -eq 0) {
+            throw "第三方依赖一个都没复制进打包目录（$($deps -join '/') 全缺）：候选目录 $($depDirs -join ',')"
           }
           if (-not (Test-Path (Join-Path $dist 'TKV3d.dll'))) { throw "包里缺 TKV3d.dll（OCCT 视口不会可用）" }
           Compress-Archive -Path "$dist/*" -DestinationPath "dist/automationcad-qt-windows-x64-occt.zip" -Force
           $zip = Get-Item "dist/automationcad-qt-windows-x64-occt.zip"
           $count = (Get-ChildItem $dist | Measure-Object).Count
-          Write-Host "PACKAGE_OCCT_OK bytes=$($zip.Length) files=$count tkv3d=1"
+          Write-Host "PACKAGE_OCCT_OK bytes=$($zip.Length) files=$count tkv3d=1 stl=$($stlCopied.Count) step=$($stepCopied.Count) deps=$depsCopied vcrt=$(($vcRuntime.Count - $vcMissing.Count))/$($vcRuntime.Count)"
       - name: 从打包目录启动并核对版本
         shell: pwsh
         run: |
@@ -423,10 +618,10 @@ jobs:
           }
           # GUI 子系统程序的 stdout 可能被系统吞掉；退出码 0 = 进程正常启动并退出。
           # 有输出时仍要求版本号匹配，没输出时不假装验证过版本。
-          if ($text -and ($text -notmatch "0\.5\.0")) { throw "版本输出异常：$text" }
+          if ($text -and ($text -notmatch "0\.5\.1")) { throw "版本输出异常：$text" }
           if (-not $text) { Write-Host "VERSION_STDOUT_EMPTY （GUI 子系统无 stdout，按退出码判定启动成功）" }
           $dlls = (Get-ChildItem $dist -Filter *.dll | Measure-Object).Count
-          Write-Host "OCCT_WIN_RUN_OK version=0.5.0 dlls=$dlls"
+          Write-Host "OCCT_WIN_RUN_OK version=0.5.1 dlls=$dlls"
           # 只验 --version 不够：白名单砍掉 DLL 后，真正的风险是「能启动但一用几何就崩」。
           # 这里在离线/无窗口下跑一次布尔剖切自检（走 BRepAlgoAPI_Cut → TKBO/TKBRep/TKTopAlgo）。
           $env:QT_QPA_PLATFORM = 'offscreen'

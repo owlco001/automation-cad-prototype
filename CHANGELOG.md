@@ -2,6 +2,31 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织，版本号遵循语义化版本。
 
+## [0.5.1] - 2026-11-01
+
+### Fixed · 联动调试（3D 步序播放）
+
+- 播放改为单例控制器：切机型卡片、重绘消息区、关闭抽屉（× 按钮 / Esc / 再点工具栏入口）都会先取消上一轮播放，不再出现「面板已经关了、3D 里的机器还在动」而按钮整段 disabled、用户无从停止的情况。
+- 相邻帧之间按 `min(300ms, 帧间隔)` 做线性插值（`offsets` 与 `rotZDeg` 同步），末帧精确落在目标位姿；短步长不再瞬移。
+- 播放回调抛错不再把单例卡死（停止播放并释放单例，可立即重新开播），错误经 `onError` 上报，不吞。
+
+### Fixed · 布尔复核（B-Rep 复核链路）
+
+- Sidecar 的错误信息统一脱敏：token 原文、base64/base64url 变体、≥6 字符前缀、`Authorization` 头名与长随机串都会被抹掉。此前 `payload.message` 没过脱敏，sidecar 回显请求头时 token 会原样进入 CI 日志、`case.json` 与 Qt 弹窗。
+- 401/403 文案点名 `FT_BUILD_TOKEN` 并给出「核对 sidecar `--token`」的可操作提示；非 JSON 响应报出「含 HTTP 状态 + 脱敏摘要」的可读错误，不再是裸 `SyntaxError`；JSON 合法但不是对象时文案改为「响应不是预期的 JSON 对象」。
+- 中途失败不再丢弃已完成的对：`available:false` 也按已完成结果计数，CLI 以 `BOOLEAN_RECHECK_PARTIAL` 打印已完成明细后再以退出码 1 结束（退出码语义不变）。
+
+### Fixed · Windows Qt 打包（CI）
+
+- `windeployqt` 不再剔除 VC++ 运行时，并在打包后校验 `vcruntime140.dll` / `vcruntime140_1.dll` / `msvcp140.dll` 真的落地，缺一个直接失败。
+- 第三方运行库 `tbb12` / `tbbmalloc` / `freetype` / `zlib` / `libpng16` 真实 `Copy-Item` 进产物目录并回验（原来只 `Write-Host` 打印，纯净 Windows 机启动会 `0xc0000135`）；`freetype` / `libpng16` / `zlib` 缺失直接失败。
+- OCCT 8.0 的 STEP 库名改为兼容 `TKXDESTEP` / `TKDESTEP` / `TKDE` 与 7.x 的 `TKSTEP*`，且一个都没命中就失败（原来按 7.7 旧名匹配 + `Test-Path` 静默跳过，打出的包可能没有 STEP 读写库）。
+- 核心 OCCT 白名单缺任一库即失败；补上 `qt-client` 显式链接的 `TKSTL` / `TKDESTL`。
+
+### Changed · 排布求解器
+
+- 阻尼求解器接线尝试经审查后回滚，未合入：该版采纳判据把「未声明重叠」按 1:1 折成间距缺口，收益全部来自拿重叠换间距（改回硬约束后六工位 5 个阈值输出逐位退回原位），活锁只是换了个零件。阈值口径与重启门槛已写入 `docs/desktop/BACKLOG.md`。
+
 ## [0.5.0] - 2026-10-27
 
 ### Added · 缓存机台与 Qt 原生客户端（2026-10-29）

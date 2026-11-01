@@ -1150,6 +1150,27 @@ async function runHeadlessDesignWebglSmoke(window: BrowserWindow): Promise<void>
     console.log(`SMOKE_DESIGN_WEBGL_OK renderer=${result.renderer} seed=STEP_fixture:${result.seedParts} scene=${result.sceneParts} partPaths=${result.partPaths} tree=${result.treeRows} cadPartCount=${result.partCount} placements=${result.placements}`);
     console.log(`SMOKE_PLACEHOLDER_DIMS_OK w=${result.dims.w} h=${result.dims.h} d=${result.dims.d} y=${result.dims.y}`);
     console.log('SMOKE_DESIGN_LAYOUT_SEMANTICS_OK wizard=symbolic-card saved-project=symbolic-card');
+    // 3D 联动位姿：桥在整机场景建好后注册。这里用真实零件 id 施加 +100 mm 位移，
+    // 再读回坐标，断言它真的动了——只调函数不算证据。
+    const pose = await window.webContents.executeJavaScript(`(async () => {
+      const snap = window.__cadLinkageDebugSnapshot;
+      if (typeof snap !== 'function') return { ok: false, reason: 'no_scene' };
+      const before = snap();
+      const ids = before ? Object.keys(before) : [];
+      if (ids.length === 0) return { ok: false, reason: 'empty_scene' };
+      const id = ids[0];
+      if (typeof window.__cadApplyLinkagePose !== 'function') return { ok: false, reason: 'bridge_missing' };
+      window.__cadApplyLinkagePose({ offsets: { [id]: [100, 0, 0] } });
+      const after = snap();
+      return { ok: true, id, before: before[id], after: after[id] };
+    })()`);
+    if (!pose?.ok) {
+      console.log(`SMOKE_LINKAGE_POSE_SKIP reason=${pose?.reason ?? 'unknown'}`);
+    } else {
+      const dx = Number(pose.after?.[0] ?? 0) - Number(pose.before?.[0] ?? 0);
+      if (!(dx > 0)) throw new Error(`联动位姿没有生效：${pose.id} dx=${dx}`);
+      console.log(`SMOKE_LINKAGE_POSE_OK id=${pose.id} dx=${dx.toFixed(3)}`);
+    }
     console.log(`SMOKE_DESIGN_WEBGL_NOTICE ${result.notice}`);
   } catch (error) {
     console.error('SMOKE_DESIGN_WEBGL_FAIL', error);
