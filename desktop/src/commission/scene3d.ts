@@ -249,6 +249,11 @@ export class CommissionScene3D {
   private readonly sensorOff = new THREE.Color(0x000000);
   private annotation: KinematicsAnnotation | null = null;
   private annotationVisuals: AnnotationVisual[] = [];
+  /**
+   * 整机机体网格（按零件 id 索引）。此前场景里只有 annotationVisuals（运动学标注盒），
+   * 联动帧的 offsets 用的是**机体零件 id**，所以怎么接都动不到真实零件。
+   */
+  private bodyMeshes = new Map<string, { mesh: THREE.Mesh; base: THREE.Vector3 }>();
   private annotationGroup: THREE.Group | null = null;
   private annotationScale = 1;
   private layoutOverride: GeomLayout | null;
@@ -532,6 +537,34 @@ export class CommissionScene3D {
 
 
   /**
+   * 按整机几何零件建机体网格（box 示意），返回建成的件数。
+   * 只做 id→mesh 映射，位姿仍由 applyLinkagePose 套用，不在这里算运动。
+   */
+  buildMachineBody(parts: Array<{ id: string; center: number[]; size: number[] }>): number {
+    this.bodyMeshes.clear();
+    let built = 0;
+    for (const part of parts ?? []) {
+      const size = part?.size ?? [0, 0, 0];
+      if (!part?.id || size.some((value) => !(Number(value) > 0))) continue;
+      const [w = 0, h = 0, d = 0] = size;
+      const mesh = new THREE.Mesh(
+        new THREE.BoxGeometry(w * this.annotationScale, h * this.annotationScale, d * this.annotationScale),
+        new THREE.MeshStandardMaterial({ color: 0x93a4b8, metalness: 0.15, roughness: 0.6 })
+      );
+      const base = new THREE.Vector3(
+        (part.center?.[0] ?? 0) * this.annotationScale,
+        (part.center?.[2] ?? 0) * this.annotationScale,
+        -(part.center?.[1] ?? 0) * this.annotationScale
+      );
+      mesh.position.copy(base);
+      this.scene?.add(mesh);
+      this.bodyMeshes.set(String(part.id), { mesh, base });
+      built += 1;
+    }
+    return built;
+  }
+
+  /**
    * 应用一帧联动位姿（来自 desktop `poseAt()`）：只套用位移/转角，不在这里算运动。
    * 返回真正被摆动的零件数，便于自检断言。
    */
@@ -539,6 +572,15 @@ export class CommissionScene3D {
     const offsets = pose.offsets ?? {};
     const rotations = pose.rotZDeg ?? {};
     let applied = 0;
+    // 机体零件优先：联动帧的 id 来自整机几何（st1-gripper-1-jaw-l 这类）
+    for (const [id, entry] of this.bodyMeshes) {
+      const offset = offsets[id];
+      const position = linkagePosition([entry.base.x, entry.base.y, entry.base.z], offset, 1);
+      entry.mesh.position.set(position[0], position[1], position[2]);
+      const deg = rotations[id] ?? 0;
+      entry.mesh.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), (deg * Math.PI) / 180);
+      if (Array.isArray(offset)) applied += 1;
+    }
     for (const visual of this.annotationVisuals) {
       const id = String((visual.part as any).id ?? (visual.part as any).partId ?? '');
       const position = linkagePosition(
@@ -557,6 +599,10 @@ export class CommissionScene3D {
   /** 自检/冒烟用：读回每个零件当前场景坐标，证明位姿真的被套用了 */
   debugPositions(): Record<string, [number, number, number]> {
     const out: Record<string, [number, number, number]> = {};
+    for (const [id, entry] of this.bodyMeshes) {
+      const p = entry.mesh.position;
+      out[id] = [p.x, p.y, p.z];
+    }
     for (const visual of this.annotationVisuals) {
       const id = String((visual.part as any).id ?? (visual.part as any).partId ?? '');
       const p = visual.mesh.position;
