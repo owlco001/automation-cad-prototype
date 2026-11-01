@@ -154,6 +154,17 @@ export async function recheckPairs(
         message: `复核不可用：${(error as Error).message}（结论仍是 AABB 初筛，不能当真实布尔）`
       };
     }
+    // 鉴权失败必须单独说清楚：以前会被当成普通失败，最终表现为「复核不了」，
+    // 排查时看不出是 token 配错（doc v6 §19.3 指出的盲区）。
+    if (response.status === 401 || response.status === 403) {
+      const hint = options.token ? 'token 与 sidecar 不一致' : '没有带 token（sidecar 需要 Authorization: Bearer）';
+      return {
+        ...empty,
+        pairs: results,
+        available: false,
+        message: `复核不可用：sidecar 拒绝访问（HTTP ${response.status}，${hint}）——结论仍是 AABB 初筛，不能当真实布尔`
+      };
+    }
     const payload = (await response.json()) as { ok?: boolean; message?: string; pairs?: Array<{ overlapMm3: number }> };
     if (!payload.ok) {
       results.push({
