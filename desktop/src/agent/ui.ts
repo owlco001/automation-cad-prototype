@@ -815,7 +815,9 @@ async function openMachineLinkage(callId: string): Promise<void> {
         });
         // 3D 视口挂上了就套位姿；没挂上就只走时间轴，不假装动过
         const apply = (window as any).__cadApplyLinkagePose;
-        if (typeof apply === 'function' && frame?.pose) apply(frame.pose);
+        // CLI 的帧把 offsets/rotZDeg 放在顶层（不是 frame.pose）；两种形状都认，别静默不动
+        const pose = (frame as any)?.pose ?? { offsets: (frame as any)?.offsets, rotZDeg: (frame as any)?.rotZDeg };
+        if (typeof apply === 'function' && pose) apply(pose);
         if (tMs < total) requestAnimationFrame(tick);
         else play.disabled = false;
       };

@@ -36,3 +36,24 @@ test('endMs 缺失时按 start+duration 兜底', () => {
   assert.equal(view.steps[0].endMs, 150);
   assert.equal(view.steps[0].stepNo, 1);
 });
+
+test('真实 CLI 形状：axisCount / actuatorId / io[] / endMs（不是 axes/actuator/point）', () => {
+  const view = formatLinkageView({
+    axisCount: 12,
+    stepCount: 2,
+    cycleMs: 1890,
+    cycleMsSource: 'throughput',
+    steps: [
+      { stepNo: 1, actuatorId: 'st1-gripper-1', stationId: 'st1', kind: 'gripper', startMs: 0, endMs: 280, io: ['ST1-GRIP-A1'], amount: 20 },
+      { stepNo: 2, actuatorId: 'st2-gripper-1', stationId: 'st2', kind: 'gripper', startMs: 182, endMs: 462, io: ['ST2-GRIP-A1'], amount: 20 }
+    ],
+    frames: [{ tMs: 236, offsets: { 'st1-gripper-1-jaw-l': [-3.1, 0, 0] }, rotZDeg: {} }]
+  });
+  assert.equal(view.headline, '12 轴 / 2 步 / 循环 1.89 s');
+  assert.equal(view.lines.find((l) => l.label === '运动轴').value, '12 个');
+  assert.equal(view.steps[0].actuator, 'st1-gripper-1');
+  assert.equal(view.steps[0].point, 'ST1-GRIP-A1');
+  assert.equal(view.steps[0].durationMs, 280);
+  assert.equal(view.steps[1].endMs, 462);
+  assert.deepEqual(view.warnings, []);
+});

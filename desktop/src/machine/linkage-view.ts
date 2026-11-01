@@ -32,16 +32,20 @@ const num = (value: unknown): number | null => (typeof value === 'number' && Num
 export function formatLinkageView(linkage: any): LinkageView {
   const cycleMs = num(linkage?.cycleMs);
   const axes: any[] = Array.isArray(linkage?.axes) ? linkage.axes : [];
+  // CLI 实际输出用 axisCount（不是 axes 数组）；两者都认，避免面板显示成 0 轴
+  const axisCount = num(linkage?.axisCount) ?? axes.length;
   const steps: any[] = Array.isArray(linkage?.steps) ? linkage.steps : [];
 
   const rows: LinkageStepRow[] = steps.map((step, index) => {
     const startMs = num(step?.startMs) ?? 0;
-    const durationMs = num(step?.durationMs) ?? 0;
-    const endMs = num(step?.endMs) ?? startMs + durationMs;
+    const rawEnd = num(step?.endMs);
+    const durationMs = num(step?.durationMs) ?? (rawEnd === null ? 0 : rawEnd - startMs);
+    const endMs = rawEnd ?? startMs + durationMs;
+    const ioList: unknown[] = Array.isArray(step?.io) ? step.io : [];
     return {
       stepNo: num(step?.stepNo) ?? index + 1,
-      actuator: String(step?.actuator ?? step?.partId ?? ''),
-      point: String(step?.point ?? ''),
+      actuator: String(step?.actuatorId ?? step?.actuator ?? step?.partId ?? ''),
+      point: String(step?.point ?? ioList.join(' / ')),
       startMs: Math.round(startMs),
       endMs: Math.round(endMs),
       durationMs: Math.round(durationMs)
@@ -58,13 +62,13 @@ export function formatLinkageView(linkage: any): LinkageView {
   }
 
   const headline = cycleMs === null
-    ? `联动时间线：${axes.length} 轴 / ${steps.length} 步（缺循环时间，无法播放）`
-    : `${axes.length} 轴 / ${steps.length} 步 / 循环 ${(cycleMs / 1000).toFixed(2)} s`;
+    ? `联动时间线：${axisCount} 轴 / ${steps.length} 步（缺循环时间，无法播放）`
+    : `${axisCount} 轴 / ${steps.length} 步 / 循环 ${(cycleMs / 1000).toFixed(2)} s`;
 
   return {
     headline,
     lines: [
-      { label: '运动轴', value: `${axes.length} 个` },
+      { label: '运动轴', value: `${axisCount} 个` },
       { label: '步序', value: `${steps.length} 步` },
       { label: '循环时间', value: cycleMs === null ? '未给出' : `${cycleMs} ms` },
       { label: '节拍', value: cycleMs === null || cycleMs <= 0 ? '—' : `${(60000 / cycleMs).toFixed(1)} 件/分钟` }
