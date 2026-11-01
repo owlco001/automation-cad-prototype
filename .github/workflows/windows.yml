@@ -219,7 +219,36 @@ jobs:
           $text = $text.Trim()
           Write-Host "QT_VERSION exit=$($proc.ExitCode) out=[$text]"
           if ($proc.ExitCode -ne 0) {
-            throw "3/4 随包 exe --version 退出码 $($proc.ExitCode)（0xC0000135/-1073741515 多为缺 DLL/VC++ 运行库）"
+            # 失败时先取证再抛：只报「退出码 -1073741515」无法定位是「少了哪个文件」还是「路径/加载顺序」问题。
+            Write-Host "DIAG_TOPLEVEL"
+            Get-ChildItem -Path $qtDir -File | Sort-Object Name | ForEach-Object { Write-Host ("  {0}`t{1}" -f $_.Name, $_.Length) }
+            $qtSum = (Get-ChildItem $qtDir -Recurse -File | Measure-Object Length -Sum).Sum
+            $srcDir = Join-Path $root 'qt-dist'
+            $srcSum = (Get-ChildItem $srcDir -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+            Write-Host "DIAG_SIZE qt_dir=$qtSum qt_dist=$srcSum"
+            foreach ($d in @('vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll','Qt6Core.dll','Qt6Widgets.dll','TKernel.dll','TKV3d.dll','TKOpenGl.dll','TKBO.dll','platforms\qwindows.dll')) {
+              Write-Host ("DIAG_FILE {0}={1}" -f $d, (Test-Path (Join-Path $qtDir $d)))
+            }
+            # 逐文件比对：目录里少的 / 大小不同的，直接列出来
+            $qtMap = @{}
+            Get-ChildItem $qtDir -Recurse -File | ForEach-Object { $qtMap[$_.FullName.Substring($qtDir.Length).TrimStart('\')] = $_.Length }
+            $srcMap = @{}
+            Get-ChildItem $srcDir -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { $srcMap[$_.FullName.Substring($srcDir.Length).TrimStart('\')] = $_.Length }
+            foreach ($k in $srcMap.Keys) {
+              if (-not $qtMap.ContainsKey($k)) { Write-Host "DIAG_MISSING $k" }
+              elseif ($qtMap[$k] -ne $srcMap[$k]) { Write-Host "DIAG_SIZE_DIFF $k qt=$($qtMap[$k]) src=$($srcMap[$k])" }
+            }
+            $env:PATH = "$qtDir;$env:PATH"
+            $p2 = Start-Process -FilePath $qtExe -ArgumentList '--version' -WorkingDirectory $qtDir `
+              -Wait -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $env:RUNNER_TEMP 'q2.out') -RedirectStandardError (Join-Path $env:RUNNER_TEMP 'q2.err')
+            Write-Host "DIAG_WITH_PATH exit=$($p2.ExitCode)"
+            $copy = Join-Path $env:RUNNER_TEMP 'qtcopy'
+            if (Test-Path $copy) { Remove-Item $copy -Recurse -Force }
+            Copy-Item $qtDir $copy -Recurse -Force
+            $p3 = Start-Process -FilePath (Join-Path $copy 'automationcad-qt.exe') -ArgumentList '--version' `
+              -WorkingDirectory $copy -Wait -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $env:RUNNER_TEMP 'q3.out') -RedirectStandardError (Join-Path $env:RUNNER_TEMP 'q3.err')
+            Write-Host "DIAG_FROM_COPY exit=$($p3.ExitCode)"
+            throw "3/4 随包 exe --version 退出码 $($proc.ExitCode)（0xC0000135/-1073741515 多为缺 DLL/VC++ 运行库），取证见上方 DIAG_* / ASSERT_3 失败"
           }
           if (-not $text) { throw '3/4 随包 exe --version 没有任何输出：无法证明包里的 Qt 能起来' }
           $m = [regex]::Match($text, '(\d+\.\d+\.\d+)')
