@@ -1,4 +1,5 @@
 import { loadMachineLinkage } from './machine-linkage.ts';
+import { killActiveQt, launchQt } from './qt-client.ts';
 import { app, BrowserWindow, dialog, ipcMain, Menu, type IpcMainInvokeEvent, type MenuItemConstructorOptions } from 'electron';
 import { autoUpdater } from 'electron-updater';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
@@ -11,7 +12,8 @@ import {
   CAD_EXTENSIONS,
   renderAssemblyReportPdf,
   renderCostReportPdf,
-  disposeIpcRuntime
+  disposeIpcRuntime,
+  beginQtLaunchWindow
 } from './ipc';
 import { isTrustedUiUrl } from './security.ts';
 import { PackRegistry } from '../src/packs/registry';
@@ -5232,6 +5234,39 @@ async function chooseCadFile(window: BrowserWindow): Promise<string | null> {
   return result.canceled ? null : (result.filePaths[0] ?? null);
 }
 
+/** 主进程侧的第三条入口（菜单直接调，不经过渲染进程）：拉起随包 Qt 原生工作台。 */
+async function openQtWorkbench(window: BrowserWindow): Promise<void> {
+  // launchQt 是 PromiseLike：await 后才拿到 900ms 观察窗的最终结论，
+  // 否则「进程起来又秒退」会被当成功、菜单入口一个提示都不弹。
+  // 观察窗内也开了广播抑制：失败由这里弹框说清楚，别再叠一条 toast。
+  const endLaunchWindow = beginQtLaunchWindow();
+  try {
+    const result = await launchQt({
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      appRoot: app.getAppPath(),
+      electronExePath: process.execPath,
+      env: process.env,
+      onExit: (info) => {
+        // Qt 是 GUI 子系统程序：缺 DLL 时窗口不出现、stdout 为空，只有退出码+stderr 能解释「点了没反应」
+        if (info.code === 0 || DIAGNOSE) return;
+        console.error(`[qt] ${info.message}`);
+      }
+    });
+    if (result.ok || window.isDestroyed()) return;
+    void dialog.showMessageBox(window, {
+      type: 'error',
+      title: 'Qt 工作台',
+      message: 'Qt 工作台没有启动',
+      detail: result.message,
+      buttons: ['知道了'],
+      noLink: true
+    });
+  } finally {
+    endLaunchWindow();
+  }
+}
+
 function buildMenu(window: BrowserWindow): void {
   const send = (channel: string, payload?: unknown): void => {
     if (!window.isDestroyed()) window.webContents.send(channel, payload);
@@ -5272,6 +5307,17 @@ function buildMenu(window: BrowserWindow): void {
       submenu: [
         { label: '机械', accelerator: 'CmdOrCtrl+Alt+1', click: () => send('desktop:set-domain', 'mech') },
         { label: '电气', accelerator: 'CmdOrCtrl+Alt+2', click: () => send('desktop:set-domain', 'elec') }
+      ]
+    },
+    {
+      label: '工具',
+      submenu: [
+        {
+          label: '打开 Qt 工作台（OCCT 视口）',
+          click: () => {
+            void openQtWorkbench(window);
+          }
+        }
       ]
     },
     {
@@ -5623,6 +5669,11 @@ app.on('window-all-closed', () => {
 });
 
 let quitAfterParametricStop = false;
+app.on('will-quit', () => {
+  // 随包 Qt 是长驻子进程：Electron 退出时它不会自己走。win32 用 taskkill /T 连子孙进程一起收，
+  // 否则用户下次启动会留一堆看不见的 automationcad-qt.exe 占着 OCCT 显存。
+  killActiveQt();
+});
 app.on('before-quit', (event) => {
   if (agentServer) void agentServer.stop();
   void stopCdpForwarder();

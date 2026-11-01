@@ -97,6 +97,16 @@ const desktopApi = {
     linkage: (brief: string) => ipcRenderer.invoke('machine:linkage', brief),
     plcAudit: (brief: string) => ipcRenderer.invoke('machine:plc-audit', brief)
   },
+  qt: {
+    // 随包 Qt 原生工作台：主进程 spawn resources/qt/automationcad-qt.exe，失败返回 { ok:false, message }
+    launch: () => ipcRenderer.invoke('qt:launch'),
+    // 进程后续退出由主进程 qt:exited 广播；返回取消订阅函数，组件销毁时调用避免重复提示。
+    onExited: (callback: (payload: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+      ipcRenderer.on('qt:exited', listener);
+      return () => ipcRenderer.removeListener('qt:exited', listener);
+    }
+  },
   packs: {
     list: () => ipcRenderer.invoke('packs:list'),
     chooseZip: () => ipcRenderer.invoke('packs:choose-zip'),

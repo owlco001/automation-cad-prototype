@@ -80,6 +80,7 @@ import {
 } from './machine/model-builders';
 import { detectBufferLayers, detectConveyorSpec } from './machine/spec.ts';
 import { buildEntryButton as buildPanelEntryButton, createDrawer } from './ui/panels';
+import { qtExitNotice, qtLaunchNotice, type QtExitPayload, type QtLaunchReply } from './ui/qt-exit-notice.ts';
 import { syncToolMenu } from './ui/tool-menu.ts';
 import { assertCadFileSize } from './shared/input-limits';
 import { recordDiagnosticError, setDiagnosticOperation } from './shared/diagnostics';
@@ -106,10 +107,12 @@ const ICONS = {
   close: '<svg viewBox="0 0 16 16"><path d="M4.4 4.4l7.2 7.2M11.6 4.4l-7.2 7.2"/></svg>',
   export: '<svg viewBox="0 0 16 16"><path d="M8 2v7M5.5 6.5L8 9l2.5-2.5M3 11.5v2h10v-2"/></svg>',
   kinematics: '<svg viewBox="0 0 16 16"><path d="M2.5 4.5h7M11.5 4.5h2M2.5 11.5h2M6.5 11.5h7"/><circle cx="10" cy="4.5" r="1.5"/><circle cx="5" cy="11.5" r="1.5"/></svg>',
-  parametric: '<svg viewBox="0 0 16 16"><path d="M3 13V3M3 13h10"/><path d="M4.5 10.5l2.5-3 2 1.5 3-4.5"/><circle cx="7" cy="7.5" r=".8"/><circle cx="9" cy="9" r=".8"/></svg>'
+  parametric: '<svg viewBox="0 0 16 16"><path d="M3 13V3M3 13h10"/><path d="M4.5 10.5l2.5-3 2 1.5 3-4.5"/><circle cx="7" cy="7.5" r=".8"/><circle cx="9" cy="9" r=".8"/></svg>',
+  qt: '<svg viewBox="0 0 16 16"><rect x="2" y="2.6" width="12" height="8.4" rx="1.2"/><path d="M5.6 13.6h4.8M8 11v2.6"/></svg>'
 };
 
 const CAD_ENTRY = 'cadEntryButton';
+const QT_ENTRY = 'qtWorkbenchEntry';
 let viewer: CadViewer | null = null;
 let plcSyncModulesEnabled = (): { plcgen: boolean; plcSync: boolean } => ({ plcgen: false, plcSync: false });
 let parametricImportModuleEnabled = false;
@@ -224,6 +227,61 @@ function buildEntryButton(): void {
     openOverlay();
   });
   target.appendChild(button);
+}
+
+/** preload 暴露的 qt 桥；desktop-api.d.ts 还没跟上（machine.linkage 也是这种情况），这里就地声明。 */
+interface QtBridge {
+  launch(): Promise<QtLaunchReply>;
+  /** 主进程 qt:exited 广播；返回取消订阅函数 */
+  onExited?(callback: (payload: QtExitPayload) => void): () => void;
+}
+
+function qtBridge(): QtBridge | null {
+  const desktop = window.desktop as unknown as { qt?: QtBridge } | undefined;
+  return desktop?.qt ?? null;
+}
+
+let unsubscribeQtExit: (() => void) | null = null;
+
+/**
+ * 订阅 Qt 退出事件：非 0 退出码才提示（0 是正常收工）。
+ * 重复初始化时先退订，避免同一个退出事件弹出多条提示。
+ */
+function subscribeQtExitNotice(): void {
+  unsubscribeQtExit?.();
+  unsubscribeQtExit = null;
+  const qt = qtBridge();
+  if (!qt?.onExited) return;
+  try {
+    unsubscribeQtExit = qt.onExited((payload) => {
+      const notice = qtExitNotice(payload);
+      if (notice) showNotice(notice.message, notice.error);
+    });
+  } catch (error) {
+    console.error('[qt] 订阅 Qt 退出事件失败，异常退出将不会提示', error);
+  }
+}
+
+/** Electron → 随包 Qt 原生工作台（OCCT 视口 + 联动调试）。失败用既有 showNotice 报，不弹 alert。 */
+async function launchQtWorkbench(): Promise<void> {
+  const qt = qtBridge();
+  if (!qt) {
+    showNotice('当前环境没有桌面接口（浏览器模式），Qt 工作台只能在桌面版里启动', true);
+    return;
+  }
+  try {
+    const notice = qtLaunchNotice(await qt.launch());
+    showNotice(notice.message, notice.error);
+  } catch (error) {
+    const notice = qtLaunchNotice({ ok: false, message: `Qt 工作台启动失败：${error instanceof Error ? error.message : String(error)}` });
+    showNotice(notice.message, notice.error);
+  }
+}
+
+function buildQtEntryButton(): void {
+  buildPanelEntryButton(QT_ENTRY, 'Qt 工作台', ICONS.qt, () => {
+    void launchQtWorkbench();
+  });
 }
 
 function buildOverlay(): void {
@@ -3668,6 +3726,9 @@ function bindWindowEvents(): void {
     setParametricStatus(state);
   });
   window.addEventListener('pagehide', () => {
+    // 页面卸载前退订，避免热重载/重开后同一退出事件重复提示。
+    unsubscribeQtExit?.();
+    unsubscribeQtExit = null;
     disposeCadWorker('pagehide');
     window.clearTimeout(noticeTimer);
     viewer?.dispose();
@@ -3685,6 +3746,8 @@ function init(): void {
       console.error('[appearance] 读取界面缩放/渲染质量失败，使用默认值', error);
     }) ?? Promise.resolve();
   buildEntryButton();
+  buildQtEntryButton();
+  subscribeQtExitNotice();
   // 顶栏入口收进「工具」下拉（机械/电气与 CAD 查看留在栏上）
   syncToolMenu();
   initFactoryPanel();

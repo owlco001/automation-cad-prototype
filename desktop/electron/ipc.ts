@@ -11,6 +11,7 @@ import { mergeSyncConfig, publicSyncConfig, readSyncConfig, writeSyncConfig } fr
 import { buildDesignPackage, parseDesignPackage } from '../src/sync/package.ts';
 import { validateMachineConfig } from '../src/commission/machine-config.ts';
 import { loadMachineLinkage, loadPlcAudit } from './machine-linkage.ts';
+import { launchQt, subscribeQtExit } from './qt-client.ts';
 import type { DesignBomRow, SyncConfig, SyncPlcUploadPayload, SyncUploadPayload } from '../src/sync/types.ts';
 import {
   EXPORT_EXTENSIONS,
@@ -473,6 +474,42 @@ function plcExportFailure(error: unknown): { ok: false; code: string; message: s
 
 let ipcRuntime: { factory: FactoryManager; plc: PlcManager } | null = null;
 
+/** Qt 退出订阅只注册一次；重复注册会让同一个退出事件被广播多遍。 */
+let qtExitSubscription: (() => void) | null = null;
+
+/** 正在等 launchQt 观察窗结论的次数：这段时间内的退出算「启动失败」，由调用方自己上报。 */
+let qtLaunchPending = 0;
+
+/**
+ * 标记一段「启动观察窗」（900ms）：期间 Qt 退出不再广播，因为发起启动的那一方
+ * 会拿到 ok:false 自行提示。返回结束标记的函数，重复调用安全（菜单入口与 ipc 共用）。
+ */
+export function beginQtLaunchWindow(): () => void {
+  qtLaunchPending += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    qtLaunchPending -= 1;
+  };
+}
+
+/**
+ * Qt 进程在启动 900ms 之后退出走这里：广播给所有窗口，由渲染层提示。
+ * 窗口可能已经销毁（关窗/重载），逐个 isDestroyed() 判空，绝不往死 webContents 发消息。
+ * 观察窗内退出（qt-client 既广播也返回 ok:false）不重复广播，否则用户会连看两条同样的报错。
+ */
+function ensureQtExitSubscription(): void {
+  if (qtExitSubscription) return;
+  qtExitSubscription = subscribeQtExit((payload) => {
+    if (qtLaunchPending > 0) return;
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (window.isDestroyed() || window.webContents.isDestroyed()) continue;
+      window.webContents.send('qt:exited', payload);
+    }
+  });
+}
+
 /** 退出前由主进程调用；断开工厂/PLC 网络与定时器。 */
 export async function disposeIpcRuntime(): Promise<void> {
   const runtime = ipcRuntime;
@@ -504,6 +541,7 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
   const plc = new PlcManager({ configFile: context.plcConfigFile });
   ipcRuntime = { factory, plc };
   const handle = createTrustedIpcHandler(() => context.getWindow(), context.trustedUiPath);
+  ensureQtExitSubscription();
   const broadcast = (channel: string, payload: unknown): void => {
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed()) window.webContents.send(channel, payload);
@@ -1541,6 +1579,32 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
       return { ok: true, audit };
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : String(error), audit: null };
+    }
+  });
+
+  // 随包 Qt 原生工作台：一键拉起 resources/qt/automationcad-qt.exe（OCCT 视口 + 联动调试）。
+  // 与 machine:* 同风格：找不到 exe / 缺 DLL / 管线缺失一律 { ok:false, message }，不往渲染进程抛。
+  // launchQt 返回 PromiseLike：await 之后才是「观察窗结束的最终结论」（900ms 内秒退 => ok:false），
+  // 所以这里必须 await，不能拿同步字段当结果，否则崩在窗口里的进程会被谎报成「已启动」。
+  handle('qt:launch', async () => {
+    const endLaunchWindow = beginQtLaunchWindow();
+    try {
+      const result = await launchQt({
+        isPackaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+        appRoot: app.getAppPath(),
+        electronExePath: process.execPath,
+        env: process.env
+      });
+      if (!result.ok) return { ok: false as const, message: result.message };
+      // alreadyRunning 原样透传：已有实例在跑时不再起第二个，界面据此提示「已在运行」。
+      return {
+        ok: true as const,
+        pid: result.pid,
+        ...(result.alreadyRunning === true ? { alreadyRunning: true as const } : {})
+      };
+    } finally {
+      endLaunchWindow();
     }
   });
 
