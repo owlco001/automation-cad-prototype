@@ -726,6 +726,10 @@ export class AgentTools {
           });
           return {
             ok: true,
+            // 原始需求随结果一起带回（**放在 design 外层**：design 的字段形状被
+            // test/design/candidates.test.mjs 的 deepEqual 锁定）。联动调试要按同一句话
+            // 重算时间线，否则面板只能拿机型名去重跑管线，算出来是另一台机器（步序/零件 id 全对不上）。
+            brief: briefText,
             design: {
               config: design.config,
               cycle: design.cycle,

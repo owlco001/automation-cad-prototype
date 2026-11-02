@@ -132,7 +132,7 @@ import {
   startLinkagePlayback
 } from './linkage-panel.ts';
 
-const machineDesignCards = new Map<string, { design: Record<string, unknown> }>();
+const machineDesignCards = new Map<string, { design: Record<string, unknown>; brief?: string }>();
 const appliedMachineCards = new Map<string, string>();
 
 interface LiveProgress {
@@ -585,6 +585,8 @@ function failureSuggestionHtml(input: {
 
 function parseMachineCard(result: DesktopAgentChatMessage | undefined): {
   design: Record<string, unknown>;
+  /** design_machine 结果里带回的原始需求（联动重算时间线要用同一句话） */
+  brief: string;
   config: Record<string, unknown>;
   warnings: string[];
   cycle: Record<string, unknown> | null;
@@ -605,6 +607,7 @@ function parseMachineCard(result: DesktopAgentChatMessage | undefined): {
     if (typeof config !== 'object' || config === null || Array.isArray(config)) return null;
     return {
       design: designRecord,
+      brief: typeof record.brief === 'string' ? record.brief : '',
       config: config as Record<string, unknown>,
       warnings: Array.isArray(designRecord.warnings)
         ? designRecord.warnings.filter((value): value is string => typeof value === 'string')
@@ -632,7 +635,7 @@ function renderMachineCard(call: DesktopAgentToolCall, result: DesktopAgentChatM
   if (call.function.name !== 'design_machine') return '';
   const card = parseMachineCard(result);
   if (!card) return '';
-  machineDesignCards.set(call.id, { design: card.design });
+  machineDesignCards.set(call.id, { design: card.design, brief: card.brief });
   const appliedName = appliedMachineCards.get(call.id);
   const stations = Array.isArray(card.config.stations) ? card.config.stations.length : 0;
   const actuators = Array.isArray(card.config.actuators) ? card.config.actuators.length : 0;
@@ -791,14 +794,28 @@ async function openMachineLinkage(callId: string): Promise<void> {
   abortLinkagePlayback();
   const card = machineDesignCards.get(callId);
   const slot = body?.querySelector<HTMLElement>(`[data-linkage-slot="${CSS.escape(callId)}"]`);
-  const machine = (window as any).machine;
+  // 桥在 preload 里叫 window.desktop.machine（electron/preload.ts 的 machine 段）。
+  // 之前读的是 window.machine —— 那是 undefined，于是整函数在这儿静默 return，
+  // 真机上点「联动调试…」永远只有一行「正在生成联动时间线…」（或什么都不出）。
+  const machine = (window as any).desktop?.machine ?? (window as any).machine;
   if (!card || !slot || !machine) return;
-  const brief = typeof (card.design as any).brief === 'string' && (card.design as any).brief.trim()
-    ? String((card.design as any).brief)
+  // 优先用方案自带的原始需求：拿机型名去重跑管线会合成出另一台机器（步序/零件 id 对不上）。
+  const brief = typeof (card as any).brief === 'string' && (card as any).brief.trim()
+    ? String((card as any).brief)
     : String((card.design as any).name ?? '整机方案');
   slot.innerHTML = '<div class="acp-linkage-loading">正在生成联动时间线…</div>';
   try {
-    const linkage = await machine.linkage(brief);
+    const response = await machine.linkage(brief);
+    // IPC 契约是 `{ ok, linkage, message }`（electron/ipc.ts 的 machine:linkage），
+    // 面板要的是里面的 linkage 本体（frames / cycleMs / steps）。
+    // 之前直接把包装层当 linkage 用 → frames 读成 undefined → 播放按钮永远 disabled、
+    // 步序表永远「没有步序」，即在真机上「联动调试」点了但没东西可播。
+    const linkage = response && typeof response === 'object' && 'linkage' in response
+      ? (response as any).linkage
+      : response;
+    if (response && (response as any).ok === false) {
+      throw new Error(String((response as any).message ?? '联动数据不可用'));
+    }
     const frames: any[] = Array.isArray(linkage?.frames) ? linkage.frames : [];
     const view = formatLinkageView(linkage);
     const reason = frames.length === 0
