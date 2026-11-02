@@ -7,6 +7,8 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import {
   LAUNCH_GRACE_MS,
   STATUS_DLL_NOT_FOUND,
@@ -414,5 +416,37 @@ test('subscribeQtExit：单个订阅方抛异常不影响其他订阅方与进�
   } finally {
     offBad();
     offGood();
+  }
+});
+
+test('vendor-qt：只搬运行时（exe + dll），跳过 CI 打包副产物（zip / vc_redist / 日志）', () => {
+  // 首个双端安装包 238.7MB 里有 61MB 是 ci.yml 上传用的那个 zip、18MB 是 windeployqt 放的
+  // vc_redist 安装器 —— 都已经把 CRT DLL 直接带进包了，这些再进安装包纯属白占体积。
+  const src = mkdtempSync(join(tmpdir(), 'vq-src-'));
+  const dst = mkdtempSync(join(tmpdir(), 'vq-dst-'));
+  const script = new URL('../../scripts/vendor-qt.mjs', import.meta.url);
+  try {
+    writeFileSync(join(src, 'automationcad-qt.exe'), 'exe');
+    for (let i = 0; i < 45; i += 1) writeFileSync(join(src, `lib${i}.dll`), 'x'.repeat(1024 * 1024));
+    mkdirSync(join(src, 'platforms'));
+    writeFileSync(join(src, 'platforms', 'qwindows.dll'), 'x'.repeat(1024 * 1024));
+    writeFileSync(join(src, 'automationcad-qt-windows-x64-occt.zip'), 'z'.repeat(2048));
+    writeFileSync(join(src, 'vc_redist.x64.exe'), 'r'.repeat(2048));
+    writeFileSync(join(src, 'version.out.txt'), 'log');
+    const r = spawnSync(process.execPath, [script.pathname], {
+      env: { ...process.env, QT_DIST: src, VENDOR_QT_TARGET: dst },
+      encoding: 'utf8',
+    });
+    assert.equal(r.status, 0, `vendor-qt 失败：${r.stderr}`);
+    assert.match(r.stdout, /VENDOR_QT_SKIP automationcad-qt-windows-x64-occt\.zip/);
+    assert.match(r.stdout, /VENDOR_QT_SKIP vc_redist\.x64\.exe/);
+    assert.match(r.stdout, /VENDOR_QT_OK files=47/);
+    for (const junk of ['automationcad-qt-windows-x64-occt.zip', 'vc_redist.x64.exe', 'version.out.txt']) {
+      assert.equal(existsSync(join(dst, junk)), false, `${junk} 不该进 vendor/qt`);
+    }
+    assert.ok(existsSync(join(dst, 'platforms', 'qwindows.dll')), '插件子目录里的 DLL 必须保留');
+  } finally {
+    rmSync(src, { recursive: true, force: true });
+    rmSync(dst, { recursive: true, force: true });
   }
 });

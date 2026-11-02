@@ -315,12 +315,13 @@ jobs:
           }
           Write-Host "ASSERT_3_VERSION_OK version=$($m.Groups[1].Value)"
 
-          # ④ 体积：不含 Qt 时稳定在 136MB，含 Qt 约 190MB。≤150MB 就是 Qt 没进去
+          # ④ 体积：不含 Qt 时稳定在 136MB；含 Qt 且已剔除打包副产物（zip / vc_redist）后仍 >150MB。
+          #    阈值留在 140MB：Qt 运行时本体约 100MB，即使后续再瘦身也不该掉到 140 以下。
           $setup = Get-ChildItem -Path (Join-Path $root 'desktop/release') -Filter 'AutomationCAD-Setup-*.exe' -File |
             Sort-Object Length -Descending | Select-Object -First 1
           if (-not $setup) { throw '4/4 release 下没有 AutomationCAD-Setup-*.exe' }
-          if ($setup.Length -le 150MB) {
-            throw "4/4 安装包只有 $([math]::Round($setup.Length/1MB,1))MB（要求 >150MB）：Qt 没进去"
+          if ($setup.Length -le 140MB) {
+            throw "4/4 安装包只有 $([math]::Round($setup.Length/1MB,1))MB（要求 >140MB）：Qt 没进去"
           }
           Write-Host "ASSERT_4_SIZE_OK setup=$($setup.Name) bytes=$($setup.Length) mb=$([math]::Round($setup.Length/1MB,1))"
 
