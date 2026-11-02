@@ -2,6 +2,35 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织，版本号遵循语义化版本。
 
+## [0.6.2] - 2026-11-02
+
+### Fixed · 3D 联动真正生效（`SMOKE_LINKAGE_POSE_SKIP` → `OK`）
+
+CI 里的联动冒烟长期打印 `SMOKE_LINKAGE_POSE_SKIP reason=empty_scene`——它一直在 SKIP 里假装通过。三处根因：
+
+- `buildMachineBody()` 全仓**零调用点**，且实现把 mm 乘 `annotationScale`、挂在 scene 根而非 `machine.root` 下，即使被调用也摆不到零件上；
+- `buildThreeMachine()` 建的零件 mesh 矩阵被冻结（`matrixAutoUpdate=false`），联动帧没有 id→mesh 索引可写，`debugPositions()` 恒为 `{}`；
+- `abortLinkagePlayback()` 只停循环不复位位姿，关闭抽屉/切卡片后零件悬在半空插值态。
+
+现在 `buildMachineBody()` 把零件 id 索引到**整机真实网格**（只有「几何里有、场景里没有」才补 mm 占位盒），幂等键为 `machine.root.uuid + 零件集合`，重复调用返回 0；位姿写 mesh 局部坐标（mm、Z 向上），缩放与 Z→Y 由 `machine.root` 统一负责；`abort` 时**先 abort 再 reset**，排队中的 tick 被 `aborted` 吞掉。冒烟从 SKIP 改为**硬失败**，并新增复位断言。
+
+本地实测（xvfb + SwiftShader）：
+
+```
+SMOKE_LINKAGE_POSE_OK id=frame-top parts=61 dx=100.0000 resetDx=0.000000
+```
+
+### Changed · 安装包继续瘦身
+
+解开已发布的 v0.6.1（196 文件 / 595 MiB 解包体积）逐项统计：`app.asar` 里 `.map` 37.89 MB（3337 个）、`.ts` 11.21 MB、`occt-import-js.wasm` 同一份存了 3 处各 7.6 MB、serialport 增量构建中间件 2.17 MB；`resources/qt` 的 `dxcompiler.dll`+`dxil.dll` 15.77 MB **没有任何 DLL 静态导入**（`Qt6Gui.dll` 24 条导入只有 d3d11/d3d12/dxgi，qt-client 无 Quick/RHI）。
+
+- `build.files` 增加 12 条排除（map / ts / tsbuildinfo / test 目录 / iobj / ipdb / tlog / exp / lib / 重复 wasm）；
+- `ci.yml` 的 Qt 打包段新增两条守卫：符号与导入库清理（**残留即 throw**）、dx 编译器**条件剔除**（先 `dumpbin` 扫静态导入，真有导入就 `QTC_DX_KEPT` 原样保留）。
+
+按 `7z -mx=5` 实测压缩率折算预计 **168.85 MB → 约 155.9 MB（−7.7%）**；真实数字以 `windows.yml` 出包为准。
+
+顺带否掉文档里「剔除 52 个语言包可再省 30 MB」的说法：`electronLanguages` 自 `b60840c` 起就生效，包内只有 `zh-CN`/`en-US` 两个 `.pak` 共 1.19 MB；Qt 目录 `.pdb/.ilk/.exp` 实测 0 个。
+
 ## [0.6.1] - 2026-11-02
 
 ### Fixed · 安装包体积（238.7 MB → 预计 ~167 MB）
