@@ -2,6 +2,19 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织，版本号遵循语义化版本。
 
+## [0.6.1] - 2026-11-02
+
+### Fixed · 安装包体积（238.7 MB → 预计 ~167 MB）
+
+拆开已发布的 `AutomationCAD-Setup-0.6.0.exe` 核对包内实际内容，发现 `resources/qt` 里混进了 CI 的副产物：
+
+- `automationcad-qt-windows-x64-occt.zip`（**61 MB**）—— `ci.yml` 上传 artifact 用的那个 zip，解压后原件仍留在目录里；
+- `vc_redist.x64.exe`（**18 MB**）—— `windeployqt` 放的运行库安装器，而 CRT DLL 已经直接带进包，客户机不需要再装；
+- `version.out.txt` / `clip.log` 等启动自检日志。
+
+`vendor-qt.mjs` 改为白名单搬运（`automationcad-qt.exe` + `*.dll`，插件子目录保留），跳过项逐个打印
+`VENDOR_QT_SKIP <名字> <体积>`；新增用例钉住「zip / vc_redist / 日志不进包」。
+
 ## [0.6.0] - 2026-11-02
 
 ### Added · 双端整合：一个安装包内含 Electron 工作台与 Qt 原生 OCCT 视口

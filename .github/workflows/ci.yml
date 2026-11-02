@@ -703,10 +703,10 @@ jobs:
             throw "打包目录里的 exe 启动失败（exit $($proc.ExitCode)）"
           }
           # 没有「空就跳过」的退路：stdout+stderr 都空 = 拿不到版本，直接判失败（否则这步等于没验版本）。
-          if (-not $text) { throw "VERSION_OUTPUT_EMPTY：exe --version 的 stdout/stderr 都是空的，无法证明打进去的是 0.6.0" }
-          if ($text -notmatch "0\.6\.0") { throw "版本输出异常：$text" }
+          if (-not $text) { throw "VERSION_OUTPUT_EMPTY：exe --version 的 stdout/stderr 都是空的，无法证明打进去的是 0.6.1" }
+          if ($text -notmatch "0\.6\.1") { throw "版本输出异常：$text" }
           $dlls = (Get-ChildItem $dist -Filter *.dll | Measure-Object).Count
-          Write-Host "OCCT_WIN_RUN_OK version=0.6.0 dlls=$dlls"
+          Write-Host "OCCT_WIN_RUN_OK version=0.6.1 dlls=$dlls"
           # 只验 --version 不够：白名单砍掉 DLL 后，真正的风险是「能启动但一用几何就崩」。
           # 这里在离线/无窗口下跑一次布尔剖切自检（走 BRepAlgoAPI_Cut → TKBO/TKBRep/TKTopAlgo）。
           $env:QT_QPA_PLATFORM = 'offscreen'

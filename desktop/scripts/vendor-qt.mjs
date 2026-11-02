@@ -15,7 +15,8 @@ import { join, resolve } from 'node:path';
 
 const desktopRoot = resolve(import.meta.dirname, '..');
 const source = resolve(process.env.QT_DIST ?? join(desktopRoot, '..', 'qt-dist'));
-const target = join(desktopRoot, 'vendor', 'qt');
+// VENDOR_QT_TARGET 只给测试用：让用例把产物搬到临时目录，别动仓库里的 vendor/qt。
+const target = resolve(process.env.VENDOR_QT_TARGET ?? join(desktopRoot, 'vendor', 'qt'));
 const EXE_NAME = 'automationcad-qt.exe';
 const MIN_FILES = 40;
 const MIN_BYTES = 30 * 1024 * 1024;
@@ -62,9 +63,48 @@ if (before.bytes <= MIN_BYTES) {
 }
 if (problems.length > 0) fail(problems);
 
+/** 只搬运行时需要的东西；以下都是 CI 打包过程的副产物，进安装包就是白占体积：
+ *  - `automationcad-qt-windows-x64-occt.zip`（ci.yml 用 Compress-Archive 上传的那个 zip，
+ *    解压后仍留在目录里，实测 61 MB —— 首个双端安装包 238.7 MB 里有四分之一是它）
+ *  - `vc_redist.x64.exe`（windeployqt 放的运行库安装器，18 MB；我们已经把 CRT DLL 直接带进包，
+ *    客户机不需要再装）
+ *  - `version.out.txt` / `version.err.txt` / `clip.log` / `clip.err.log`（启动自检的日志）
+ */
+function shouldShip(relPath) {
+  const name = relPath.split(/[\\/]/).pop().toLowerCase();
+  if (name === EXE_NAME) return true;
+  if (!name.endsWith('.dll')) return false;
+  return true;
+}
+
+async function copyFiltered(from, to) {
+  await mkdir(to, { recursive: true });
+  let copied = 0;
+  const skipped = [];
+  const entries = await readdir(from, { withFileTypes: true });
+  for (const entry of entries) {
+    const src = join(from, entry.name);
+    const dst = join(to, entry.name);
+    if (entry.isDirectory()) {
+      const child = await copyFiltered(src, dst);
+      copied += child.copied;
+      skipped.push(...child.skipped);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    if (!shouldShip(entry.name)) {
+      skipped.push({ name: entry.name, bytes: (await stat(src)).size });
+      continue;
+    }
+    await cp(src, dst);
+    copied += 1;
+  }
+  return { copied, skipped };
+}
+
 await rm(target, { recursive: true, force: true });
 await mkdir(target, { recursive: true });
-await cp(source, target, { recursive: true });
+const copyResult = await copyFiltered(source, target);
 
 // 拷完再核一次：cp 失败/被截断时不能报成功
 if (!existsSync(join(target, EXE_NAME))) {
@@ -72,9 +112,13 @@ if (!existsSync(join(target, EXE_NAME))) {
   process.exit(1);
 }
 const after = await measure(target);
-if (after.files !== before.files) {
-  console.error(`VENDOR_QT_FAIL 拷贝不完整：源 ${before.files} 个文件，目标 ${after.files} 个`);
+if (after.files !== copyResult.copied) {
+  console.error(`VENDOR_QT_FAIL 拷贝不完整：应拷 ${copyResult.copied} 个文件，目标 ${after.files} 个`);
   process.exit(1);
 }
+const skippedBytes = copyResult.skipped.reduce((sum, item) => sum + item.bytes, 0);
+for (const item of copyResult.skipped) {
+  console.log(`VENDOR_QT_SKIP ${item.name} ${(item.bytes / 1024 / 1024).toFixed(1)}MB`);
+}
 
-console.log(`VENDOR_QT_OK files=${after.files} bytes=${after.bytes}`);
+console.log(`VENDOR_QT_OK files=${after.files} bytes=${after.bytes} skipped=${copyResult.skipped.length} skippedBytes=${skippedBytes}`);
