@@ -386,6 +386,39 @@ export function abortLinkagePlayback(): void {
   const current = activeLinkagePlayback;
   activeLinkagePlayback = null;
   current?.abort();
+  // 顺序不能反：先 abort（cancelRaf + 置 aborted，排队中的 tick 会直接咽掉），
+  // 再复位位姿。这样复位之后不可能还有帧把零件写回半空插值态。
+  resetLinkagePose();
+}
+
+// ---------------------------------------------------------------------------
+// 位姿复位钩子
+//
+// 面板侧是纯逻辑模块（不碰 DOM / window），3D 场景由 commission/ui.ts 持有，
+// 所以用注入的方式拿到「复位写入点」：commission/ui.ts 在注册位姿桥时一起注册。
+// 没注册（单测 / 场景还没建）时复位是 no-op，不会抛错。
+// ---------------------------------------------------------------------------
+let poseResetter: (() => void) | null = null;
+
+/** 注册 / 摘除「把 3D 位姿复位到 t=0 基准」的写入点。传 null 表示摘钩。 */
+export function setLinkagePoseResetter(reset: (() => void) | null): void {
+  poseResetter = reset;
+}
+
+/**
+ * 复位到 t=0 基准：offsets 空、rotZDeg 空（即各零件回安装位）。
+ * 单独导出便于自检与单测直接调用；`abortLinkagePlayback` 内部也会调它。
+ */
+export function resetLinkagePose(): void {
+  const reset = poseResetter;
+  if (!reset) return;
+  try {
+    reset();
+  } catch (error) {
+    // 复位失败不能让「关闭抽屉」这条路径抛错（抽屉已经关了，抛出去没人接）；
+    // 但也不能静默，留一条控制台告警说明 3D 可能停在旧位姿。
+    console.warn('[linkage] 位姿复位失败，3D 零件可能停在旧位姿：', error);
+  }
 }
 
 /** 自检用：当前是否还有活跃联动循环 */

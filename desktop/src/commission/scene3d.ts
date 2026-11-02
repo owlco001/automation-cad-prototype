@@ -8,7 +8,7 @@ import {
   type MovingPart
 } from '../cad/kinematics-ui.ts';
 import { type ActuatorConfig, type MachineConfig, validateMachineConfig } from './machine-config.ts';
-import { generateMachineGeometry, type GeomLayout, type MachineGeometry, type Vec3 } from '../machine/geometry.ts';
+import { generateMachineGeometry, partBounds, type GeomLayout, type MachineGeometry, type Vec3 } from '../machine/geometry.ts';
 import {
   applyAxisValue,
   buildThreeMachine,
@@ -36,6 +36,8 @@ export interface Commission3DStats {
   active: boolean;
   /** 参数化几何零件数（机架/底板/门架/机构/传感器等全部实体）。 */
   geometryParts: number;
+  /** 已建机体网格件数（联动帧 id → mesh 的映射规模）；0 表示还没建，联动无处可写。 */
+  bodyParts: number;
   /** 外形包络 mm（X × Y × Z）。 */
   envelopeMm: Vec3;
   layout: GeomLayout;
@@ -90,6 +92,32 @@ interface HighlightMaterial {
   emissiveIntensity: number;
 }
 
+/**
+ * 机体网格的输入：整机几何零件换算成的世界 AABB（mm，Z 向上）。
+ * `center`/`size` 直接来自 `Geometry.parts`（经 partBounds 折算旋转），
+ * 因此联动帧里的零件 id 与这里一一对应。
+ */
+export interface MachineBodyPart {
+  id: string;
+  center: number[];
+  size: number[];
+  /** 零件自身绕世界 Z 轴的安装转角（度）。联动时叠加，不会被位姿抹成 0。 */
+  rotationZDeg?: number;
+}
+
+interface MachineBodyVisual {
+  /** 场景里的真实零件网格（`buildThreeMachine` 建的，name/userData.partId = 零件 id）。 */
+  mesh: THREE.Mesh;
+  /** 未加联动位移的基准位置，**mm、Z 向上**（父级 root 负责缩放到场景单位并 Z→Y）。 */
+  base: THREE.Vector3;
+  /** 未加联动转角的基准绕自身 Z 转角（弧度）。 */
+  baseRadZ: number;
+  /** true = 我们自己建的兜底占位盒，清理由我们负责；false = 复用整机模型的网格。 */
+  owned: boolean;
+  /** 索引前的 `matrixAutoUpdate`：退出联动层时还原，别破坏静态矩阵冻结。 */
+  autoMatrix: boolean;
+}
+
 type PointValues = Record<string, boolean | number>;
 
 const BACKGROUND = 0x2a2d31;
@@ -98,6 +126,8 @@ const SENSOR_DEFAULT_ON = new THREE.Color(0x2dd4bf);
 const FAULT_COLOR = 0xff4d4f;
 /** 场景中整机最大边长（场景单位）；mm → 场景单位的比例由几何包络反算。 */
 const SCENE_SPAN = 6;
+/** 兜底占位盒的示意色（只在几何里有该零件、场景里却没有对应网格时才用）。 */
+const BODY_COLOR = 0x93a4b8;
 
 function defaultNow(): number {
   return typeof performance !== 'undefined' ? performance.now() : Date.now();
@@ -253,7 +283,9 @@ export class CommissionScene3D {
    * 整机机体网格（按零件 id 索引）。此前场景里只有 annotationVisuals（运动学标注盒），
    * 联动帧的 offsets 用的是**机体零件 id**，所以怎么接都动不到真实零件。
    */
-  private bodyMeshes = new Map<string, { mesh: THREE.Mesh; base: THREE.Vector3 }>();
+  private bodyMeshes = new Map<string, MachineBodyVisual>();
+  /** 机体网格的幂等键（几何 + 缩放）；键没变就不再重建，避免重复建网格/重复加进场景。 */
+  private bodySignature = '';
   private annotationGroup: THREE.Group | null = null;
   private annotationScale = 1;
   private layoutOverride: GeomLayout | null;
@@ -288,6 +320,8 @@ export class CommissionScene3D {
 
   setActive(active: boolean): void {
     this.active = active;
+    // 打开 3D 视口就是「该有网格」的时刻：此时补建机体网格（幂等，已建则直接返回 0）
+    if (active) this.ensureMachineBody();
     this.sync();
   }
 
@@ -373,6 +407,7 @@ export class CommissionScene3D {
       enabled: this.enabled,
       active: this.active,
       geometryParts: this.geometry?.parts.length ?? 0,
+      bodyParts: this.bodyMeshes.size,
       envelopeMm: this.geometry ? [...this.geometry.envelope] : [0, 0, 0],
       layout: this.geometry?.layout ?? 'single',
       transformUpdates: this.transformUpdates
@@ -394,6 +429,8 @@ export class CommissionScene3D {
 
   dispose(): void {
     this.stopAnimation();
+    // 机体网格是场景直属 mesh（不在 ThreeMachine 内），单独回收并清空 id→mesh 索引
+    this.clearMachineBody();
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.controls?.dispose();
@@ -537,48 +574,169 @@ export class CommissionScene3D {
 
 
   /**
-   * 按整机几何零件建机体网格（box 示意），返回建成的件数。
-   * 只做 id→mesh 映射，位姿仍由 applyLinkagePose 套用，不在这里算运动。
+   * 建「联动可动层」：把整机几何的每个零件 id 索引到场景里的真实网格，返回**本次新索引**的件数。
+   *
+   * 为什么不是另建一层盒子：`buildThreeMachine` 已经把每个零件渲染成名为 `part.id` 的 mesh，
+   * 再叠一层 AABB 盒子就会和整机重影（z-fighting），而且动的是盒子、零件留在原地。
+   * 所以这里优先复用真实网格，只有「几何里有、场景里没有」的零件才补占位盒兜底。
+   *
+   * 幂等：同一份零件集合（同一棵 machine.root）重复调用返回 0，既不重建也不重复挂载；
+   * 键变了（换机型 / 改布局 → 新的 machine.root）才拆旧建新。
+   *
+   * 坐标口径：位姿写的是 mesh 的局部坐标，单位 mm、Z 向上 —— machine.root 负责
+   * `rotation.x = -π/2` + `scale`，所以这里**不乘** `geometryScale`，也不做 (x,z,-y) 翻转。
    */
-  buildMachineBody(parts: Array<{ id: string; center: number[]; size: number[] }>): number {
-    this.bodyMeshes.clear();
+  buildMachineBody(parts: MachineBodyPart[]): number {
+    const list = Array.isArray(parts) ? parts : [];
+    const root = this.machine?.root ?? null;
+    // 没有整机模型就没有 mm 坐标系可用：不建、也不假装建好了
+    if (!root) return 0;
+    const signature = this.bodySignatureFor(list);
+    if (this.bodyMeshes.size > 0 && signature === this.bodySignature) return 0;
+    this.clearMachineBody();
+    const rendered = this.renderedPartMeshes(root);
     let built = 0;
-    for (const part of parts ?? []) {
-      const size = part?.size ?? [0, 0, 0];
-      if (!part?.id || size.some((value) => !(Number(value) > 0))) continue;
+    for (const part of list) {
+      if (!part?.id) continue;
+      const id = String(part.id);
+      // 首选：整机模型里已经有这个零件的真实网格（name / userData.partId = 零件 id）。
+      // 复用它，位姿才能真正摆到零件上；另建一层盒子会和整机重影（z-fighting），
+      // 而且盒子飞走了零件还留在原地 —— 那是最容易被当成"联动没生效"的样子。
+      const existing = rendered.get(id);
+      if (existing) {
+        this.bodyMeshes.set(id, {
+          mesh: existing,
+          base: existing.position.clone(),
+          baseRadZ: existing.rotation.z,
+          owned: false,
+          autoMatrix: existing.matrixAutoUpdate
+        });
+        // buildThreeMachine 会把静态零件的矩阵冻结（matrixAutoUpdate=false）；
+        // 联动要每帧写位姿，这个零件必须重新自动更新矩阵。
+        existing.matrixAutoUpdate = true;
+        built += 1;
+        continue;
+      }
+      // 兜底：几何里有该零件、场景里却没有对应网格（生成器跳过/过滤过）时补一个占位盒。
+      // 坐标系仍取 mm（挂 machine.root 下，由 root 统一缩放 + Z→Y），与真实零件同一口径。
+      const size = part.size ?? [];
+      if (size.length < 3 || size.some((value) => !(Number(value) > 0))) continue;
       const [w = 0, h = 0, d = 0] = size;
       const mesh = new THREE.Mesh(
-        new THREE.BoxGeometry(w * this.annotationScale, h * this.annotationScale, d * this.annotationScale),
-        new THREE.MeshStandardMaterial({ color: 0x93a4b8, metalness: 0.15, roughness: 0.6 })
+        new THREE.BoxGeometry(w, h, d),
+        new THREE.MeshStandardMaterial({ color: BODY_COLOR, metalness: 0.15, roughness: 0.6 })
       );
-      const base = new THREE.Vector3(
-        (part.center?.[0] ?? 0) * this.annotationScale,
-        (part.center?.[2] ?? 0) * this.annotationScale,
-        -(part.center?.[1] ?? 0) * this.annotationScale
-      );
+      mesh.name = `body:${id}`;
+      mesh.userData.partId = id;
+      const base = new THREE.Vector3(part.center?.[0] ?? 0, part.center?.[1] ?? 0, part.center?.[2] ?? 0);
       mesh.position.copy(base);
-      this.scene?.add(mesh);
-      this.bodyMeshes.set(String(part.id), { mesh, base });
+      const baseRadZ = ((Number.isFinite(part.rotationZDeg) ? (part.rotationZDeg as number) : 0) * Math.PI) / 180;
+      mesh.rotation.z = baseRadZ;
+      root.add(mesh);
+      this.bodyMeshes.set(id, { mesh, base, baseRadZ, owned: true, autoMatrix: true });
       built += 1;
     }
+    this.bodySignature = signature;
     return built;
   }
 
   /**
+   * 打开 3D 视口 / 联动面板时调用：当前机型有几何但还没索引机体网格才建，重复调用返回 0。
+   * 联动帧的 id 来自整机几何零件，没有这层 id→网格索引时 `applyLinkagePose` 无处可写，
+   * 这也是 CI smoke 之前只能打 `SMOKE_LINKAGE_POSE_SKIP reason=empty_scene` 的根因。
+   */
+  ensureMachineBody(): number {
+    if (this.bodyMeshes.size > 0) return 0;
+    const parts = this.machineBodyParts();
+    if (parts.length === 0) return 0;
+    return this.buildMachineBody(parts);
+  }
+
+  /** 机体索引件数（自检用）。 */
+  machineBodyCount(): number {
+    return this.bodyMeshes.size;
+  }
+
+  /** 当前几何换算成的机体索引输入（mm）：世界 AABB 已含零件自身 Z 转角的包络。 */
+  machineBodyParts(): MachineBodyPart[] {
+    const parts = this.geometry?.parts ?? [];
+    const out: MachineBodyPart[] = [];
+    for (const part of parts) {
+      if (!part?.id) continue;
+      const box = partBounds(part);
+      const size = [box.max[0] - box.min[0], box.max[1] - box.min[1], box.max[2] - box.min[2]];
+      out.push({ id: part.id, center: [...part.center], size, rotationZDeg: part.rotationZDeg });
+    }
+    return out;
+  }
+
+  /**
+   * 拆掉机体索引；幂等。
+   * 复用的真实网格只把位姿写回基准并还原矩阵冻结状态（不 dispose：那是整机模型的资源），
+   * 自己建的兜底占位盒才连 geometry/material 一起释放。
+   */
+  clearMachineBody(): void {
+    for (const entry of this.bodyMeshes.values()) {
+      entry.mesh.position.copy(entry.base);
+      entry.mesh.rotation.z = entry.baseRadZ;
+      if (entry.owned) {
+        entry.mesh.removeFromParent();
+        entry.mesh.geometry.dispose();
+        const material = entry.mesh.material;
+        if (Array.isArray(material)) for (const item of material) item.dispose();
+        else material?.dispose();
+      } else {
+        entry.mesh.matrixAutoUpdate = entry.autoMatrix;
+        if (!entry.autoMatrix) entry.mesh.updateMatrix();
+      }
+    }
+    this.bodyMeshes.clear();
+    this.bodySignature = '';
+  }
+
+  /** 整机模型里按零件 id 索引真实网格：name 与 userData.partId 都由 buildThreeMachine 写入。 */
+  private renderedPartMeshes(root: THREE.Object3D): Map<string, THREE.Mesh> {
+    const out = new Map<string, THREE.Mesh>();
+    root.traverse((object) => {
+      const mesh = object as THREE.Mesh;
+      if (!(mesh as unknown as { isMesh?: boolean }).isMesh) return;
+      const id = String(mesh.userData?.partId ?? mesh.name ?? '');
+      if (id && !out.has(id)) out.set(id, mesh);
+    });
+    return out;
+  }
+
+  private bodySignatureFor(parts: ReadonlyArray<MachineBodyPart>): string {
+    return `${this.machine?.root.uuid ?? ''}|${parts
+      .map((part) => `${part.id}@${(part.center ?? []).join(',')}/${(part.size ?? []).join(',')}`)
+      .join(';')}`;
+  }
+
+  /**
    * 应用一帧联动位姿（来自 desktop `poseAt()`）：只套用位移/转角，不在这里算运动。
+   * 位移单位是 mm、Z 向上 —— 与零件网格所在的局部坐标系一致（root 负责缩放与 Z→Y），
+   * 所以这里直接叠加，不需要再乘 `geometryScale`。
+   * 传空对象即「复位到 t=0 基准」：位移回 base、转角回安装角。
    * 返回真正被摆动的零件数，便于自检断言。
    */
   applyLinkagePose(pose: { offsets?: Record<string, number[]>; rotZDeg?: Record<string, number> } = {}): number {
+    // 没打开过视口的场景也要能套位姿（冒烟/自检路径）：这里补一次惰性索引
+    this.ensureMachineBody();
     const offsets = pose.offsets ?? {};
     const rotations = pose.rotZDeg ?? {};
     let applied = 0;
     // 机体零件优先：联动帧的 id 来自整机几何（st1-gripper-1-jaw-l 这类）
     for (const [id, entry] of this.bodyMeshes) {
       const offset = offsets[id];
-      const position = linkagePosition([entry.base.x, entry.base.y, entry.base.z], offset, 1);
-      entry.mesh.position.set(position[0], position[1], position[2]);
-      const deg = rotations[id] ?? 0;
-      entry.mesh.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), (deg * Math.PI) / 180);
+      const shift = Array.isArray(offset) ? offset : [];
+      entry.mesh.position.set(
+        entry.base.x + (shift[0] ?? 0),
+        entry.base.y + (shift[1] ?? 0),
+        entry.base.z + (shift[2] ?? 0)
+      );
+      const deg = rotations[id];
+      const extraRad = typeof deg === 'number' && Number.isFinite(deg) ? (deg * Math.PI) / 180 : 0;
+      entry.mesh.rotation.z = entry.baseRadZ + extraRad;
       if (Array.isArray(offset)) applied += 1;
     }
     for (const visual of this.annotationVisuals) {
@@ -596,8 +754,10 @@ export class CommissionScene3D {
     return applied;
   }
 
-  /** 自检/冒烟用：读回每个零件当前场景坐标，证明位姿真的被套用了 */
+  /** 自检/冒烟用：读回每个零件当前场景坐标（mesh 局部坐标，mm、Z 向上），证明位姿真的被套用了 */
   debugPositions(): Record<string, [number, number, number]> {
+    // 自检不能因为「视口还没渲染过」就报空场景：先补建机体网格（幂等）
+    this.ensureMachineBody();
     const out: Record<string, [number, number, number]> = {};
     for (const [id, entry] of this.bodyMeshes) {
       const p = entry.mesh.position;

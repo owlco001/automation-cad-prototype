@@ -15,6 +15,7 @@ import { recordDiagnosticError } from '../shared/diagnostics.ts';
 import { demoMachineConfig, validateMachineConfig, type MachineConfig } from './machine-config.ts';
 import { buildMachineIoMap, type MachineIoMapRow } from '../machine/io-map.ts';
 import { registerLinkagePoseBridge } from './linkage-bridge.ts';
+import { setLinkagePoseResetter } from '../agent/linkage-panel.ts';
 import { createScene3D, type Commission3DStats, type CommissionKinematicsMode, type CommissionScene3D } from './scene3d.ts';
 import type { GeomLayout } from '../machine/geometry.ts';
 import type { KinematicsAnnotation } from '../cad/kinematics-ui.ts';
@@ -26,9 +27,17 @@ import commissionStyles from './commission.css?inline';
  * 每次调用现取 scene3d，视口重建后不会指向已 dispose 的旧实例（见 linkage-bridge.ts 单测）。
  */
 function exposeLinkagePoseBridge(): void {
+  const resetPose = (): void => {
+    // 空位姿 = t=0 基准（offsets 空、rotZDeg 空）
+    scene3d?.applyLinkagePose({});
+  };
   registerLinkagePoseBridge(window as any, () => scene3d);
   // 冒烟/自检读取入口：位姿是否真的落到 mesh 上，只能靠读回坐标来证
   (window as any).__cadLinkageDebugSnapshot = () => scene3d?.debugPositions() ?? null;
+  // 复位入口：同样现取 scene3d（视口重建后旧实例已 dispose，闭包里不能抓死实例）。
+  // 关闭抽屉 / 切卡片 / 取消播放时由 agent 侧 abortLinkagePlayback() 调同一个函数。
+  (window as any).__cadResetLinkagePose = resetPose;
+  setLinkagePoseResetter(resetPose);
 }
 
 const COMMISSION_ICON = '<svg viewBox="0 0 16 16"><path d="M2.5 13.5h11M4 13.5V8h2.5v5.5M8 13.5V4.5h2.5v9M11.5 13.5V6.5H14v7"/><path d="M3.5 5.5l2.5-2 2 1.2 3.5-2.5"/></svg>';
@@ -984,6 +993,8 @@ function buildPanel(): void {
     summary: get<HTMLElement>('#commissionSummary')
   };
   scene3d = createScene3D(elements.scene3dHost, machineConfig);
+  // 打开联调面板就是「该有零件网格」的时刻：按当前机型几何建机体网格（幂等，重复调用返回 0）
+  scene3d.ensureMachineBody();
   exposeLinkagePoseBridge();
   const machineNote = drawer.root.querySelector<HTMLElement>('#commission3dMachine');
   if (machineNote) machineNote.textContent = machineSummary();
@@ -1029,6 +1040,8 @@ export function initCommissionPanel(options: PanelOptions): CommissionPanelHandl
     scene3d?.dispose();
     elements.scene3dHost.innerHTML = '';
     scene3d = createScene3D(elements.scene3dHost, machineConfig, undefined, machineLayout);
+    // 换机型 / 改布局后场景是新的：按新几何重建机体网格（旧实例已 dispose）
+    scene3d.ensureMachineBody();
     exposeLinkagePoseBridge();
     const summary = elements.drawer.querySelector<HTMLElement>('#commission3dMachine');
     if (summary) summary.textContent = machineSummary();
@@ -1077,6 +1090,7 @@ export function initCommissionPanel(options: PanelOptions): CommissionPanelHandl
         enabled: false,
         active: false,
         geometryParts: 0,
+        bodyParts: 0,
         envelopeMm: [0, 0, 0],
         layout: 'single',
         transformUpdates: 0

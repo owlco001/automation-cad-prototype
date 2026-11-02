@@ -12,6 +12,8 @@ import {
   abortLinkagePlayback,
   createLinkagePlayback,
   hasActiveLinkagePlayback,
+  resetLinkagePose,
+  setLinkagePoseResetter,
   startLinkagePlayback
 } from '../../src/agent/linkage-panel.ts';
 
@@ -522,3 +524,103 @@ test('采样阶段抛错也走 abort 收尾：不留卡死单例、可立即重�
   assert.equal(hasActiveLinkagePlayback(), false);
 });
 
+
+// ---------------------------------------------------------------------------
+// 位姿复位（缺陷 2）：关闭抽屉 / 取消播放 / 切卡片时必须回到 t=0 基准。
+// 之前只 abort 循环，没有复位写入点，3D 零件就停在半空插值态。
+// ---------------------------------------------------------------------------
+
+test('取消播放：abort 后位姿复位一次，且之后不再有任何帧写场景', () => {
+  const clock = fakeClock();
+  const events = [];
+  let resets = 0;
+  setLinkagePoseResetter(() => {
+    resets += 1;
+    events.push('reset');
+  });
+  try {
+    startLinkagePlayback({
+      frames,
+      cycleMs: 600,
+      now: clock.now,
+      raf: clock.raf,
+      cancelRaf: clock.cancelRaf,
+      onSample: (sample) => events.push(`sample:${sample.tMs}`)
+    });
+    clock.flush();           // t=0
+    clock.advance(150);      // 半空插值态
+    clock.flush();
+    assert.deepEqual(events, ['sample:0', 'sample:150']);
+    assert.equal(resets, 0, '播放中不得复位');
+
+    abortLinkagePlayback();
+    assert.equal(resets, 1, '取消播放必须复位到 t=0 基准');
+    assert.equal(events[events.length - 1], 'reset', '复位必须是最后一次写入');
+
+    // 旧回调即便还排在队列里，也绝不能把零件写回插值态
+    clock.flush();
+    clock.advance(100);
+    clock.flush();
+    assert.equal(clock.pending(), 0);
+    assert.deepEqual(events.slice(-1), ['reset']);
+    assert.equal(events.filter((event) => event.startsWith('sample:')).length, 2);
+  } finally {
+    setLinkagePoseResetter(null);
+  }
+});
+
+test('关闭抽屉：drawer.onClose → abort 循环 + 复位位姿（真实接线一致）', () => {
+  const clock = fakeClock();
+  let resets = 0;
+  let samples = 0;
+  setLinkagePoseResetter(() => {
+    resets += 1;
+  });
+  const drawer = fakeDrawer();
+  // 与 desktop/src/agent/ui.ts 一致的接线
+  drawer.onClose = abortLinkagePlayback;
+  try {
+    startLinkagePlayback({
+      frames,
+      cycleMs: 600,
+      now: clock.now,
+      raf: clock.raf,
+      cancelRaf: clock.cancelRaf,
+      onSample: () => {
+        samples += 1;
+      }
+    });
+    clock.flush();
+    assert.equal(samples, 1);
+
+    drawer.close();
+    assert.equal(resets, 1);
+    assert.equal(hasActiveLinkagePlayback(), false);
+    clock.advance(200);
+    clock.flush();
+    assert.equal(samples, 1, '抽屉关掉后不得再有帧写 3D');
+  } finally {
+    setLinkagePoseResetter(null);
+  }
+});
+
+test('复位钩子缺失或抛错时，关闭路径不抛错（抽屉已经收了，没人接异常）', () => {
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(' '));
+  try {
+    setLinkagePoseResetter(null);
+    assert.doesNotThrow(() => abortLinkagePlayback(), '没注册复位点时必须 no-op');
+    assert.doesNotThrow(() => resetLinkagePose());
+
+    setLinkagePoseResetter(() => {
+      throw new Error('场景已销毁');
+    });
+    assert.doesNotThrow(() => abortLinkagePlayback(), '复位失败不得冒到抽屉关闭路径');
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /位姿复位失败/);
+  } finally {
+    setLinkagePoseResetter(null);
+    console.warn = originalWarn;
+  }
+});

@@ -1153,7 +1153,8 @@ async function runHeadlessDesignWebglSmoke(window: BrowserWindow): Promise<void>
     console.log(`SMOKE_PLACEHOLDER_DIMS_OK w=${result.dims.w} h=${result.dims.h} d=${result.dims.d} y=${result.dims.y}`);
     console.log('SMOKE_DESIGN_LAYOUT_SEMANTICS_OK wizard=symbolic-card saved-project=symbolic-card');
     // 3D 联动位姿：桥在整机场景建好后注册。这里用真实零件 id 施加 +100 mm 位移，
-    // 再读回坐标，断言它真的动了——只调函数不算证据。
+    // 再读回坐标，断言它真的动了——只调函数不算证据；随后复位，断言回得到 t=0 基准。
+    // 空场景不再 SKIP：机体网格建不出来就是缺陷（此前 SKIP 把这个 bug 藏了整条流水线）。
     const pose = await window.webContents.executeJavaScript(`(async () => {
       const snap = window.__cadLinkageDebugSnapshot;
       if (typeof snap !== 'function') return { ok: false, reason: 'no_scene' };
@@ -1164,14 +1165,20 @@ async function runHeadlessDesignWebglSmoke(window: BrowserWindow): Promise<void>
       if (typeof window.__cadApplyLinkagePose !== 'function') return { ok: false, reason: 'bridge_missing' };
       window.__cadApplyLinkagePose({ offsets: { [id]: [100, 0, 0] } });
       const after = snap();
-      return { ok: true, id, before: before[id], after: after[id] };
+      if (typeof window.__cadResetLinkagePose !== 'function') return { ok: false, reason: 'reset_bridge_missing', id, parts: ids.length };
+      window.__cadResetLinkagePose();
+      const reset = snap();
+      return { ok: true, id, parts: ids.length, before: before[id], after: after[id], reset: reset[id] };
     })()`);
     if (!pose?.ok) {
-      console.log(`SMOKE_LINKAGE_POSE_SKIP reason=${pose?.reason ?? 'unknown'}`);
-    } else {
+      throw new Error(`联动位姿自检失败（3D 场景里没有可联动的零件网格）：${pose?.reason ?? 'unknown'}`);
+    }
+    {
       const dx = Number(pose.after?.[0] ?? 0) - Number(pose.before?.[0] ?? 0);
       if (!(dx > 0)) throw new Error(`联动位姿没有生效：${pose.id} dx=${dx}`);
-      console.log(`SMOKE_LINKAGE_POSE_OK id=${pose.id} dx=${dx.toFixed(3)}`);
+      const resetDx = Number(pose.reset?.[0] ?? 0) - Number(pose.before?.[0] ?? 0);
+      if (Math.abs(resetDx) > 1e-6) throw new Error(`联动复位没有回到 t=0 基准：${pose.id} resetDx=${resetDx}`);
+      console.log(`SMOKE_LINKAGE_POSE_OK id=${pose.id} parts=${pose.parts} dx=${dx.toFixed(4)} resetDx=${resetDx.toFixed(6)}`);
     }
     console.log(`SMOKE_DESIGN_WEBGL_NOTICE ${result.notice}`);
   } catch (error) {
