@@ -241,6 +241,24 @@ test('模型不可用时自动降级到只读规则路由并写审计', async ()
   assert.equal(audit[0].ok, true);
 });
 
+test('离线问答：工具层结果（无 data 字段）也要把命中来源写进回答', async () => {
+  // search_docs 这类工具层工具由 agentExecutor 兜底返回 {ok, query, hits}，没有 data。
+  // 回归：只序列化 result.data 会让离线文档问答只剩「已执行」而看不到 source/heading。
+  const llm = { async chat() { throw new Error('fetch failed'); } };
+  const bus = createBus(async () => ({
+    ok: true,
+    query: 'D2 决策',
+    hits: [{ source: 'docs/desktop/NL-AGENT.md', heading: '4.1 本地知识检索', snippet: '离线 RAG', score: 3.2 }]
+  }));
+  const session = new AgentSession({ llm, bus, confirmWrite: async () => false });
+  const reply = await session.run('D2 是什么决策');
+  assert.match(reply, /离线规则路由/);
+  assert.deepEqual(bus.calls, [{ name: 'search_docs', args: { query: 'D2 决策' } }]);
+  assert.match(reply, /docs\/desktop\/NL-AGENT\.md/);
+  assert.match(reply, /"heading":"4.1 本地知识检索"/);
+  assert.equal(session.mode(), 'offline');
+});
+
 test('模型不可用且指令是写操作时明确拒绝，不执行命令', async () => {
   const llm = { async chat() { throw new Error('网络不可达'); } };
   const bus = createBus();

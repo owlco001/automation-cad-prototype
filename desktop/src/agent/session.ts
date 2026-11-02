@@ -1320,7 +1320,12 @@ export class AgentSession {
     if (!result.ok) {
       return `模型暂不可用，离线规则已调用 ${plan.tool}，但返回失败：${result.error?.message ?? '未知错误'}`;
     }
-    const detail = result.data === undefined ? '' : serializeToolResult(result.data, toolResultByteLimit(plan.tool)).text;
+    // 工具层工具（search_docs / design_machine / search_components …）由 agentExecutor 的兜底
+    // 分支返回，结果形如 { ok, query, hits } —— 没有 data 字段。只认 result.data 会把命中内容
+    // 整段丢掉，离线问答就成了「已执行」却看不到任何结果（与 NL-AGENT.md 4.1「基于
+    // source/heading/snippet 回答」的约定不符）。有 data 用 data，否则序列化整个结果。
+    const payload = result.data === undefined ? result : result.data;
+    const detail = serializeToolResult(payload, toolResultByteLimit(plan.tool)).text;
     const summary = detail.length > 600 ? `${detail.slice(0, 600)}…` : detail;
     const reference = plan.resolvedFrom
       ? `已使用${plan.resolvedFrom === 'selection' ? '选中对象' : plan.resolvedFrom === 'recent' ? '最近操作对象' : '底板对象'}：${plan.resolvedLabel ?? ''}`

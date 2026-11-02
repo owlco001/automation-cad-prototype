@@ -109,7 +109,12 @@ import {
   type UpdateChannel
 } from './update-service.ts';
 import { captureProductScreenshots } from './screenshots';
-import { captureMachineScreenshots, captureDesignWizardScreenshots, captureLinkageScreenshots } from './machine-screenshots';
+import {
+  captureMachineScreenshots,
+  captureDesignWizardScreenshots,
+  captureLinkageScreenshots,
+  captureAgentScreenshots
+} from './machine-screenshots';
 import { writeLastCrash } from './crash-report.ts';
 import { collectDiagnosis } from './diagnostics.ts';
 import {
@@ -128,11 +133,14 @@ const HEADLESS_MACHINE_SCREENSHOTS = process.argv.includes('--headless-machine-s
 const HEADLESS_WIZARD_SHOTS = process.argv.includes('--headless-wizard-shots');
 /** 联动播放中的真机截图（base / mid / reset）：需要模型桩生成机型方案卡 */
 const HEADLESS_LINKAGE_SHOTS = process.argv.includes('--headless-linkage-shots');
+/** 智能体面板截图（初始 / 离线规则问答 / 审计）：纯本地，不联网、无模型桩 */
+const HEADLESS_AGENT_SHOTS = process.argv.includes('--headless-agent-shots');
 const HEADLESS_DESIGN_WEBGL_SMOKE = process.argv.includes('--headless-design-webgl-smoke');
 /** 只起服务、跑外部客户端 smoke（MCP/JSON-RPC 契约）：不跑 UI 断言、不自动退出，等外部脚本杀。 */
 const HEADLESS_SERVICE = process.argv.includes('--headless-service');
 const HEADLESS = HEADLESS_SMOKE || HEADLESS_SCREENSHOTS || HEADLESS_MACHINE_SCREENSHOTS ||
-  HEADLESS_WIZARD_SHOTS || HEADLESS_LINKAGE_SHOTS || HEADLESS_DESIGN_WEBGL_SMOKE || HEADLESS_SERVICE;
+  HEADLESS_WIZARD_SHOTS || HEADLESS_LINKAGE_SHOTS || HEADLESS_AGENT_SHOTS ||
+  HEADLESS_DESIGN_WEBGL_SMOKE || HEADLESS_SERVICE;
 if (HEADLESS_SMOKE && HEADLESS_DESIGN_WEBGL_SMOKE) {
   console.error('SMOKE_MODE_CONFLICT --headless-smoke disables WebGL; use --headless-design-webgl-smoke alone for SwiftShader');
   process.exit(1);
@@ -176,7 +184,7 @@ if (HEADLESS_SMOKE) {
   // CI 的 xvfb 环境没有 GPU；显式关闭 WebGL 以稳定覆盖降级面板路径。
   app.commandLine.appendSwitch('disable-webgl');
 }
-if (HEADLESS_MACHINE_SCREENSHOTS || HEADLESS_LINKAGE_SHOTS) {
+if (HEADLESS_MACHINE_SCREENSHOTS || HEADLESS_LINKAGE_SHOTS || HEADLESS_AGENT_SHOTS) {
   // xvfb 无硬件 GPU；用 SwiftShader 软件渲染，确保 3D 联调截图来自真实 WebGL 场景。
   app.commandLine.appendSwitch('enable-unsafe-swiftshader');
   app.commandLine.appendSwitch('use-gl', 'angle');
@@ -198,6 +206,8 @@ if (HEADLESS) {
     ? 'automationcad-linkage-shots-'
     : HEADLESS_MACHINE_SCREENSHOTS
     ? 'automationcad-machine-shots-'
+    : HEADLESS_AGENT_SHOTS
+    ? 'automationcad-agent-shots-'
     : HEADLESS_SCREENSHOTS
       ? 'automationcad-shots-'
       : 'automationcad-smoke-';
@@ -1244,9 +1254,9 @@ function createWindow(): BrowserWindow {
   const trustedUiPath = indexHtmlPath();
   const isTrustedNavigation = (url: string): boolean => isTrustedUiUrl(url, trustedUiPath);
   const window = new BrowserWindow({
-    width: HEADLESS_SCREENSHOTS || HEADLESS_MACHINE_SCREENSHOTS || HEADLESS_LINKAGE_SHOTS || HEADLESS_DESIGN_WEBGL_SMOKE ? 1600 : 1440,
-    height: HEADLESS_SCREENSHOTS || HEADLESS_MACHINE_SCREENSHOTS || HEADLESS_LINKAGE_SHOTS || HEADLESS_DESIGN_WEBGL_SMOKE ? 1000 : 900,
-    useContentSize: HEADLESS_SCREENSHOTS || HEADLESS_MACHINE_SCREENSHOTS || HEADLESS_LINKAGE_SHOTS || HEADLESS_DESIGN_WEBGL_SMOKE,
+    width: HEADLESS_SCREENSHOTS || HEADLESS_MACHINE_SCREENSHOTS || HEADLESS_LINKAGE_SHOTS || HEADLESS_AGENT_SHOTS || HEADLESS_DESIGN_WEBGL_SMOKE ? 1600 : 1440,
+    height: HEADLESS_SCREENSHOTS || HEADLESS_MACHINE_SCREENSHOTS || HEADLESS_LINKAGE_SHOTS || HEADLESS_AGENT_SHOTS || HEADLESS_DESIGN_WEBGL_SMOKE ? 1000 : 900,
+    useContentSize: HEADLESS_SCREENSHOTS || HEADLESS_MACHINE_SCREENSHOTS || HEADLESS_LINKAGE_SHOTS || HEADLESS_AGENT_SHOTS || HEADLESS_DESIGN_WEBGL_SMOKE,
     minWidth: 1000,
     minHeight: 680,
     backgroundColor: '#1E2124',
@@ -1326,6 +1336,21 @@ function createWindow(): BrowserWindow {
           setTimeout(() => app.exit(result.failed > 0 ? 1 : 0), 100);
         } catch (error) {
           console.error('SMOKE_LINKAGE_SHOTS_FAIL', error);
+          if (parametric) await parametric.stop();
+          setTimeout(() => app.exit(1), 100);
+        }
+        return;
+      }
+      if (HEADLESS_AGENT_SHOTS) {
+        const outputDir = process.env.AUTOMATIONCAD_SCREENSHOT_DIR
+          ? resolve(process.env.AUTOMATIONCAD_SCREENSHOT_DIR)
+          : resolve(desktopRoot(), '..', 'docs', 'desktop', 'screenshots');
+        try {
+          const result = await captureAgentScreenshots(window, { outputDir });
+          if (parametric) await parametric.stop();
+          setTimeout(() => app.exit(result.failed > 0 ? 1 : 0), 100);
+        } catch (error) {
+          console.error('SMOKE_AGENT_SHOTS_FAIL', error);
           if (parametric) await parametric.stop();
           setTimeout(() => app.exit(1), 100);
         }

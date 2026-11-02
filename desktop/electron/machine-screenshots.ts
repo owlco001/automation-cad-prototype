@@ -1296,3 +1296,373 @@ export async function captureLinkageScreenshots(
   }
 }
 
+/** 智能体面板单张截图的结果：比 machine 多一个 nodes（结果区真实节点数）。 */
+export interface AgentShotValidation {
+  name: string;
+  label: string;
+  width: number;
+  height: number;
+  bytes: number;
+  nodes: number;
+  uniqueColors: number;
+}
+
+/**
+ * 智能体面板截图：与 `capture()` 同一套抓帧/去重口径，但多两条针对面板的守卫——
+ * - `bytes > 60 KB`：纯色面板（抽屉没渲染出来）PNG 会压到几 KB；
+ * - `nodes > 0`：由调用方传入「结果区真实节点数」，为 0 说明内容没落进 DOM。
+ */
+async function captureAgentShot(
+  window: BrowserWindow,
+  outputDir: string,
+  name: string,
+  label: string,
+  nodes: number,
+  seenHashes: Map<string, string>
+): Promise<AgentShotValidation> {
+  await window.webContents.executeJavaScript(
+    `document.getElementById('cadNotice')?.classList.remove('is-on');
+     document.getElementById('acpToast')?.classList.remove('is-on'); true`
+  );
+  await settle(window);
+  // 与 machine 截图同因：xvfb 下窗口被判遮挡时合成器不产新帧，先确保可见再主动作废一帧。
+  if (!window.isVisible()) window.showInactive();
+  window.webContents.invalidate();
+  await settle(window, 320);
+  const png = await grabPng(window);
+  const image = nativeImage.createFromBuffer(png);
+  const { width, height } = image.getSize();
+  if (width !== SHOT_WIDTH || height !== SHOT_HEIGHT) {
+    throw new Error(`${name} 尺寸 ${width}×${height}，期望 ${SHOT_WIDTH}×${SHOT_HEIGHT}`);
+  }
+  const hash = createHash('sha256').update(png).digest('hex');
+  const duplicateOf = seenHashes.get(hash);
+  if (duplicateOf) {
+    throw new Error(`${name} 与 ${duplicateOf} 字节完全相同，抓到的是同一帧（面板没刷新）`);
+  }
+  seenHashes.set(hash, name);
+  const target = join(outputDir, name);
+  writeFileSync(target, png);
+  const bytes = statSync(target).size;
+  if (bytes <= 60 * 1024) throw new Error(`${name} 仅 ${bytes} 字节（要求 > 60 KB），疑似面板没渲染`);
+  if (!(nodes > 0)) throw new Error(`${name} 结果区节点数 ${nodes}，画面里没有可断言的内容`);
+  const uniqueColors = uniqueColorCount(image.toBitmap());
+  if (uniqueColors <= 500) throw new Error(`${name} 唯一色数 ${uniqueColors}，疑似单色/空白`);
+  console.log(`AGENT_SHOT_OK name=${name} label=${label} bytes=${bytes} nodes=${nodes}`);
+  return { name, label, width, height, bytes, nodes, uniqueColors };
+}
+
+/** 智能体对话的现场快照：超时时能说清是「没回」还是「回了但内容不对」，不靠猜。 */
+async function describeAgentChat(window: BrowserWindow): Promise<string> {
+  try {
+    const state = await window.webContents.executeJavaScript(
+      `(() => {
+        const log = document.getElementById('agentChatLog');
+        const feedback = document.getElementById('agentChatFeedback');
+        return {
+          status: document.getElementById('agentChatStatus')?.textContent || '',
+          feedback: feedback && !feedback.hidden ? feedback.textContent : '',
+          messages: Array.from(log ? log.querySelectorAll('.acp-chat-msg') : []).map((node) => ({
+            role: node.className.includes('is-user') ? 'user' : 'assistant',
+            text: (node.textContent || '').slice(0, 240)
+          })),
+          receipt: log?.querySelector('.acp-chat-receipt')?.textContent || '',
+          bubbles: log ? log.querySelectorAll('.acp-chat-bubble').length : 0
+        };
+      })()`
+    );
+    return JSON.stringify(state);
+  } catch (error) {
+    return `诊断失败：${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+const AGENT_DOC_QUERY = 'D2 是什么决策';
+const AGENT_SECOND_QUERY = '没有尺寸的件怎么处理';
+
+/**
+ * 智能体面板三张真机截图：初始态 / 离线规则问答 / 审计记录。
+ *
+ * 全部走真实 DOM 入口：`#agentEntryButton` 开抽屉、`#agentChatInput` 填字、
+ * `#agentChatSend` 点发送、`#agentAuditRefresh` 刷审计、`#agentAuditList` 点开一行。
+ * 不调用内部函数、不拼假消息。
+ *
+ * 离线怎么来的：`getSession()` 在缺 key 时直接抛错（连离线降级都不会走），所以这里必须
+ * 配一条**必然失败**的 LLM 端点——回环 127.0.0.1 上已关闭的端口（由 capture 脚本用
+ * net 现取空端口传入）。请求立刻 ECONNREFUSED → `runOffline()` → 规则路由执行只读
+ * `search_docs`。全程不出本机、不联网。
+ */
+export async function captureAgentScreenshots(
+  window: BrowserWindow,
+  options: MachineScreenshotOptions
+): Promise<{ captured: number; failed: number }> {
+  mkdirSync(options.outputDir, { recursive: true });
+  const shots: AgentShotValidation[] = [];
+  const seenHashes = new Map<string, string>();
+  // 默认 127.0.0.1:9（discard，容器里通常没人监听）：没有 stub 服务器，等于「模型不可达」。
+  const offlineBaseUrl = process.env.AUTOMATIONCAD_AGENT_OFFLINE_BASE_URL || 'http://127.0.0.1:9/v1';
+
+  window.setContentSize(SHOT_WIDTH, SHOT_HEIGHT);
+  window.webContents.setBackgroundThrottling(false);
+  await delay(350);
+  await waitForExtension(window);
+
+  console.log(`AGENT_SHOTS_ENDPOINT baseUrl=${offlineBaseUrl} reachable=no（回环空端口，不联网）`);
+
+  await window.webContents.executeJavaScript(
+    `(async () => {
+      const saved = await window.desktop.agent.saveLlmConfig({
+        baseUrl: ${JSON.stringify(offlineBaseUrl)},
+        apiKey: 'offline-rules-shots',
+        model: 'offline-rules',
+        maxIterations: 4
+      });
+      return saved;
+    })()`
+  );
+
+  try {
+    // 0. 离开首页 + 收起其它面板，再点工具栏入口开智能体抽屉（真实 UI 入口）。
+    const opened = await window.webContents.executeJavaScript(
+      `(async () => {
+        const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const home = document.getElementById('homeScreen');
+        if (home && !home.hidden) { document.querySelector('.home-link')?.click(); await wait(600); }
+        window.AutomationCadViewer?.close();
+        window.AutomationCadParametric?.close();
+        document.getElementById('commissionDrawer')?.setAttribute('hidden', '');
+        const entry = document.getElementById('agentEntryButton');
+        if (!entry) throw new Error('智能体入口按钮缺失（#agentEntryButton）');
+        entry.click();
+        await wait(500);
+        const drawer = document.getElementById('agentDrawer');
+        const input = document.getElementById('agentChatInput');
+        const log = document.getElementById('agentChatLog');
+        if (!drawer || drawer.hidden) throw new Error('智能体侧栏没有打开（#agentDrawer 仍 hidden）');
+        if (!(input instanceof HTMLTextAreaElement)) throw new Error('智能体输入框缺失（#agentChatInput）');
+        if (!log) throw new Error('对话区缺失（#agentChatLog）');
+        return {
+          title: document.querySelector('#agentDrawer .acp-drawer-title')?.textContent || '',
+          placeholder: input.placeholder,
+          empty: log.textContent.trim(),
+          preview: document.getElementById('agentPlanTitle')?.textContent || '',
+          send: Boolean(document.getElementById('agentChatSend')),
+          sendText: document.getElementById('agentChatSend')?.textContent || ''
+        };
+      })()`
+    ) as {
+      title: string; placeholder: string; empty: string; preview: string; send: boolean; sendText: string;
+    };
+    if (!opened.title.includes('智能体')) throw new Error(`抽屉标题异常：${opened.title}`);
+    if (!opened.placeholder || !opened.placeholder.includes('例如')) {
+      throw new Error(`输入框缺少示例提示，placeholder=${opened.placeholder}`);
+    }
+    if (!opened.send || !opened.sendText.includes('发送')) throw new Error('发送按钮缺失');
+    console.log(
+      `AGENT_PANEL_OPEN title=${opened.title} placeholder=${JSON.stringify(opened.placeholder)} ` +
+        `preview=${JSON.stringify(opened.preview)}`
+    );
+
+    // 1. 初始态：空对话 + 输入框 + 示例提示
+    const initialNodes = await window.webContents.executeJavaScript(
+      `document.querySelectorAll('#agentChatLog *').length`
+    ) as number;
+    if (initialNodes <= 0) throw new Error('初始态对话区没有节点');
+    shots.push(await captureAgentShot(
+      window, options.outputDir, '22-agent-01-panel.png',
+      '智能体侧栏初始态：输入框 + 示例提示 + 空对话', initialNodes, seenHashes
+    ));
+
+    // 2. 真实输入 + 点发送 → 离线规则路由执行 search_docs
+    const sent = await window.webContents.executeJavaScript(
+      `(async () => {
+        const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const input = document.getElementById('agentChatInput');
+        const preview = document.getElementById('agentPlanPreview');
+        input.focus();
+        input.value = ${JSON.stringify(AGENT_DOC_QUERY)};
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await wait(180);
+        const plan = {
+          tool: preview?.dataset.tool || '',
+          readOnly: preview?.dataset.readOnly || '',
+          offline: preview?.dataset.offline || '',
+          title: document.getElementById('agentPlanTitle')?.textContent || '',
+          hint: document.getElementById('agentPlanHint')?.textContent || ''
+        };
+        const send = document.getElementById('agentChatSend');
+        if (!send) throw new Error('发送按钮缺失（#agentChatSend）');
+        send.click();
+        return plan;
+      })()`
+    ) as { tool: string; readOnly: string; offline: string; title: string; hint: string };
+    if (sent.tool !== 'search_docs' || sent.readOnly !== '1' || sent.offline !== '1') {
+      throw new Error(`计划预览不是「只读·可离线」的 search_docs：${JSON.stringify(sent)}`);
+    }
+    console.log(
+      `AGENT_PLAN_PREVIEW tool=${sent.tool} readOnly=${sent.readOnly} offline=${sent.offline} ` +
+        `title=${JSON.stringify(sent.title)} hint=${JSON.stringify(sent.hint)}`
+    );
+
+    // 等真实回答落进对话区：必须有助手气泡、含 search_docs 与 docs/desktop/ 命中来源
+    await waitFor(
+      window,
+      `(() => {
+        const bubble = document.querySelector('#agentChatLog .acp-chat-msg.is-assistant .acp-chat-bubble');
+        const text = bubble ? bubble.textContent || '' : '';
+        return text.length > 80 && text.includes('search_docs') && text.includes('docs/desktop/');
+      })()`,
+      '离线规则回答（含 search_docs 与 docs/desktop 来源）',
+      40_000
+    );
+    // 回执「离线规则」= 真走了离线通道，不是在线模型
+    await waitFor(
+      window,
+      `(() => {
+        const receipt = document.querySelector('#agentChatLog .acp-chat-receipt');
+        return Boolean(receipt && (receipt.textContent || '').includes('离线规则'));
+      })()`,
+      '离线回执（离线规则）',
+      20_000
+    );
+
+    const answer = await window.webContents.executeJavaScript(
+      `(() => {
+        const log = document.getElementById('agentChatLog');
+        const user = log.querySelector('.acp-chat-msg.is-user .acp-chat-bubble')?.textContent || '';
+        const bubble = log.querySelector('.acp-chat-msg.is-assistant .acp-chat-bubble');
+        const text = bubble?.textContent || '';
+        const receipt = log.querySelector('.acp-chat-receipt');
+        // 对话区 260px 高：回到顶部才是「提问 + 回答开头（含 source/heading）」同框
+        log.scrollTop = 0;
+        const sourceMatch = text.match(/docs\\/desktop\\/[A-Za-z0-9._\\/-]+/);
+        // 不只看 DOM 里有：用 Range 量出 source 文字与提问气泡的实际像素位置，
+        // 断言它们落在对话区的可视裁剪区内（否则截图上根本看不见）。
+        const logRect = log.getBoundingClientRect();
+        const inside = (rect) => rect.width > 0 && rect.top >= logRect.top - 1 && rect.bottom <= logRect.bottom + 1;
+        const userBubble = log.querySelector('.acp-chat-msg.is-user .acp-chat-bubble');
+        const node = bubble ? bubble.firstChild : null;
+        let sourceVisible = false;
+        if (node && node.nodeType === 3 && sourceMatch) {
+          const start = text.indexOf(sourceMatch[0]);
+          const range = document.createRange();
+          range.setStart(node, start);
+          range.setEnd(node, start + sourceMatch[0].length);
+          sourceVisible = inside(range.getBoundingClientRect());
+        }
+        return {
+          user,
+          textLength: text.length,
+          visibleHead: text.slice(0, 600),
+          source: sourceMatch ? sourceMatch[0] : '',
+          sourceVisible,
+          questionVisible: userBubble ? inside(userBubble.getBoundingClientRect()) : false,
+          hasHeading: text.includes('heading'),
+          receipt: receipt ? receipt.textContent : '',
+          receiptTone: receipt ? receipt.className : '',
+          nodes: log.querySelectorAll('*').length
+        };
+      })()`
+    ) as {
+      user: string; textLength: number; visibleHead: string; source: string; sourceVisible: boolean;
+      questionVisible: boolean; hasHeading: boolean; receipt: string; receiptTone: string; nodes: number;
+    };
+    if (!answer.user.includes(AGENT_DOC_QUERY)) throw new Error(`提问没进对话区：${answer.user}`);
+    if (!answer.questionVisible) throw new Error('提问气泡不在对话区可视范围内（截图上看不到提问）');
+    if (!answer.textLength || answer.textLength < 80) throw new Error('回答为空');
+    if (!answer.source) throw new Error('回答里没有 docs/desktop/ 命中来源');
+    if (!answer.sourceVisible) throw new Error(`命中来源 ${answer.source} 不在对话区可视范围内`);
+    if (!answer.hasHeading) throw new Error('回答里没有 heading 字段');
+    if (!answer.receipt.includes('离线规则')) throw new Error(`回执不是离线通道：${answer.receipt}`);
+    if (!/is-warn/.test(answer.receiptTone)) throw new Error(`离线回执底色异常：${answer.receiptTone}`);
+    console.log(
+      `AGENT_ANSWER_OK user=${JSON.stringify(AGENT_DOC_QUERY)} chars=${answer.textLength} ` +
+        `source=${answer.source} receipt=${JSON.stringify(answer.receipt)}`
+    );
+    shots.push(await captureAgentShot(
+      window, options.outputDir, '22-agent-02-answer.png',
+      '离线规则问答：只读 search_docs 命中本地文档（source/heading）', answer.nodes, seenHashes
+    ));
+
+    // 3. 再跑一条离线只读查询，让审计里有两行；然后滚到审计区、点开第一行看执行记录
+    await window.webContents.executeJavaScript(
+      `(async () => {
+        const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const input = document.getElementById('agentChatInput');
+        input.value = ${JSON.stringify(AGENT_SECOND_QUERY)};
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        await wait(180);
+        document.getElementById('agentChatSend')?.click();
+        return true;
+      })()`
+    );
+    await waitFor(
+      window,
+      `document.querySelectorAll('#agentChatLog .acp-chat-msg.is-user').length >= 2 &&
+       document.querySelectorAll('#agentChatLog .acp-chat-msg.is-assistant .acp-chat-bubble').length >= 2`,
+      '第二条离线回答',
+      40_000
+    );
+
+    const audit = await window.webContents.executeJavaScript(
+      `(async () => {
+        const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        document.getElementById('agentAuditRefresh')?.click();
+        let rows = 0;
+        let summary = '';
+        for (let attempt = 0; attempt < 60; attempt += 1) {
+          await wait(100);
+          rows = document.querySelectorAll('#agentAuditList .acp-audit-row').length;
+          summary = document.getElementById('agentAuditSummary')?.textContent || '';
+          if (rows >= 2) break;
+        }
+        // 展开第一行：审计行是 <details>，点 summary 等价于用户点开看执行记录
+        document.querySelector('#agentAuditList .acp-audit-row summary')?.click();
+        const sectionTitle = document.getElementById('agentAuditCount')?.closest('.acp-section-title');
+        (sectionTitle || document.getElementById('agentAuditList'))?.scrollIntoView({ block: 'start' });
+        await wait(260);
+        const first = document.querySelector('#agentAuditList .acp-audit-row');
+        return {
+          rows,
+          summary,
+          count: document.getElementById('agentAuditCount')?.textContent || '',
+          firstRow: first ? first.textContent.replace(/\\s+/g, ' ').trim() : '',
+          expanded: first ? first.hasAttribute('open') : false,
+          nodes: document.querySelectorAll('#agentAuditList .acp-audit-row').length,
+          visible: (() => {
+            const body = document.querySelector('#agentDrawer .acp-drawer-body');
+            const list = document.getElementById('agentAuditList');
+            if (!body || !list) return false;
+            const bodyRect = body.getBoundingClientRect();
+            const listRect = list.getBoundingClientRect();
+            return listRect.top < bodyRect.bottom && listRect.bottom > bodyRect.top;
+          })()
+        };
+      })()`
+    ) as {
+      rows: number; summary: string; count: string; firstRow: string; expanded: boolean;
+      nodes: number; visible: boolean;
+    };
+    if (audit.rows < 2) throw new Error(`审计只有 ${audit.rows} 行，离线查询没写进审计`);
+    if (!audit.summary.includes('共')) throw new Error(`审计汇总异常：${audit.summary}`);
+    if (!audit.firstRow.includes('search_docs')) throw new Error(`审计行不含 search_docs：${audit.firstRow}`);
+    if (!audit.expanded) throw new Error('审计第一行没有展开（点击没生效）');
+    if (!audit.visible) throw new Error('审计列表不在抽屉可视区内（滚动没生效）');
+    console.log(
+      `AGENT_AUDIT_OK rows=${audit.rows} count=${audit.count} summary=${JSON.stringify(audit.summary)} ` +
+        `expanded=${audit.expanded}`
+    );
+    shots.push(await captureAgentShot(
+      window, options.outputDir, '22-agent-03-audit.png',
+      '审计：离线只读的工具调用记录（工具名/参数/结果/耗时）', audit.nodes, seenHashes
+    ));
+
+    console.log(`AGENT_SHOTS_DONE captured=${shots.length} failed=0 dir=${options.outputDir}`);
+    return { captured: shots.length, failed: 0 };
+  } catch (error) {
+    console.error('AGENT_SHOTS_FAIL', error);
+    console.error('AGENT_SHOTS_STATE', await describeAgentChat(window));
+    return { captured: shots.length, failed: 1 };
+  }
+}
+
