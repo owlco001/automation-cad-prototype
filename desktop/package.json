@@ -73,7 +73,19 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
-      "package.json"
+      "package.json",
+      "!**/*.map",
+      "!**/*.ts",
+      "!**/*.cts",
+      "!**/*.mts",
+      "!**/*.tsbuildinfo",
+      "!**/{test,tests,__tests__}/**",
+      "!**/*.iobj",
+      "!**/*.ipdb",
+      "!**/*.tlog",
+      "!**/*.exp",
+      "!**/*.lib",
+      "!dist-electron/occt-import-js.wasm"
     ],
     "extraResources": [
       {

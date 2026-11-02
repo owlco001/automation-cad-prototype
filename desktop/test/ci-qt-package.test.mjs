@@ -640,3 +640,86 @@ test('发布流程不变量：打包仍是 OCCT job 的产物，上传路径与�
     '上传 artifact 的名称/路径被改动了');
   assert.match(PACKAGING, /PACKAGE_OCCT_OK/, '打包成功标记 PACKAGE_OCCT_OK 不能丢');
 });
+
+// ---------------------------------------------------------------------------
+// ⑪ 瘦身守卫：Qt 目录的符号/导入库清理、D3D12 着色器编译器条件剔除、asar 侧排除。
+// 实测依据（v0.6.1 安装包解包）：resources/qt 78 个文件里 0 个 .pdb/.ilk/.exp；
+// dxcompiler.dll + dxil.dll 共 15,768,944 B，且包内没有任何 DLL/exe 静态导入它们
+// （Qt6Gui.dll 的 24 条导入里只有 d3d11/d3d12/dxgi）。
+// ---------------------------------------------------------------------------
+const PKG = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+
+/** 符号清理：扩展名名单 + 残留就 throw + 必须在 Compress-Archive 之前。 */
+function hasSymbolSweep(text) {
+  try {
+    const exts = arrayLiteral(text, 'symExts');
+    for (const e of ['.pdb', '.ilk', '.exp', '.lib']) {
+      if (!exts.includes(`'${e}'`)) return false;
+    }
+    const guard = bodyOf(text, /if\s*\(\s*\$symLeft\.Count\s+-gt\s+0\s*\)\s*\{/, '符号残留守卫');
+    if (!/throw/.test(guard)) return false;
+    if (!/QTC_SYMBOL_CLEAN/.test(text)) return false;
+    const sweepAt = text.indexOf('$symExts = @(');
+    const zipAt = text.indexOf('Compress-Archive');
+    return sweepAt > 0 && zipAt > sweepAt;   // 先清理再压包，顺序反了等于没删
+  } catch {
+    return false;
+  }
+}
+
+/** dx 剔除：必须有「静态导入就保留」的实测判据，不能无条件删。 */
+function hasDxStrip(text) {
+  try {
+    const arr = arrayLiteral(text, 'dxLibs');
+    if (!arr.includes("'dxcompiler.dll'") || !arr.includes("'dxil.dll'")) return false;
+    if (!/Get-ClosureImports/.test(text)) return false;
+    // 扫描目标要排除 dx 自己：dxcompiler.dll 静态导入 dxil.dll，不排除就永远「被导入」→ 永远不删
+    if (!/Where-Object\s*\{\s*\$dxLibs\s+-notcontains\s+\$_\.Name\.ToLower\(\)\s*\}/.test(text)) return false;
+    const kept = bodyOf(text, /if\s*\(\s*\$dxImportedBy\.Count\s+-gt\s+0\s*\)\s*\{/, 'dx 保留分支');
+    if (!/QTC_DX_KEPT/.test(kept)) return false;
+    if (!/QTC_DX_STRIPPED/.test(text)) return false;
+    const scanAt = text.indexOf('$dxScanTargets');
+    const delAt = text.indexOf('QTC_DX_STRIPPED');
+    return scanAt > 0 && delAt > scanAt;
+  } catch {
+    return false;
+  }
+}
+
+/** asar 侧排除项：源文件（.map/.ts/构建中间件）不进包，但入口目录必须原样保留。 */
+function hasAsarExcludes(files) {
+  for (const keep of ['dist/**/*', 'dist-electron/**/*', 'package.json']) {
+    if (!files.includes(keep)) return false;   // 把入口目录一起排除 = 打出一个空包
+  }
+  return ['!**/*.map', '!**/*.ts', '!**/*.tsbuildinfo', '!dist-electron/occt-import-js.wasm']
+    .every((pat) => files.includes(pat));
+}
+
+test('⑪ 打包瘦身守卫：符号清理 + dx 条件剔除 + asar 排除源文件', () => {
+  assert.ok(hasSymbolSweep(PACKAGING),
+    'Qt 打包段缺少符号/导入库清理：需要 $symExts 名单（含 .pdb/.ilk/.exp/.lib）+ 残留 throw，且在 Compress-Archive 之前');
+  assert.ok(hasDxStrip(PACKAGING),
+    'dxcompiler/dxil 剔除缺少实测判据：必须先扫包内静态导入表，有人导入就 QTC_DX_KEPT 保留，否则才删');
+  assert.ok(hasAsarExcludes(PKG.build?.files ?? []),
+    'desktop/package.json 的 build.files 缺排除项：.map/.ts/.tsbuildinfo 与 dist-electron 的重复 wasm 会被打进 asar');
+
+  // 负向自证 1：把符号残留的 throw 改成告警 → 判定必须变红（否则「清理失败也全绿」）。
+  const warnOnly = PACKAGING.replace('throw "打包目录里仍有调试符号/导入库', 'Write-Host "打包目录里仍有调试符号/导入库');
+  assert.notEqual(warnOnly, PACKAGING, '变异没生效：没找到符号残留的 throw');
+  assert.equal(hasSymbolSweep(warnOnly), false, '符号残留只告警不失败后判定仍通过（守卫是空转的）');
+
+  // 负向自证 2：去掉「扫描时排除 dx 自己」→ 判定必须变红（那会让 dx 永远删不掉）。
+  const noSelfSkip = PACKAGING.replace(/\s*\|\s*\n\s*Where-Object \{ \$dxLibs -notcontains \$_\.Name\.ToLower\(\) \}/, '');
+  assert.notEqual(noSelfSkip, PACKAGING, '变异没生效：没找到 dx 扫描的自排除过滤');
+  assert.equal(hasDxStrip(noSelfSkip), false, '去掉 dx 自排除后判定仍通过（说明断言没盯住这条）');
+
+  // 负向自证 3：把保留分支删掉（等于无条件删 dx）→ 判定必须变红。
+  const alwaysStrip = PACKAGING.replace('if ($dxImportedBy.Count -gt 0) {', 'if ($false) {');
+  assert.notEqual(alwaysStrip, PACKAGING, '变异没生效：没找到 dx 保留分支');
+  assert.equal(hasDxStrip(alwaysStrip), false, '无条件删 dx 后判定仍通过（客户机会 0xc0000135）');
+
+  // 负向自证 4：把 asar 的 .map 排除去掉 → 判定必须变红（37.89MB 源码映射不该进包）。
+  const noMapExclude = (PKG.build?.files ?? []).filter((p) => p !== '!**/*.map');
+  assert.notEqual(noMapExclude.length, (PKG.build?.files ?? []).length, '变异没生效：build.files 里没有 !**/*.map');
+  assert.equal(hasAsarExcludes(noMapExclude), false, '去掉 .map 排除后判定仍通过');
+});

@@ -670,10 +670,55 @@ jobs:
           }
           Write-Host "DEP_CLOSURE_OK extra=$closureExtra"
 
+          # 打包副产物清理：windeployqt / conda 的 release 构建一般不带符号，但只要哪天上游换了
+          # build（debug CRT、带 /DEBUG 的 OCCT、MSVC 顺手拷进来的 .lib/.exp），安装包会平白
+          # 胖十几 MB 且没人发现 —— v0.6.1 实测是 0 个，这里留的是回归守卫，不是"当前有问题"。
+          # 只删链接期/调试期文件：运行期一个都不需要（.exp/.lib 是导入库，.pdb/.ilk 是调试符号，
+          # .iobj/.ipdb/.tlog 是 MSVC 增量构建中间件）。
+          $symExts = @('.pdb', '.ilk', '.exp', '.lib', '.iobj', '.ipdb', '.tlog', '.obj')
+          # 先收集再删：边枚举边 Remove-Item 在深目录上会踩「目录项已变化」。
+          $symStripped = @(Get-ChildItem $dist -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $symExts -contains $_.Extension.ToLower() })
+          $symBytes = ($symStripped | Measure-Object -Property Length -Sum).Sum
+          if ($null -eq $symBytes) { $symBytes = 0 }
+          foreach ($sym in $symStripped) { Remove-Item $sym.FullName -Force }
+          $symLeft = @(Get-ChildItem $dist -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $symExts -contains $_.Extension.ToLower() })
+          if ($symLeft.Count -gt 0) { throw "打包目录里仍有调试符号/导入库：$($symLeft.FullName -join ',')" }
+          Write-Host "QTC_SYMBOL_CLEAN stripped=$($symStripped.Count) bytes=$symBytes"
+
+          # D3D12 着色器编译器：dxcompiler.dll(14.3MB) + dxil.dll(1.5MB) 只有 Qt Quick 的
+          # D3D12 RHI 才会用 QLibrary 动态加载（不在 Qt6Gui.dll 的导入表里，实测 24 个导入里
+          # 只有 d3d11/d3d12/dxgi）。qt-client 只链 Widgets/Network/OpenGLWidgets，没有 Quick，
+          # 所以这两个是死重量 —— 但"应该没人加载"不算依据：先扫包内每个 DLL 的静态导入表，
+          # 真有谁静态导入就原样保留（宁可多 15MB，也不让客户机 0xc0000135）。
+          # 扫的时候把 dx 这两个自己排除掉，否则 dxcompiler.dll 导入 dxil.dll 会让自己永远被保留。
+          $dxLibs = @('dxcompiler.dll', 'dxil.dll')
+          $dxImportedBy = @()
+          $dxScanTargets = @(Get-ChildItem $dist -File -Filter '*.dll' -ErrorAction SilentlyContinue |
+            Where-Object { $dxLibs -notcontains $_.Name.ToLower() }) + @(Get-Item (Join-Path $dist 'automationcad-qt.exe'))
+          foreach ($f in $dxScanTargets) {
+            foreach ($imp in (Get-ClosureImports $f.FullName)) {
+              if ($dxLibs -contains $imp.ToLower()) { $dxImportedBy += "$($f.Name)->$imp" }
+            }
+          }
+          $dxBytes = 0
+          if ($dxImportedBy.Count -gt 0) {
+            Write-Host "QTC_DX_KEPT $($dxImportedBy -join ',')"
+          } else {
+            foreach ($name in $dxLibs) {
+              $p = Join-Path $dist $name
+              if (Test-Path $p) { $dxBytes += (Get-Item $p).Length; Remove-Item $p -Force }
+            }
+            $dxLeft = @(Get-ChildItem $dist -File -ErrorAction SilentlyContinue | Where-Object { $dxLibs -contains $_.Name.ToLower() })
+            if ($dxLeft.Count -gt 0) { throw "D3D12 着色器编译器没删干净：$($dxLeft.Name -join ',')" }
+            Write-Host "QTC_DX_STRIPPED bytes=$dxBytes"
+          }
+
           Compress-Archive -Path "$dist/*" -DestinationPath "dist/automationcad-qt-windows-x64-occt.zip" -Force
           $zip = Get-Item "dist/automationcad-qt-windows-x64-occt.zip"
           $count = (Get-ChildItem $dist | Measure-Object).Count
-          Write-Host "PACKAGE_OCCT_OK bytes=$($zip.Length) files=$count tkv3d=1 stl=$($stlCopied.Count) step=$($stepCopied.Count) deps=$depsCopied vcrt=$(($vcRuntime.Count - $vcMissing.Count))/$($vcRuntime.Count)"
+          Write-Host "PACKAGE_OCCT_OK bytes=$($zip.Length) files=$count tkv3d=1 stl=$($stlCopied.Count) step=$($stepCopied.Count) deps=$depsCopied vcrt=$(($vcRuntime.Count - $vcMissing.Count))/$($vcRuntime.Count) symstripped=$($symStripped.Count) dxstripped=$dxBytes"
       - name: 从打包目录启动并核对版本
         shell: pwsh
         run: |
