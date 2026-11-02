@@ -203,6 +203,49 @@ jobs:
           if ($pipelineBytes -le 0) { throw "2/4 $pipeline 是空文件" }
           Write-Host "ASSERT_2_PIPELINE_OK bytes=$pipelineBytes"
 
+          # ②b 依赖闭包体检：把 exe 与包内 DLL 的导入表全扫一遍，列出「被引用但目录里没有」的 DLL。
+          #    这一步是为了抓住「conda PATH 兜住的隐藏依赖」——ci.yml 的启动自检在 conda 环境里跑，
+          #    缺的 DLL 可能被 Library/bin 兜住，只有脱离 conda 的安装包才会暴露 0xc0000135。
+          $systemDlls = @('kernel32.dll','user32.dll','gdi32.dll','advapi32.dll','shell32.dll','ole32.dll','oleaut32.dll',
+            'msvcrt.dll','ucrtbase.dll','ws2_32.dll','opengl32.dll','d3d11.dll','dxgi.dll','comdlg32.dll','winmm.dll',
+            'imm32.dll','version.dll','userenv.dll','netapi32.dll','uxtheme.dll','dnsapi.dll','iphlpapi.dll','secur32.dll',
+            'crypt32.dll','bcrypt.dll','rpcrt4.dll','setupapi.dll','dwmapi.dll','mpr.dll','shlwapi.dll','winspool.drv',
+            'ntdll.dll','powrprof.dll','d3d9.dll','dbghelp.dll','psapi.dll','wtsapi32.dll','authz.dll','cfgmgr32.dll')
+          function Get-ImportNames([string]$file) {
+            $lines = & $dumpbin /nologo /dependents $file 2>$null
+            if ($LASTEXITCODE -ne 0) { return @() }
+            $names = @()
+            foreach ($line in $lines) {
+              $m = [regex]::Match($line, '^\s+([A-Za-z0-9_\.\-]+\.(dll|drv|DLL|DRV))\s*$')
+              if ($m.Success) { $names += $m.Groups[1].Value.ToLower() }
+            }
+            return $names
+          }
+          # dumpbin 只在 VS 开发者环境里；本 job 没跑 msvc-dev-cmd，需要自己找。
+          $dumpbin = (Get-Command dumpbin.exe -ErrorAction SilentlyContinue).Source
+          if (-not $dumpbin) {
+            $dumpbin = Get-ChildItem -Path 'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe' -ErrorAction SilentlyContinue |
+              Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $dumpbin) { throw '1.5/4 找不到 dumpbin.exe：无法做依赖闭包体检（不要静默跳过）' }
+          Write-Host "DUMPBIN $dumpbin"
+          $present = @{}
+          Get-ChildItem $qtDir -Recurse -File | ForEach-Object { $present[$_.Name.ToLower()] = $true }
+          $missing = @{}
+          foreach ($f in (Get-ChildItem $qtDir -File -Filter '*.dll') + @(Get-Item $qtExe)) {
+            foreach ($imp in (Get-ImportNames $f.FullName)) {
+              if ($present.ContainsKey($imp)) { continue }
+              if ($systemDlls -contains $imp) { continue }
+              if ($imp -like 'api-ms-win-*' -or $imp -like 'ext-ms-*') { continue }
+              $missing[$imp] = $true
+            }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Host "IMPORT_CLOSURE_MISSING $($missing.Keys -join ',')"
+            throw "1.5/4 依赖闭包缺 $(($missing.Keys | Sort-Object) -join ',')：包里没这些 DLL，脱离 conda 环境启动即 0xc0000135"
+          }
+          Write-Host "ASSERT_1B_CLOSURE_OK"
+
           # ③ 真跑随包 exe --version：退出码 0、输出非空、版本号与 desktop/package.json 一致。
           #    Qt 是 GUI 子系统程序（直接 & exe 拿不到 stdout、$LASTEXITCODE 不可信），
           #    且 main.cpp 把 qInfo 强写 stderr —— 所以用 Start-Process 同时收两个流。
@@ -237,6 +280,15 @@ jobs:
             foreach ($k in $srcMap.Keys) {
               if (-not $qtMap.ContainsKey($k)) { Write-Host "DIAG_MISSING $k" }
               elseif ($qtMap[$k] -ne $srcMap[$k]) { Write-Host "DIAG_SIZE_DIFF $k qt=$($qtMap[$k]) src=$($srcMap[$k])" }
+            }
+            # A/B 对照：同一个 exe、同一套文件，在「原始 qt-dist 目录」里能不能起来
+            $srcExe = Join-Path $root 'qt-dist/automationcad-qt.exe'
+            if (Test-Path $srcExe) {
+              $p0 = Start-Process -FilePath $srcExe -ArgumentList '--version' -WorkingDirectory (Split-Path $srcExe) `
+                -Wait -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $env:RUNNER_TEMP 'q0.out') -RedirectStandardError (Join-Path $env:RUNNER_TEMP 'q0.err')
+              Write-Host "DIAG_FROM_QT_DIST exit=$($p0.ExitCode)"
+            } else {
+              Write-Host "DIAG_FROM_QT_DIST skip=no-exe"
             }
             $env:PATH = "$qtDir;$env:PATH"
             $p2 = Start-Process -FilePath $qtExe -ArgumentList '--version' -WorkingDirectory $qtDir `
