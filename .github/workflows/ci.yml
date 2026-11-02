@@ -460,6 +460,21 @@ jobs:
           } else {
             throw "缺 VC++ 运行库 $($vcMissing -join ',')：VS CRT 目录里没找到、也没拷进打包目录，包里也没有 vc_redist.x64.exe —— 纯净 Windows 机启动即 0xc0000135"
           }
+          # OpenMP 运行库 vcomp140 在另一个目录（Microsoft.VC*.OpenMP），不在 .CRT 里：
+          # FreeImage/OpenEXR 这类第三方库常用 /openmp 构建，缺它同样 0xc0000135。
+          $openmpDirs = @()
+          foreach ($root in @($vsRedistRoots | Select-Object -Unique)) {
+            if (-not (Test-Path $root)) { continue }
+            $openmpDirs += @(Get-ChildItem -Path (Join-Path $root 'x64') -Filter 'Microsoft.VC*.OpenMP' -Directory -ErrorAction SilentlyContinue |
+              Sort-Object Name -Descending | ForEach-Object { $_.FullName })
+          }
+          foreach ($dir in @($openmpDirs | Select-Object -Unique)) {
+            $src = Join-Path $dir 'vcomp140.dll'
+            if (Test-Path $src) {
+              Copy-Item $src $dist -Force
+              if (Test-Path (Join-Path $dist 'vcomp140.dll')) { Write-Host "VC_OPENMP_COPIED vcomp140.dll <- $dir"; break }
+            }
+          }
           # <<< VC_RUNTIME_BLOCK_END
           $occtBin = Join-Path $env:OCCT_PREFIX 'bin'
           # OCCT 只带白名单：B-Rep 布尔 / AIS 视口 / 基础与可视化服务（STEP 交换库单独处理）。
@@ -622,7 +637,7 @@ jobs:
             return $names
           }
           $closureExtra = 0
-          for ($pass = 1; $pass -le 3; $pass++) {
+          for ($pass = 1; $pass -le 6; $pass++) {
             $present = @{}
             Get-ChildItem $dist -File | ForEach-Object { $present[$_.Name.ToLower()] = $true }
             $closureMissing = @{}

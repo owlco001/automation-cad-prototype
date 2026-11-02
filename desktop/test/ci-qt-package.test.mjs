@@ -625,6 +625,8 @@ test('⑩ 依赖闭包：FreeImage 的兄弟 DLL 与 msvcp140_1/_2 必须真进�
   for (const name of ['msvcp140_1.dll', 'msvcp140_2.dll', 'concrt140.dll']) {
     assert.ok(vcLine.includes(name), `$vcRuntime 少了 ${name}：纯净机加载 automationcad-qt.exe / Qt6Gui 时 0xc0000135`);
   }
+  // vcomp140（OpenMP）在 Microsoft.VC*.OpenMP 目录，不在 .CRT 里，必须单独补拷
+  assert.match(PACKAGING, /VC_OPENMP_COPIED vcomp140\.dll/, 'OpenMP 运行库 vcomp140.dll 没有单独的补拷逻辑（FreeImage/OpenEXR 常带 /openmp）');
 
   // ④ 启动核对必须先把 conda 相关目录从 PATH 摘掉，否则缺的 DLL 会被 Library/bin 兜住 → 假绿
   const launch = stepBlock(LINES, '从打包目录启动并核对版本');
