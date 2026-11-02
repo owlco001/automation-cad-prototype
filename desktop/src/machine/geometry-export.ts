@@ -3,8 +3,8 @@
 //
 // 诚实边界：
 // - STL / glTF 是三角网格，圆柱按 segments 段多边形近似；不是 B-Rep，不能直接做 CAM。
-// - STEP 只能经 build123d sidecar 产出；sidecar 只有 box / 竖直 cylinder 算子与绕 Z 旋转，
-//   因此水平圆柱（接近开关、压力传感器、输送线电机）在实体化时以「等截面积方棒」近似。
+// - STEP 只能经 build123d sidecar 产出；sidecar 的 box / cylinder 算子支持 axis=x/y/z，
+//   因此竖直圆柱与横轴圆柱（滚筒、传动轴、光电/接近开关本体）都是精确回转体，不再退化成方棒。
 
 import {
   ASSEMBLY_SCHEMA_VERSION,
@@ -286,7 +286,7 @@ function round(value: number, digits = 3): number {
   return Object.is(result, -0) ? 0 : result;
 }
 
-/** 零件 → sidecar 特征列表（box 居中；竖直圆柱 = 内接小方块 + cylinder；水平圆柱 = 等截面方棒）。 */
+/** 零件 → sidecar 特征列表（box 居中；圆柱一律精确：竖直 = 内接小方块 + cylinder，横轴 = 带 axis 的 cylinder）。 */
 export function partSidecarFeatures(part: GeomPart): { features: FeatureNode[]; approximated: boolean } {
   if (part.shape.type === 'box') {
     const [length, width, height] = part.shape.size;
@@ -307,11 +307,17 @@ export function partSidecarFeatures(part: GeomPart): { features: FeatureNode[]; 
       approximated: false
     };
   }
-  const side = round(radius * Math.sqrt(Math.PI));
-  const size: Vec3 = axis === 'x' ? [length, side, side] : [side, length, side];
+  // 横轴（滚筒、传动轴、光电/接近开关本体）：内核 cylinder 支持 axis=x/y，按轴旋转展开后仍是精确回转体。
+  // 不再用「等截面积方棒」近似（方棒边长 r√π，包围盒比真圆柱小约 11%、面数 6 而非 3）。
+  // at 固定 [0,0,0]：特征在零件局部坐标系里建模，零件中心由实例 transform 摆位（与 z 轴写法一致）。
   return {
-    features: [{ id: 'f1', type: 'box', name: `${part.name}（等截面方棒近似）`, params: { length: size[0], width: size[1], height: size[2], centered: true } }],
-    approximated: true
+    features: [{
+      id: 'f1',
+      type: 'cylinder',
+      name: part.name,
+      params: { diameter: round(radius * 2), height: length, axis, at: [0, 0, 0] }
+    }],
+    approximated: false
   };
 }
 
@@ -319,6 +325,10 @@ export interface SidecarAssemblyBundle {
   /** 每块 ≤ MAX_ASSEMBLY_CHUNK 个实体，可逐块 POST /build。 */
   chunks: AssemblyDoc[];
   instances: number;
+  /**
+   * 近似件 id。横轴圆柱已改精确 cylinder（axis=x/y），目前恒为空数组；
+   * 字段保留是为了 commands.ts 的 «近似件 warning» 契约不回退（将来若再加近似算子仍可复用）。
+   */
   approximated: string[];
 }
 

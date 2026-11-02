@@ -1,5 +1,9 @@
 export type FeatureType = 'box' | 'cylinder' | 'holes' | 'counterbore' | 'slot' | 'fillet';
 
+/** cylinder 的轴向：z 竖直（默认），x/y 横轴（滚筒、传动轴、销轴）。 */
+export type CylinderAxis = 'x' | 'y' | 'z';
+export const CYLINDER_AXES: readonly CylinderAxis[] = ['x', 'y', 'z'] as const;
+
 export interface FeatureNode {
   id: string;
   type: FeatureType;
@@ -309,6 +313,11 @@ function validateFeatureDoc(doc: FeatureDoc): string[] {
       if (params.at !== undefined && vector3(params.at) === null) {
         errors.push(`${label}：参数「at」必须是 3 个数字组成的数组`);
       }
+      // axis：圆柱轴向，缺省 z。内核支持 x/y/z（横轴滚筒、传动轴必须带 axis），值域外一律报错，
+      // 不静默回落成 z —— 静默回落会让横轴件悄悄变成竖直圆柱，比报错更难查。
+      if (params.axis !== undefined && !CYLINDER_AXES.includes(params.axis as CylinderAxis)) {
+        errors.push(`${label}：参数「axis」只能是 x / y / z（收到「${String(params.axis)}」）`);
+      }
       return;
     }
 
@@ -484,10 +493,15 @@ function compileFeatureOps(features: readonly FeatureNode[]): Array<Record<strin
         ...(typeof params.centered === 'boolean' ? { centered: params.centered } : {})
       });
     } else if (type === 'cylinder') {
+      // axis 必须透传：内核 cylinder 按 axis 旋转展开（x/y 为横轴滚筒、传动轴）。
+      // 之前这里丢掉 axis，横轴件到了 sidecar 全变成竖直圆柱；只在值域内透传，
+      // 非法值由 validateFeatures 报错（compileOps 不替上游猜轴向）。
+      const axis = CYLINDER_AXES.includes(params.axis as CylinderAxis) ? params.axis as CylinderAxis : undefined;
       ops.push({
         op: 'cylinder',
         diameter: params.diameter,
         height: params.height,
+        ...(axis && axis !== 'z' ? { axis } : {}),
         ...(params.at !== undefined ? { at: clone(params.at) } : {})
       });
     } else if (type === 'holes') {

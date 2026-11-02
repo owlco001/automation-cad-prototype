@@ -165,7 +165,7 @@ test('工具层：schema 含 withGeometry/withSolids 且拒绝非布尔；design
   assert.ok(designed.summary.length <= 600);
 });
 
-test('withSolids：清掉上一次遗留的 part-N.step（撤销可恢复），并把近似件写进 warning 与 ids', async () => {
+test('withSolids：清掉上一次遗留的 part-N.step（撤销可恢复），近似件清零且不再有方棒 warning', async () => {
   const scratch = mkdtempSync(join(tmpdir(), 'cad-fake-step-'));
   roots.push(scratch);
   let chunk = 0;
@@ -187,12 +187,12 @@ test('withSolids：清掉上一次遗留的 part-N.step（撤销可恢复），�
   assert.equal(solids.mode, 'solids');
   assert.equal(existsSync(stale), false, '旧分块应被清理');
   for (const path of solids.stepPaths) assert.ok(existsSync(path), path);
-  // 近似件：count 与 id 列表都要透出，且有中文 warning 点名
+  // 横轴圆柱改精确 cylinder 后：contract 字段保留但恒为 0，且不得再出现方棒近似 warning
   const approximated = result.data.geometry.approximatedIds;
   assert.ok(Array.isArray(approximated));
-  assert.equal(approximated.length, result.data.geometry.approximated);
-  assert.equal(approximated.length > 0, true);
-  assert.ok(result.data.warnings.some((warning) => /等截面方棒近似/.test(warning)));
+  assert.equal(approximated.length, 0, '横轴滚筒/传动轴已精确，不再有近似件');
+  assert.equal(result.data.geometry.approximated, 0);
+  assert.ok(!result.data.warnings.some((warning) => /等截面方棒近似/.test(warning)), result.data.warnings.join('；'));
   // 撤销：清掉的旧块按快照恢复，本次新写入的 STEP 被删除
   assert.equal((await bus.undoLast()).ok, true);
   assert.ok(existsSync(stale), '撤销应恢复旧分块');

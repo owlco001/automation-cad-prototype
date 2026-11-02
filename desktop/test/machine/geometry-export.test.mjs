@@ -120,7 +120,7 @@ test('sidecar 契约：分块 ≤ 50 实体、每块通过 validateFeatures、�
   assert.equal(small.chunks.length, Math.ceil(geometry.parts.length / 10));
 });
 
-test('sidecar 契约：竖直圆柱 = 内接种子方块 + cylinder（精确），水平圆柱记为等截面方棒近似', () => {
+test('sidecar 契约：竖直圆柱 = 内接种子方块 + cylinder（精确），横轴圆柱 = 带 axis 的精确 cylinder', () => {
   const vertical = partSidecarFeatures({ name: '台面', shape: { type: 'cylinder', radius: 70, length: 12, axis: 'z' } });
   assert.equal(vertical.approximated, false);
   assert.deepEqual(vertical.features.map((feature) => feature.type), ['box', 'cylinder']);
@@ -129,17 +129,100 @@ test('sidecar 契约：竖直圆柱 = 内接种子方块 + cylinder（精确）�
   assert.ok(seed.height <= 12);
   assert.deepEqual(vertical.features[1].params, { diameter: 140, height: 12, at: [0, 0, 0] });
   const horizontal = partSidecarFeatures({ name: '接近开关', shape: { type: 'cylinder', radius: 6, length: 45, axis: 'y' } });
-  assert.equal(horizontal.approximated, true);
-  const { length, width, height } = horizontal.features[0].params;
-  assert.equal(width, 45);
-  assert.ok(Math.abs(length * height - Math.PI * 36) < 0.05, '截面积相等');
+  assert.equal(horizontal.approximated, false);
+  assert.equal(horizontal.features.length, 1, '横轴圆柱只发一个 cylinder，不再垫种子方块');
+  const [only] = horizontal.features;
+  assert.equal(only.type, 'cylinder');
+  assert.equal(only.params.axis, 'y');
+  assert.equal(only.params.diameter, 12);
+  assert.equal(only.params.height, 45);
+  assert.deepEqual(only.params.at, [0, 0, 0]);
+  assert.ok(!/方棒/.test(only.name), '不再标记为方棒近似');
   const geometry = geometryFor();
   const bundle = geometryToSidecarAssemblies(geometry, { updatedAt: UPDATED_AT });
-  const horizontalIds = geometry.parts
-    .filter((part) => part.shape.type === 'cylinder' && part.shape.axis !== 'z')
-    .map((part) => part.id);
-  assert.deepEqual(bundle.approximated, horizontalIds);
-  assert.ok(horizontalIds.length > 0);
+  const horizontalParts = geometry.parts.filter((part) => part.shape.type === 'cylinder' && part.shape.axis !== 'z');
+  assert.ok(horizontalParts.length > 0);
+  assert.deepEqual(bundle.approximated, [], '横轴圆柱已精确，不得再有近似件');
+  for (const part of horizontalParts) {
+    const { features, approximated } = partSidecarFeatures(part);
+    assert.equal(approximated, false, part.name);
+    assert.equal(features.length, 1, part.name);
+    assert.equal(features[0].type, 'cylinder', part.name);
+    assert.equal(features[0].params.axis, part.shape.axis, part.name);
+    assert.equal(features[0].params.diameter, Math.round(part.shape.radius * 2000) / 1000, part.name);
+    assert.equal(features[0].params.height, part.shape.length, part.name);
+  }
+});
+
+test('compileOps：cylinder.axis 透传（横轴件带 axis，z 轴与缺省不写 axis）', () => {
+  const doc = {
+    schemaVersion: 2,
+    instances: [
+      {
+        id: 'roller',
+        name: '滚筒',
+        transform: { x: 0, y: 0, z: 0, rz: 0 },
+        features: [{ id: 'f1', type: 'cylinder', name: '筒体', params: { diameter: 50, height: 200, axis: 'y', at: [0, -60, 0] } }]
+      },
+      {
+        id: 'shaft',
+        name: '传动轴',
+        transform: { x: 0, y: 0, z: 0, rz: 0 },
+        features: [{ id: 'f2', type: 'cylinder', name: '轴', params: { diameter: 20, height: 300, axis: 'x' } }]
+      },
+      {
+        id: 'table',
+        name: '台面',
+        transform: { x: 0, y: 0, z: 0, rz: 0 },
+        features: [{ id: 'f3', type: 'cylinder', name: '台面', params: { diameter: 140, height: 12, axis: 'z', at: [0, 0, 0] } }]
+      }
+    ],
+    updatedAt: UPDATED_AT
+  };
+  assert.deepEqual(validateFeatures(doc), []);
+  const { instances } = compileOps(doc);
+  assert.deepEqual(instances[0].ops, [{ op: 'cylinder', diameter: 50, height: 200, axis: 'y', at: [0, -60, 0] }]);
+  assert.deepEqual(instances[1].ops, [{ op: 'cylinder', diameter: 20, height: 300, axis: 'x' }]);
+  assert.deepEqual(instances[2].ops, [{ op: 'cylinder', diameter: 140, height: 12, at: [0, 0, 0] }], 'z 轴即内核缺省，不写 axis');
+});
+
+test('特征树：cylinder.axis 只接受 x/y/z，非法值报错而不是悄悄变成竖直圆柱', () => {
+  const base = { schemaVersion: 1, updatedAt: UPDATED_AT };
+  const errors = validateFeatures({ ...base, features: [{ id: 'f1', type: 'cylinder', name: '筒体', params: { diameter: 50, height: 200, axis: 'w' } }] });
+  assert.ok(errors.some((message) => message.includes('axis') && message.includes('x / y / z')), errors.join('；'));
+  for (const axis of ['x', 'y', 'z']) {
+    const ok = validateFeatures({ ...base, features: [{ id: 'f1', type: 'cylinder', name: '筒体', params: { diameter: 50, height: 200, axis } }] });
+    assert.deepEqual(ok, [], axis);
+  }
+});
+
+test('网格与 STEP 口径一致：横轴圆柱的局部 bbox = [直径, 长度, 直径]（y）/ [长度, 直径, 直径]（x）', () => {
+  const roller = { name: '滚筒', shape: { type: 'cylinder', radius: 40, length: 120, axis: 'y' } };
+  const shaft = { name: '传动轴', shape: { type: 'cylinder', radius: 25, length: 200, axis: 'x' } };
+  const measure = (part) => {
+    const { positions } = partLocalMesh(part);
+    const min = [Infinity, Infinity, Infinity];
+    const max = [-Infinity, -Infinity, -Infinity];
+    for (let index = 0; index < positions.length; index += 3) {
+      for (let k = 0; k < 3; k += 1) {
+        min[k] = Math.min(min[k], positions[index + k]);
+        max[k] = Math.max(max[k], positions[index + k]);
+      }
+    }
+    return max.map((value, k) => Math.round((value - min[k]) * 10) / 10);
+  };
+  assert.deepEqual(measure(roller), [80, 120, 80]);
+  assert.deepEqual(measure(shaft), [200, 50, 50]);
+  // sidecar 特征只声明 Ø/长度/轴向，允许内核算出同一 bbox：横轴 bbox 的「长边」必须落在 axis 上
+  for (const part of [roller, shaft]) {
+    const [feature] = partSidecarFeatures(part).features;
+    assert.equal(feature.type, 'cylinder');
+    assert.equal(feature.params.axis, part.shape.axis);
+    const along = { x: 0, y: 1, z: 2 }[feature.params.axis];
+    const bbox = measure(part);
+    assert.equal(bbox[along], part.shape.length, part.name);
+    assert.deepEqual(bbox.filter((_value, k) => k !== along), [part.shape.radius * 2, part.shape.radius * 2], part.name);
+  }
 });
 
 test('实体化：无内核回退 TS 网格；内核全部成功返回 STEP；任一块失败整体回退不冒充完整', async () => {
