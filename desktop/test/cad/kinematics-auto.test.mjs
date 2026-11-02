@@ -7,8 +7,11 @@ import {
   acceptSuggestions,
   analyzeMeshShape,
   axisAngleDeg,
+  batchGate,
   classifyName,
   describeSuggestions,
+  GEOMETRY_CONFIDENCE_CAP,
+  GEOMETRY_UNQUANTIFIED_CAP,
   scorePointOption,
   snapAxis,
   stationOf,
@@ -515,6 +518,137 @@ test('装配路径：occt 树 → 每个网格的父节点路径（跳过空名�
   assert.deepEqual(paths[2], ['MACHINE']);
   assert.equal(paths[3], undefined);
   assert.deepEqual(meshPathsFromRoot(undefined, ['a']), [undefined]);
+});
+
+// ---------------------------------------------------------------- 几何推断（无型号 / 通用件名）
+//
+// R1 场景：零件名只有通用词（「工位1气缸1 缸体」「工位1夹爪2 夹指左」）或干脆是 Part1 / Solid1，
+// 没有型号、没有子装配层级。旧实现按名称主干分组，同一支气缸的缸体与活塞杆被拆成两条单件聚类，
+// 全部报「气缸只有一个网格」→ 基线 ≥0.6 档严格正确 0/31。下面覆盖几何归组与置信度封顶。
+
+test('几何归组：通用件名（缸体 / 活塞杆 / 压头 名字各异）仍归成同一支气缸，缸体保持固定', () => {
+  const path = ['MACHINE', 'ST1'];
+  const meshes = [
+    prismMesh('工位1气缸1 缸体 Ø32×40', [0, 0, 0], [0, 0, 1], 110, 20, { id: 1, path }),
+    prismMesh('工位1气缸1 活塞杆', [0, 0, -25], [0, 0, 1], 75, 6, { id: 2, path }),
+    boxMesh('工位1气缸1 压头', [-16, -16, -39], [16, 16, -25], { id: 3, path }),
+    // 治具离活塞杆很远（贴着工件），不能被算成随动件
+    boxMesh('工位1气缸1 治具', [-35, -35, -190], [35, 35, -160], { id: 4, path })
+  ];
+  const result = suggestKinematics(meshes);
+  const cylinders = allSuggestions(result).filter((item) => item.category === 'cylinder');
+  assert.equal(cylinders.length, 1, '缸体与活塞杆应合成一条建议，而不是各出一条');
+  const s = cylinders[0];
+  assert.equal(s.inferredBy, 'geometry');
+  assert.deepEqual([s.axis, s.direction], ['z', -1]);
+  assert.equal(s.strokeSource, 'geometry');
+  assert.equal(s.travelMm, 40);
+  assert.deepEqual([...s.meshIds].sort(), [2, 3], '随动件 = 活塞杆 + 压头');
+  assert.deepEqual(s.fixedMeshIds, [1], '缸体是固定件，不能被写成动件');
+  assert.ok(!s.meshIds.includes(4), '治具不在杆端，不能随杆动');
+  assert.ok(s.confidence <= GEOMETRY_CONFIDENCE_CAP);
+  assert.match(s.reason, /同轴/);
+  assert.match(s.reason, /贴在活塞杆端部/);
+});
+
+test('只有几何信息（Part1 / Solid1，无任何名称）也能认出气缸，并标注为几何来源', () => {
+  const meshes = [
+    prismMesh('Part1', [0, 0, 0], [0, 0, 1], 110, 20, { id: 1 }),
+    prismMesh('Solid2', [0, 0, -25], [0, 0, 1], 75, 6, { id: 2 })
+  ];
+  const s = allSuggestions(suggestKinematics(meshes))[0];
+  assert.ok(s, '纯几何条件下应至少出一条建议');
+  assert.equal(s.category, 'cylinder');
+  assert.equal(s.inferredBy, 'geometry');
+  assert.equal(s.travelMm, 40);
+  assert.match(s.reason, /无任何名称信息/);
+});
+
+test('几何推断不抢型号场景：带型号的气缸仍走型号档，行程与置信度都不降', () => {
+  const result = suggestKinematics(cylinderPair({ names: ['CDJ2B16-50_body', 'CDJ2B16-50_rod'] }));
+  assert.equal(result.suggestions.length, 1);
+  const s = result.suggestions[0];
+  assert.equal(s.inferredBy, 'model');
+  assert.equal(s.travelMm, 50);
+  assert.equal(s.strokeSource, 'model-code');
+  assert.ok(s.confidence >= 0.8);
+  assert.equal(batchGate(s).ok, true, batchGate(s).reason);
+});
+
+test('几何推断的置信度必须低于型号档，且过不了批量采纳门槛', () => {
+  const model = suggestKinematics(cylinderPair({ names: ['CDJ2B16-50_body', 'CDJ2B16-50_rod'] })).suggestions[0];
+  const geo = allSuggestions(suggestKinematics(cylinderPair({ names: ['Part1', 'Solid2'] })))[0];
+  assert.equal(geo.inferredBy, 'geometry');
+  assert.ok(geo.confidence <= GEOMETRY_CONFIDENCE_CAP, `几何上限 ${GEOMETRY_CONFIDENCE_CAP}，实际 ${geo.confidence}`);
+  assert.ok(geo.confidence < model.confidence);
+  const gate = batchGate(geo);
+  assert.equal(gate.ok, false);
+  assert.match(gate.reason, /低于批量门槛/);
+});
+
+test('夹爪：名字只写「夹爪」时按镜像两指归组，名称里的「行程 6」折半为单指 3 mm', () => {
+  const path = ['MACHINE', 'ST2'];
+  const meshes = [
+    boxMesh('工位2夹爪2 本体（行程 6）', [23, 500, 1126], [87, 540, 1182], { id: 1, path }),
+    boxMesh('工位2夹爪2 左块', [30, 508, 1086], [42, 532, 1126], { id: 2, path }),
+    boxMesh('工位2夹爪2 右块', [68, 508, 1086], [80, 532, 1126], { id: 3, path }),
+    boxMesh('工位2夹爪2 安装块', [20, 495, 1182], [90, 545, 1202], { id: 4, path })
+  ];
+  const s = allSuggestions(suggestKinematics(meshes)).find((item) => item.category === 'gripper');
+  assert.ok(s, '应识别出夹爪');
+  assert.equal(s.inferredBy, 'geometry');
+  assert.equal(s.axis, 'x');
+  assert.equal(s.travelMm, 3, '开闭总行程 6 mm → 单指 3 mm');
+  assert.match(s.reason, /折半/);
+  assert.match(s.reason, /镜像对称/);
+  assert.deepEqual(s.fixedMeshIds, [1], '本体固定，只有一根手指被写成动件');
+});
+
+test('旋转台：薄台面贴底座识别为转轴、台面治具随动；角度只能预填时压到低置信度', () => {
+  const path = ['MACHINE', 'ST1'];
+  const meshes = [
+    prismMesh('工位1旋转轴1 底座', [0, 0, 0], [0, 0, 1], 40, 55, { id: 1, path }),
+    prismMesh('工位1旋转轴1 台面 Ø140', [0, 0, 40], [0, 0, 1], 12, 70, { id: 2, path }),
+    boxMesh('工位1旋转轴1 治具', [10, -15, 52], [70, 15, 82], { id: 3, path })
+  ];
+  const s = allSuggestions(suggestKinematics(meshes)).find((item) => item.category === 'rotary');
+  assert.ok(s, '应识别出旋转台');
+  assert.equal(s.axis, 'z');
+  assert.deepEqual([...s.meshIds].sort(), [2, 3], '台面 + 台面上的治具一起转');
+  assert.deepEqual(s.fixedMeshIds, [1], '底座是固定件');
+  assert.equal(s.inferredBy, 'geometry');
+  assert.equal(s.confidence, GEOMETRY_UNQUANTIFIED_CAP);
+  assert.equal(s.level, 'low');
+});
+
+test('转盘没有贴合底座时，不把 100 mm 外的机架台面写进动件', () => {
+  const path = ['MACHINE', 'ST0'];
+  const meshes = [
+    boxMesh('机架台面 680×1460×20', [-340, -730, -20], [340, 730, 0], { id: 1, path }),
+    prismMesh('分度转盘 Ø560×20', [0, 0, 113], [0, 0, 1], 20, 280, { id: 2 }),
+    boxMesh('转盘治具 1', [-35, -35, 133], [35, 35, 163], { id: 3 })
+  ];
+  const result = suggestKinematics(meshes);
+  const touchingFrame = allSuggestions(result).filter((item) => item.meshIds.includes(1));
+  assert.equal(touchingFrame.length, 0, '机架台面不能被当成转盘本体或随动件');
+  const dial = allSuggestions(result).filter((item) => item.meshIds.includes(2));
+  assert.ok(dial.length > 0, '转盘本身仍应出现在建议/跳过里，不能静默丢弃');
+  assert.ok(dial.every((item) => item.level === 'low'), '定不出本体与转轴，只能是低置信度');
+  assert.ok(dial.some((item) => /转轴无法确定/.test(item.reason)), dial.map((item) => item.reason).join('｜'));
+});
+
+test('空装配 / 单件装配：不抛错、不出建议', () => {
+  const cases = [
+    [],
+    [prismMesh('Part1', [0, 0, 0], [0, 0, 1], 100, 8, { id: 1 })],
+    [boxMesh('Solid1', [0, 0, 0], [10, 10, 10], { id: 2 })]
+  ];
+  for (const meshes of cases) {
+    const result = suggestKinematics(meshes);
+    assert.equal(result.suggestions.length, 0);
+    assert.equal(result.lowConfidence.length, 0);
+    assert.equal(result.stats.meshes, meshes.length);
+  }
 });
 
 // ---------------------------------------------------------------- 端到端：STEP 夹具

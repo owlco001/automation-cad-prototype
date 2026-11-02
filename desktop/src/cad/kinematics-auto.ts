@@ -159,6 +159,11 @@ export interface KinematicsSuggestion {
   pointCandidates: PointCandidate[];
   confidence: number;
   level: 'high' | 'low';
+  /**
+   * 归组依据：model 型号 / path 子装配名 / name 名称主干 / geometry 纯几何。
+   * geometry 来源的建议置信度被封顶（见 GEOMETRY_CONFIDENCE_CAP），UI 与批量采纳据此区别对待。
+   */
+  inferredBy: ClusterOrigin;
   reasons: string[];
   reason: string;
 }
@@ -220,6 +225,25 @@ export const CATEGORY_LABELS: Record<MechanismCategory, string> = {
 
 const DEFAULT_MIN_CONFIDENCE = 0.6;
 const DEFAULT_MIN_POINT_SCORE = 0.5;
+
+/**
+ * 归组依据：型号 > 子装配名 > 名称主干 > 纯几何。纯几何归组出来的建议要单独封顶。
+ */
+export type ClusterOrigin = 'model' | 'path' | 'name' | 'geometry';
+
+/**
+ * 几何来源建议的置信度上限（型号/样本表来源的天花板是 0.9）。
+ * 为什么是 0.65：批量采纳门槛是「置信度 ≥ 0.8 且行程来源 ∈ {model-code, catalog}」，
+ * 0.65 同时挡住这两条，几何结论永远进不了型号那一档，也就不会被「一键高置信」误批。
+ */
+export const GEOMETRY_CONFIDENCE_CAP = 0.65;
+/**
+ * 几何只定位到机构、却量不出行程/角度（直线行程为 0、旋转角度只能按 90° 预填）时再降一档。
+ * 0.55 < DEFAULT_MIN_CONFIDENCE(0.6)：这种建议不进高置信主表，只在折叠区给人看，
+ * 与引擎既有「行程取不到就不能算高置信」的口径一致。
+ */
+export const GEOMETRY_UNQUANTIFIED_CAP = 0.55;
+
 const STANDARD_STROKES = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 75, 80, 100, 125, 150, 175, 200, 250, 300, 350, 400, 450, 500];
 
 /** SMC MHZ2 平行夹爪开闭总行程（mm），按样本表；单指行程为一半。 */
@@ -659,6 +683,9 @@ interface Cluster {
   members: MeshInfo[];
   modelCode: string;
   fromPath: boolean;
+  origin: ClusterOrigin;
+  /** 几何归组的判据（中文），会写进建议理由，让用户能复核「为什么这么判」。 */
+  evidence: string[];
 }
 
 const ROLE_FOR_CATEGORY: Record<MechanismCategory, PartRole[]> = {
@@ -685,11 +712,21 @@ function nameStem(name: string): string {
 
 function buildClusters(infos: MeshInfo[]): { clusters: Cluster[]; loose: MeshInfo[] } {
   const clusters = new Map<string, Cluster>();
+  const pools = new Map<string, { group: string; category: MechanismCategory; members: MeshInfo[] }>();
   const pending: MeshInfo[] = [];
-  const addTo = (key: string, info: MeshInfo, category: MechanismCategory, modelCode: string, fromPath: boolean): void => {
+  const orphans: MeshInfo[] = [];
+
+  const addTo = (
+    key: string,
+    info: MeshInfo,
+    category: MechanismCategory,
+    modelCode: string,
+    fromPath: boolean,
+    origin: ClusterOrigin
+  ): void => {
     let cluster = clusters.get(key);
     if (!cluster) {
-      cluster = { key, group: info.group, category, members: [], modelCode, fromPath };
+      cluster = { key, group: info.group, category, members: [], modelCode, fromPath, origin, evidence: [] };
       clusters.set(key, cluster);
     }
     cluster.members.push(info);
@@ -699,18 +736,50 @@ function buildClusters(infos: MeshInfo[]): { clusters: Cluster[]; loose: MeshInf
   for (const info of infos) {
     const own = info.own;
     if (own.category && own.seriesKey) {
-      addTo(`${info.group}#${own.seriesKey}`, info, own.category, own.modelCode, false);
+      addTo(`${info.group}#${own.seriesKey}`, info, own.category, own.modelCode, false, 'model');
     } else if (info.inherited.category && !own.category) {
       // 父节点名带类别（如子装配「ST1_CYL_A1_CDJ2B16-50」下的 body / rod）
-      addTo(`${info.group}#path`, info, info.inherited.category, info.inherited.modelCode, true);
+      addTo(`${info.group}#path`, info, info.inherited.category, info.inherited.modelCode, true, 'path');
     } else if (own.category) {
-      addTo(`${info.group}#${own.category}#${nameStem(info.mesh.name)}`, info, own.category, '', false);
+      // 有类别、没型号：名称只能说明「这是哪一类件」，说不清「哪几件属于同一个机构」。
+      // 先按「组 + 类别」攒成池子，再纯几何切成一个个真实机构（见 partitionPool）。
+      const key = `${info.group}#${own.category}`;
+      const pool = pools.get(key);
+      if (pool) pool.members.push(info);
+      else pools.set(key, { group: info.group, category: own.category, members: [info] });
     } else if (own.role) {
       pending.push(info);
+    } else {
+      orphans.push(info);
     }
   }
 
-  // 只有角色、没有类别的件（finger_L、活塞杆…）：并入同组内包围盒相接且角色相容的最近机构
+  for (const [key, pool] of [...pools.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    for (const cluster of partitionPool(pool.group, pool.category, pool.members)) {
+      clusters.set(`${key}#${cluster.key}`, cluster);
+    }
+  }
+
+  // 连「哪一类件」都读不出来（Part1 / Solid1 / 无名称导出）：只靠几何找机构。
+  // 只在「整台装配没有任何一处名称能认出机构」时启用。为什么不做逐组兜底：
+  // 机架立柱、立腿这类成对结构件会被镜像规则误当成夹爪两指（实测 R3 会多出 14 条噪声），
+  // 而纯几何无从分辨「两根立柱」与「两根夹指」——没有名称交叉验证时宁可漏，不可乱报。
+  const bareAllowed = clusters.size === 0;
+  const orphanGroups = new Map<string, MeshInfo[]>();
+  if (bareAllowed) {
+    for (const info of orphans) {
+      const list = orphanGroups.get(info.group);
+      if (list) list.push(info);
+      else orphanGroups.set(info.group, [info]);
+    }
+  }
+  for (const [group, members] of [...orphanGroups.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    for (const cluster of inferBareClusters(group, members)) clusters.set(`${group}#bare#${cluster.key}`, cluster);
+  }
+
+  // 只有角色、没有类别的件（finger_L、活塞杆…）：并入同组内包围盒相接且角色相容的最近机构。
+  // 邻接容差按「机构自身最小件的尺寸」算，不按来件尺寸算——否则机架台面（1460 mm 长）
+  // 会凭 146 mm 的容差把自己并进 103 mm 外的分度转盘，把固定机架写成动件。
   const loose: MeshInfo[] = [];
   for (const info of pending) {
     let best: { cluster: Cluster; gap: number } | null = null;
@@ -718,7 +787,8 @@ function buildClusters(infos: MeshInfo[]): { clusters: Cluster[]; loose: MeshInf
       if (cluster.group !== info.group) continue;
       if (!ROLE_FOR_CATEGORY[cluster.category].includes(info.own.role)) continue;
       const gap = Math.min(...cluster.members.map((member) => boxGap(member.mesh, info.mesh)));
-      const tolerance = Math.max(2, 0.1 * Math.max(...info.mesh.size));
+      const clusterScale = Math.min(...cluster.members.map((member) => Math.max(...member.mesh.size)));
+      const tolerance = Math.max(2, Math.min(10, 0.1 * clusterScale));
       if (gap <= tolerance && (!best || gap < best.gap)) best = { cluster, gap };
     }
     if (best) best.cluster.members.push(info);
@@ -726,6 +796,372 @@ function buildClusters(infos: MeshInfo[]): { clusters: Cluster[]; loose: MeshInf
   }
 
   return { clusters: [...clusters.values()], loose };
+}
+
+// ---------------------------------------------------------------- 几何归组
+//
+// 为什么需要这一层：型号（R2）与子装配名（R3）能直接告诉引擎「哪几件是同一个机构」，
+// 没有型号时旧实现退回「按名称主干分组」，于是「工位1气缸1 缸体」和「工位1气缸1 活塞杆」
+// 名字主干不同 → 被拆成两个单件聚类 → 各报「气缸只有一个网格」。实测 R1 ≥0.6 档严格正确 0/31 全由此而来。
+//
+// 这一层的输入只有 center/size/PCA（analyzeMeshShape），输出「哪些网格属于同一个机构、各是什么角色」。
+// 名称角色仍然优先（ROLE_FOR_CATEGORY 相容就保留），几何只负责补空缺与分组。
+// 坐标全部是世界坐标包围盒，所以不依赖装配变换是否为单位阵。
+
+function makeCluster(
+  group: string,
+  category: MechanismCategory,
+  members: MeshInfo[],
+  origin: ClusterOrigin,
+  evidence: string[],
+  modelCode = ''
+): Cluster {
+  // 键用网格 id：同一装配内唯一、与成员顺序无关，识别两次结果不变。
+  return {
+    key: `${origin}#${category}#${members.map((member) => member.mesh.id).join('-')}`,
+    group,
+    category,
+    members,
+    modelCode,
+    fromPath: false,
+    origin,
+    evidence
+  };
+}
+
+/** 名称给的角色是否适用于该类别；适用就保留（名称优先），否则用几何推断的角色覆盖。 */
+function assignRole(info: MeshInfo, category: MechanismCategory, role: PartRole): MeshInfo {
+  if (info.own.role !== '' && ROLE_FOR_CATEGORY[category].includes(info.own.role)) return info;
+  if (info.own.role === role) return info;
+  return { ...info, own: { ...info.own, role } };
+}
+
+/** 横截面尺寸（第二、第三主轴的较大者）。 */
+function crossExtent(shape: MeshShape): number {
+  return Math.max(shape.extents[1], shape.extents[2]);
+}
+
+interface RodBodyPair {
+  rod: MeshInfo;
+  body: MeshInfo;
+  line: number;
+  angle: number;
+  overlap: number;
+  score: number;
+}
+
+/**
+ * 「细长杆 + 粗体」同轴配对：杆截面明显细于体、轴线夹角小、沿轴投影有实质重叠。
+ * 为什么固定件不会被认成动件：这条只判「谁套在谁里」，不判「谁动」——
+ * 动的是杆（analyzeCylinder 里 moving 只取非 body，方向取杆露出的一端），体始终 fixed。
+ */
+function findRodBodyPairs(members: MeshInfo[], options: { requireRodRound?: boolean } = {}): RodBodyPair[] {
+  const matches: RodBodyPair[] = [];
+  for (const rod of members) {
+    if (rod.shape.elongation < 2) continue;
+    if (options.requireRodRound && !rod.shape.round) continue;
+    const rodCross = crossExtent(rod.shape);
+    const axis = rod.shape.axes[0];
+    const rodRange = projectBox(rod.mesh, axis);
+    const rodLength = Math.max(1e-6, rodRange[1] - rodRange[0]);
+    for (const body of members) {
+      if (body === rod) continue;
+      const bodyCross = crossExtent(body.shape);
+      // 体必须明显粗于杆，否则两根同粗的杆会互相配成「缸」
+      if (bodyCross < rodCross * 1.35) continue;
+      if (volume(body.mesh) <= volume(rod.mesh)) continue;
+      // 体不细长时（方块缸体/安装块），轴线无意义，只按中心线与投影判断
+      const angle = body.shape.elongation >= 1.25 ? axisAngleDeg(axis, body.shape.axes[0]) : 0;
+      if (angle > 12) continue;
+      const line = distanceToLine(body.mesh.center, rod.mesh.center, axis);
+      if (line > Math.max(2, 0.3 * bodyCross)) continue;
+      const bodyRange = projectBox(body.mesh, axis);
+      const overlap = Math.min(rodRange[1], bodyRange[1]) - Math.max(rodRange[0], bodyRange[0]);
+      if (overlap < 0.25 * rodLength) continue;
+      matches.push({ rod, body, line, angle, overlap, score: line / Math.max(2, bodyCross) + angle / 90 - overlap / rodLength });
+    }
+  }
+  matches.sort((a, b) => a.score - b.score || a.rod.mesh.id - b.rod.mesh.id || a.body.mesh.id - b.body.mesh.id);
+  const taken = new Set<MeshInfo>();
+  const out: RodBodyPair[] = [];
+  for (const match of matches) {
+    if (taken.has(match.rod) || taken.has(match.body)) continue;
+    taken.add(match.rod);
+    taken.add(match.body);
+    out.push(match);
+  }
+  return out;
+}
+
+/** 贴在活塞杆端部、随杆一起动的零件（压头/工装）：贴着杆、不细长、且不是缸体本身。 */
+function cylinderFollowers(members: MeshInfo[], pair: RodBodyPair, used: Set<MeshInfo>): MeshInfo[] {
+  const axis = pair.rod.shape.axes[0];
+  const tolerance = Math.max(1, 0.15 * crossExtent(pair.rod.shape));
+  return members.filter((extra) => {
+    if (used.has(extra) || extra === pair.rod || extra === pair.body) return false;
+    if (extra.own.role === 'body') return false;
+    if (extra.shape.elongation >= 2) return false; // 另一根杆，别挂到这条缸上
+    if (boxGap(extra.mesh, pair.rod.mesh) > tolerance) return false;
+    return distanceToLine(extra.mesh.center, pair.rod.mesh.center, axis) <= Math.max(3, 0.6 * crossExtent(pair.body.shape));
+  });
+}
+
+function partitionCylinder(group: string, members: MeshInfo[]): Cluster[] {
+  const out: Cluster[] = [];
+  const used = new Set<MeshInfo>();
+  for (const pair of findRodBodyPairs(members)) {
+    const followers = cylinderFollowers(members, pair, used);
+    used.add(pair.rod);
+    used.add(pair.body);
+    for (const follower of followers) used.add(follower);
+    const roster = [pair.rod, pair.body, ...followers].map((info) =>
+      info === pair.rod
+        ? assignRole(info, 'cylinder', 'rod')
+        : info === pair.body
+          ? assignRole(info, 'cylinder', 'body')
+          : info
+    );
+    out.push(
+      makeCluster(
+        group,
+        'cylinder',
+        roster,
+        'geometry',
+        [
+          `活塞杆「${pair.rod.mesh.name}」与缸体「${pair.body.mesh.name}」同轴（偏距 ${round(pair.line, 1)} mm，夹角 ${round(pair.angle, 1)}°，沿轴重叠 ${round(pair.overlap, 1)} mm）`,
+          ...(followers.length > 0 ? [`「${followers.map((follower) => follower.mesh.name).join('、')}」贴在活塞杆端部，随杆一起动`] : [])
+        ]
+      )
+    );
+  }
+  for (const info of members) if (!used.has(info)) out.push(makeCluster(group, 'cylinder', [info], 'geometry', ['同组内没有与它同轴的缸体/活塞杆配对']));
+  return out;
+}
+
+interface MirrorPair {
+  a: MeshInfo;
+  b: MeshInfo;
+  axis: number;
+  skew: number;
+  offset: number;
+}
+
+/** 关于某件中心镜像对称的一对小件（夹爪两指）：体积相近、分居一条轴两侧、其余两轴几乎重合。 */
+function findMirrorPairs(candidates: MeshInfo[], body: MeshInfo): MirrorPair[] {
+  const pairs: MirrorPair[] = [];
+  for (let i = 0; i < candidates.length; i += 1) {
+    for (let j = i + 1; j < candidates.length; j += 1) {
+      const a = candidates[i]!;
+      const b = candidates[j]!;
+      const va = volume(a.mesh);
+      const vb = volume(b.mesh);
+      if (Math.min(va, vb) <= 0) continue;
+      if (Math.max(va, vb) > 2.2 * Math.min(va, vb)) continue;
+      const da = sub(a.mesh.center, body.mesh.center);
+      const db = sub(b.mesh.center, body.mesh.center);
+      for (let k = 0; k < 3; k += 1) {
+        if (da[k]! * db[k]! >= 0) continue; // 必须分居两侧
+        const separation = Math.abs(da[k]!) + Math.abs(db[k]!);
+        if (separation < 2) continue;
+        const offset = Math.abs(da[k]! + db[k]!) / separation; // 离中心是否等距
+        if (offset > 0.2) continue;
+        const skew = [0, 1, 2].filter((axis) => axis !== k).reduce((sum, axis) => sum + Math.abs(da[axis]! - db[axis]!), 0);
+        if (skew > Math.max(2, 0.3 * separation)) continue;
+        pairs.push({ a, b, axis: k, skew, offset });
+      }
+    }
+  }
+  pairs.sort((x, y) => x.offset + x.skew / 10 - (y.offset + y.skew / 10) || x.a.mesh.id - y.a.mesh.id || x.b.mesh.id - y.b.mesh.id);
+  const taken = new Set<MeshInfo>();
+  const out: MirrorPair[] = [];
+  for (const pair of pairs) {
+    if (taken.has(pair.a) || taken.has(pair.b)) continue;
+    taken.add(pair.a);
+    taken.add(pair.b);
+    out.push(pair);
+  }
+  return out;
+}
+
+function partitionGripper(group: string, members: MeshInfo[]): Cluster[] {
+  const out: Cluster[] = [];
+  if (members.length === 0) return out;
+  const body =
+    members.find((member) => member.own.role === 'body') ??
+    [...members].sort((a, b) => volume(b.mesh) - volume(a.mesh) || a.mesh.id - b.mesh.id)[0]!;
+  const bodyVolume = volume(body.mesh);
+
+  // 手指：名称角色优先；名称没写就找「体积相近、关于本体镜像」的一对。
+  const named = members.filter((member) => member !== body && member.own.role === 'finger');
+  const candidates = members.filter(
+    (member) => member !== body && member.own.role !== 'body' && member.own.role !== 'finger' && volume(member.mesh) < 0.8 * bodyVolume
+  );
+  const mirrored = named.length >= 2 ? [] : findMirrorPairs(candidates, body);
+  const fingers = mirrored.length > 0 ? [mirrored[0]!.a, mirrored[0]!.b] : named.slice(0, 2);
+
+  const used = new Set<MeshInfo>([body, ...fingers]);
+  const evidence = mirrored.length
+    ? [`「${mirrored[0]!.a.mesh.name}」与「${mirrored[0]!.b.mesh.name}」体积相近（${round(Math.min(volume(mirrored[0]!.a.mesh), volume(mirrored[0]!.b.mesh)) / 1000, 1)} L vs ${round(Math.max(volume(mirrored[0]!.a.mesh), volume(mirrored[0]!.b.mesh)) / 1000, 1)} L）、关于本体「${body.mesh.name}」镜像对称 → 判断为开合两指`]
+    : [`按名称角色识别到 ${fingers.length} 根手指`];
+
+  if (fingers.length > 0) {
+    const roster = [body, ...fingers].map((info) =>
+      info === body ? assignRole(info, 'gripper', 'body') : assignRole(info, 'gripper', 'finger')
+    );
+    out.push(makeCluster(group, 'gripper', roster, 'geometry', evidence));
+  }
+  for (const info of members) {
+    if (used.has(info)) continue;
+    out.push(makeCluster(group, 'gripper', [info], 'geometry', ['同组内没有与之镜像对称的配对件']));
+  }
+  if (fingers.length === 0) {
+    // 没配出任何手指：整池按单件处理，保留原本「手指未拆分」的跳过说明
+    const rest = out.filter((cluster) => !cluster.members.includes(body));
+    return [makeCluster(group, 'gripper', [body], 'geometry', ['没有找到成对的手指']), ...rest];
+  }
+  return out;
+}
+
+/** 台面法向：优先与「台面→本体」连线同向，便于后续判断治具在台面上方还是下方。 */
+function tableNormal(table: MeshInfo, body: MeshInfo | null): Vec3 {
+  const normal = table.shape.flatness < 0.6 ? table.shape.axes[2] : table.shape.axes[0];
+  if (body && dot(sub(table.mesh.center, body.mesh.center), normal) < 0) return scale(normal, -1);
+  return normal;
+}
+
+function partitionRotary(group: string, members: MeshInfo[]): Cluster[] {
+  const tables = members.filter((member) => (member.own.role === 'table' || member.own.role === 'shaft') && member.shape.flatness < 0.6);
+  const table =
+    tables[0] ?? [...members].filter((member) => member.shape.flatness < 0.6).sort((a, b) => a.shape.flatness - b.shape.flatness)[0];
+  // 连一块薄台面都找不到：这类件没法判转轴，退回原来的名称主干归组，保持行为不变
+  if (!table) return partitionByNameStem(group, 'rotary', members);
+
+  const rest = members.filter((member) => member !== table);
+  // 本体必须贴着台面（同一根轴上的底座），不能拿机架台面/大底板凑数：
+  // 分度转盘底下 100 mm 就是机架台面，体积够大但不是它的底座，误当本体就会把整机台面写进动件。
+  const bodyGapLimit = Math.max(2, 0.08 * Math.max(table.shape.extents[1], table.shape.extents[2]));
+  const body =
+    rest.find((member) => member.own.role === 'body') ??
+    [...rest]
+      .filter((member) => volume(member.mesh) >= 0.3 * volume(table.mesh) && boxGap(member.mesh, table.mesh) <= bodyGapLimit)
+      .sort((a, b) => volume(b.mesh) - volume(a.mesh) || a.mesh.id - b.mesh.id)[0];
+
+  if (!body) {
+    // 只有一片转盘、没有紧贴的底座/本体（如分度盘直接装在机架里）：转轴与固定件都定不了，如实跳过
+    return [
+      makeCluster(group, 'rotary', [table], 'geometry', [`只有台面/转盘「${table.mesh.name}」，${round(bodyGapLimit, 1)} mm 内没有体积相当的底座可作本体，转轴无法确定`]),
+      ...rest.map((member) => makeCluster(group, 'rotary', [member], 'geometry', ['缺少台面/本体配对']))
+    ];
+  }
+
+  const normal = tableNormal(table, body);
+  const inPlaneRadius = 0.5 * Math.max(table.shape.extents[1], table.shape.extents[2]);
+  // 台面上的治具/工装随台面一起转（真值里它们与台面同属一个旋转轴）
+  const followers = rest.filter((member) => {
+    if (member === body || member.own.role === 'body') return false;
+    const rel = sub(member.mesh.center, table.mesh.center);
+    const along = dot(rel, normal);
+    if (along <= 0) return false;
+    if (boxGap(member.mesh, table.mesh) > Math.max(1, 0.1 * Math.max(...member.mesh.size))) return false;
+    return length(sub(rel, scale(normal, along))) <= inPlaneRadius;
+  });
+  const roster = [table, body, ...followers].map((info) =>
+    info === table ? assignRole(info, 'rotary', 'table') : info === body ? assignRole(info, 'rotary', 'body') : info
+  );
+  const evidence = [
+    `薄台面「${table.mesh.name}」（厚度/宽度 ${round(table.shape.flatness, 2)}）与本体「${body.mesh.name}」分件`,
+    ...(followers.length > 0 ? [`台面上「${followers.map((follower) => follower.mesh.name).join('、')}」随台面一起转`] : [])
+  ];
+  const out = [makeCluster(group, 'rotary', roster, 'geometry', evidence)];
+  for (const member of rest) {
+    if (member === body || followers.includes(member)) continue;
+    out.push(makeCluster(group, 'rotary', [member], 'geometry', ['与台面/本体没有包容关系']));
+  }
+  return out;
+}
+
+/** 无型号时的按名称主干归组（导轨/滑台/丝杆/电机沿用旧行为，几何推断暂不覆盖这几类）。 */
+function partitionByNameStem(group: string, category: MechanismCategory, members: MeshInfo[]): Cluster[] {
+  const byStem = new Map<string, MeshInfo[]>();
+  for (const info of members) {
+    const stem = nameStem(info.mesh.name) || '—';
+    const list = byStem.get(stem);
+    if (list) list.push(info);
+    else byStem.set(stem, [info]);
+  }
+  return [...byStem.entries()].map(([stem, list]) => makeCluster(group, category, list, 'name', [`零件名主干「${stem}」相同`]));
+}
+
+function partitionPool(group: string, category: MechanismCategory, members: MeshInfo[]): Cluster[] {
+  switch (category) {
+    case 'cylinder':
+      return partitionCylinder(group, members);
+    case 'gripper':
+      return partitionGripper(group, members);
+    case 'rotary':
+      return partitionRotary(group, members);
+    default:
+      return partitionByNameStem(group, category, members);
+  }
+}
+
+/**
+ * 连类别都没有的装配（Part1 / Solid1 / 无名称导出）：只按几何找三种最稳的结构。
+ * 门槛刻意定得比有名称时更严（杆必须回转体、夹爪两指必须体积相近且镜像、旋转台必须是圆盘），
+ * 因为这时没有任何名称可以交叉验证——宁可漏，不可乱报。
+ */
+function inferBareClusters(group: string, members: MeshInfo[]): Cluster[] {
+  const out: Cluster[] = [];
+  const used = new Set<MeshInfo>();
+
+  for (const pair of findRodBodyPairs(members, { requireRodRound: true })) {
+    if (used.has(pair.rod) || used.has(pair.body)) continue;
+    if (!pair.rod.shape.round || !pair.body.shape.round) continue;
+    used.add(pair.rod);
+    used.add(pair.body);
+    out.push(
+      makeCluster(group, 'cylinder', [assignRole(pair.rod, 'cylinder', 'rod'), assignRole(pair.body, 'cylinder', 'body')], 'geometry', [
+        `无任何名称信息：细长回转件「${pair.rod.mesh.name}」同轴插入更粗的回转件「${pair.body.mesh.name}」（偏距 ${round(pair.line, 1)} mm，沿轴重叠 ${round(pair.overlap, 1)} mm），按缸体 + 活塞杆处理`
+      ])
+    );
+  }
+
+  const remaining = members.filter((member) => !used.has(member));
+  const disk = remaining.find((member) => member.shape.round && member.shape.flatness < 0.3);
+  if (disk) {
+    const body = [...remaining]
+      .filter((member) => member !== disk && volume(member.mesh) >= 0.3 * volume(disk.mesh))
+      .sort((a, b) => volume(b.mesh) - volume(a.mesh) || a.mesh.id - b.mesh.id)[0];
+    if (body) {
+      used.add(disk);
+      used.add(body);
+      out.push(
+        makeCluster(group, 'rotary', [assignRole(disk, 'rotary', 'table'), assignRole(body, 'rotary', 'body')], 'geometry', [
+          `无任何名称信息：薄圆盘「${disk.mesh.name}」（厚度/直径 ${round(disk.shape.flatness, 2)}）压在「${body.mesh.name}」上，按旋转台处理`
+        ])
+      );
+    }
+  }
+
+  const bulk = [...members].filter((member) => !used.has(member)).sort((a, b) => volume(b.mesh) - volume(a.mesh) || a.mesh.id - b.mesh.id)[0];
+  if (bulk) {
+    const pair = findMirrorPairs(
+      members.filter((member) => member !== bulk && !used.has(member) && volume(member.mesh) < 0.8 * volume(bulk.mesh)),
+      bulk
+    )[0];
+    if (pair) {
+      used.add(bulk);
+      used.add(pair.a);
+      used.add(pair.b);
+      out.push(
+        makeCluster(group, 'gripper', [assignRole(bulk, 'gripper', 'body'), assignRole(pair.a, 'gripper', 'finger'), assignRole(pair.b, 'gripper', 'finger')], 'geometry', [
+          `无任何名称信息：两件「${pair.a.mesh.name}」「${pair.b.mesh.name}」体积相近、关于「${bulk.mesh.name}」镜像对称，按夹爪本体 + 两指处理`
+        ])
+      );
+    }
+  }
+
+  return out;
 }
 
 // ---------------------------------------------------------------- 各类机构分析
@@ -751,6 +1187,11 @@ interface Skip {
 
 function nameEvidence(cluster: Cluster, reasons: string[]): number {
   const label = CATEGORY_LABELS[cluster.category];
+  if (cluster.origin === 'geometry') {
+    for (const line of cluster.evidence) reasons.push(line);
+    reasons.push(`没有可用型号，按几何/结构关系归组（${label}），置信度上限 ${GEOMETRY_CONFIDENCE_CAP}`);
+    return 0.25;
+  }
   if (cluster.modelCode) {
     reasons.push(`${cluster.fromPath ? '父装配' : '零件名'}含型号 ${cluster.modelCode}（${label}）`);
     return 0.35;
@@ -983,10 +1424,17 @@ function analyzeGripper(cluster: Cluster): Draft | Skip {
   let travelMm = 0;
   let source: StrokeSource = 'none';
   if (stroke.strokeMm !== null) {
-    travelMm = stroke.strokeMm;
+    // 语义区分：型号/样本表（MHZ2 表）给的就是单指行程；名称里手写的「行程 N」是执行机构的开闭总行程，
+    // 单指要折半，否则一条 6 mm 的平行夹爪会被写成「单指 6 mm」（真值 3 mm）。
+    const fromName = stroke.source === 'model-code';
+    travelMm = fromName ? round(stroke.strokeMm / 2, 2) : stroke.strokeMm;
     source = stroke.source;
     score += 0.1;
-    reasons.push(`单指行程 ${travelMm} mm（${cluster.modelCode || '型号'} 开闭总行程 ${travelMm * 2} mm 的一半，按样本表）`);
+    reasons.push(
+      fromName
+        ? `单指行程 ${travelMm} mm（名称里的「行程 ${stroke.strokeMm} mm」按开闭总行程折半，请核对）`
+        : `单指行程 ${travelMm} mm（${cluster.modelCode || '型号'} 开闭总行程 ${travelMm * 2} mm 的一半，按样本表）`
+    );
   } else {
     reasons.push('夹爪行程无法从几何确定，请填写单指行程');
   }
@@ -1363,7 +1811,17 @@ export function suggestKinematics(meshes: readonly AutoKinMesh[], options: Sugge
     if (point) reasons.push(`建议绑定点位 ${point.point}（${point.reason}）`);
     else if ((options.pointOptions ?? []).length === 0) reasons.push('当前没有 IO 点位表，点位需加载机型配置后手动绑定');
     else reasons.push('IO 点位表中没有足够匹配的点位，请手动绑定');
-    const confidence = round(clamp01(score), 2);
+    let confidence = round(clamp01(score), 2);
+    // 几何来源单独封顶：型号/样本表来源最高 0.90，几何最高 0.65（量不出行程/角度时 0.55），
+    // 保证几何结论永远进不了批量采纳那一档，也不会跟型号结论混成同一批。
+    if (item.cluster.origin === 'geometry') {
+      const unquantified = draft.kind === 'linear' ? !(draft.travelMm > 0) : draft.strokeSource === 'default' || !(draft.rangeDeg > 0);
+      const cap = unquantified ? GEOMETRY_UNQUANTIFIED_CAP : GEOMETRY_CONFIDENCE_CAP;
+      if (confidence > cap) {
+        confidence = cap;
+        reasons.push(`几何推断的置信度上限 ${cap}（${unquantified ? '行程/角度只能预填' : '低于型号/样本表来源'}），已下调`);
+      }
+    }
     return {
       id: `sg-${index + 1}`,
       category: draft.category,
@@ -1388,6 +1846,7 @@ export function suggestKinematics(meshes: readonly AutoKinMesh[], options: Sugge
       pointCandidates: list,
       confidence,
       level: confidence >= minConfidence ? 'high' : 'low',
+      inferredBy: item.cluster.origin,
       reasons,
       reason: reasons.join('；')
     };
