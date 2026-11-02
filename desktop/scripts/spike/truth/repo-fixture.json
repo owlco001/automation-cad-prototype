@@ -1,0 +1,36 @@
+{
+  "file": "../../test/fixtures/kinematics-assembly.stp",
+  "note": "仓库自带夹具（FACETED_BREP，圆柱用 16 棱柱近似）。真值不是本 spike 编的：取自 scripts/gen-kinematics-fixture.mjs 的工位构造注释 + scripts/kinematics-baseline.mjs 的 FIXTURE_TRUTH 表。",
+  "joints": [
+    {
+      "parts": ["CDJ2B16-50_body", "CDJ2B16-50_rod"],
+      "type": "prismatic",
+      "axis": [1, 0, 0],
+      "reason": "gen-kinematics-fixture.mjs: 「CDJ2 圆形气缸，沿 +X 伸出」"
+    },
+    {
+      "parts": ["ST1_RAIL_MGN12_L300", "ST1_CARRIAGE_MGN12H"],
+      "type": "prismatic",
+      "axis": [0, 1, 0],
+      "reason": "gen-kinematics-fixture.mjs: 「MGN12 直线导轨 300mm（沿 Y）+ 滑块」"
+    },
+    {
+      "parts": ["MSQB20A_body", "MSQB20A_table"],
+      "type": "revolute",
+      "axis": [0, 0, 1],
+      "reason": "kinematics-baseline.mjs FIXTURE_TRUTH: MSQB20A_table rotary axis [0,0,1]"
+    },
+    {
+      "parts": ["MHZ2-16D_body", "finger_L"],
+      "type": "prismatic",
+      "axis": [1, 0, 0],
+      "reason": "gen-kinematics-fixture.mjs: 「平行夹爪，两指沿 X 开合」"
+    },
+    {
+      "parts": ["MHZ2-16D_body", "finger_R"],
+      "type": "prismatic",
+      "axis": [1, 0, 0],
+      "reason": "同上（另一指）"
+    }
+  ]
+}

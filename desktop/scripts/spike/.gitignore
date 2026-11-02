@@ -1,0 +1,5 @@
+# 编译产物与生成件（run_spike.sh 可重建）
+brep_joints
+make_fixture
+fixture/*.stp
+__pycache__/

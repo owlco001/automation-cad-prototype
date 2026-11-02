@@ -1,0 +1,24 @@
+{
+  "file": "fixture/kinematics-analytic.stp",
+  "note": "合成件（本 spike 用 OCCT 构造，非客户数据）。解析曲面：圆柱/平面。零件名刻意用 Part1..Part6，复刻客户 STEP 的无名件场景。",
+  "joints": [
+    {
+      "parts": ["Part1", "Part2"],
+      "type": "prismatic",
+      "axis": [1, 0, 0],
+      "reason": "滑块底面与底座顶面贴合 80×40，滑块 bbox 80×40×20 沿 X 长条"
+    },
+    {
+      "parts": ["Part3", "Part4"],
+      "type": "prismatic",
+      "axis": [0, 0, 1],
+      "reason": "D 形活塞 R9.8 在 D 形孔 R10 内沿 Z 滑动；铣扁平面防转（0.2mm 间隙）"
+    },
+    {
+      "parts": ["Part5", "Part6"],
+      "type": "revolute",
+      "axis": [0, 1, 0],
+      "reason": "轴 R5.9 穿过衬套孔 R6，两端轴环 R9 顶住衬套端面做轴向定位"
+    }
+  ]
+}
