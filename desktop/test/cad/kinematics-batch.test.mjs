@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  acceptSuggestions,
   applyBatchAccept,
   batchGate,
   BATCH_MAX_OFF_AXIS_DEG,
@@ -194,21 +195,71 @@ test('批量门槛：置信度 / 行程来源 / 偏角三条互相独立，任�
   assert.match(motor.reason, /伺服电机/);
 });
 
-test('高置信批量只挑三条件全过的项：导轨（几何行程）与电机留在列表里，低置信池不动', () => {
+test('旋转台角度：只有型号码里写明的角度能进批量，样本表默认值必须逐条确认', () => {
+  // 型号没写角度 → 按样本表标准品预填 180°，与其他字段一样高置信，但角度是猜的
+  const catalogRotary = makeSuggestion({
+    category: 'rotary',
+    kind: 'rotary',
+    travelMm: 0,
+    rangeDeg: 180,
+    strokeSource: 'catalog',
+    modelCode: 'MSQB20A',
+    confidence: 0.8,
+    level: 'high'
+  });
+  const rejected = batchGate(catalogRotary);
+  assert.equal(rejected.ok, false);
+  assert.match(rejected.reason, /旋转角度 180°/);
+  assert.match(rejected.reason, /样本表/);
+  assert.match(rejected.reason, /默认值/);
+  assert.match(rejected.reason, /逐条确认/);
+  assert.deepEqual(selectBatchEligible([catalogRotary]).ids, []);
+
+  // 只把来源换成「型号码里写了角度」，其余字段不动 → 放行
+  const codeRotary = { ...catalogRotary, rangeDeg: 90, strokeSource: 'model-code', modelCode: 'MSQB20A-90' };
+  assert.deepEqual(batchGate(codeRotary), { ok: true, reason: '' });
+
+  // 直线类的样本表行程是型号唯一确定的（气缸/滑台/导轨），保持现状
+  assert.deepEqual(
+    batchGate(makeSuggestion({ category: 'cylinder', kind: 'linear', travelMm: 100, strokeSource: 'catalog' })),
+    { ok: true, reason: '' }
+  );
+
+  // 单条采纳不受这条类别规则限制：用户看到 180° 与「行程取自样本表」自己点，仍可写进标注
+  const meshes = rotaryPair();
+  const result = suggestKinematics(meshes, { pointOptions: POINTS });
+  const rotary = result.suggestions.find((item) => item.category === 'rotary');
+  assert.equal(rotary.strokeSource, 'catalog');
+  assert.equal(rotary.rangeDeg, 180);
+  assert.equal(batchGate(rotary).ok, false);
+  const single = acceptSuggestions([], result.suggestions, [rotary.id], meshes, { pointOptions: POINTS });
+  assert.deepEqual(single.accepted, [rotary.id]);
+  assert.equal(single.parts.length, 1);
+  assert.deepEqual([single.parts[0].kind, single.parts[0].rangeDeg], ['rotary', 180]);
+});
+
+test('高置信批量只挑门槛全过的项：导轨（几何行程）、样本表角度的旋转台、电机都留在列表里，低置信池不动', () => {
   const meshes = mixedMeshes();
   const result = suggestKinematics(meshes, { pointOptions: POINTS });
   const selection = selectBatchEligible(result.suggestions);
 
-  assert.equal(selection.ids.length, 3);
+  assert.equal(selection.ids.length, 2);
   assert.deepEqual(
     selection.ids.map((id) => byId(result, id).category).sort(),
-    ['cylinder', 'gripper', 'rotary']
+    ['cylinder', 'gripper']
   );
   // 导轨是高置信度（0.7）但行程只能几何估算/低于 0.8，必须挡下且说明原因
   const rail = result.suggestions.find((item) => item.category === 'rail');
   assert.ok(rail);
   assert.ok(!selection.ids.includes(rail.id));
   assert.match(selection.skipped.find((item) => item.id === rail.id).reason, /置信度 70% 低于批量门槛 80%/);
+
+  // MSQB20A 没写角度 → 角度取样本表标准值 180°，属于猜测：单条可采纳，但不能进「采纳全部高置信」
+  const rotary = result.suggestions.find((item) => item.category === 'rotary');
+  assert.ok(rotary);
+  assert.deepEqual([rotary.kind, rotary.axis, rotary.rangeDeg, rotary.strokeSource], ['rotary', 'z', 180, 'catalog']);
+  assert.ok(!selection.ids.includes(rotary.id));
+  assert.match(selection.skipped.find((item) => item.id === rotary.id).reason, /旋转角度 180°.*样本表默认值/);
 
   // 低置信度建议一条都不应该进批量
   assert.deepEqual(selectBatchEligible(result.lowConfidence).ids, []);
@@ -217,33 +268,42 @@ test('高置信批量只挑三条件全过的项：导轨（几何行程）与�
   const outcome = applyBatchAccept([], allSuggestions(result), selection.ids, meshes, {
     pointOptions: POINTS,
     scope: 'high-confidence',
-    label: '全部高置信 3 条',
+    label: '全部高置信 2 条',
     at: AT
   });
   assert.equal(outcome.ok, true, outcome.error);
-  assert.equal(outcome.parts.length, 3);
+  assert.equal(outcome.parts.length, 2);
   assert.deepEqual(outcome.acceptedIds, selection.ids);
   assert.deepEqual(outcome.parts.map((part) => part.name).sort(), [
     'ST1 气缸 CDJ2B16-50',
-    'ST2 夹爪 MHZ2-16D',
-    'ST2 旋转台 MSQB20A'
+    'ST2 夹爪 MHZ2-16D'
   ]);
   // 逐件核对字段确实来自各自的建议，而不是默认值
   const cylinderPart = outcome.parts.find((part) => part.name.includes('CDJ2B16-50'));
   assert.deepEqual([cylinderPart.axis, cylinderPart.direction, cylinderPart.travelMm, cylinderPart.point], ['y', -1, 50, 'ST1-EXT-A1']);
-  const rotaryPart = outcome.parts.find((part) => part.name.includes('MSQB20A'));
-  assert.deepEqual([rotaryPart.kind, rotaryPart.axis, rotaryPart.rangeDeg, rotaryPart.point], ['rotary', 'z', 180, 'ST2-ROT-A1']);
   const gripperPart = outcome.parts.find((part) => part.name.includes('MHZ2'));
   assert.deepEqual([gripperPart.axis, gripperPart.direction, gripperPart.travelMm, gripperPart.point], ['x', 1, 3, 'ST2-GRIP-A2']);
-  // 电机（低置信）没有被塞进动件
+  // 旋转台与电机（低置信）都没有被塞进动件
   assert.ok(!outcome.parts.some((part) => part.meshIds.includes(9)));
+  assert.ok(!outcome.parts.some((part) => part.kind === 'rotary'));
+
+  // 直接调 applyBatchAccept 也不能绕过：闸门在采纳前会再判一次
+  const bypass = applyBatchAccept([], allSuggestions(result), [rotary.id], meshes, {
+    pointOptions: POINTS,
+    scope: 'high-confidence',
+    label: '旋转台 1 条',
+    at: AT
+  });
+  assert.equal(bypass.ok, false);
+  assert.match(bypass.skipped[0].reason, /样本表默认值/);
+  assert.deepEqual(bypass.parts, []);
 
   // 审计记录：条数、id、前后数量、快照
   assert.equal(outcome.audit.recordId, `ba-high-confidence-${AT}`);
   assert.equal(outcome.audit.scope, 'high-confidence');
   assert.deepEqual(outcome.audit.suggestionIds, selection.ids);
-  assert.equal(outcome.audit.addedPartIds.length, 3);
-  assert.deepEqual([outcome.audit.beforeCount, outcome.audit.afterCount], [0, 3]);
+  assert.equal(outcome.audit.addedPartIds.length, 2);
+  assert.deepEqual([outcome.audit.beforeCount, outcome.audit.afterCount], [0, 2]);
   assert.deepEqual(outcome.audit.before, []);
 });
 
@@ -330,16 +390,11 @@ test('撤销批量采纳：快照精确回到采纳前（总数 + 每件字段�
   const twins = result.suggestions.filter((item) => item.category === 'cylinder');
   assert.equal(twins.length, 2);
 
-  // 采纳前已有 1 个动件（走单条采纳路径），撤销必须保留它而不是清空
-  const base = applyBatchAccept([], result.suggestions, [rotary.id], meshes, {
-    pointOptions: POINTS,
-    scope: 'high-confidence',
-    label: '旋转台 1 条',
-    at: AT
-  });
-  assert.equal(base.ok, true, base.error);
-  const before = base.parts;
-  assert.equal(before.length, 1);
+  // 采纳前已有 1 个动件（走单条采纳路径，旋转台用样本表角度也能进），撤销必须保留它而不是清空
+  const single = acceptSuggestions([], result.suggestions, [rotary.id], meshes, { pointOptions: POINTS });
+  assert.deepEqual(single.accepted, [rotary.id]);
+  assert.equal(single.parts.length, 1);
+  const before = single.parts;
 
   const batch = applyBatchAccept(before, result.suggestions, twins.map((item) => item.id), meshes, {
     pointOptions: POINTS,

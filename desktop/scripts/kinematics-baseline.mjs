@@ -778,6 +778,8 @@ function rotarySlice(records) {
     // 能通过产品「批量采纳」闸门、但角度是错的条数（会无提示写进标注）
     batchOk: matched.filter((entry) => entry.batchOk).length,
     batchOkWrongAngle: matched.filter((entry) => entry.batchOk && !entry.strokeOk).length,
+    // 通过闸门且角度正确的条数（用来说明「对的仍然进得去」，不是把旋转台整体挡死）
+    batchOkAngleOk: matched.filter((entry) => entry.batchOk && entry.strokeOk).length,
     predictedAngles,
     sources,
     truthAngles: [...new Set(truths.map((item) => item.rangeDeg))].sort((a, b) => a - b),
@@ -824,6 +826,7 @@ function buildAngleVariance() {
         highConfidenceWrongAngle: slice.highConfidenceWrongAngle,
         batchOk: slice.batchOk,
         batchOkWrongAngle: slice.batchOkWrongAngle,
+        batchOkAngleOk: slice.batchOkAngleOk,
         truthAngles: slice.truthAngles,
         predictedAngles: slice.predictedAngles,
         sources: slice.sources
@@ -880,6 +883,7 @@ function buildAngleVariance() {
       highConfidenceWrongAngle: sum('highConfidenceWrongAngle'),
       batchOk: sum('batchOk'),
       batchOkWrongAngle: sum('batchOkWrongAngle'),
+      batchOkAngleOk: sum('batchOkAngleOk'),
       predictedAngles: slices.reduce((acc, slice) => {
         for (const [key, value] of Object.entries(slice.predictedAngles)) acc[key] = (acc[key] ?? 0) + value;
         return acc;
@@ -980,7 +984,8 @@ function printAngleVariance(report) {
   );
   console.log(
     `  ${padEndW('约定', 6)}${padStartW('真值', 6)}${padStartW('命中', 6)}${padStartW('严格≥0.6', 10)}` +
-      `${padStartW('P≥0.6', 8)}${padStartW('高置信错填', 12)}${padStartW('可批量且角度错', 16)}  预测角度`
+      `${padStartW('P≥0.6', 8)}${padStartW('高置信错填', 12)}${padStartW('可批量且角度错', 16)}` +
+      `${padStartW('角度对且通过', 14)}  预测角度`
   );
   for (const row of report.perRegime) {
     const angles = Object.entries(row.predictedAngles)
@@ -990,12 +995,14 @@ function printAngleVariance(report) {
       `  ${padEndW(row.regime, 6)}${padStartW(String(row.truth), 6)}${padStartW(String(row.matched), 6)}` +
         `${padStartW(`${row.strictAt06}`, 10)}` +
         `${padStartW(row.predictedAt06 ? `${((row.strictAt06 / row.predictedAt06) * 100).toFixed(1)}%` : '—', 8)}` +
-        `${padStartW(`${row.highConfidenceWrongAngle}`, 12)}${padStartW(`${row.batchOkWrongAngle}/${row.batchOk}`, 16)}  ${angles}`
+        `${padStartW(`${row.highConfidenceWrongAngle}`, 12)}${padStartW(`${row.batchOkWrongAngle}/${row.batchOk}`, 16)}` +
+        `${padStartW(`${row.batchOkAngleOk}`, 14)}  ${angles}`
     );
   }
   console.log(
     `  （「高置信错填」= 置信度 ≥0.6 且角度错；「可批量且角度错」= 直接调用产品 batchGate() 判过、同时角度错的条数 /` +
-      ` 通过 batchGate 的总条数 —— 这批会无提示批量写进标注）`
+      ` 通过 batchGate 的总条数 —— 这批会无提示批量写进标注；「角度对且通过」= 通过 batchGate 且角度正确的条数，` +
+      ` 用来看「挡的是错角度，不是整个旋转台」）`
   );
 }
 

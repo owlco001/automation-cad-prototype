@@ -2037,6 +2037,15 @@ export function acceptSuggestions(
  * 2) 行程来源必须是 model-code / catalog。geometry 是按包围盒反推的估算，default 是「角度未知按 90°/360° 预填」，
  *    none 是没行程——这三种采纳后都要人工改；批量改 12 条的错误成本远高于逐条点。
  *    这条比置信度更硬：100% 置信的几何估算照样拒绝（见单测「批量门槛：置信度 / 行程来源 / 偏角三条互相独立」）。
+ * 2b) 类别例外：rotary 只接受 model-code（见 BATCH_ROTARY_STROKE_SOURCES）。行程与角度的错误代价不对称——
+ *    直线类（气缸/滑台/导轨）的 catalog 行程来自样本表，同一型号的行程是唯一确定的，错也只错在量级；
+ *    而 rotary 的 catalog 角度是「型号没写角度时按样本标准值预填」，MSQ/MSU 一律填 180°，
+ *    同型号摆动缸实际有 90/120/180/270 多种（实测角度方差样本：catalog 预填角度正确率 25%，
+ *    即 4 个等量角度里蒙中 1 个）。角度错会直接改掉运动包络与联动时间线：
+ *    90° 的工位被写成 180°，扫掠范围翻倍，与邻站/夹具的干涉行程凭空出现或凭空消失，
+ *    联动时序按错误行程排；而行程错至少方向、机构、轴线都对，用户看数字就能发现。
+ *    所以 catalog 角度必须逐条确认，不能进「采纳全部高置信」。
+ *    单条采纳（acceptSuggestions）不受此限：用户点那一条时看到的就是带「行程取自样本表」标的建议。
  * 3) 方向明确：offAxisDeg ≤ 5°。引擎现在只按「yaw 之外的残余倾角」扣分（> 3° 起、每度 0.01），
  *    但闸门仍按与主轴的夹角 offAxisDeg 判定：水平面内的 30° 虽然已经能精确写成 yawDeg，
  *    它依然是「转盘工位上的斜装件」，不是批量采纳的目标（那类件逐条看更稳妥）。
@@ -2045,6 +2054,12 @@ export function acceptSuggestions(
 export const BATCH_MIN_CONFIDENCE = 0.8;
 export const BATCH_MAX_OFF_AXIS_DEG = 5;
 export const BATCH_STROKE_SOURCES: readonly StrokeSource[] = ['model-code', 'catalog'];
+/**
+ * rotary 的批量门槛比直线类更紧：角度只认型号码里写明的值。
+ * catalog 是「型号没写角度 → 按样本标准值预填」（MSQ/MSU 一律 180°），是猜测而非结论；
+ * 角度错会改掉扫掠包络与联动时间线（见上方 2b），因此不允许静默批量写入。
+ */
+export const BATCH_ROTARY_STROKE_SOURCES: readonly StrokeSource[] = ['model-code'];
 
 export const STROKE_SOURCE_LABELS: Record<StrokeSource, string> = {
   'model-code': '行程取自型号',
@@ -2082,6 +2097,14 @@ export function batchGate(suggestion: KinematicsSuggestion, options: BatchGateOp
   }
   if (!sources.includes(suggestion.strokeSource)) {
     return { ok: false, reason: `${STROKE_SOURCE_LABELS[suggestion.strokeSource]}，批量采纳只接受型号或样本表行程` };
+  }
+  if (suggestion.kind === 'rotary' && !BATCH_ROTARY_STROKE_SOURCES.includes(suggestion.strokeSource)) {
+    return {
+      ok: false,
+      reason:
+        `旋转角度 ${suggestion.rangeDeg}° 来自样本表默认值（型号未写明角度，按标准品预填），` +
+        '不是型号码给出的角度，需逐条确认后再采纳'
+    };
   }
   if (suggestion.offAxisDeg > maxOffAxis) {
     return { ok: false, reason: `方向偏离主轴 ${suggestion.offAxisDeg}°，已回落最近主轴，方向不可信` };
