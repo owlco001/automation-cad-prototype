@@ -207,10 +207,12 @@ jobs:
           #    这一步是为了抓住「conda PATH 兜住的隐藏依赖」——ci.yml 的启动自检在 conda 环境里跑，
           #    缺的 DLL 可能被 Library/bin 兜住，只有脱离 conda 的安装包才会暴露 0xc0000135。
           $systemDlls = @('kernel32.dll','user32.dll','gdi32.dll','advapi32.dll','shell32.dll','ole32.dll','oleaut32.dll',
-            'msvcrt.dll','ucrtbase.dll','ws2_32.dll','opengl32.dll','d3d11.dll','dxgi.dll','comdlg32.dll','winmm.dll',
-            'imm32.dll','version.dll','userenv.dll','netapi32.dll','uxtheme.dll','dnsapi.dll','iphlpapi.dll','secur32.dll',
-            'crypt32.dll','bcrypt.dll','rpcrt4.dll','setupapi.dll','dwmapi.dll','mpr.dll','shlwapi.dll','winspool.drv',
-            'ntdll.dll','powrprof.dll','d3d9.dll','dbghelp.dll','psapi.dll','wtsapi32.dll','authz.dll','cfgmgr32.dll')
+            'msvcrt.dll','ucrtbase.dll','ws2_32.dll','wsock32.dll','opengl32.dll','d3d11.dll','d3d12.dll','dxgi.dll',
+            'comdlg32.dll','winmm.dll','imm32.dll','version.dll','userenv.dll','netapi32.dll','uxtheme.dll','dnsapi.dll',
+            'iphlpapi.dll','secur32.dll','crypt32.dll','bcrypt.dll','ncrypt.dll','rpcrt4.dll','setupapi.dll','dwmapi.dll',
+            'dwrite.dll','winhttp.dll','mpr.dll','shlwapi.dll','winspool.drv','ntdll.dll','powrprof.dll','d3d9.dll',
+            'dbghelp.dll','psapi.dll','wtsapi32.dll','authz.dll','cfgmgr32.dll','uiautomationcore.dll','wininet.dll',
+            'msimg32.dll','comctl32.dll','gdiplus.dll','urlmon.dll','oleacc.dll','pdh.dll','vssapi.dll','wevtapi.dll')
           function Get-ImportNames([string]$file) {
             $lines = & $dumpbin /nologo /dependents $file 2>$null
             if ($LASTEXITCODE -ne 0) { return @() }

@@ -599,6 +599,40 @@ test('⑨ OCCT 版本 pin 住：裸 occt 等于把「上游发版」变成无预
   assert.equal(isOcctPinned(wrongSeries), false, 'pin 到 7.8 仍判定为通过（版本断言没约束住）');
 });
 
+test('⑩ 依赖闭包：FreeImage 的兄弟 DLL 与 msvcp140_1/_2 必须真进包，且启动核对不许被 conda PATH 兜住', () => {
+  // 实测踩过：包里缺 msvcp140_1/_2 与 FreeImage 静态导入的 jpeg8/tiff/openjp2/libwebp/libwebpmux/raw/
+  // OpenEXR/Iex/Imath，共 11 个；conda 的 Library/bin 把它们兜住了，所以「在 CI 里跑 --version」一直是假绿，
+  // 一直到把 Qt 塞进安装包、脱离 conda 才暴露 0xc0000135（run 41363864932）。
+  const detectsClosure = (text) => {
+    // ① 有 dumpbin 导入表扫描 + 系统 DLL 白名单，缺的不能静默放过
+    if (!/dumpbin[^\n]*\/dependents/i.test(text)) return false;
+    if (!/\$systemDlls\s*=/.test(text)) return false;
+    if (!/throw "依赖闭包缺/.test(text)) return false;
+    // ② 缺的能从前面的候选目录补回来（FreeImage 的 jpeg8 之类与它同源）
+    if (!/DEP_CLOSURE_COPIED/.test(text)) return false;
+    if (!/DEP_CLOSURE_OK/.test(text)) return false;
+    return true;
+  };
+  assert.ok(detectsClosure(PACKAGING), `${CI_PATH_DISPLAY} 打包段缺少依赖闭包体检（dumpbin 扫导入表 → 补拷 → 仍缺就 throw）`);
+
+  // 负向自证：把 throw 去掉，判定必须变红，证明断言不是摆设。
+  const droppedThrow = PACKAGING.replace(/throw "依赖闭包缺/, 'Write-Host "依赖闭包缺');
+  assert.notEqual(droppedThrow, PACKAGING, '变异没生效：没找到「依赖闭包缺」的 throw');
+  assert.equal(detectsClosure(droppedThrow), false, '把闭包 throw 去掉后判定仍通过（断言空转）');
+
+  // ③ VC 运行时必须带上 msvcp140_1 / msvcp140_2 / concrt140：exe 与 Qt6Gui 静态导入 msvcp140_2
+  const vcLine = (PACKAGING.match(/\$vcRuntime\s*=\s*@\(([^)]*)\)/) || [])[1] || '';
+  for (const name of ['msvcp140_1.dll', 'msvcp140_2.dll', 'concrt140.dll']) {
+    assert.ok(vcLine.includes(name), `$vcRuntime 少了 ${name}：纯净机加载 automationcad-qt.exe / Qt6Gui 时 0xc0000135`);
+  }
+
+  // ④ 启动核对必须先把 conda 相关目录从 PATH 摘掉，否则缺的 DLL 会被 Library/bin 兜住 → 假绿
+  const launch = stepBlock(LINES, '从打包目录启动并核对版本');
+  assert.ok(launch, `${CI_PATH_DISPLAY} 找不到「从打包目录启动并核对版本」step`);
+  assert.ok(launch.includes("notmatch '(?i)micromamba|conda'"),
+    '启动核对没有把 conda 目录从 PATH 摘掉：包里缺 DLL 也会显示通过（假绿）');
+});
+
 test('发布流程不变量：打包仍是 OCCT job 的产物，上传路径与产物名不变', () => {
   assert.match(CI, /name:\s*automationcad-qt-windows-x64-occt\s*\n\s*path:\s*dist\/automationcad-qt-windows-x64-occt\.zip/,
     '上传 artifact 的名称/路径被改动了');
