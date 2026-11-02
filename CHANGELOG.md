@@ -16,6 +16,21 @@
 
 - `desktop/package.json` / `qt-client/CMakeLists.txt` / `ci.yml` 自检 / `README` 四处版本统一为 0.6.0，新增 `test/meta/version-parity.test.mjs` 防止再次漂移（此前 CMake 的 0.5.0 与 package.json 的 0.5.1 已不一致，且被 GUI stdout 为空跳过断言掩盖）。
 
+### Verified · 0.6.0 出包实测（CI run 41371789524）
+
+```
+ASSERT_1_QT_OK files=80
+ASSERT_1B_CLOSURE_OK
+QT_VERSION exit=0 out=[FT_QT_VERSION_OK version=0.6.0]   # 已把 conda 从 PATH 摘掉，模拟纯净客户机
+ASSERT_3_VERSION_OK version=0.6.0
+ASSERT_4_SIZE_OK setup=AutomationCAD-Setup-0.6.0.exe bytes=250253889 mb=238.7
+DUAL_PACKAGE_OK qt_files=80 setup_bytes=250253889 pipeline=1
+```
+
+打包链路现在会在「依赖闭包不完整」时直接失败：dumpbin 扫 exe 与包内所有 DLL 的导入表，
+缺的从 conda 候选目录补拷并迭代到不动点；补不到就 throw。这条门禁是为修掉「conda PATH 兜住缺库，
+CI 启动自检假绿」而加的 —— 实测它先后抓出 11 个缺失 DLL 与 OpenMP 运行库 vcomp140。
+
 ## [0.5.1] - 2026-11-01
 
 ### Fixed · 联动调试（3D 步序播放）
