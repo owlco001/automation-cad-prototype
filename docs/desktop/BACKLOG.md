@@ -126,6 +126,6 @@ BOOLEAN_RECHECK_OK checked=8 confirmed=0 misreported=8 unchecked=0
 
 1. **物理工控机首装**：干净 Win11（无 VS/conda/Node）安装 → 开 Qt 工作台 → 跑联动 → 导 STEP；CI 只证明「进程能起、版本对、依赖闭包完整」。
 2. **`resources/qt/*` 未签名**：安装器可签，Qt 子程序是未签名 PE；拿到证书后补 `signtool /fd sha256` + CI 验签。
-3. **便携包未随 0.6.1 重出**：0.6.0 的 392.8 MB 未瘦身；CI 已产出 `AutomationCAD-Portable-win-x64`，尚未挂 Release。
+3. ~~便携包未随版本重出~~：已随 **0.6.2** 重出并挂 Release（`AutomationCAD-Portable-0.6.2.zip`，281,757,185 B / 181 文件，`unzip -t` 无错；0.6.0 时是 392.8 MB）。
 
 `windows.yml` 仍手动触发；真机验过后再加 `push: tags: ['v*']`。
