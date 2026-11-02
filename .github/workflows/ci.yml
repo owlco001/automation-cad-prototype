@@ -836,6 +836,14 @@ jobs:
         run: npm ci
       - name: 构建扩展（smoke 需要 dist/）
         run: npm run build:ext
+      # npm 12 默认拦 install-scripts（日志里 "npm warn install-scripts"），electron 的 postinstall
+      # 一旦被跳过，node_modules/electron/dist 就是空的——smoke 后面会以更绕的方式失败。
+      # 这里显式跑一次 install.js：已下载时秒退，没下载时补上并打印版本，失败也看得见。
+      - name: 确保 Electron 二进制就位
+        run: |
+          node node_modules/electron/install.js
+          ./node_modules/.bin/electron --version
+          ls -l node_modules/electron/dist/chrome-sandbox
       # Chromium 的 SUID 沙箱助手必须 root:root + 4755，否则非 root 下 Electron 直接 abort：
       #   FATAL:sandbox/linux/suid/client/setuid_sandbox_host.cc:172 ... is not configured correctly
       # 这一步是为了让 CI 真正跑在沙箱下（而不是靠 ELECTRON_DISABLE_SANDBOX 蒙过去）。
