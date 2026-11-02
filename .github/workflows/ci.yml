@@ -396,7 +396,9 @@ jobs:
           # 下面这段用 VC_RUNTIME_BLOCK 标记包起来：desktop/test/ci-qt-package.test.mjs 按这对标记
           # 原样截取本段，在 mock 目录上跑「拷贝 + 三档守卫」，所以标记别删、别改名字。
           # >>> VC_RUNTIME_BLOCK_BEGIN
-          $vcRuntime = @('vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll')
+          # msvcp140_1/_2 与 concrt140 必须一起带：实测 automationcad-qt.exe 与 Qt6Gui.dll
+          # 静态导入 msvcp140_2.dll、Qt6Widgets/Network/Gui 导入 msvcp140_1.dll，只拷 msvcp140.dll 不够。
+          $vcRuntime = @('vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll','msvcp140_1.dll','msvcp140_2.dll','concrt140.dll')
           # CRT 可再分发目录：真正放 DLL 的是 <msvc redist root>\x64\Microsoft.VC*.CRT。
           # ① 首选环境变量 $env:VCToolsRedistDir（MSVC 开发者 shell / ilammy/msvc-dev-cmd 之后存在，
           #    形如 C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC\14.44.35207\）
@@ -457,6 +459,21 @@ jobs:
             Write-Host "VC_RUNTIME_REDIST_ONLY 缺 $($vcMissing -join ',')，但包内有 vc_redist.x64.exe：便携包用户需自行安装 VC++ 运行库后才能启动"
           } else {
             throw "缺 VC++ 运行库 $($vcMissing -join ',')：VS CRT 目录里没找到、也没拷进打包目录，包里也没有 vc_redist.x64.exe —— 纯净 Windows 机启动即 0xc0000135"
+          }
+          # OpenMP 运行库 vcomp140 在另一个目录（Microsoft.VC*.OpenMP），不在 .CRT 里：
+          # FreeImage/OpenEXR 这类第三方库常用 /openmp 构建，缺它同样 0xc0000135。
+          $openmpDirs = @()
+          foreach ($root in @($vsRedistRoots | Select-Object -Unique)) {
+            if (-not (Test-Path $root)) { continue }
+            $openmpDirs += @(Get-ChildItem -Path (Join-Path $root 'x64') -Filter 'Microsoft.VC*.OpenMP' -Directory -ErrorAction SilentlyContinue |
+              Sort-Object Name -Descending | ForEach-Object { $_.FullName })
+          }
+          foreach ($dir in @($openmpDirs | Select-Object -Unique)) {
+            $src = Join-Path $dir 'vcomp140.dll'
+            if (Test-Path $src) {
+              Copy-Item $src $dist -Force
+              if (Test-Path (Join-Path $dist 'vcomp140.dll')) { Write-Host "VC_OPENMP_COPIED vcomp140.dll <- $dir"; break }
+            }
           }
           # <<< VC_RUNTIME_BLOCK_END
           $occtBin = Join-Path $env:OCCT_PREFIX 'bin'
@@ -594,6 +611,65 @@ jobs:
             throw "第三方依赖一个都没复制进打包目录（$($deps -join '/') 全缺）：候选目录 $($depDirs -join ',')"
           }
           if (-not (Test-Path (Join-Path $dist 'TKV3d.dll'))) { throw "包里缺 TKV3d.dll（OCCT 视口不会可用）" }
+
+          # 依赖闭包体检：把 exe 与包里每个 DLL 的导入表扫一遍，凡是「被引用但包里没有、也不是系统 DLL」
+          # 的一律列出来；能从前面的候选目录补的当场补，补不到直接失败。
+          # 为什么必须有这一步：FreeImage.dll **静态导入** jpeg8/tiff/openjp2/libwebp/libwebpmux/raw/
+          # OpenEXR/Iex/Imath，缺一个 FreeImage 就加载失败 → TKService → TKV3d 连锁失败 → 纯净机
+          # 0xc0000135。而 conda 的 Library/bin 里这些 DLL 天生齐全，所以「在 CI 里跑 --version」一直是假绿。
+          $systemDlls = @('kernel32.dll','user32.dll','gdi32.dll','advapi32.dll','shell32.dll','ole32.dll','oleaut32.dll',
+            'msvcrt.dll','ucrtbase.dll','ws2_32.dll','wsock32.dll','opengl32.dll','d3d11.dll','d3d12.dll','dxgi.dll',
+            'comdlg32.dll','winmm.dll','imm32.dll','version.dll','userenv.dll','netapi32.dll','uxtheme.dll','dnsapi.dll',
+            'iphlpapi.dll','secur32.dll','crypt32.dll','bcrypt.dll','ncrypt.dll','rpcrt4.dll','setupapi.dll','dwmapi.dll',
+            'dwrite.dll','winhttp.dll','mpr.dll','shlwapi.dll','winspool.drv','ntdll.dll','powrprof.dll','d3d9.dll',
+            'dbghelp.dll','psapi.dll','wtsapi32.dll','authz.dll','cfgmgr32.dll','uiautomationcore.dll','wininet.dll',
+            'msimg32.dll','comctl32.dll','gdiplus.dll','urlmon.dll','oleacc.dll','pdh.dll','vssapi.dll','wevtapi.dll')
+          $dumpbinExe = (Get-Command dumpbin.exe -ErrorAction SilentlyContinue).Source
+          if (-not $dumpbinExe) { throw "找不到 dumpbin.exe：无法做依赖闭包体检（不要静默跳过）" }
+          function Get-ClosureImports([string]$file) {
+            $lines = & $dumpbinExe /nologo /dependents $file 2>$null
+            if ($LASTEXITCODE -ne 0) { return @() }
+            $names = @()
+            foreach ($line in $lines) {
+              $m = [regex]::Match($line, '^\s+([A-Za-z0-9_\.\-]+\.(dll|drv))\s*$')
+              if ($m.Success) { $names += $m.Groups[1].Value }
+            }
+            return $names
+          }
+          $closureExtra = 0
+          for ($pass = 1; $pass -le 6; $pass++) {
+            $present = @{}
+            Get-ChildItem $dist -File | ForEach-Object { $present[$_.Name.ToLower()] = $true }
+            $closureMissing = @{}
+            $scanTargets = @(Get-ChildItem $dist -File -Filter '*.dll') + @(Get-Item (Join-Path $dist 'automationcad-qt.exe'))
+            foreach ($f in $scanTargets) {
+              foreach ($imp in (Get-ClosureImports $f.FullName)) {
+                $low = $imp.ToLower()
+                if ($present.ContainsKey($low)) { continue }
+                if ($systemDlls -contains $low) { continue }
+                if ($low -like 'api-ms-win-*' -or $low -like 'ext-ms-*') { continue }
+                $closureMissing[$low] = $imp
+              }
+            }
+            if ($closureMissing.Count -eq 0) { break }
+            foreach ($k in @($closureMissing.Keys)) {
+              $imp = $closureMissing[$k]
+              foreach ($dir in $depDirs) {
+                if (Test-Path (Join-Path $dir $imp)) {
+                  Copy-Item (Join-Path $dir $imp) $dist -Force
+                  Write-Host "DEP_CLOSURE_COPIED $imp <- $dir"
+                  $closureExtra++
+                  $closureMissing.Remove($k)
+                  break
+                }
+              }
+            }
+            if ($closureMissing.Count -gt 0) {
+              throw "依赖闭包缺 $(($closureMissing.Values | Sort-Object) -join ',')：包里没有、候选目录也没有 —— 纯净 Windows 机启动即 0xc0000135"
+            }
+          }
+          Write-Host "DEP_CLOSURE_OK extra=$closureExtra"
+
           Compress-Archive -Path "$dist/*" -DestinationPath "dist/automationcad-qt-windows-x64-occt.zip" -Force
           $zip = Get-Item "dist/automationcad-qt-windows-x64-occt.zip"
           $count = (Get-ChildItem $dist | Measure-Object).Count
@@ -603,11 +679,21 @@ jobs:
         run: |
           $dist = (Resolve-Path "dist/automationcad-qt-occt").Path
           $exe = Join-Path $dist 'automationcad-qt.exe'
-          $outFile = Join-Path $dist 'version.txt'
+          # 关键：先把这个 job 里 conda 相关目录从 PATH 摘掉，模拟纯净客户机。
+          # 不摘的话 conda 的 Library/bin 会兜住包里缺的 DLL（FreeImage 的 jpeg8/tiff/libwebp/... 就是这么
+          # 被兜住的），启动自检就永远是假绿 —— 这正是本仓库真实踩过的坑。
+          $env:PATH = (($env:PATH -split ';') | Where-Object { $_ -and $_ -notmatch '(?i)micromamba|conda' }) -join ';'
+          $outFile = Join-Path $dist 'version.out.txt'
+          $errFile = Join-Path $dist 'version.err.txt'
           # Qt 是 GUI 子系统程序：直接 & exe 拿不到 stdout，$LASTEXITCODE 也不可信。
           # 用 Start-Process 重定向输出 + 读 ExitCode，才是在 Windows 上验证「能启动」的正解。
-          $proc = Start-Process -FilePath $exe -ArgumentList '--version' -WorkingDirectory $dist -Wait -PassThru -NoNewWindow -RedirectStandardOutput $outFile
-          $text = if (Test-Path $outFile) { Get-Content $outFile -Raw } else { '' }
+          # qt-client/src/main.cpp 的 qInstallMessageHandler 把 qInfo 强写 stderr（Windows 默认走
+          # OutputDebugString），只收 stdout 只会拿到空串 —— 两个流都要收，版本断言才不是死的。
+          $proc = Start-Process -FilePath $exe -ArgumentList '--version' -WorkingDirectory $dist -Wait -PassThru -NoNewWindow -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+          $text = ''
+          foreach ($f in @($outFile, $errFile)) {
+            if (Test-Path $f) { $text += (Get-Content $f -Raw) }
+          }
           if ($null -eq $text) { $text = '' }   # 空文件时 Get-Content -Raw 返回 $null，Trim() 会直接抛
           $text = $text.Trim()
           Write-Host "VERSION_OUTPUT [$text] exit=$($proc.ExitCode)"
@@ -616,12 +702,11 @@ jobs:
             dumpbin /dependents $exe | Select-String -Pattern "\.dll" | ForEach-Object { $_.Line.Trim() }
             throw "打包目录里的 exe 启动失败（exit $($proc.ExitCode)）"
           }
-          # GUI 子系统程序的 stdout 可能被系统吞掉；退出码 0 = 进程正常启动并退出。
-          # 有输出时仍要求版本号匹配，没输出时不假装验证过版本。
-          if ($text -and ($text -notmatch "0\.5\.1")) { throw "版本输出异常：$text" }
-          if (-not $text) { Write-Host "VERSION_STDOUT_EMPTY （GUI 子系统无 stdout，按退出码判定启动成功）" }
+          # 没有「空就跳过」的退路：stdout+stderr 都空 = 拿不到版本，直接判失败（否则这步等于没验版本）。
+          if (-not $text) { throw "VERSION_OUTPUT_EMPTY：exe --version 的 stdout/stderr 都是空的，无法证明打进去的是 0.6.0" }
+          if ($text -notmatch "0\.6\.0") { throw "版本输出异常：$text" }
           $dlls = (Get-ChildItem $dist -Filter *.dll | Measure-Object).Count
-          Write-Host "OCCT_WIN_RUN_OK version=0.5.1 dlls=$dlls"
+          Write-Host "OCCT_WIN_RUN_OK version=0.6.0 dlls=$dlls"
           # 只验 --version 不够：白名单砍掉 DLL 后，真正的风险是「能启动但一用几何就崩」。
           # 这里在离线/无窗口下跑一次布尔剖切自检（走 BRepAlgoAPI_Cut → TKBO/TKBRep/TKTopAlgo）。
           $env:QT_QPA_PLATFORM = 'offscreen'

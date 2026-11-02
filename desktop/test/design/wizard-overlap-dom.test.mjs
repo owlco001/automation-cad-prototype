@@ -11,7 +11,13 @@ const viteBin = path.join(desktopDir, 'node_modules', 'vite', 'bin', 'vite.js');
 const electronBin = path.join(desktopDir, 'node_modules', '.bin', 'electron');
 const xvfbRun = '/usr/bin/xvfb-run';
 
-test('真实 Electron DOM：布局重叠确认与越界阻断回归', { timeout: 120_000 }, async (t) => {
+// Windows 上没有 xvfb，spawn 会直接 ENOENT；不留假绿也不删用例：
+// Windows 上显式 skip 并说明覆盖来源，Linux smoke job 仍跑这条真实 DOM 回归。
+const domSkipReason = process.platform === 'win32'
+  ? 'Windows CI 无 xvfb；Electron DOM 回归由 Linux smoke job 覆盖'
+  : false;
+
+test('真实 Electron DOM：布局重叠确认与越界阻断回归', { timeout: 120_000, skip: domSkipReason }, async (t) => {
   const port = await findFreePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const vite = spawn(process.execPath, [viteBin, '--host', '127.0.0.1', '--port', String(port), '--strictPort'], {

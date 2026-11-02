@@ -42,10 +42,16 @@ test('保存失败不清草稿', async () => {
   assert.equal(result.ok, false);
   assert.equal(cleared, 0);
 });
-test('草稿0600原子写、损坏恢复与删除', () => {
+test('草稿0600原子写、损坏恢复与删除', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'design-draft-test-'));
   writeDesignDraft(dir, { version: 1, step: 1 });
-  assert.equal(statSync(join(dir, 'design-draft.json')).mode & 0o777, 0o600);
+  if (process.platform === 'win32') {
+    // Windows 无 POSIX 模式位：stat().mode 恒为 0o666，0600 断言不可移植。
+    // 只跳过权限位这一条，下面的读写往返/存在性/删除断言照跑；POSIX 权限语义由 Linux unit job 覆盖。
+    t.diagnostic('Windows 无 POSIX 模式位，跳过 0600 断言（Linux unit job 覆盖）');
+  } else {
+    assert.equal(statSync(join(dir, 'design-draft.json')).mode & 0o777, 0o600);
+  }
   assert.equal(readDesignDraft(dir).draft.version, 1);
   assert.equal(existsSync(join(dir, 'design-draft.json')), true);
   clearDesignDraft(dir);

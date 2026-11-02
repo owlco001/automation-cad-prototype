@@ -5,9 +5,15 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 40
+    # 40 → 60：本 job 不再自己编 Qt（那是 ci.yml 的 qt-windows-occt，约 30-40 min），
+    # 但要下载 60MB 产物 + electron-builder 打 ~190MB 的 NSIS + 压 ~500MB 的便携包，
+    # 40 分钟在 runner 抖动时会不够。
+    timeout-minutes: 60
     permissions:
       contents: write
+      # 必须显式给：一旦写了 permissions 块，未列出的权限一律是 none。
+      # 下面要用 gh api 读 ci.yml 的 run 与 artifact 列表，没有 actions: read 会直接 403。
+      actions: read
     defaults:
       run:
         working-directory: desktop
@@ -24,8 +30,116 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
 
+      # 一个安装包里同时含 Electron 与 Qt：Qt 不在本 job 重编（重复 30-40 min 且与 ci.yml 完全重复），
+      # 而是从「同一个 commit SHA 的 ci.yml 成功 run」里取已验证过的 qt-windows-occt 产物。
+      # 取不到就立刻失败 —— 宁可红在 20 秒处，也不要静默打出一个没有 Qt 的包。
+      - name: 取本 commit 的 Qt 产物（ci.yml / qt-windows-occt）
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = $env:GITHUB_REPOSITORY
+          $sha = $env:GITHUB_SHA
+          $name = 'automationcad-qt-windows-x64-occt'
+          $dest = Join-Path $env:GITHUB_WORKSPACE 'qt-dist'
+          $missingMsg = "本 commit 还没有 ci.yml 的 Qt 产物，请先等 ci 绿（$sha）"
+
+          # 刚推完 commit 就手动触发时，本 SHA 的 ci 可能还在跑：等它，而不是立刻判红
+          # （实测踩过两次：一次是 artifact 是 zip 没解压，一次是推送后 SHA 变了、ci 还没绿）。
+          # 最多等 40 分钟，超时仍按失败处理 —— 宁可红，也不要打一个没有 Qt 的包。
+          $deadline = (Get-Date).AddMinutes(40)
+          while ($true) {
+            $probe = gh api "repos/$repo/actions/workflows/ci.yml/runs?head_sha=$sha&per_page=20" --jq '[.workflow_runs[] | {id: .id, status: .status, conclusion: .conclusion}]' 2>$null
+            if ($LASTEXITCODE -ne 0) { Write-Host "CI_PROBE_RETRY gh api 失败，稍后重试"; Start-Sleep -Seconds 30; continue }
+            $probeRuns = @((@($probe) -join '') | ConvertFrom-Json)
+            $okRun = @($probeRuns | Where-Object { $_.status -eq 'completed' -and $_.conclusion -eq 'success' })
+            if ($okRun.Count -gt 0) { Write-Host "CI_WAIT_OK sha=$sha runs=$($okRun.Count)"; break }
+            $running = @($probeRuns | Where-Object { $_.status -ne 'completed' })
+            $failed = @($probeRuns | Where-Object { $_.status -eq 'completed' -and $_.conclusion -ne 'success' })
+            if ($running.Count -eq 0 -and $failed.Count -gt 0) {
+              throw "本 commit 的 ci.yml 已结束但没有成功 run（$sha）：先修 ci 再打包"
+            }
+            if ((Get-Date) -gt $deadline) {
+              throw "等待本 commit 的 ci.yml 超时（40 分钟，$sha）：请确认 ci 是否卡住"
+            }
+            Write-Host "CI_WAIT sha=$sha running=$($running.Count) 等待 60s"
+            Start-Sleep -Seconds 60
+          }
+
+          # 只认成功、且 head_sha 完全一致（不是「最新一次成功」——那可能是别的 commit 的 Qt，
+          # 装进包里就是版本漂移）。per_page=20 覆盖同 SHA 的多次重跑。
+          # 不再用 API 的 status=success 过滤：实测同一时刻「探测循环看到 success」与
+          # 「status=success 查询返回空」会打架（run 41370707603 就死在这里），改为取全量后本地筛。
+          $runsJson = gh api "repos/$repo/actions/workflows/ci.yml/runs?head_sha=$sha&per_page=20" `
+            --jq '[.workflow_runs[] | {id: .id, created: .created_at, status: .status, conclusion: .conclusion}]'
+          if ($LASTEXITCODE -ne 0) { throw "查询 ci.yml run 列表失败（gh api exit $LASTEXITCODE）" }
+          $allRuns = @((@($runsJson) -join '') | ConvertFrom-Json)
+          $runs = @($allRuns | Where-Object { $_.status -eq 'completed' -and $_.conclusion -eq 'success' })
+          if ($runs.Count -eq 0) { throw $missingMsg }
+          $runs = @($runs | Sort-Object created -Descending)
+          Write-Host "CI_RUNS sha=$sha 候选 $($runs.Count) 个，最新 run=$($runs[0].id)"
+
+          # 逐个 run 看 artifact，取第一个带目标 artifact 的 run id
+          $runId = $null
+          foreach ($run in $runs) {
+            $namesJson = gh api "repos/$repo/actions/runs/$($run.id)/artifacts" `
+              --jq '[.artifacts[] | select(.expired == false) | .name]'
+            if ($LASTEXITCODE -ne 0) { Write-Host "ARTIFACTS_SKIP run=$($run.id) gh api 失败"; continue }
+            $names = @((@($namesJson) -join '') | ConvertFrom-Json)
+            Write-Host "ARTIFACTS run=$($run.id) names=$($names -join ',')"
+            if ($names -contains $name) { $runId = $run.id; break }
+          }
+          if (-not $runId) { throw "$missingMsg（成功 run 里都没有未过期的 $name）" }
+          Write-Host "QT_ARTIFACT_RUN run=$runId artifact=$name"
+
+          if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          gh run download $runId -R $repo -n $name -D $dest
+          if ($LASTEXITCODE -ne 0) { throw "gh run download 失败（run $runId, exit $LASTEXITCODE）" }
+
+          # ci.yml 上传的 artifact 是「一个 zip 文件」（Compress-Archive 的产物），不是散文件：
+          # gh run download 只把这个 zip 落地，必须先解压出 exe + DLL 再做后续检查。
+          $archives = @(Get-ChildItem -Path $dest -Filter '*.zip' -Recurse -File -ErrorAction SilentlyContinue)
+          foreach ($arc in $archives) {
+            Write-Host "QT_DIST_EXPAND $($arc.FullName)"
+            Expand-Archive -Path $arc.FullName -DestinationPath $dest -Force
+          }
+
+          # ci.yml 的 zip 是「exe + DLL 摊在根」，gh 解压后一般直接落 $dest；
+          # 但 -n 单产物在某些 gh 版本会多套一层与 artifact 同名的目录，这里两种情况都收。
+          $exe = Join-Path $dest 'automationcad-qt.exe'
+          if (-not (Test-Path $exe)) {
+            $found = Get-ChildItem -Path $dest -Filter 'automationcad-qt.exe' -Recurse -File -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if ($found) {
+              $srcDir = $found.Directory.FullName
+              Write-Host "QT_DIST_NESTED $srcDir -> $dest"
+              Get-ChildItem -Path $srcDir -Force | Move-Item -Destination $dest -Force
+              if (@(Get-ChildItem -Path $srcDir -Recurse -File -ErrorAction SilentlyContinue).Count -eq 0) {
+                Remove-Item $srcDir -Recurse -Force -ErrorAction SilentlyContinue
+              }
+              $exe = Join-Path $dest 'automationcad-qt.exe'
+            }
+          }
+          if (-not (Test-Path $exe)) { throw "$missingMsg（下载完成但 qt-dist 里没有 automationcad-qt.exe）" }
+          # 26 个 OCCT 库 + STL/STEP + 第三方 + CRT 三件，正常 40+ 个文件；少于 40 说明产物是残的
+          $files = @(Get-ChildItem -Path $dest -Recurse -File)
+          if ($files.Count -lt 40) {
+            throw "qt-dist 只有 $($files.Count) 个文件（要求 ≥40）：Qt 产物不完整，vendor-qt 会打出一个缺 DLL 的包"
+          }
+          $bytes = ($files | Measure-Object -Property Length -Sum).Sum
+          Write-Host "QT_DIST_FETCH_OK run=$runId files=$($files.Count) bytes=$bytes"
+          "QT_DIST=$dest" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: 安装依赖
         run: npm ci
+
+      # DWG 转换模块（LibreDWG WASM，~12MB）刻意不进 devDependencies：
+      # 平时 `npm ci` + 单测不需要它，只有打包要。缺了它 vendor-dwg.mjs 会失败，
+      # 打出来的包就没有 DWG 导入能力 —— 所以发布包必须装。
+      - name: 安装 DWG 转换模块（仅打包需要）
+        run: npm i --no-save @mlightcad/libredwg-web@0.8.3
 
       - name: 发行签名与渠道前置检查
         id: release-preflight
@@ -38,17 +152,182 @@ jobs:
       - name: 单元测试
         run: npm test
 
-      - name: 打包 NSIS 安装程序
+      # 走 dist:win 而不是直接 npx electron-builder：dist:win 里前置了 vendor-dwg / vendor-qt /
+      # build-pipeline，QT_DIST 决定 Qt 从哪拷进 desktop/vendor/qt（再由 extraResources 落 resources/qt）。
+      # 额外参数用 `--` 透传，npm 会把它们拼到脚本最后一条命令（electron-builder）后面，
+      # 所以 tag 时的 publish.channel / forceCodeSigning 照旧生效。
+      - name: 打包 NSIS 安装程序（含随包 Qt）
         shell: pwsh
         env:
           UPDATE_PUBLISH_CHANNEL: ${{ steps.release-preflight.outputs.publish_channel }}
+          QT_DIST: ${{ github.workspace }}/qt-dist
         run: |
-          $builderArgs = @('--win', 'nsis', '--x64', '--publish', 'never')
+          if (-not $env:QT_DIST) { throw 'QT_DIST 为空：vendor-qt 无从取 Qt' }
+          if (-not (Test-Path (Join-Path $env:QT_DIST 'automationcad-qt.exe'))) {
+            throw "QT_DIST 里没有 automationcad-qt.exe：$env:QT_DIST"
+          }
+          Write-Host "QT_DIST=$env:QT_DIST"
+          $builderArgs = @('--publish', 'never')
           if ($env:UPDATE_PUBLISH_CHANNEL) {
             $builderArgs += "-c.publish.channel=$env:UPDATE_PUBLISH_CHANNEL"
             $builderArgs += '-c.win.forceCodeSigning=true'
           }
-          npx electron-builder @builderArgs
+          npm run dist:win -- @builderArgs
+          if ($LASTEXITCODE -ne 0) { throw "npm run dist:win 失败（exit $LASTEXITCODE）" }
+
+      # 打包后自证：①-④ 是四条真断言（各自 throw，缺一即失败），能把「Qt 没进包 / 管线没进包 /
+      # Qt 起不来 / 包没变大」单独指出来；最后一行 DUAL_PACKAGE_OK 只是给发版记录与人眼看的汇总输出，
+      # 它本身不参与失败判定——别把它数成第五条断言。
+      - name: 打包后自证（Qt 随包 / 管线 / 版本 / 体积）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = $env:GITHUB_WORKSPACE
+          $unpacked = Join-Path $root 'desktop/release/win-unpacked'
+          $qtDir = Join-Path $unpacked 'resources/qt'
+          $qtExe = Join-Path $qtDir 'automationcad-qt.exe'
+          $pipeline = Join-Path $unpacked 'resources/pipeline/machine-design-cli.cjs'
+
+          # ① 随包 Qt：exe 在，且 resources/qt 下文件数 ≥ 40（26 OCCT + STL/STEP + 第三方 + CRT + Qt6*）
+          if (-not (Test-Path $qtExe)) {
+            throw "1/4 缺 $qtExe：Qt 没进包（vendor-qt 没跑 / extraResources 没配 vendor/qt→qt）"
+          }
+          $qtFiles = @(Get-ChildItem -Path $qtDir -Recurse -File)
+          if ($qtFiles.Count -lt 40) {
+            throw "1/4 resources/qt 只有 $($qtFiles.Count) 个文件（要求 ≥40）：Qt 运行库不全，客户机必 0xc0000135"
+          }
+          Write-Host "ASSERT_1_QT_OK files=$($qtFiles.Count)"
+
+          # ② 单文件管线：Qt 与 Electron 共用同一份预打包脚本，缺了它两端都跑不了整机管线
+          if (-not (Test-Path $pipeline)) {
+            throw "2/4 缺 $pipeline：build-pipeline 没跑，或 extraResources 没配 vendor/pipeline→pipeline"
+          }
+          $pipelineBytes = (Get-Item $pipeline).Length
+          if ($pipelineBytes -le 0) { throw "2/4 $pipeline 是空文件" }
+          Write-Host "ASSERT_2_PIPELINE_OK bytes=$pipelineBytes"
+
+          # ②b 依赖闭包体检：把 exe 与包内 DLL 的导入表全扫一遍，列出「被引用但目录里没有」的 DLL。
+          #    这一步是为了抓住「conda PATH 兜住的隐藏依赖」——ci.yml 的启动自检在 conda 环境里跑，
+          #    缺的 DLL 可能被 Library/bin 兜住，只有脱离 conda 的安装包才会暴露 0xc0000135。
+          $systemDlls = @('kernel32.dll','user32.dll','gdi32.dll','advapi32.dll','shell32.dll','ole32.dll','oleaut32.dll',
+            'msvcrt.dll','ucrtbase.dll','ws2_32.dll','wsock32.dll','opengl32.dll','d3d11.dll','d3d12.dll','dxgi.dll',
+            'comdlg32.dll','winmm.dll','imm32.dll','version.dll','userenv.dll','netapi32.dll','uxtheme.dll','dnsapi.dll',
+            'iphlpapi.dll','secur32.dll','crypt32.dll','bcrypt.dll','ncrypt.dll','rpcrt4.dll','setupapi.dll','dwmapi.dll',
+            'dwrite.dll','winhttp.dll','mpr.dll','shlwapi.dll','winspool.drv','ntdll.dll','powrprof.dll','d3d9.dll',
+            'dbghelp.dll','psapi.dll','wtsapi32.dll','authz.dll','cfgmgr32.dll','uiautomationcore.dll','wininet.dll',
+            'msimg32.dll','comctl32.dll','gdiplus.dll','urlmon.dll','oleacc.dll','pdh.dll','vssapi.dll','wevtapi.dll')
+          function Get-ImportNames([string]$file) {
+            $lines = & $dumpbin /nologo /dependents $file 2>$null
+            if ($LASTEXITCODE -ne 0) { return @() }
+            $names = @()
+            foreach ($line in $lines) {
+              $m = [regex]::Match($line, '^\s+([A-Za-z0-9_\.\-]+\.(dll|drv|DLL|DRV))\s*$')
+              if ($m.Success) { $names += $m.Groups[1].Value.ToLower() }
+            }
+            return $names
+          }
+          # dumpbin 只在 VS 开发者环境里；本 job 没跑 msvc-dev-cmd，需要自己找。
+          $dumpbin = (Get-Command dumpbin.exe -ErrorAction SilentlyContinue).Source
+          if (-not $dumpbin) {
+            $dumpbin = Get-ChildItem -Path 'C:\Program Files\Microsoft Visual Studio\*\*\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe' -ErrorAction SilentlyContinue |
+              Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $dumpbin) { throw '1.5/4 找不到 dumpbin.exe：无法做依赖闭包体检（不要静默跳过）' }
+          Write-Host "DUMPBIN $dumpbin"
+          $present = @{}
+          Get-ChildItem $qtDir -Recurse -File | ForEach-Object { $present[$_.Name.ToLower()] = $true }
+          $missing = @{}
+          foreach ($f in (Get-ChildItem $qtDir -File -Filter '*.dll') + @(Get-Item $qtExe)) {
+            foreach ($imp in (Get-ImportNames $f.FullName)) {
+              if ($present.ContainsKey($imp)) { continue }
+              if ($systemDlls -contains $imp) { continue }
+              if ($imp -like 'api-ms-win-*' -or $imp -like 'ext-ms-*') { continue }
+              $missing[$imp] = $true
+            }
+          }
+          if ($missing.Count -gt 0) {
+            Write-Host "IMPORT_CLOSURE_MISSING $($missing.Keys -join ',')"
+            throw "1.5/4 依赖闭包缺 $(($missing.Keys | Sort-Object) -join ',')：包里没这些 DLL，脱离 conda 环境启动即 0xc0000135"
+          }
+          Write-Host "ASSERT_1B_CLOSURE_OK"
+
+          # ③ 真跑随包 exe --version：退出码 0、输出非空、版本号与 desktop/package.json 一致。
+          #    Qt 是 GUI 子系统程序（直接 & exe 拿不到 stdout、$LASTEXITCODE 不可信），
+          #    且 main.cpp 把 qInfo 强写 stderr —— 所以用 Start-Process 同时收两个流。
+          $pkgVersion = (Get-Content (Join-Path $root 'desktop/package.json') -Raw | ConvertFrom-Json).version
+          $outFile = Join-Path $env:RUNNER_TEMP 'qt-version.out.txt'
+          $errFile = Join-Path $env:RUNNER_TEMP 'qt-version.err.txt'
+          $proc = Start-Process -FilePath $qtExe -ArgumentList '--version' -WorkingDirectory $qtDir `
+            -Wait -PassThru -NoNewWindow -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+          $text = ''
+          foreach ($f in @($outFile, $errFile)) {
+            if (Test-Path $f) { $text += (Get-Content $f -Raw) }
+          }
+          if ($null -eq $text) { $text = '' }
+          $text = $text.Trim()
+          Write-Host "QT_VERSION exit=$($proc.ExitCode) out=[$text]"
+          if ($proc.ExitCode -ne 0) {
+            # 失败时先取证再抛：只报「退出码 -1073741515」无法定位是「少了哪个文件」还是「路径/加载顺序」问题。
+            Write-Host "DIAG_TOPLEVEL"
+            Get-ChildItem -Path $qtDir -File | Sort-Object Name | ForEach-Object { Write-Host ("  {0}`t{1}" -f $_.Name, $_.Length) }
+            $qtSum = (Get-ChildItem $qtDir -Recurse -File | Measure-Object Length -Sum).Sum
+            $srcDir = Join-Path $root 'qt-dist'
+            $srcSum = (Get-ChildItem $srcDir -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+            Write-Host "DIAG_SIZE qt_dir=$qtSum qt_dist=$srcSum"
+            foreach ($d in @('vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll','Qt6Core.dll','Qt6Widgets.dll','TKernel.dll','TKV3d.dll','TKOpenGl.dll','TKBO.dll','platforms\qwindows.dll')) {
+              Write-Host ("DIAG_FILE {0}={1}" -f $d, (Test-Path (Join-Path $qtDir $d)))
+            }
+            # 逐文件比对：目录里少的 / 大小不同的，直接列出来
+            $qtMap = @{}
+            Get-ChildItem $qtDir -Recurse -File | ForEach-Object { $qtMap[$_.FullName.Substring($qtDir.Length).TrimStart('\')] = $_.Length }
+            $srcMap = @{}
+            Get-ChildItem $srcDir -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { $srcMap[$_.FullName.Substring($srcDir.Length).TrimStart('\')] = $_.Length }
+            foreach ($k in $srcMap.Keys) {
+              if (-not $qtMap.ContainsKey($k)) { Write-Host "DIAG_MISSING $k" }
+              elseif ($qtMap[$k] -ne $srcMap[$k]) { Write-Host "DIAG_SIZE_DIFF $k qt=$($qtMap[$k]) src=$($srcMap[$k])" }
+            }
+            # A/B 对照：同一个 exe、同一套文件，在「原始 qt-dist 目录」里能不能起来
+            $srcExe = Join-Path $root 'qt-dist/automationcad-qt.exe'
+            if (Test-Path $srcExe) {
+              $p0 = Start-Process -FilePath $srcExe -ArgumentList '--version' -WorkingDirectory (Split-Path $srcExe) `
+                -Wait -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $env:RUNNER_TEMP 'q0.out') -RedirectStandardError (Join-Path $env:RUNNER_TEMP 'q0.err')
+              Write-Host "DIAG_FROM_QT_DIST exit=$($p0.ExitCode)"
+            } else {
+              Write-Host "DIAG_FROM_QT_DIST skip=no-exe"
+            }
+            $env:PATH = "$qtDir;$env:PATH"
+            $p2 = Start-Process -FilePath $qtExe -ArgumentList '--version' -WorkingDirectory $qtDir `
+              -Wait -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $env:RUNNER_TEMP 'q2.out') -RedirectStandardError (Join-Path $env:RUNNER_TEMP 'q2.err')
+            Write-Host "DIAG_WITH_PATH exit=$($p2.ExitCode)"
+            $copy = Join-Path $env:RUNNER_TEMP 'qtcopy'
+            if (Test-Path $copy) { Remove-Item $copy -Recurse -Force }
+            Copy-Item $qtDir $copy -Recurse -Force
+            $p3 = Start-Process -FilePath (Join-Path $copy 'automationcad-qt.exe') -ArgumentList '--version' `
+              -WorkingDirectory $copy -Wait -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $env:RUNNER_TEMP 'q3.out') -RedirectStandardError (Join-Path $env:RUNNER_TEMP 'q3.err')
+            Write-Host "DIAG_FROM_COPY exit=$($p3.ExitCode)"
+            throw "3/4 随包 exe --version 退出码 $($proc.ExitCode)（0xC0000135/-1073741515 多为缺 DLL/VC++ 运行库），取证见上方 DIAG_* / ASSERT_3 失败"
+          }
+          if (-not $text) { throw '3/4 随包 exe --version 没有任何输出：无法证明包里的 Qt 能起来' }
+          $m = [regex]::Match($text, '(\d+\.\d+\.\d+)')
+          if (-not $m.Success) { throw "3/4 --version 输出里没有语义化版本号：$text" }
+          if ($m.Groups[1].Value -ne $pkgVersion) {
+            throw "3/4 版本不一致：随包 Qt=$($m.Groups[1].Value)，desktop/package.json=$pkgVersion（qt-client/CMakeLists.txt 的 project VERSION 没跟上）"
+          }
+          Write-Host "ASSERT_3_VERSION_OK version=$($m.Groups[1].Value)"
+
+          # ④ 体积：不含 Qt 时稳定在 136MB，含 Qt 约 190MB。≤150MB 就是 Qt 没进去
+          $setup = Get-ChildItem -Path (Join-Path $root 'desktop/release') -Filter 'AutomationCAD-Setup-*.exe' -File |
+            Sort-Object Length -Descending | Select-Object -First 1
+          if (-not $setup) { throw '4/4 release 下没有 AutomationCAD-Setup-*.exe' }
+          if ($setup.Length -le 150MB) {
+            throw "4/4 安装包只有 $([math]::Round($setup.Length/1MB,1))MB（要求 >150MB）：Qt 没进去"
+          }
+          Write-Host "ASSERT_4_SIZE_OK setup=$($setup.Name) bytes=$($setup.Length) mb=$([math]::Round($setup.Length/1MB,1))"
+
+          # 汇总输出（不是断言）：发版记录与 Release note 直接摘这一行，失败判定由 ①-④ 负责
+          $summary = "DUAL_PACKAGE_OK qt_files=$($qtFiles.Count) setup_bytes=$($setup.Length) pipeline=1"
+          Write-Host $summary
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: 校验生产更新产物
         if: startsWith(github.ref, 'refs/tags/v')
@@ -69,6 +348,39 @@ jobs:
       - name: 列出产物
         run: Get-ChildItem release | Format-Table Name,Length
 
+      # 免安装便携包：给「不装、直接解压跑」的现场（工控机没管理员权限时最常用）。
+      # 用 .NET ZipFile 而不是 Compress-Archive：500MB+ / 数万文件的目录上 Compress-Archive
+      # 会先整目录读进内存，runner 上实测极慢且容易爆。
+      - name: 压便携包（win-unpacked → zip）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = Join-Path $env:GITHUB_WORKSPACE 'desktop/release'
+          $unpacked = Join-Path $release 'win-unpacked'
+          if (-not (Test-Path $unpacked)) { throw "没有 $unpacked，无法产出便携包" }
+          $version = (Get-Content (Join-Path $env:GITHUB_WORKSPACE 'desktop/package.json') -Raw | ConvertFrom-Json).version
+          $zipPath = Join-Path $release "AutomationCAD-Portable-$version.zip"
+          if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            $unpacked, $zipPath, [System.IO.Compression.CompressionLevel]::Fastest, $true)
+          $zip = Get-Item $zipPath
+          if ($zip.Length -le 100MB) { throw "便携包只有 $([math]::Round($zip.Length/1MB,1))MB：win-unpacked 不完整" }
+          # 光有体积不算数，要看包里真有 Qt 与管线（这里是便携包的「含 Qt」证明）
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+          try {
+            $entryNames = @($archive.Entries | ForEach-Object { $_.FullName })
+          } finally {
+            $archive.Dispose()
+          }
+          if (-not ($entryNames -match 'resources[\\/]qt[\\/]automationcad-qt\.exe$')) {
+            throw '便携包里没有 resources/qt/automationcad-qt.exe'
+          }
+          if (-not ($entryNames -match 'resources[\\/]pipeline[\\/]machine-design-cli\.cjs$')) {
+            throw '便携包里没有 resources/pipeline/machine-design-cli.cjs'
+          }
+          Write-Host "PORTABLE_OK path=$($zip.Name) bytes=$($zip.Length) mb=$([math]::Round($zip.Length/1MB,1)) entries=$($entryNames.Count) version=$version"
+
       - uses: actions/upload-artifact@v4
         with:
           name: AutomationCAD-Setup-win-x64
@@ -76,6 +388,13 @@ jobs:
             desktop/release/*.exe
             desktop/release/*.blockmap
             desktop/release/*.yml
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutomationCAD-Portable-win-x64
+          path: desktop/release/AutomationCAD-Portable-*.zip
           if-no-files-found: error
           retention-days: 14
 
@@ -87,6 +406,7 @@ jobs:
             desktop/release/*.exe
             desktop/release/*.blockmap
             desktop/release/*.yml
+            desktop/release/AutomationCAD-Portable-*.zip
           draft: false
           prerelease: ${{ steps.release-preflight.outputs.prerelease == 'true' }}
           token: ${{ secrets.GITHUB_TOKEN }}

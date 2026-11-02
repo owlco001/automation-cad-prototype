@@ -22,6 +22,7 @@
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QStandardPaths>
 #include <QDrag>
 #include <QDockWidget>
@@ -100,26 +101,162 @@ QJsonObject readReply(QNetworkReply *reply) {
 } // namespace
 
 namespace {
-// 管线脚本定位：环境变量 → exe 目录向上 → 当前工作目录向上。
-// 之前两处各写一份、都不看 cwd，所以在仓库外构建（/tmp/qt-occt）时构件库读不到，
-// 而同一份 exe 的“生成整机”却能跑——同一件事两套规则，很容易看着像坏了。
-QString resolvePipelineScript()
-{
+// node 运行时解析结果。安装态客户机不一定装 Node，但 Electron 主程序带
+// ELECTRON_RUN_AS_NODE=1 就是一只完整的 node，所以优先用它。
+// electronRunAsNode 为 true 时必须在 start() 之前注入该环境变量：不注入就会
+// 拉起整个 GUI 主窗口，看着像「点了按钮没反应 / 冒出一个空软件」。
+struct NodeRunner {
+    QString program;              // 要启动的可执行文件
+    bool electronRunAsNode = false;  // true = program 是 Electron 主程序
+    bool found = false;           // false = 安装根和 PATH 都没有可用的运行时
+    QStringList searched;         // 找过的位置（失败文案用，不参与逻辑）
+};
+
+// Electron 主程序文件名：Windows 打包态是 AutomationCAD.exe / AutomationCAD，
+// 开发态是 node_modules/electron/dist/electron(.exe)。只按文件名猜会漏掉开发态（也漏掉被改名的便携包）。
+bool isElectronRuntime(const QString &program) {
+    // Electron 侧在 buildLaunchEnv 里显式打标记（AUTOMATIONCAD_NODE_ELECTRON=1），
+    // 有标记就以标记为准，不再靠文件名猜；没有标记才回落到文件名判定。
+    if (qEnvironmentVariableIsSet("AUTOMATIONCAD_NODE_ELECTRON") &&
+        qEnvironmentVariable("AUTOMATIONCAD_NODE_ELECTRON") == QLatin1String("1")) {
+        return true;
+    }
+    const QString name = QFileInfo(program).fileName();
+    return name.compare(QStringLiteral("AutomationCAD.exe"), Qt::CaseInsensitive) == 0 ||
+           name.compare(QStringLiteral("AutomationCAD"), Qt::CaseInsensitive) == 0 ||
+           name.compare(QStringLiteral("electron.exe"), Qt::CaseInsensitive) == 0 ||
+           name.compare(QStringLiteral("electron"), Qt::CaseInsensitive) == 0;
+}
+
+// node 运行时定位：AUTOMATIONCAD_NODE → 安装根下的 Electron 主程序 → PATH 上的 node。
+// 顺序不能反：客户机上通常只有 Electron 没有 Node，先探 PATH 会白报一次「找不到 node」。
+NodeRunner resolveNodeRunner() {
+    NodeRunner runner;
+
+    const QString fromEnv = qEnvironmentVariable("AUTOMATIONCAD_NODE");
+    runner.searched << QStringLiteral("环境变量 AUTOMATIONCAD_NODE=%1")
+                           .arg(fromEnv.isEmpty() ? QStringLiteral("（未设置）") : fromEnv);
+    if (!fromEnv.isEmpty()) {
+        // 显式配置优先且不静默回退：指错了就照着它报错，别偷偷换成 PATH 上的另一个 node。
+        runner.program = fromEnv;
+        runner.electronRunAsNode = isElectronRuntime(fromEnv);
+        runner.searched << QStringLiteral("AUTOMATIONCAD_NODE_ELECTRON=%1 → 按%2处理")
+                               .arg(qEnvironmentVariableIsSet("AUTOMATIONCAD_NODE_ELECTRON")
+                                        ? qEnvironmentVariable("AUTOMATIONCAD_NODE_ELECTRON")
+                                        : QStringLiteral("（未设置）"),
+                                    runner.electronRunAsNode ? QStringLiteral("Electron（注入 ELECTRON_RUN_AS_NODE）")
+                                                             : QStringLiteral("普通 node"));
+        runner.found = true;
+        return runner;
+    }
+
+    // 安装态布局：<安装根>/resources/qt/automationcad-qt.exe，Electron 主程序在 <安装根>。
+    // 开发态（build-qt/ 里）也可能放在同级或上一级，所以三个位置都探。
+    const QDir appDir(QCoreApplication::applicationDirPath());
+    const QStringList dirs{QStringLiteral("."), QStringLiteral(".."), QStringLiteral("../..")};
+    const QStringList names{QStringLiteral("AutomationCAD.exe"), QStringLiteral("AutomationCAD")};
+    for (const QString &dir : dirs) {
+        for (const QString &name : names) {
+            const QString candidate =
+                QFileInfo(appDir.filePath(dir + QLatin1Char('/') + name)).absoluteFilePath();
+            runner.searched << candidate;
+            if (!runner.found && QFileInfo(candidate).isFile()) {
+                runner.program = candidate;
+                runner.electronRunAsNode = true;
+                runner.found = true;
+            }
+        }
+    }
+    if (runner.found) return runner;
+
+    // 兜底：PATH 上的 node（开发机/工作站上的常规情形）。
+    const QString onPath = QStandardPaths::findExecutable(QStringLiteral("node"));
+    runner.searched << QStringLiteral("PATH 上的 node（findExecutable(\"node\")）= %1")
+                           .arg(onPath.isEmpty() ? QStringLiteral("（未找到）") : onPath);
+    if (!onPath.isEmpty()) {
+        runner.program = onPath;
+        runner.found = true;
+        return runner;
+    }
+    // 都没有：program 仍留 "node"，让 start() 的报错里至少能看到这个名字。
+    runner.program = QStringLiteral("node");
+    return runner;
+}
+
+// 只有 Electron 主程序需要这个变量：注入后它退化成 node（无窗口、只跑脚本）。
+void prepareNodeProcess(QProcess &process, const NodeRunner &runner) {
+    if (!runner.electronRunAsNode) return;
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert(QStringLiteral("ELECTRON_RUN_AS_NODE"), QStringLiteral("1"));
+    process.setProcessEnvironment(env);
+}
+
+QString nodeRunnerHint(const NodeRunner &runner) {
+    return QCoreApplication::translate(
+               "MainWindow",
+               "找过的位置：\n%1\n"
+               "没装 Node.js 也能跑：安装包里的 AutomationCAD.exe 自带运行时（以 ELECTRON_RUN_AS_NODE 方式启动）；"
+               "也可以用环境变量 AUTOMATIONCAD_NODE 指定 node 或 AutomationCAD.exe 的完整路径")
+        .arg(runner.searched.join(QStringLiteral("\n")));
+}
+
+// 管线脚本定位结果。searched 只进失败文案：让人看见「到底找过哪」，
+// 而不是收到一句「找不到脚本」再去猜。
+struct PipelineScript {
+    QString path;         // 空 = 没找到
+    QStringList searched;
+};
+
+// 管线脚本定位：AUTOMATIONCAD_PIPELINE → 随包 cjs（安装态）→ 源码 mjs（开发态）。
+// 之前只有源码探测，安装包里根本没有 desktop/scripts/，装完就整条链路不可用。
+PipelineScript resolvePipelineScript() {
+    PipelineScript script;
     // 显式配置优先且不静默回退：设了但指错，就照着它报错（报错里能看到指到哪），
     // 而不是悄悄用自动探测到的另一个脚本——那种“配了却没生效”最难查。
     const QString fromEnv = qEnvironmentVariable("AUTOMATIONCAD_PIPELINE");
-    if (!fromEnv.isEmpty()) return fromEnv;
+    script.searched << QStringLiteral("环境变量 AUTOMATIONCAD_PIPELINE=%1")
+                           .arg(fromEnv.isEmpty() ? QStringLiteral("（未设置）") : fromEnv);
+    if (!fromEnv.isEmpty()) {
+        script.path = fromEnv;
+        return script;
+    }
 
+    // 安装态：管线由预打包步骤合成单文件 cjs，与 Qt 客户端一起装进 resources/。
+    // <安装根>/resources/qt/automationcad-qt.exe → ../pipeline/ 即 <安装根>/resources/pipeline/。
+    const QDir appDir(QCoreApplication::applicationDirPath());
+    for (const QString &rel : {QStringLiteral("../pipeline/machine-design-cli.cjs"),
+                               QStringLiteral("pipeline/machine-design-cli.cjs")}) {
+        const QString candidate = QFileInfo(appDir.filePath(rel)).absoluteFilePath();
+        script.searched << candidate;
+        if (QFileInfo::exists(candidate)) {
+            script.path = candidate;
+            return script;
+        }
+    }
+
+    // 开发态兜底：仓库里跑时脚本还在 desktop/scripts/（未预打包）。
     const QString rel = QStringLiteral("desktop/scripts/machine-design-cli.mjs");
-    for (const QDir &start : {QDir(QCoreApplication::applicationDirPath()), QDir::current()}) {
+    for (const QDir &start : {QDir(appDir), QDir::current()}) {
         QDir probe(start);
         for (int depth = 0; depth < 8; ++depth) {
             const QString candidate = QFileInfo(probe.filePath(rel)).absoluteFilePath();
-            if (QFileInfo::exists(candidate)) return candidate;
+            // cwd 与 exe 目录常常是同一个地方，去重后再记，免得失败文案里同一行出现两遍
+            if (depth < 2 && !script.searched.contains(candidate)) script.searched << candidate;
+            if (QFileInfo::exists(candidate)) {
+                script.path = candidate;
+                return script;
+            }
             if (!probe.cdUp()) break;
         }
     }
-    return fromEnv;  // 环境变量设了但不存在：原样返回，报错里能看出它指向哪
+    return script;
+}
+
+QString pipelineScriptHint(const QStringList &searched) {
+    return QCoreApplication::translate(
+               "MainWindow",
+               "找过的路径：\n%1\n请在安装目录确认 resources/qt 与 resources/pipeline 是否存在")
+        .arg(searched.join(QStringLiteral("\n")));
 }
 }  // namespace
 
@@ -287,8 +424,10 @@ MainWindow::MainWindow(QWidget *parent)
         QString error;
         if (!loadCatalog(&catalog, &error)) {
             catalogList->addItem(tr("构件库不可用：%1").arg(error));
-            // 修复命令要跟着失败原因走：node 没装时给“export 管线路径”是错的指引
-            const bool nodeMissing = error.contains(QStringLiteral("node"));
+            // 修复命令要跟着失败原因走：node 没装时给“export 管线路径”是错的指引。
+            // 只认「找不到 node 运行时」这句：现在 node 侧还有 Electron 兜底，
+            // 消息里随手出现 node 字样不再等价于「运行时缺失」。
+            const bool nodeMissing = error.contains(QStringLiteral("node 运行时"));
             const QString command = nodeMissing
                 ? QStringLiteral("node -v || echo '请先安装 Node.js 并确保 node 在 PATH 中'")
                 : QStringLiteral("export AUTOMATIONCAD_PIPELINE=%1")
@@ -728,15 +867,24 @@ bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *docum
         *error = tr("brief 不能为空");
         return false;
     }
-    const QString script = resolvePipelineScript();
+    const PipelineScript pipeline = resolvePipelineScript();
+    const QString script = pipeline.path;
     if (script.isEmpty() || !QFileInfo::exists(script)) {
-        *error = tr("找不到整机管线脚本（%1）；设置环境变量 AUTOMATIONCAD_PIPELINE 指向 desktop/scripts/machine-design-cli.mjs")
-                     .arg(script.isEmpty() ? tr("未设置") : script);
+        *error = script.isEmpty()
+                     ? tr("找不到整机管线脚本\n%1").arg(pipelineScriptHint(pipeline.searched))
+                     : tr("找不到整机管线脚本（%1 不存在）\n%2")
+                           .arg(script, pipelineScriptHint(pipeline.searched));
+        return false;
+    }
+    const NodeRunner node = resolveNodeRunner();
+    if (!node.found) {
+        *error = tr("找不到 node 运行时，生成整机方案需要它\n%1").arg(nodeRunnerHint(node));
         return false;
     }
 
     QProcess process;
     process.setProcessChannelMode(QProcess::SeparateChannels);
+    prepareNodeProcess(process, node);
     QStringList arguments{script, QStringLiteral("--brief"), brief, QStringLiteral("--with-geometry")};
     for (const QString &move : moves) arguments << QStringLiteral("--move") << move;
     if (resolveAll) arguments << QStringLiteral("--resolve");
@@ -762,9 +910,9 @@ bool MainWindow::designMachineFromBrief(const QString &brief, QJsonObject *docum
     // 间距初筛阈值可由干涉页调整；默认 20 mm。只读诊断，不改变几何
     arguments << QStringLiteral("--clearance")
               << QString::number(clearanceMm > 0 ? clearanceMm : m_clearanceMm);
-    process.start(QStringLiteral("node"), arguments);
+    process.start(node.program, arguments);
     if (!process.waitForStarted(10'000)) {
-        *error = tr("启动 node 失败：%1").arg(process.errorString());
+        *error = tr("启动 %1 失败：%2").arg(node.program, process.errorString());
         return false;
     }
     if (!process.waitForFinished(180'000)) {
@@ -834,22 +982,28 @@ bool MainWindow::clipTestMetrics(double z, int *beforePixels, int *afterPixels, 
 
 bool MainWindow::loadPlcAudit(const QString &brief, QJsonObject *audit, QString *error)
 {
-    const QString script = resolvePipelineScript();
+    const PipelineScript pipeline = resolvePipelineScript();
+    const QString script = pipeline.path;
     if (script.isEmpty() || !QFileInfo::exists(script)) {
-        *error = tr("找不到整机管线脚本（%1）").arg(script.isEmpty() ? tr("未设置") : script);
+        *error = script.isEmpty()
+                     ? tr("找不到整机管线脚本\n%1").arg(pipelineScriptHint(pipeline.searched))
+                     : tr("找不到整机管线脚本（%1 不存在）\n%2")
+                           .arg(script, pipelineScriptHint(pipeline.searched));
         return false;
     }
-    if (QStandardPaths::findExecutable(QStringLiteral("node")).isEmpty()) {
-        *error = tr("找不到 node 运行时，PLC 体检需要它");
+    const NodeRunner node = resolveNodeRunner();
+    if (!node.found) {
+        *error = tr("找不到 node 运行时，PLC 体检需要它\n%1").arg(nodeRunnerHint(node));
         return false;
     }
     QProcess process;
     process.setProcessChannelMode(QProcess::SeparateChannels);
-    process.start(QStringLiteral("node"),
+    prepareNodeProcess(process, node);
+    process.start(node.program,
                   {script, QStringLiteral("--brief"), brief,
                    QStringLiteral("--with-geometry"), QStringLiteral("--plc-audit")});
     if (!process.waitForStarted(10'000)) {
-        *error = tr("启动 node 失败：%1").arg(process.errorString());
+        *error = tr("启动 %1 失败：%2").arg(node.program, process.errorString());
         return false;
     }
     if (!process.waitForFinished(180'000)) {
@@ -895,25 +1049,31 @@ void MainWindow::openPlcAudit()
 
 bool MainWindow::loadLinkage(const QString &brief, QJsonObject *linkage, QString *error)
 {
-    const QString script = resolvePipelineScript();
+    const PipelineScript pipeline = resolvePipelineScript();
+    const QString script = pipeline.path;
     if (script.isEmpty() || !QFileInfo::exists(script)) {
-        *error = tr("找不到整机管线脚本（%1）").arg(script.isEmpty() ? tr("未设置") : script);
+        *error = script.isEmpty()
+                     ? tr("找不到整机管线脚本\n%1").arg(pipelineScriptHint(pipeline.searched))
+                     : tr("找不到整机管线脚本（%1 不存在）\n%2")
+                           .arg(script, pipelineScriptHint(pipeline.searched));
         return false;
     }
-    if (QStandardPaths::findExecutable(QStringLiteral("node")).isEmpty()) {
-        *error = tr("找不到 node 运行时，联动调试需要它生成运动时间线");
+    const NodeRunner node = resolveNodeRunner();
+    if (!node.found) {
+        *error = tr("找不到 node 运行时，联动调试需要它生成运动时间线\n%1").arg(nodeRunnerHint(node));
         return false;
     }
     QProcess process;
     process.setProcessChannelMode(QProcess::SeparateChannels);
+    prepareNodeProcess(process, node);
     // 帧数给足 60 帧：Qt 只按帧播放，不插值
-    process.start(QStringLiteral("node"),
+    process.start(node.program,
                   {script, QStringLiteral("--brief"), brief,
                    QStringLiteral("--with-geometry"), QStringLiteral("--linkage"),
                    QStringLiteral("--motion-check"),
                    QStringLiteral("--linkage-frames"), QStringLiteral("120")});
     if (!process.waitForStarted(10'000)) {
-        *error = tr("启动 node 失败：%1").arg(process.errorString());
+        *error = tr("启动 %1 失败：%2").arg(node.program, process.errorString());
         return false;
     }
     if (!process.waitForFinished(180'000)) {
@@ -1637,22 +1797,27 @@ bool MainWindow::exportMachineStlForTest(const QString &path, int *bytes, QStrin
 }
 
 bool MainWindow::loadCatalog(QJsonArray *catalog, QString *error) {
-    const QString script = resolvePipelineScript();
+    const PipelineScript pipeline = resolvePipelineScript();
+    const QString script = pipeline.path;
     if (script.isEmpty() || !QFileInfo::exists(script)) {
-        *error = tr("找不到整机管线脚本（%1）；设置 AUTOMATIONCAD_PIPELINE 指向 desktop/scripts/machine-design-cli.mjs")
-                     .arg(script.isEmpty() ? tr("未设置且自动探测失败") : script);
+        *error = script.isEmpty()
+                     ? tr("找不到整机管线脚本\n%1").arg(pipelineScriptHint(pipeline.searched))
+                     : tr("找不到整机管线脚本（%1 不存在）\n%2")
+                           .arg(script, pipelineScriptHint(pipeline.searched));
         return false;
     }
     // 三种失败要分开报：脚本没找到 / node 没装 / 脚本自己跑挂了。
     // 之前一律报“找不到整机管线脚本”，会把人引到完全错误的方向。
-    if (QStandardPaths::findExecutable(QStringLiteral("node")).isEmpty()) {
-        *error = tr("找不到 node 运行时（构件库由 Node 脚本提供）；装 Node.js 或把 node 加进 PATH 后点重试");
+    const NodeRunner node = resolveNodeRunner();
+    if (!node.found) {
+        *error = tr("找不到 node 运行时（构件库由 Node 脚本提供）\n%1").arg(nodeRunnerHint(node));
         return false;
     }
     QProcess process;
-    process.start(QStringLiteral("node"), {script, QStringLiteral("--catalog")});
+    prepareNodeProcess(process, node);
+    process.start(node.program, {script, QStringLiteral("--catalog")});
     if (!process.waitForStarted(10'000)) {
-        *error = tr("启动 node 失败：%1").arg(process.errorString());
+        *error = tr("启动 %1 失败：%2").arg(node.program, process.errorString());
         return false;
     }
     if (!process.waitForFinished(20'000)) {

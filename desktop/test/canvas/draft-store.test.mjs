@@ -16,7 +16,7 @@ function tempDir() {
   return mkdtempSync(join(tmpdir(), 'canvas-draft-'));
 }
 
-test('writeCanvasDraft / readCanvasDraft：往返一致，文件 0600', () => {
+test('writeCanvasDraft / readCanvasDraft：往返一致，文件 0600', (t) => {
   const dir = tempDir();
   try {
     const payload = { schema: 'canvas-workbench-draft/1', graph: { nodes: [], edges: [] } };
@@ -26,7 +26,13 @@ test('writeCanvasDraft / readCanvasDraft：往返一致，文件 0600', () => {
     const read = readCanvasDraft(dir);
     assert.equal(read.recovered, false);
     assert.deepEqual(read.draft, payload);
-    assert.equal(statSync(join(dir, CANVAS_DRAFT_FILE)).mode & 0o777, 0o600);
+    if (process.platform === 'win32') {
+      // Windows 无 POSIX 模式位：NTFS 上 stat().mode 恒为 0o666，0600 无法表达也不能验证。
+      // 只跳过这一条断言，往返/换行/其余语义照跑；POSIX 权限语义由 Linux unit job 继续把关。
+      t.diagnostic('Windows 无 POSIX 模式位，跳过 0600 断言（Linux unit job 覆盖）');
+    } else {
+      assert.equal(statSync(join(dir, CANVAS_DRAFT_FILE)).mode & 0o777, 0o600);
+    }
     assert.ok(readFileSync(join(dir, CANVAS_DRAFT_FILE), 'utf8').endsWith('\n'));
   } finally {
     rmSync(dir, { recursive: true, force: true });

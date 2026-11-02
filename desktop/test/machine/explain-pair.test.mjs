@@ -4,8 +4,11 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
-const script = new URL('../../scripts/explain-pair.mjs', import.meta.url).pathname;
+// URL.pathname 在 Windows 上是 /D:/a/... 形式，直接当路径传给 spawn 必定 ENOENT；
+// 必须走 fileURLToPath 转成本地绝对路径。
+const script = fileURLToPath(new URL('../../scripts/explain-pair.mjs', import.meta.url));
 
 const writeCase = (parts, pairs = []) => {
   const dir = mkdtempSync(join(tmpdir(), 'explain-pair-'));

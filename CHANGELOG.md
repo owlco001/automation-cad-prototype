@@ -2,6 +2,20 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织，版本号遵循语义化版本。
 
+## [0.6.0] - 2026-11-02
+
+### Added · 双端整合：一个安装包内含 Electron 工作台与 Qt 原生 OCCT 视口
+
+- Electron 主程序随包携带 Qt 原生工作台（`resources/qt/`，26 个 OCCT 库 + STEP/STL + tbb/freetype/zlib/libpng16/FreeImage + VC++ CRT 三件），DLL 整目录隔离，避免与 Electron 自带 `vcruntime140/msvcp140` 互相污染。
+- 菜单「工具 → 打开 Qt 工作台（OCCT 视口）」与顶栏「Qt 工作台」按钮双入口；启动失败时给出可操作提示（`0xC0000135` → 明确提示缺运行库/DLL），退出应用时收尾子进程。
+- 整机管线打成单文件（`resources/pipeline/machine-design-cli.cjs`，esbuild），Electron 与 Qt 共用同一份产物，不再依赖源码目录。
+- Qt 侧新增运行时解析：`AUTOMATIONCAD_NODE` → 同目录 `AutomationCAD.exe`（注入 `ELECTRON_RUN_AS_NODE=1`）→ PATH 上的 `node`；客户机不再需要预装 Node。管线定位同理（`AUTOMATIONCAD_PIPELINE` → `../pipeline` → 开发态源码兜底）。
+- `windows-build` 改为出**一个**同时含两端的包：自动取本 commit 已通过验证的 `automationcad-qt-windows-x64-occt` 产物，产物自证 `DUAL_PACKAGE_OK qt_files=N setup_bytes=M pipeline=1`，并额外产出便携 zip。
+
+### Fixed · 版本号单一来源
+
+- `desktop/package.json` / `qt-client/CMakeLists.txt` / `ci.yml` 自检 / `README` 四处版本统一为 0.6.0，新增 `test/meta/version-parity.test.mjs` 防止再次漂移（此前 CMake 的 0.5.0 与 package.json 的 0.5.1 已不一致，且被 GUI stdout 为空跳过断言掩盖）。
+
 ## [0.5.1] - 2026-11-01
 
 ### Fixed · 联动调试（3D 步序播放）
