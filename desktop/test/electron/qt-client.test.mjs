@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
 import {
   LAUNCH_GRACE_MS,
@@ -433,7 +434,7 @@ test('vendor-qt：只搬运行时（exe + dll），跳过 CI 打包副产物（z
     writeFileSync(join(src, 'automationcad-qt-windows-x64-occt.zip'), 'z'.repeat(2048));
     writeFileSync(join(src, 'vc_redist.x64.exe'), 'r'.repeat(2048));
     writeFileSync(join(src, 'version.out.txt'), 'log');
-    const r = spawnSync(process.execPath, [script.pathname], {
+    const r = spawnSync(process.execPath, [fileURLToPath(script)], {
       env: { ...process.env, QT_DIST: src, VENDOR_QT_TARGET: dst },
       encoding: 'utf8',
     });
