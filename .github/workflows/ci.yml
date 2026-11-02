@@ -836,6 +836,29 @@ jobs:
         run: npm ci
       - name: 构建扩展（smoke 需要 dist/）
         run: npm run build:ext
+      # npm 12 默认拦 install-scripts（日志里 "npm warn install-scripts"），electron 的 postinstall
+      # 一旦被跳过，node_modules/electron/dist 就是空的——smoke 后面会以更绕的方式失败。
+      # 这里显式跑一次 install.js：已下载时秒退，没下载时补上并打印版本，失败也看得见。
+      - name: 确保 Electron 二进制就位
+        run: |
+          node node_modules/electron/install.js
+          ls -l node_modules/electron/dist/chrome-sandbox
+      # Chromium 的 SUID 沙箱助手必须 root:root + 4755，否则非 root 下 Electron 直接 abort：
+      #   FATAL:sandbox/linux/suid/client/setuid_sandbox_host.cc:172 ... is not configured correctly
+      # 这一步是为了让 CI 真正跑在沙箱下（而不是靠 ELECTRON_DISABLE_SANDBOX 蒙过去）。
+      - name: 配置 Chrome 沙箱助手（仅 Linux CI）
+        run: |
+          SANDBOX=node_modules/electron/dist/chrome-sandbox
+          if [ -f "$SANDBOX" ]; then
+            sudo chown root:root "$SANDBOX"
+            sudo chmod 4755 "$SANDBOX"
+            ls -l "$SANDBOX"
+            echo "CHROME_SANDBOX_OK mode=$(stat -c '%a' "$SANDBOX") owner=$(stat -c '%U:%G' "$SANDBOX")"
+            # chown 之后才敢启动 electron 自检：之前跑 --version 会直接撞 SUID FATAL
+            ./node_modules/.bin/electron --version
+          else
+            echo "::error::找不到 chrome-sandbox（electron 未安装？）"; exit 1
+          fi
       # 沙箱加固是"构建产物才生效"的：preload 一旦重新引入 node: 内置，沙箱渲染下会直接抛
       # module not found，而单测只看得见源码。这里对产物再做一次守卫。
       - name: 校验 preload 仍是沙箱安全的

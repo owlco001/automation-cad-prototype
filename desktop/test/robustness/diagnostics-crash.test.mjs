@@ -219,6 +219,10 @@ test('崩溃：last-crash.json 原子写入 userData/diagnostics 且权限受限
 
 test('诊断：npm 脚本暴露 diagnose 与性能基线入口', () => {
   const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
-  assert.equal(pkg.scripts.diagnose, 'ELECTRON_DISABLE_SANDBOX=1 xvfb-run -a electron . --diagnose');
+  // 不再写死 ELECTRON_DISABLE_SANDBOX：那会让「CI 也在无沙箱下跑」，实证过 CI 日志里
+  // 打的是 SECURITY_NO_SANDBOX reason=env:ELECTRON_DISABLE_SANDBOX=1。现在统一走
+  // scripts/electron-run.mjs，由它按 uid 决定要不要补 --no-sandbox。
+  assert.match(pkg.scripts.diagnose, /xvfb-run -a node scripts\/electron-run\.mjs --diagnose$/);
+  assert.doesNotMatch(pkg.scripts.diagnose, /ELECTRON_DISABLE_SANDBOX/);
   assert.match(pkg.scripts['perf:baseline'], /perf-baseline\.mjs/);
 });
