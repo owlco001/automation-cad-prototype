@@ -18,11 +18,18 @@ import type { CadViewer } from './viewer';
 import { recordDiagnosticError } from '../shared/diagnostics.ts';
 import {
   acceptSuggestions,
+  applyBatchAccept,
   CATEGORY_LABELS,
   describeSuggestions,
+  groupSuggestionsByMechanism,
+  selectBatchEligible,
   suggestKinematics,
+  undoBatchAccept,
   type AutoKinMesh,
+  type BatchAcceptAudit,
+  type BatchAcceptOutcome,
   type KinematicsSuggestion,
+  type MechanismSuggestionGroup,
   type SuggestResult
 } from './kinematics-auto.ts';
 import type { MachineConfig } from '../commission/machine-config.ts';
@@ -692,6 +699,16 @@ export interface KinematicsUiHandle {
   suggestions(): SuggestResult;
   /** 用户确认采纳一条建议：加入动件列表（未保存），返回新动件 id；找不到返回 null。 */
   acceptSuggestion(id: string): string | null;
+  /** 一键采纳全部通过批量门槛的高置信建议；返回新动件 id（失败/无可采纳项返回空数组）。 */
+  acceptHighConfidenceSuggestions(): string[];
+  /** 按机构组键批量采纳该组内通过门槛的建议；返回新动件 id。 */
+  acceptSuggestionGroup(groupKey: string): string[];
+  /** 撤销最近一次批量采纳（快照还原）；没有可撤销记录或已被改动时返回 false。 */
+  undoLastBatch(): boolean;
+  /** 最近若干条批量采纳审计记录（新的在前）。 */
+  batchAudits(): BatchAcceptAudit[];
+  /** 当前建议按机构归组（含每组可批量采纳的 id 与被门槛挡下的原因）。 */
+  mechanismGroups(): MechanismSuggestionGroup[];
   dismissSuggestion(id: string): void;
 }
 
@@ -730,6 +747,29 @@ function defaultStorage(): StorageLike | null {
   }
 }
 
+/** 「采纳全部高置信(N)」按钮文案；N 是门槛过滤后的条数，0 时按钮同时置灰。 */
+export function batchAcceptButtonLabel(count: number): string {
+  return `采纳全部高置信(${Math.max(0, Math.trunc(count))})`;
+}
+
+/**
+ * 一组机构建议的 HTML（组头 + 卡片）。抽成纯函数便于单测：组键、条数、可批量条数与
+ * 「0 条可批时按钮 disabled」都在这里决定，initKinematicsUi 只负责挂事件。
+ * 组键来自装配路径，可能含引号/尖括号，一律转义后再进属性。
+ */
+export function renderSuggestionGroupSection(
+  group: MechanismSuggestionGroup,
+  card: (item: KinematicsSuggestion) => string
+): string {
+  return `<section class="cad-kin-suggest-group" data-kin-group="${escapeHtml(group.key)}">
+      <div class="cad-kin-section-head">
+        <span>${escapeHtml(group.label)} · ${group.suggestions.length} 条</span>
+        <button type="button" class="cad-btn" data-kin-accept-group="${escapeHtml(group.key)}"${group.eligibleIds.length === 0 ? ' disabled' : ''}>采纳本机构(${group.eligibleIds.length})</button>
+      </div>
+      ${group.suggestions.map(card).join('')}
+    </section>`;
+}
+
 export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHandle {
   const storage = options.storage ?? defaultStorage();
   const store = storage ? createKinematicsStore(storage) : null;
@@ -749,6 +789,8 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
     stats: { meshes: 0, classified: 0, groups: 0, high: 0, low: 0, skipped: 0 }
   });
   let suggestResult: SuggestResult = emptySuggest();
+  /** 批量采纳审计记录，新的在前；最多留 10 条，供「撤销批量采纳」与状态行回溯。 */
+  let batches: BatchAcceptAudit[] = [];
 
   container.classList.add('cad-kinematics-drawer');
   container.innerHTML = `
@@ -773,8 +815,11 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
         <div class="cad-kin-section-head"><span>自动识别建议</span><b data-kin-suggest-count>0</b></div>
         <div class="cad-kin-actions">
           <button type="button" class="cad-btn" data-kin-suggest>识别动件</button>
+          <button type="button" class="cad-btn cad-btn-primary" data-kin-accept-high disabled>采纳全部高置信(0)</button>
+          <button type="button" class="cad-btn" data-kin-undo-batch hidden>撤销批量采纳</button>
         </div>
         <div class="cad-kin-hint cad-kin-suggest-note" data-kin-suggest-note>建议不会自动写入：逐条「采纳」后进入动件列表，仍需校验通过并保存。</div>
+        <div class="cad-kin-hint" data-kin-batch-note hidden></div>
         <div class="cad-kin-suggests" data-kin-suggests></div>
         <details class="cad-kin-suggest-low" data-kin-suggest-low hidden>
           <summary>低置信度建议 <b data-kin-suggest-low-count>0</b></summary>
@@ -819,6 +864,9 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
   const suggestLow = query<HTMLDetailsElement>('[data-kin-suggest-low]');
   const suggestLowCount = query<HTMLElement>('[data-kin-suggest-low-count]');
   const suggestLowList = query<HTMLElement>('[data-kin-suggests-low]');
+  const acceptHighButton = query<HTMLButtonElement>('[data-kin-accept-high]');
+  const undoBatchButton = query<HTMLButtonElement>('[data-kin-undo-batch]');
+  const batchNote = query<HTMLElement>('[data-kin-batch-note]');
 
   const notify = (message: string, error = false): void => options.notify?.(message, error);
 
@@ -967,21 +1015,39 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
     </article>`;
   };
 
+  /** 一组机构：组头带「采纳本机构(N)」，N 只数通过批量门槛的条目。 */
+  const groupBlock = (group: MechanismSuggestionGroup): string => renderSuggestionGroupSection(group, suggestionCard);
+
+  const renderBatchNote = (): void => {
+    const audit = batches[0];
+    undoBatchButton.hidden = !audit;
+    batchNote.hidden = !audit;
+    if (!audit) {
+      batchNote.textContent = '';
+      return;
+    }
+    batchNote.textContent = `最近批量采纳：${audit.label}（记录 ${audit.recordId}，新增 ${audit.addedNames.join('、') || '—'}）`;
+  };
+
   const renderSuggestions = (): void => {
     const high = suggestResult.suggestions;
     const low = suggestResult.lowConfidence;
     suggestCount.textContent = String(high.length + low.length);
+    const selection = selectBatchEligible(high);
+    acceptHighButton.disabled = selection.ids.length === 0;
+    acceptHighButton.textContent = batchAcceptButtonLabel(selection.ids.length);
     suggestList.innerHTML =
       high.length === 0
         ? `<div class="cad-kin-empty">${options.getGeometry ? (meshes.length === 0 ? '导入 STEP 装配体后会自动识别气缸、滑台、夹爪、旋转台、导轨等动件。' : '没有高置信度建议。') : '当前环境未提供几何数据，无法自动识别。'}</div>`
-        : high.map(suggestionCard).join('');
+        : groupSuggestionsByMechanism(high).map(groupBlock).join('');
     suggestLow.hidden = low.length === 0;
     suggestLowCount.textContent = String(low.length);
     suggestLowList.innerHTML = low.map(suggestionCard).join('');
     suggestNote.textContent =
       high.length + low.length > 0
-        ? `${describeSuggestions(suggestResult)}。采纳后进入动件列表，仍需校验通过并保存。`
-        : '建议不会自动写入：逐条「采纳」后进入动件列表，仍需校验通过并保存。';
+        ? `${describeSuggestions(suggestResult)}。批量只收「置信度 ≥ 80% + 行程取自型号/样本表 + 方向偏主轴 ≤ 5°」的条目，采纳后仍需校验通过并保存。`
+        : '建议不会自动写入：逐条「采纳」或「采纳全部高置信」后进入动件列表，仍需校验通过并保存。';
+    renderBatchNote();
   };
 
   const runSuggest = (): SuggestResult => {
@@ -1012,6 +1078,96 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
     renderAll();
     notify(`已采纳建议「${added.name}」，校验通过后请点「保存标注」`);
     return added.id;
+  };
+
+  /**
+   * 批量采纳统一入口：门槛/回滚全在 applyBatchAccept 里（纯函数、有单测），这里只负责
+   * 「失败就不动 parts」「成功才落审计记录 + 移出建议列表」。审计记录是撤销的唯一依据。
+   */
+  const runBatch = (ids: readonly string[], scope: BatchAcceptAudit['scope'], label: string): BatchAcceptOutcome | null => {
+    if (ids.length === 0) {
+      notify('没有满足批量条件的建议：需置信度 ≥ 80%、行程取自型号或样本表、方向偏主轴 ≤ 5°', true);
+      return null;
+    }
+    const pool = [...suggestResult.suggestions, ...suggestResult.lowConfidence];
+    const geometry = options.getGeometry?.() ?? meshes;
+    const outcome = applyBatchAccept(parts, pool, ids, geometry, {
+      pointOptions: pointOptions(),
+      scope,
+      label,
+      at: new Date().toISOString()
+    });
+    if (!outcome.ok || !outcome.audit) {
+      // 失败时 outcome.parts 已是采纳前快照，这里明确不改 parts，避免半途而废
+      notify(`批量采纳未生效：${outcome.error}；动件仍是采纳前的 ${parts.length} 个`, true);
+      return null;
+    }
+    parts = outcome.parts;
+    for (const id of outcome.acceptedIds) dropSuggestion(id);
+    batches = [outcome.audit, ...batches].slice(0, 10);
+    renderAll();
+    const skippedText = outcome.skipped.map((item) => `${item.name}（${item.reason}）`).join('；');
+    notify(
+      `已批量采纳 ${outcome.acceptedIds.length} 条：${outcome.audit.addedNames.join('、')}` +
+        `${skippedText ? `。未采纳：${skippedText}` : ''}。记录 ${outcome.audit.recordId} 可撤销；校验通过后请保存`
+    );
+    return outcome;
+  };
+
+  const acceptHighConfidence = (): string[] => {
+    const selection = selectBatchEligible(suggestResult.suggestions);
+    if (selection.ids.length === 0) {
+      const reasons = selection.skipped.map((item) => `${item.name}（${item.reason}）`).join('；');
+      notify(`没有可批量采纳的高置信建议${reasons ? `：${reasons}` : '，请先点「识别动件」'}`, true);
+      return [];
+    }
+    return runBatch(selection.ids, 'high-confidence', `全部高置信 ${selection.ids.length} 条`)?.audit?.addedPartIds ?? [];
+  };
+
+  const acceptSuggestionGroup = (groupKey: string): string[] => {
+    const group = groupSuggestionsByMechanism(suggestResult.suggestions).find((item) => item.key === groupKey);
+    if (!group) {
+      notify(`没有找到机构组「${groupKey}」`, true);
+      return [];
+    }
+    if (group.eligibleIds.length === 0) {
+      const reasons = group.skipped.map((item) => `${item.name}（${item.reason}）`).join('；');
+      notify(`机构「${group.label}」里没有满足批量条件的建议${reasons ? `：${reasons}` : ''}`, true);
+      return [];
+    }
+    return runBatch(group.eligibleIds, 'mechanism', `${group.label} ${group.eligibleIds.length} 条`)?.audit?.addedPartIds ?? [];
+  };
+
+  const undoLastBatch = (): boolean => {
+    const audit = batches[0];
+    if (!audit) {
+      notify('没有可撤销的批量采纳记录', true);
+      return false;
+    }
+    const outcome = undoBatchAccept(parts, audit);
+    if (!outcome.ok) {
+      notify(outcome.reason, true);
+      return false;
+    }
+    for (const id of outcome.removedIds) {
+      const removed = parts.find((part) => part.id === id);
+      if (!removed) continue;
+      viewer.resetKinematics(removed.meshIds);
+      slides.delete(id);
+    }
+    parts = outcome.parts;
+    batches = batches.slice(1);
+    if (options.getGeometry) {
+      try {
+        runSuggest();
+      } catch (error) {
+        // 撤销本身已生效，重新识别只是刷新建议列表
+        console.warn('[kinematics] 撤销后重新识别失败', error);
+      }
+    }
+    renderAll();
+    notify(`已撤销「${audit.label}」，动件回到 ${parts.length} 个（记录 ${audit.recordId} 已关闭）`);
+    return true;
   };
 
   const renderAll = (): void => {
@@ -1145,6 +1301,15 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
   });
   const onSuggestClick = (event: Event): void => {
     const target = event.target as HTMLElement;
+    const groupButton = target.closest<HTMLElement>('[data-kin-accept-group]');
+    if (groupButton?.dataset.kinAcceptGroup) {
+      try {
+        acceptSuggestionGroup(groupButton.dataset.kinAcceptGroup);
+      } catch (error) {
+        notify(error instanceof Error ? error.message : String(error), true);
+      }
+      return;
+    }
     const card = target.closest<HTMLElement>('[data-kin-suggest-id]');
     const id = card?.dataset.kinSuggestId;
     if (!id) return;
@@ -1161,6 +1326,20 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
   };
   suggestList.addEventListener('click', onSuggestClick);
   suggestLowList.addEventListener('click', onSuggestClick);
+  acceptHighButton.addEventListener('click', () => {
+    try {
+      acceptHighConfidence();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error), true);
+    }
+  });
+  undoBatchButton.addEventListener('click', () => {
+    try {
+      undoLastBatch();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error), true);
+    }
+  });
   query<HTMLButtonElement>('[data-kin-export]').addEventListener('click', () => {
     const blob = new Blob([serializeAnnotation(annotation())], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -1287,6 +1466,7 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
         notify('检测到旧版索引式运动学数据；为避免网格错绑，未自动恢复，原始本地记录仍保留。', true);
       }
       suggestResult = emptySuggest();
+      batches = [];
       if (options.getGeometry && meshes.length > 0) {
         try {
           runSuggest();
@@ -1333,6 +1513,24 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
     suggest: runSuggest,
     suggestions: () => suggestResult,
     acceptSuggestion,
+    acceptHighConfidenceSuggestions: acceptHighConfidence,
+    acceptSuggestionGroup,
+    undoLastBatch,
+    batchAudits: () =>
+      batches.map((audit) => ({
+        ...audit,
+        suggestionIds: [...audit.suggestionIds],
+        addedPartIds: [...audit.addedPartIds],
+        addedNames: [...audit.addedNames],
+        before: audit.before.map((part) => ({
+          ...part,
+          meshIds: [...part.meshIds],
+          meshNames: [...part.meshNames],
+          center: [...part.center] as [number, number, number],
+          size: [...part.size] as [number, number, number]
+        }))
+      })),
+    mechanismGroups: () => groupSuggestionsByMechanism(suggestResult.suggestions),
     dismissSuggestion(id: string): void {
       dropSuggestion(id);
       renderSuggestions();

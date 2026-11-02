@@ -1,6 +1,7 @@
 // 运动学自动识别：从导入的 STEP 装配体（网格名 + 装配层级 + 几何）推测动件，产出「建议」。
 // 边界：
-// - 只出建议，不改任何标注；采纳必须由用户在运动学抽屉里逐条确认（acceptSuggestions 需要显式 id）。
+// - 只出建议，不改任何标注；采纳必须由用户在运动学抽屉里确认（单条 acceptSuggestion 或批量 applyBatchAccept，
+//   两者都要求显式 id/门槛，批量还带审计记录与快照撤销）。
 // - 结果全部是启发式推测：名称关键词 / 厂商型号 / 同级归组 / 主轴分析（PCA）与同轴判断。
 // - 方向向量保留真实值；标注层只支持 ±X/±Y/±Z，取最近主轴并在偏角过大时降低置信度。
 // - 行程优先取型号（如 MGPM20-50 → 50 mm），其次几何估算，取不到就留 0 让用户填，不编造。
@@ -33,6 +34,45 @@ export type PartRole =
   | '';
 
 export type StrokeSource = 'model-code' | 'catalog' | 'geometry' | 'default' | 'none';
+
+/**
+ * 批量采纳用的机构族：同一工位里同一族的建议视为一个动作组。
+ * 气缸 / 滑台 / 导轨 / 丝杆常串成同一条直线驱动链（气缸推滑块），所以合成 'linear'；
+ * 夹爪、旋转台、电机各自独立（它们的运动学语义不同，不能混批）。
+ */
+export type MechanismFamily = 'linear' | 'gripper' | 'rotary' | 'motor';
+
+export const MECHANISM_FAMILY_LABELS: Record<MechanismFamily, string> = {
+  linear: '直线驱动',
+  gripper: '夹爪',
+  rotary: '旋转台',
+  motor: '电机'
+};
+
+export function mechanismFamily(category: MechanismCategory): MechanismFamily {
+  switch (category) {
+    case 'gripper':
+      return 'gripper';
+    case 'rotary':
+      return 'rotary';
+    case 'motor':
+      return 'motor';
+    default:
+      return 'linear';
+  }
+}
+
+/**
+ * 稳定的机构组键（纯函数、可测、跨两次识别不变）：`锚点@机构族`。
+ * 锚点优先取工位号（ST1…），没有工位才退回装配层级路径；不使用 sg-N 这类按顺序生成的 id，
+ * 否则建议列表一重排，组键就漂移，批量采纳的审计记录也没法复用。
+ * 为什么不在键里塞型号：同一工位的气缸 + 导轨 + 滑台就是同一条直线驱动链，
+ * 拆成三组等于没减少点击；逐条门槛仍在 applyBatchAccept 里生效，误批可一键撤销。
+ */
+export function mechanismGroupKey(input: { station: string; category: MechanismCategory; group?: string }): string {
+  const anchor = input.station.trim() || input.group?.trim() || 'ROOT';
+  return `${anchor}@${mechanismFamily(input.category)}`;
+}
 
 export interface AutoKinMesh {
   /** 与 KinematicsMeshInfo.id 一致（CadViewer parts 索引）。 */
@@ -112,6 +152,8 @@ export interface KinematicsSuggestion {
   strokeSource: StrokeSource;
   modelCode: string;
   station: string;
+  /** 稳定机构组键：`工位@机构族`，批量采纳按它归组；同一输入两次识别完全一致。 */
+  groupKey: string;
   point: string;
   role: KinematicsRole | '';
   pointCandidates: PointCandidate[];
@@ -1340,6 +1382,7 @@ export function suggestKinematics(meshes: readonly AutoKinMesh[], options: Sugge
       strokeSource: draft.strokeSource,
       modelCode: draft.modelCode,
       station: item.station,
+      groupKey: mechanismGroupKey({ station: item.station, category: draft.category, group: item.cluster.group }),
       point: point?.point ?? '',
       role: point ? point.role : '',
       pointCandidates: list,
@@ -1440,6 +1483,324 @@ export function acceptSuggestions(
     meshes: meshInfos
   });
   return { parts: next, accepted, missing, validation };
+}
+
+// ---------------------------------------------------------------- 批量采纳
+
+/**
+ * 批量采纳的三道门槛（逐条判定；L1「采纳全部高置信」与 L2「按机构归组」共用同一套）。
+ *
+ * 1) 置信度 ≥ 0.8。为什么不是 0.9：读 suggestKinematics 的加分上限可知，
+ *    气缸（型号 0.35 + 同轴 0.30 + 圆截面 0.05 + 型号行程 0.15 + 装配层级 0.05）= 0.90 已是天花板，
+ *    旋转台/夹爪（型号 0.35 + 分件 0.20/0.30 + 0.10 + 样本角度/行程 0.10 + 层级 0.05）= 0.80，
+ *    滑台封顶 0.75、导轨 0.70（行程只能几何估算）、电机写死 0.35。
+ *    0.9 等于只放行「气缸 + 型号行程」，六工位机上通常 0~2 条，批量按钮基本是死的；
+ *    0.8 才是「型号/样本表行程 + 结构证据齐全」的那一档，比 DEFAULT_MIN_CONFIDENCE(0.6) 高一整档，
+ *    并且把导轨、滑台、电机全挡在外面。
+ * 2) 行程来源必须是 model-code / catalog。geometry 是按包围盒反推的估算，default 是「角度未知按 90°/360° 预填」，
+ *    none 是没行程——这三种采纳后都要人工改；批量改 12 条的错误成本远高于逐条点。
+ *    这条比置信度更硬：100% 置信的几何估算照样拒绝（见单测「批量门槛：置信度 / 行程来源 / 偏角三条互相独立」）。
+ * 3) 方向明确：offAxisDeg ≤ 5°。引擎在偏角 > 3° 时按 0.3/100° 扣分，但扣分封顶 0.3，
+ *    一条 0.9 的建议偏 30° 也只扣到 0.6，仍停在 high 分界上；批量必须显式看偏角，不能指望分数兜住。
+ */
+export const BATCH_MIN_CONFIDENCE = 0.8;
+export const BATCH_MAX_OFF_AXIS_DEG = 5;
+export const BATCH_STROKE_SOURCES: readonly StrokeSource[] = ['model-code', 'catalog'];
+
+export const STROKE_SOURCE_LABELS: Record<StrokeSource, string> = {
+  'model-code': '行程取自型号',
+  catalog: '行程取自样本表',
+  geometry: '行程为几何估算（需人工核对）',
+  default: '行程/角度为默认预填值',
+  none: '行程未确定'
+};
+
+export interface BatchGateOptions {
+  minConfidence?: number;
+  maxOffAxisDeg?: number;
+  strokeSources?: readonly StrokeSource[];
+}
+
+export interface BatchGate {
+  ok: boolean;
+  /** 不通过时给用户看的中文原因；通过为空串。 */
+  reason: string;
+}
+
+/** 单条建议能不能进批量采纳；纯函数，UI 按钮计数与采纳前复检共用这一处判定。 */
+export function batchGate(suggestion: KinematicsSuggestion, options: BatchGateOptions = {}): BatchGate {
+  const minConfidence = options.minConfidence ?? BATCH_MIN_CONFIDENCE;
+  const maxOffAxis = options.maxOffAxisDeg ?? BATCH_MAX_OFF_AXIS_DEG;
+  const sources = options.strokeSources ?? BATCH_STROKE_SOURCES;
+  if (suggestion.category === 'motor') {
+    return { ok: false, reason: '伺服电机按 360° 预填，仅供参考，不参与批量采纳' };
+  }
+  if (suggestion.confidence < minConfidence) {
+    return {
+      ok: false,
+      reason: `置信度 ${Math.round(suggestion.confidence * 100)}% 低于批量门槛 ${Math.round(minConfidence * 100)}%`
+    };
+  }
+  if (!sources.includes(suggestion.strokeSource)) {
+    return { ok: false, reason: `${STROKE_SOURCE_LABELS[suggestion.strokeSource]}，批量采纳只接受型号或样本表行程` };
+  }
+  if (suggestion.offAxisDeg > maxOffAxis) {
+    return { ok: false, reason: `方向偏离主轴 ${suggestion.offAxisDeg}°，已回落最近主轴，方向不可信` };
+  }
+  if (suggestion.kind === 'linear' && !(suggestion.travelMm > 0)) {
+    return { ok: false, reason: '行程为 0，需人工填写' };
+  }
+  if (suggestion.kind === 'rotary' && !(suggestion.rangeDeg > 0)) {
+    return { ok: false, reason: '角度为 0，需人工填写' };
+  }
+  if (suggestion.meshIds.length === 0) {
+    return { ok: false, reason: '没有可移动的网格' };
+  }
+  return { ok: true, reason: '' };
+}
+
+export interface BatchSkip {
+  id: string;
+  name: string;
+  reason: string;
+}
+
+export interface BatchSelection {
+  /** 可批量采纳的建议 id，保持传入顺序。 */
+  ids: string[];
+  /** 被门槛挡下的建议及原因，UI 需原样展示，不做静默丢弃。 */
+  skipped: BatchSkip[];
+}
+
+export function selectBatchEligible(
+  suggestions: readonly KinematicsSuggestion[],
+  options: BatchGateOptions = {}
+): BatchSelection {
+  const ids: string[] = [];
+  const skipped: BatchSkip[] = [];
+  for (const suggestion of suggestions) {
+    const gate = batchGate(suggestion, options);
+    if (gate.ok) ids.push(suggestion.id);
+    else skipped.push({ id: suggestion.id, name: suggestion.name, reason: gate.reason });
+  }
+  return { ids, skipped };
+}
+
+export interface MechanismSuggestionGroup {
+  /** 稳定组键（`工位@机构族`）。 */
+  key: string;
+  /** 给用户看的组名，如「ST2 夹爪」。 */
+  label: string;
+  family: MechanismFamily;
+  station: string;
+  suggestions: KinematicsSuggestion[];
+  /** 组内通过批量门槛的 id。 */
+  eligibleIds: string[];
+  skipped: BatchSkip[];
+  /** 组内固定件（缸体 / 导轨），只供 UI 展示，不写入动件。 */
+  fixedMeshIds: number[];
+}
+
+/** 按 groupKey 归组；键相同的建议一次点完，顺序按 key 稳定排序（不依赖建议排序）。 */
+export function groupSuggestionsByMechanism(
+  suggestions: readonly KinematicsSuggestion[],
+  options: BatchGateOptions = {}
+): MechanismSuggestionGroup[] {
+  const groups = new Map<string, MechanismSuggestionGroup>();
+  for (const suggestion of suggestions) {
+    const key = suggestion.groupKey;
+    let group = groups.get(key);
+    if (!group) {
+      const family = mechanismFamily(suggestion.category);
+      group = {
+        key,
+        family,
+        station: suggestion.station,
+        label: `${suggestion.station ? `${suggestion.station} ` : ''}${MECHANISM_FAMILY_LABELS[family]}`,
+        suggestions: [],
+        eligibleIds: [],
+        skipped: [],
+        fixedMeshIds: []
+      };
+      groups.set(key, group);
+    }
+    group.suggestions.push(suggestion);
+    const gate = batchGate(suggestion, options);
+    if (gate.ok) group.eligibleIds.push(suggestion.id);
+    else group.skipped.push({ id: suggestion.id, name: suggestion.name, reason: gate.reason });
+    for (const id of suggestion.fixedMeshIds) {
+      if (!group.fixedMeshIds.includes(id)) group.fixedMeshIds.push(id);
+    }
+  }
+  return [...groups.values()].sort((a, b) => a.key.localeCompare(b.key));
+}
+
+function cloneMovingPart(part: MovingPart): MovingPart {
+  return {
+    ...part,
+    meshIds: [...part.meshIds],
+    meshNames: [...part.meshNames],
+    ...(part.meshObjectIds ? { meshObjectIds: [...part.meshObjectIds] } : {}),
+    center: [...part.center] as [number, number, number],
+    size: [...part.size] as [number, number, number]
+  };
+}
+
+function toMeshInfos(meshes: readonly (AutoKinMesh | KinematicsMeshInfo)[]): KinematicsMeshInfo[] {
+  return meshes.map((mesh) => ({
+    id: mesh.id,
+    name: mesh.name,
+    triangles: mesh.triangles ?? 0,
+    center: [...mesh.center] as [number, number, number],
+    size: [...mesh.size] as [number, number, number]
+  }));
+}
+
+export interface BatchAcceptAudit {
+  /** 记录号；默认 `ba-<scope>-<时间戳>`，也可由调用方指定（测试/重放用）。 */
+  recordId: string;
+  at: string;
+  scope: 'high-confidence' | 'mechanism';
+  /** 中文摘要，如「采纳全部高置信 3 条」「ST1 直线驱动 2 条」。 */
+  label: string;
+  suggestionIds: string[];
+  addedPartIds: string[];
+  addedNames: string[];
+  beforeCount: number;
+  afterCount: number;
+  /** 采纳前动件快照（深拷贝）；撤销按它精确还原，不是「删掉新加的那几条」这种近似。 */
+  before: MovingPart[];
+}
+
+export interface BatchAcceptOptions {
+  pointOptions?: readonly KinematicsPointOption[];
+  scope: BatchAcceptAudit['scope'];
+  label: string;
+  /**
+   * 批量结果不得比采纳前新增校验错误，默认 true（全有或全无）。
+   * 这条是「不能半途而废」的兜底：批量塞进去一条缺点位 / 行程非法的动件时整批回滚，
+   * 不会留下「前 5 条进去了、第 6 条炸了」的半成品状态。
+   */
+  rejectNewErrors?: boolean;
+  gate?: BatchGateOptions;
+  at?: string;
+  recordId?: string;
+}
+
+export interface BatchAcceptOutcome {
+  ok: boolean;
+  /** ok=false 时等于采纳前状态（深拷贝），调用方可以无条件用它对回本地 parts。 */
+  parts: MovingPart[];
+  audit: BatchAcceptAudit | null;
+  acceptedIds: string[];
+  skipped: BatchSkip[];
+  missingIds: string[];
+  error: string;
+  validation: DraftValidation;
+}
+
+/**
+ * 批量采纳：逐条过门槛 → 一次性走 acceptSuggestions（同一套校验规则）→ 失败/新增错误则整批回滚。
+ * 不修改入参；成功时返回新数组 + 一条可撤销审计记录。
+ */
+export function applyBatchAccept(
+  parts: readonly MovingPart[],
+  pool: readonly KinematicsSuggestion[],
+  ids: readonly string[],
+  meshes: readonly (AutoKinMesh | KinematicsMeshInfo)[],
+  options: BatchAcceptOptions
+): BatchAcceptOutcome {
+  const before = parts.map(cloneMovingPart);
+  const pointOptions = options.pointOptions ?? [];
+  const validationOptions = {
+    ...(pointOptions.length > 0 ? { pointOptions } : {}),
+    meshes: toMeshInfos(meshes)
+  };
+  const baseValidation = validateDraft(before, validationOptions);
+  const at = options.at ?? new Date().toISOString();
+  const rejectNewErrors = options.rejectNewErrors ?? true;
+  const requested = [...new Set(ids)];
+  const missingIds: string[] = [];
+  const picked: KinematicsSuggestion[] = [];
+  for (const id of requested) {
+    const suggestion = pool.find((item) => item.id === id);
+    if (suggestion) picked.push(suggestion);
+    else missingIds.push(id);
+  }
+  const selection = selectBatchEligible(picked, options.gate);
+  const rollback = (error: string, validation: DraftValidation = baseValidation): BatchAcceptOutcome => ({
+    ok: false,
+    parts: before.map(cloneMovingPart),
+    audit: null,
+    acceptedIds: [],
+    skipped: selection.skipped,
+    missingIds,
+    error,
+    validation
+  });
+  if (requested.length === 0) return rollback('没有传入要批量采纳的建议');
+  if (selection.ids.length === 0) return rollback('没有满足批量条件的建议（需高置信 + 型号/样本表行程 + 方向明确）');
+  let accepted: AcceptResult;
+  try {
+    accepted = acceptSuggestions(before, pool, selection.ids, meshes, pointOptions.length > 0 ? { pointOptions } : {});
+  } catch (error) {
+    return rollback(`批量采纳失败：${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (rejectNewErrors && accepted.validation.errors.length > baseValidation.errors.length) {
+    const first = accepted.validation.errors[0];
+    return rollback(
+      `批量采纳会让校验错误从 ${baseValidation.errors.length} 增至 ${accepted.validation.errors.length}` +
+        `${first ? `（${first.message}）` : ''}，已整批回滚`,
+      accepted.validation
+    );
+  }
+  const added = accepted.parts.slice(before.length);
+  const audit: BatchAcceptAudit = {
+    recordId: options.recordId ?? `ba-${options.scope}-${at}`,
+    at,
+    scope: options.scope,
+    label: options.label,
+    suggestionIds: [...selection.ids],
+    addedPartIds: added.map((part) => part.id),
+    addedNames: added.map((part) => part.name),
+    beforeCount: before.length,
+    afterCount: accepted.parts.length,
+    before: before.map(cloneMovingPart)
+  };
+  return {
+    ok: true,
+    parts: accepted.parts.map(cloneMovingPart),
+    audit,
+    acceptedIds: [...selection.ids],
+    skipped: selection.skipped,
+    missingIds,
+    error: '',
+    validation: accepted.validation
+  };
+}
+
+export interface BatchUndoOutcome {
+  ok: boolean;
+  parts: MovingPart[];
+  removedIds: string[];
+  reason: string;
+}
+
+/**
+ * 撤销一次批量采纳：用审计记录里的快照还原（总数、每条字段逐一相同）。
+ * 若批量采纳后用户手动删/改了那批动件，则拒绝撤销并说明原因——不做「猜用户想回到哪」的还原。
+ */
+export function undoBatchAccept(parts: readonly MovingPart[], audit: BatchAcceptAudit): BatchUndoOutcome {
+  const missing = audit.addedPartIds.filter((id) => !parts.some((part) => part.id === id));
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      parts: parts.map(cloneMovingPart),
+      removedIds: [],
+      reason: `批量采纳后的动件已被删除或替换（${missing.join('、')}），无法精确撤销`
+    };
+  }
+  return { ok: true, parts: audit.before.map(cloneMovingPart), removedIds: [...audit.addedPartIds], reason: '' };
 }
 
 /** 中文一句话概要，供 UI 状态行 / 冒烟输出。 */
