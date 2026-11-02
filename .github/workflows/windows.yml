@@ -69,10 +69,13 @@ jobs:
 
           # 只认成功、且 head_sha 完全一致（不是「最新一次成功」——那可能是别的 commit 的 Qt，
           # 装进包里就是版本漂移）。per_page=20 覆盖同 SHA 的多次重跑。
-          $runsJson = gh api "repos/$repo/actions/workflows/ci.yml/runs?head_sha=$sha&status=success&per_page=20" `
-            --jq '[.workflow_runs[] | {id: .id, created: .created_at}]'
+          # 不再用 API 的 status=success 过滤：实测同一时刻「探测循环看到 success」与
+          # 「status=success 查询返回空」会打架（run 41370707603 就死在这里），改为取全量后本地筛。
+          $runsJson = gh api "repos/$repo/actions/workflows/ci.yml/runs?head_sha=$sha&per_page=20" `
+            --jq '[.workflow_runs[] | {id: .id, created: .created_at, status: .status, conclusion: .conclusion}]'
           if ($LASTEXITCODE -ne 0) { throw "查询 ci.yml run 列表失败（gh api exit $LASTEXITCODE）" }
-          $runs = @((@($runsJson) -join '') | ConvertFrom-Json)
+          $allRuns = @((@($runsJson) -join '') | ConvertFrom-Json)
+          $runs = @($allRuns | Where-Object { $_.status -eq 'completed' -and $_.conclusion -eq 'success' })
           if ($runs.Count -eq 0) { throw $missingMsg }
           $runs = @($runs | Sort-Object created -Descending)
           Write-Host "CI_RUNS sha=$sha 候选 $($runs.Count) 个，最新 run=$($runs[0].id)"
