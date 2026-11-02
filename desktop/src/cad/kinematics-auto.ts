@@ -3,7 +3,8 @@
 // - 只出建议，不改任何标注；采纳必须由用户在运动学抽屉里确认（单条 acceptSuggestion 或批量 applyBatchAccept，
 //   两者都要求显式 id/门槛，批量还带审计记录与快照撤销）。
 // - 结果全部是启发式推测：名称关键词 / 厂商型号 / 同级归组 / 主轴分析（PCA）与同轴判断。
-// - 方向向量保留真实值；标注层只支持 ±X/±Y/±Z，取最近主轴并在偏角过大时降低置信度。
+// - 方向向量保留真实值；标注层支持 ±X/±Y/±Z 主轴 + 可选水平偏角 yawDeg，
+//   识别侧把真实方向拆成「最近主轴 + 绕 Z 的 yaw + 剩下的残余倾角」，置信度只按残余倾角扣分。
 // - 行程优先取型号（如 MGPM20-50 → 50 mm），其次几何估算，取不到就留 0 让用户填，不编造。
 // - 采纳后的动件复用 kinematics-ui 的 MovingPart / validateDraft，校验规则与人工标注完全一致。
 
@@ -15,7 +16,7 @@ import {
   type KinematicsPointOption,
   type MovingPart
 } from './kinematics-ui.ts';
-import type { KinematicsAxisName, KinematicsKind, KinematicsRole } from './kinematics.ts';
+import { axisDirectionVector, type KinematicsAxisName, type KinematicsKind, type KinematicsRole } from './kinematics.ts';
 
 export type Vec3 = [number, number, number];
 
@@ -142,8 +143,16 @@ export interface KinematicsSuggestion {
   /** 真实运动方向（单位向量）；旋转为转轴方向。 */
   directionVector: Vec3;
   axis: KinematicsAxisName;
+  /**
+   * 水平偏角（deg，绕 Z 从 `axis` 主轴算起）。标注层会原样保存它 —— 水平面内 30°/60° 的方向
+   * 不再被销毁成单一主轴分量。见 `snapAxis`。
+   */
+  yawDeg: number;
   direction: 1 | -1;
+  /** 与最近主轴的夹角（deg）；批量采纳闸门按它卡。 */
   offAxisDeg: number;
+  /** 真实方向与「主轴 + yawDeg」之间的残余夹角（deg，出水平面的倾角）：表达不了的部分，置信度按它扣。 */
+  residualDeg: number;
   /** 直线行程（mm）；0 表示无法确定，采纳后需用户填写。 */
   travelMm: number;
   retractedMm: number;
@@ -244,6 +253,31 @@ export const GEOMETRY_CONFIDENCE_CAP = 0.65;
  */
 export const GEOMETRY_UNQUANTIFIED_CAP = 0.55;
 
+/**
+ * 方向不落在「主轴 + 水平偏角」上时的扣分口径。
+ *
+ * 旧口径 `min(0.3, offAxisDeg/100)` 有两个毛病：① 扣的是与主轴的夹角，而水平面内的偏角现在
+ * 可以精确写进标注，扣它等于因为「标注支持了」还罚一次；② `min()` 在 30°–54.7°（`acos(1/√3)`
+ * 是它的物理上限）恒等于 0.3，30° 和 45° 分不开 —— 45° 的乱猜方向会被抬到与 30° 同一档。
+ *
+ * 新口径只扣「表达不了的残余倾角」：≤3° 视为几何噪声不扣；超出部分按实际夹角线性扣，
+ * 每度 0.01、封顶 0.6 —— 在 3°…63° 全程严格单调，30° 扣 0.27、45° 扣 0.42，
+ * 不会再有平台区。
+ */
+export const RESIDUAL_FREE_DEG = 3;
+export const RESIDUAL_PENALTY_PER_DEG = 0.01;
+export const RESIDUAL_PENALTY_CAP = 0.6;
+
+/**
+ * 残余倾角 → 置信度扣分。≤3° 不扣；超出部分每度 0.01，封顶 0.6。
+ * 3°→0、10°→0.07、30°→0.27、45°→0.42、63°+→0.6，全程严格单调（旧 `min(0.3, off/100)`
+ * 在 30°–54.7° 恒为 0.3，两条不同角度的错误会拿到同一个分数）。
+ */
+export function directionPenalty(residualDeg: number): number {
+  if (!Number.isFinite(residualDeg) || residualDeg <= RESIDUAL_FREE_DEG) return 0;
+  return Math.min(RESIDUAL_PENALTY_CAP, (residualDeg - RESIDUAL_FREE_DEG) * RESIDUAL_PENALTY_PER_DEG);
+}
+
 const STANDARD_STROKES = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 75, 80, 100, 125, 150, 175, 200, 250, 300, 350, 400, 450, 500];
 
 /** SMC MHZ2 平行夹爪开闭总行程（mm），按样本表；单指行程为一半。 */
@@ -280,8 +314,25 @@ export function distanceToLine(point: Vec3, origin: Vec3, dir: Vec3): number {
   return length(sub(v, scale(d, along)));
 }
 
-/** 方向向量 → 最近主轴 + 方向 + 偏角。 */
-export function snapAxis(vector: Vec3): { axis: KinematicsAxisName; direction: 1 | -1; offAxisDeg: number } {
+/**
+ * 方向向量 → 可标注的（最近主轴 + 水平偏角）+ 方向 + 两种偏角。
+ *
+ * - `offAxisDeg`：与最近主轴的夹角（原有语义，批量采纳闸门按它卡，保持不变）。
+ * - `yawDeg`：绕 Z 的水平偏角。标注层支持 `axis` + `yawDeg`，所以水平面内 30°/45°/60°
+ *   的方向**可以精确写出**，这一分量不再丢信息。
+ * - `residualDeg`：真实方向与「yaw 旋转后的轴」之间剩下的夹角，也就是标注层**表达不了**的
+ *   倾角（出水平面）。置信度只按它扣分。
+ *
+ * 为什么必须分开：只看 `offAxisDeg` 会把「水平偏 30°」（可标注）和「偏离 Z 轴 30°」（不可标注）
+ * 当成同一件事。分开之后 45° 的乱猜方向仍会吃掉 45° 的残差，不会被抬成高置信。
+ */
+export function snapAxis(vector: Vec3): {
+  axis: KinematicsAxisName;
+  direction: 1 | -1;
+  offAxisDeg: number;
+  yawDeg: number;
+  residualDeg: number;
+} {
   const v = normalize(vector);
   const abs = v.map((value) => Math.abs(value));
   let index = 0;
@@ -290,7 +341,23 @@ export function snapAxis(vector: Vec3): { axis: KinematicsAxisName; direction: 1
   const axis: KinematicsAxisName = index === 0 ? 'x' : index === 1 ? 'y' : 'z';
   const direction: 1 | -1 = (v[index] ?? 0) < 0 ? -1 : 1;
   const offAxisDeg = round((Math.acos(Math.min(1, abs[index] ?? 0)) * 180) / Math.PI, 1);
-  return { axis, direction, offAxisDeg };
+  // 统一到「主分量朝正」的半空间再取 yaw：这样 yaw 与 direction 不会同时带符号。
+  const u = scale(v, direction);
+  let yawDeg = 0;
+  if (axis === 'x' && (u[0] !== 0 || u[1] !== 0)) yawDeg = (Math.atan2(u[1], u[0]) * 180) / Math.PI;
+  else if (axis === 'y' && (u[0] !== 0 || u[1] !== 0)) yawDeg = (Math.atan2(-u[0], u[1]) * 180) / Math.PI;
+  yawDeg = axis === 'z' ? 0 : round(normalizeYaw(yawDeg), 1);
+  const stored = axisDirectionVector(axis, yawDeg);
+  const residualDeg = round(axisAngleDeg(u, stored), 1);
+  return { axis, direction, offAxisDeg, yawDeg, residualDeg };
+}
+
+/** yaw 归一到 (-180, 180]：同一方向只有一种写法，避免 350° 与 -10° 两种存法。 */
+function normalizeYaw(deg: number): number {
+  if (!Number.isFinite(deg)) return 0;
+  let yaw = ((deg + 180) % 360 + 360) % 360 - 180;
+  if (yaw === -180) yaw = 180;
+  return yaw;
 }
 
 /** 3×3 对称矩阵 Jacobi 特征分解；返回按特征值降序的特征向量。 */
@@ -1801,9 +1868,16 @@ export function suggestKinematics(meshes: readonly AutoKinMesh[], options: Sugge
     const snapped = snapAxis(vector);
     const reasons = [...draft.reasons];
     let score = draft.score;
-    if (snapped.offAxisDeg > 3) {
-      score -= Math.min(0.3, snapped.offAxisDeg / 100);
-      reasons.push(`运动方向与 ${snapped.direction < 0 ? '-' : '+'}${snapped.axis.toUpperCase()} 轴偏 ${snapped.offAxisDeg}°，标注层只支持主轴方向，已取最近主轴`);
+    const penalty = directionPenalty(snapped.residualDeg);
+    if (penalty > 0) {
+      score -= penalty;
+      reasons.push(
+        `运动方向与可标注方向（${snapped.direction < 0 ? '-' : '+'}${snapped.axis.toUpperCase()}${snapped.yawDeg === 0 ? '' : ` 偏 ${snapped.yawDeg}°`}）还差 ${snapped.residualDeg}°，超出标注层能表达的倾角，按实际夹角扣 ${round(penalty, 2)}`
+      );
+    } else if (snapped.yawDeg !== 0) {
+      reasons.push(
+        `运动方向在水平面内偏 ${snapped.direction < 0 ? '-' : '+'}${snapped.axis.toUpperCase()} ${snapped.yawDeg}°，已按 yawDeg=${snapped.yawDeg}° 标注入标注（不再丢方向）`
+      );
     }
     if (draft.kind === 'linear') reasons.push('以模型当前位置为缩回位（0 mm）');
     const point = assigned.get(index);
@@ -1832,8 +1906,10 @@ export function suggestKinematics(meshes: readonly AutoKinMesh[], options: Sugge
       kind: draft.kind,
       directionVector: [round(vector[0], 4), round(vector[1], 4), round(vector[2], 4)],
       axis: snapped.axis,
+      yawDeg: snapped.yawDeg,
       direction: snapped.direction,
       offAxisDeg: snapped.offAxisDeg,
+      residualDeg: snapped.residualDeg,
       travelMm: draft.kind === 'linear' ? round(draft.travelMm, 2) : 0,
       retractedMm: 0,
       rangeDeg: draft.kind === 'rotary' ? draft.rangeDeg : 0,
@@ -1888,6 +1964,8 @@ export function suggestionToMovingPart(suggestion: KinematicsSuggestion, meshes:
     name: suggestion.name,
     kind: suggestion.kind,
     axis: suggestion.axis,
+    // 关键：水平偏角必须跟着进标注，否则又退回「只存主轴」的老问题
+    yawDeg: suggestion.yawDeg ?? 0,
     direction: suggestion.direction,
     travelMm: suggestion.kind === 'linear' ? suggestion.travelMm : 0,
     retractedMm: suggestion.kind === 'linear' ? suggestion.retractedMm : 0,
@@ -1959,8 +2037,10 @@ export function acceptSuggestions(
  * 2) 行程来源必须是 model-code / catalog。geometry 是按包围盒反推的估算，default 是「角度未知按 90°/360° 预填」，
  *    none 是没行程——这三种采纳后都要人工改；批量改 12 条的错误成本远高于逐条点。
  *    这条比置信度更硬：100% 置信的几何估算照样拒绝（见单测「批量门槛：置信度 / 行程来源 / 偏角三条互相独立」）。
- * 3) 方向明确：offAxisDeg ≤ 5°。引擎在偏角 > 3° 时按 0.3/100° 扣分，但扣分封顶 0.3，
- *    一条 0.9 的建议偏 30° 也只扣到 0.6，仍停在 high 分界上；批量必须显式看偏角，不能指望分数兜住。
+ * 3) 方向明确：offAxisDeg ≤ 5°。引擎现在只按「yaw 之外的残余倾角」扣分（> 3° 起、每度 0.01），
+ *    但闸门仍按与主轴的夹角 offAxisDeg 判定：水平面内的 30° 虽然已经能精确写成 yawDeg，
+ *    它依然是「转盘工位上的斜装件」，不是批量采纳的目标（那类件逐条看更稳妥）。
+ *    这条闸门只紧不松，误放行的风险为零。
  */
 export const BATCH_MIN_CONFIDENCE = 0.8;
 export const BATCH_MAX_OFF_AXIS_DEG = 5;

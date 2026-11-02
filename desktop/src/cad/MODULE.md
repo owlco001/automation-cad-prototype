@@ -110,7 +110,8 @@ suggestionToMovingPart(suggestion, meshes) → MovingPart   // 复用 draftFromM
 ```
 
 - 每条建议：`category`（气缸/滑台/夹爪/旋转台/丝杆模组/直线导轨/伺服电机）、`kind`、真实 `directionVector` +
-  最近主轴 `axis/direction/offAxisDeg`、`travelMm`（直线）/`rangeDeg`（旋转）、`retractedMm=0`（以模型当前位置为缩回位）、
+  最近主轴 `axis/direction/offAxisDeg`、**水平偏角 `yawDeg`**（斜装件不在 ±X/±Y/±Z 上时带上，
+  存储在 `MovingPart.yawDeg`，缺省 0 时序列化不落盘）、`travelMm`（直线）/`rangeDeg`（旋转）、`retractedMm=0`（以模型当前位置为缩回位）、
   `strokeSource`（model-code / catalog / geometry / default / none）、`point/role/pointCandidates`、`confidence`、`reasons`（中文）。
 - 名称规则：中文/英文关键词（气缸/cylinder、滑台/slide、夹爪/gripper、旋转/rotary、丝杆/ballscrew、导轨/rail、伺服/motor）+
   厂商型号（SMC CDJ2/CQ2/MGP/MXQ/MHZ2/MSQ/CRB、AirTAC TN/MAL/SDA、HIWIN MGN/HGR/HGH、SFU 丝杆）。

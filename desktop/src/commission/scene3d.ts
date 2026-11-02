@@ -58,6 +58,11 @@ interface AnnotationVisual {
   basePosition: THREE.Vector3;
 }
 
+/** 模型坐标（Z 向上）下的主轴单位向量；标注盒的偏移/旋转都从这里出发，只做一次手性翻转。 */
+const MODEL_X: [number, number, number] = [1, 0, 0];
+const MODEL_Y: [number, number, number] = [0, 1, 0];
+const MODEL_Z: [number, number, number] = [0, 0, 1];
+
 export interface ActuatorMotionSnapshot {
   id: string;
   kind: ActuatorConfig['kind'];
@@ -558,6 +563,8 @@ export class CommissionScene3D {
       const axis = partToAxis(part);
       const point = part.point.trim();
       const pose = axisPose(axis, point ? { [point]: true } : {});
+      // 位移：axisPose 已经按 yaw 旋转过（x/y 两个分量），这里只做一次模型坐标 → three 坐标的
+      // 手性翻转 (x, y, z) → (x, z, -y)。翻转是线性的，所以不会破坏 yaw 的方向，也不能再叠一次 yaw。
       const offset = new THREE.Vector3(
         pose.offset[0] * this.annotationScale,
         pose.offset[2] * this.annotationScale,
@@ -565,8 +572,19 @@ export class CommissionScene3D {
       );
       const sign = (part.rangeDeg < 0 ? -1 : 1) * (part.direction === -1 ? -1 : 1);
       const rotationRad = part.kind === 'rotary' ? pose.rotationRad * sign : 0;
-      const axisVector =
-        part.axis === 'x' ? new THREE.Vector3(1, 0, 0) : part.axis === 'y' ? new THREE.Vector3(0, 0, -1) : new THREE.Vector3(0, 1, 0);
+      // 旋转轴向量：先在模型坐标里把主轴绕 Z 偏 yaw，再做同一次手性翻转。
+      // 只翻转一次是关键：scene3d:569 原来把 y 轴写成 (0,0,-1)，就是这次翻转的结果；
+      // 若先翻转再转 yaw，斜轴的旋转方向会反。
+      const base = part.axis === 'x' ? MODEL_X : part.axis === 'y' ? MODEL_Y : MODEL_Z;
+      const yawRad = ((part.yawDeg ?? 0) * Math.PI) / 180;
+      const cos = yawRad === 0 ? 1 : Math.cos(yawRad);
+      const sin = yawRad === 0 ? 0 : Math.sin(yawRad);
+      const rotated: [number, number, number] = [
+        base[0] * cos - base[1] * sin,
+        base[0] * sin + base[1] * cos,
+        base[2]
+      ];
+      const axisVector = new THREE.Vector3(rotated[0], rotated[2], -rotated[1]);
       visual.mesh.quaternion.setFromAxisAngle(axisVector, rotationRad);
       visual.mesh.position.copy(visual.basePosition).add(offset);
     }
@@ -718,6 +736,13 @@ export class CommissionScene3D {
    * 所以这里直接叠加，不需要再乘 `geometryScale`。
    * 传空对象即「复位到 t=0 基准」：位移回 base、转角回安装角。
    * 返回真正被摆动的零件数，便于自检断言。
+   *
+   * 与标注层 `yawDeg` 的关系（为什么这里一个字都不用改）：联动帧的 `offsets` 由
+   * `machine/linkage.ts` 的 `poseAt()` 算出，那个模块用的是**自己的** `GeomMovingAxis.axis`
+   * （`Vec3`），并且已经在世界坐标里乘出完整的位移向量 —— 水平面内的方向分量本来就在
+   * `offsets` 里，`rotZDeg` 只描述转台分度。标注层的 `axis`/`yawDeg` 完全不参与。
+   * 所以这里若再按 yaw 转一次 `offsets`，就是对同一份位移做双重旋转（结果偏 2×yaw）。
+   * 反之，标注盒那一路（`applyAnnotationTransforms`）才是需要 yaw 的地方。
    */
   applyLinkagePose(pose: { offsets?: Record<string, number[]>; rotZDeg?: Record<string, number> } = {}): number {
     // 没打开过视口的场景也要能套位姿（冒烟/自检路径）：这里补一次惰性索引

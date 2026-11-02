@@ -254,3 +254,65 @@ test('运动学 store：同名 CAD 的不同 project ID 不共享标注', () => 
   assert.equal(store.get(projectA).parts.length, 1);
   assert.equal(store.get(projectB).parts.length, 0);
 });
+
+// ---------------------------------------------------------------- 水平偏角 yawDeg
+
+test('运动学 UI：yawDeg 参与姿态预览，位移出现横向分量（滑块 100%）', () => {
+  const part = linearPart({ axis: 'x', yawDeg: 30, travelMm: 50, retractedMm: 0 });
+  const pose = applySlide(part, 100);
+  assert.ok(Math.abs(pose.offset[0] - 50 * Math.cos(Math.PI / 6)) < 1e-9);
+  assert.ok(Math.abs(pose.offset[1] - 25) < 1e-9);
+  assert.ok(Math.abs(pose.offset[2]) < 1e-12);
+  // 滑块在半程也保持同一方向（不是只在中点对）
+  const half = applySlide(part, 50);
+  assert.ok(Math.abs(half.offset[0] / half.offset[1] - Math.cos(Math.PI / 6) / Math.sin(Math.PI / 6)) < 1e-9);
+  // 没有 yawDeg 的旧动件不受影响
+  const legacy = applySlide(linearPart({ axis: 'y', travelMm: 50, retractedMm: 0 }), 100);
+  assert.deepEqual(legacy.offset, [0, 50, 0]);
+});
+
+test('运动学 UI：非法 yawDeg 在 validateDraft 里报中文错误（范围外 / Z 轴非 0）', () => {
+  const outOfRange = validateDraft([linearPart({ axis: 'x', yawDeg: 200 })], { meshes: [MESH_A] });
+  assert.equal(outOfRange.ok, false);
+  const issue = outOfRange.errors.find((entry) => entry.code === 'part.yawDeg.range');
+  assert.ok(issue, JSON.stringify(outOfRange.errors));
+  assert.match(issue.message, /水平偏角必须在 \(-180°, 180°\]/);
+  assert.equal(issue.part, '滑台动件');
+
+  const nan = validateDraft([linearPart({ axis: 'x', yawDeg: Number.NaN })], { meshes: [MESH_A] });
+  assert.equal(nan.ok, false);
+  assert.ok(nan.errors.some((entry) => entry.code === 'part.yawDeg.range'));
+
+  const zAxis = validateDraft([linearPart({ axis: 'z', yawDeg: 30 })], { meshes: [MESH_A] });
+  assert.equal(zAxis.ok, false);
+  const zIssue = zAxis.errors.find((entry) => entry.code === 'part.yawDeg.zAxis');
+  assert.ok(zIssue, JSON.stringify(zAxis.errors));
+  assert.match(zIssue.message, /只能为 0|请改为 0/);
+
+  const fine = validateDraft([linearPart({ axis: 'x', yawDeg: -45 })], { meshes: [MESH_A] });
+  assert.equal(fine.ok, true, JSON.stringify(fine.errors));
+  assert.equal(fine.doc.axes[0]?.yawDeg, -45);
+});
+
+test('运动学 UI：yawDeg 序列化往返不丢，旧标注（无该字段）文本不变', () => {
+  const withYaw = annotationFromParts('fixture.step', [linearPart({ axis: 'x', yawDeg: 30 })]);
+  const text = serializeAnnotation(withYaw);
+  assert.match(text, /"yawDeg": 30/);
+  const back = deserializeAnnotation(text);
+  assert.equal(back.ok, true, JSON.stringify(back.issues));
+  assert.equal(back.annotation.parts[0].yawDeg, 30);
+  assert.equal(back.annotation.parts[0].axis, 'x');
+  assert.deepEqual(applySlide(back.annotation.parts[0], 100), applySlide(withYaw.parts[0], 100));
+
+  const legacy = annotationFromParts('fixture.step', [linearPart()]);
+  assert.equal(/"yawDeg"/.test(serializeAnnotation(legacy)), false);
+  const legacyBack = deserializeAnnotation(serializeAnnotation(legacy));
+  assert.equal(legacyBack.ok, true);
+  assert.equal(legacyBack.annotation.parts[0].yawDeg ?? 0, 0);
+  // 只有类型写错（字符串）才单独报错，不静默当 0
+  const broken = JSON.parse(serializeAnnotation(legacy));
+  broken.parts[0].yawDeg = '30°';
+  const brokenBack = deserializeAnnotation(JSON.stringify(broken));
+  assert.equal(brokenBack.ok, false);
+  assert.ok(brokenBack.issues.some((entry) => entry.code === 'part.yawDeg' && /必须是数字/.test(entry.message)));
+});

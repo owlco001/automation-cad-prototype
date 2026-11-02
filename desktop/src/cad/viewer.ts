@@ -71,6 +71,8 @@ export interface CadKinematicsPose {
   offset: [number, number, number];
   rotationRad: number;
   axis: 'x' | 'y' | 'z';
+  /** 水平偏角（deg，绕 Z，从 `axis` 主轴算起）；只用于旋转轴向量，位移已含在 offset 里。 */
+  yawDeg?: number;
 }
 
 export interface CadViewerOptions {
@@ -1050,8 +1052,18 @@ export class CadViewer {
     if (this.degraded) return;
     const pivotVector = new THREE.Vector3(pivot[0], pivot[1], pivot[2]);
     const offset = new THREE.Vector3(pose.offset[0], pose.offset[1], pose.offset[2]);
-    const axisVector =
-      pose.axis === 'x' ? new THREE.Vector3(1, 0, 0) : pose.axis === 'y' ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1);
+    // 旋转轴向量 = 主轴绕 Z 偏 yaw。手性说明：网格局部坐标就是模型坐标（Z 向上、无 (x,z,-y) 翻转，
+    // 翻转在 scene3d 的标注盒那一路才做），所以这里直接用 +Y，不做符号变换。
+    // 位移不再叠加 yaw：pose.offset 由 axisPose 按 yaw 旋转后算出，这里再转一次就是双重旋转。
+    const base = pose.axis === 'x' ? [1, 0, 0] : pose.axis === 'y' ? [0, 1, 0] : [0, 0, 1];
+    const yawRad = ((pose.yawDeg ?? 0) * Math.PI) / 180;
+    const cos = yawRad === 0 ? 1 : Math.cos(yawRad);
+    const sin = yawRad === 0 ? 0 : Math.sin(yawRad);
+    const axisVector = new THREE.Vector3(
+      base[0]! * cos - base[1]! * sin,
+      base[0]! * sin + base[1]! * cos,
+      base[2]!
+    );
     const rotation = new THREE.Quaternion().setFromAxisAngle(axisVector, pose.rotationRad);
     for (const id of meshIds) {
       const part = this.parts[id];

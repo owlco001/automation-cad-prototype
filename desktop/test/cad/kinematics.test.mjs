@@ -392,3 +392,83 @@ test('空标注文档：合法但统计为 0，不伪造内容', () => {
     totalTravelMm: 0
   });
 });
+
+// ---------------------------------------------------------------- 水平偏角 yawDeg
+
+test('水平偏角：直线位移按 yaw 旋转后写 x/y 两个分量（不再只写一个主轴分量）', () => {
+  const axis = linearAxis({ axis: 'x', travelMm: 40, yawDeg: 30, bindings: [{ role: 'extend', point: 'X0' }] });
+  const extended = axisPose(axis, { X0: true });
+  assert.equal(extended.yawDeg, 30);
+  // 40 × (cos30, sin30, 0) = (34.641, 20, 0)：横向 20 mm 不再被销毁
+  assert.ok(Math.abs(extended.offset[0] - 40 * Math.cos(Math.PI / 6)) < 1e-9);
+  assert.ok(Math.abs(extended.offset[1] - 20) < 1e-9);
+  assert.ok(Math.abs(extended.offset[2]) < 1e-12);
+  // 旧实现只会写 [40,0,0]；这个断言的差值就是过去的横向误差
+  assert.ok(Math.abs(extended.offset[0] - 40) > 5);
+
+  // y 轴 + 负方向 + yaw=60：(-sin60, cos60, 0) × 40 × -1 = (34.641, -20, 0)
+  const yAxis = linearAxis({ axis: 'y', travelMm: 50, yawDeg: 60, direction: -1, bindings: [{ role: 'extend', point: 'Y0' }] });
+  const yPose = axisPose(yAxis, { Y0: true });
+  assert.ok(Math.abs(yPose.offset[0] - 50 * Math.sin(Math.PI / 3)) < 1e-9);
+  assert.ok(Math.abs(yPose.offset[1] + 25) < 1e-9);
+});
+
+test('水平偏角缺省 0：行为与加 yaw 之前逐位相同（含 -0 归一）', () => {
+  const cases = [
+    { axis: 'x', direction: 1, expected: [50, 0, 0] },
+    { axis: 'x', direction: -1, expected: [-50, 0, 0] },
+    { axis: 'y', direction: 1, expected: [0, 50, 0] },
+    { axis: 'y', direction: -1, expected: [0, -50, 0] },
+    { axis: 'z', direction: 1, expected: [0, 0, 50] },
+    { axis: 'z', direction: -1, expected: [0, 0, -50] }
+  ];
+  for (const entry of cases) {
+    const axis = linearAxis({ axis: entry.axis, direction: entry.direction });
+    const pose = axisPose(axis, { Y0: true });
+    assert.deepEqual(pose.offset, entry.expected, `${entry.axis}${entry.direction > 0 ? '+' : '-'}`);
+    assert.equal(pose.yawDeg, 0);
+    assert.equal(Object.hasOwn(pose, 'yawDeg'), true);
+  }
+  // 对象里没有 yawDeg 字段的旧数据同样走 yaw=0 分支
+  const legacy = { part: 'station-1-cylinder', kind: 'linear', axis: 'y', travelMm: 50, bindings: [{ role: 'extend', point: 'Y0' }] };
+  assert.deepEqual(axisPose(legacy, { Y0: true }).offset, [0, 50, 0]);
+});
+
+test('水平偏角非法：范围外 / 非数字 / Z 轴非 0 都给中文错误码，不抛英文', () => {
+  for (const bad of [180.1, -180, 1000, '30', Number.NaN]) {
+    const check = checkKinematics(docOf(linearAxis({ axis: 'x', yawDeg: bad })), { partNames: PARTS, knownPoints: POINTS });
+    assert.equal(check.ok, false, `yawDeg=${String(bad)} 应当被拒`);
+    const issue = check.errors.find((entry) => entry.code === 'axis.yaw.range');
+    assert.ok(issue, `缺少 axis.yaw.range：${JSON.stringify(check.errors)}`);
+    assert.match(issue.message, /水平偏角/);
+    assert.match(issue.message, /-180°/);
+  }
+  // Z 向轴绕 Z 旋转不改变方向：静默忽略会丢信息，所以显式报错
+  const zAxis = checkKinematics(docOf(linearAxis({ axis: 'z', yawDeg: 30 })), { partNames: PARTS, knownPoints: POINTS });
+  assert.equal(zAxis.ok, false);
+  assert.equal(zAxis.errors[0]?.code, 'axis.yaw.zAxis');
+  assert.match(zAxis.errors[0]?.message ?? '', /只能为 0/);
+  // 边界值本身合法：180 与 -179.9 都收
+  assert.equal(checkKinematics(docOf(linearAxis({ axis: 'x', yawDeg: 180 })), { partNames: PARTS, knownPoints: POINTS }).ok, true);
+  assert.equal(checkKinematics(docOf(linearAxis({ axis: 'x', yawDeg: -179.9 })), { partNames: PARTS, knownPoints: POINTS }).ok, true);
+  // 严格模式抛的是中文提示，不是英文 TypeError
+  assert.throws(
+    () => assertKinematics(docOf(linearAxis({ axis: 'x', yawDeg: 999 })), { partNames: PARTS, knownPoints: POINTS }),
+    /运动学标注校验失败：.*水平偏角/
+  );
+});
+
+test('水平偏角：旧标注（无 yawDeg）原样流通，序列化不多出字段', () => {
+  const check = checkKinematics(docOf(linearAxis()), { partNames: PARTS, knownPoints: POINTS });
+  assert.equal(check.ok, true);
+  assert.equal(Object.hasOwn(check.doc.axes[0], 'yawDeg'), false);
+  assert.equal(/"yawDeg"/.test(serializeKinematics(check.doc)), false);
+
+  const withYaw = checkKinematics(docOf(linearAxis({ axis: 'x', yawDeg: 30 })), { partNames: PARTS, knownPoints: POINTS });
+  const text = serializeKinematics(withYaw.doc);
+  assert.match(text, /"yawDeg": 30/);
+  const back = parseKinematicsJson(text, { partNames: PARTS, knownPoints: POINTS });
+  assert.equal(back.ok, true);
+  assert.equal(back.doc.axes[0]?.yawDeg, 30);
+  assert.deepEqual(axisPose(back.doc.axes[0], { Y0: true }), axisPose(withYaw.doc.axes[0], { Y0: true }));
+});

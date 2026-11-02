@@ -10,8 +10,10 @@ import {
   batchGate,
   classifyName,
   describeSuggestions,
+  directionPenalty,
   GEOMETRY_CONFIDENCE_CAP,
   GEOMETRY_UNQUANTIFIED_CAP,
+  RESIDUAL_PENALTY_CAP,
   scorePointOption,
   snapAxis,
   stationOf,
@@ -25,7 +27,7 @@ import {
   serializeAnnotation,
   validateDraft
 } from '../../src/cad/kinematics-ui.ts';
-import { checkKinematics } from '../../src/cad/kinematics.ts';
+import { axisDirectionVector, axisPose, checkKinematics } from '../../src/cad/kinematics.ts';
 import { meshPathsFromRoot, parseOcctBuffer } from '../../src/cad/step.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -222,12 +224,20 @@ test('几何：圆盘的最短轴为面法向；无顶点时退回包围盒', ()
   assert.equal(bbox.extents[0], 200);
 });
 
-test('方向：最近主轴、正负号与偏角', () => {
-  assert.deepEqual(snapAxis([0, -1, 0]), { axis: 'y', direction: -1, offAxisDeg: 0 });
+test('方向：最近主轴、正负号、偏角与水平偏角', () => {
+  const straight = snapAxis([0, -1, 0]);
+  assert.equal(straight.axis, 'y');
+  assert.equal(straight.direction, -1);
+  assert.equal(straight.offAxisDeg, 0);
+  assert.equal(straight.yawDeg, 0);
+  assert.equal(straight.residualDeg, 0);
   const tilted = snapAxis([Math.cos(Math.PI / 6), Math.sin(Math.PI / 6), 0]);
   assert.equal(tilted.axis, 'x');
   assert.equal(tilted.direction, 1);
   assert.equal(tilted.offAxisDeg, 30);
+  // 水平面内的 30° 可以精确标注：yaw 存 30，残余倾角 0
+  assert.equal(tilted.yawDeg, 30);
+  assert.equal(tilted.residualDeg, 0);
 });
 
 // ---------------------------------------------------------------- 机构启发式
@@ -278,15 +288,28 @@ test('气缸：活塞杆与缸体不同轴时降为低置信度', () => {
   assert.match(result.lowConfidence[0].reason, /不同轴/);
 });
 
-test('方向偏离主轴：保留真实方向向量、取最近主轴并降低置信度', () => {
+test('方向水平偏 30°：保留真实方向向量，并把偏角存成 yawDeg（不再压成单一主轴）', () => {
   const dir = [Math.cos(Math.PI / 6), Math.sin(Math.PI / 6), 0];
   const straight = suggestKinematics(cylinderPair({ dir: [1, 0, 0] })).suggestions[0];
   const tilted = allSuggestions(suggestKinematics(cylinderPair({ dir })))[0];
   assert.equal(tilted.axis, 'x');
   assert.equal(tilted.offAxisDeg, 30);
+  // 水平面内的偏角是可标注的：写进 yawDeg，残余倾角 0 → 不再扣分
+  assert.equal(tilted.yawDeg, 30);
+  assert.equal(tilted.residualDeg, 0);
   assert.ok(Math.abs(tilted.directionVector[1] - 0.5) < 0.01);
-  assert.match(tilted.reason, /偏 30°/);
-  assert.ok(tilted.confidence < straight.confidence);
+  assert.match(tilted.reason, /yawDeg=30°/);
+  assert.equal(tilted.confidence, straight.confidence);
+});
+
+test('方向偏出水平面 45°：yaw 救不了，按残余倾角扣分且不进高置信度', () => {
+  // 45° 斜向：(1,0,1)/√2，绕 Z 的 yaw 无法表达，残差 45°
+  const dir = [Math.SQRT1_2, 0, Math.SQRT1_2];
+  const tilted = allSuggestions(suggestKinematics(cylinderPair({ dir })))[0];
+  assert.equal(tilted.yawDeg, 0);
+  assert.equal(tilted.residualDeg, 45);
+  assert.ok(tilted.confidence < 0.7, `45° 残差应被扣到 0.7 以下，实际 ${tilted.confidence}`);
+  assert.match(tilted.reason, /残差|超出标注层/);
 });
 
 test('装配层级：通用件名 body/rod 继承父装配的类别、型号行程、工位与编号', () => {
@@ -711,4 +734,78 @@ test('端到端：合成 STEP 装配体 → 4 条高置信度 + 1 条低置信�
   const withRail = acceptSuggestions(accepted.parts, result.suggestions, [rail.id], meshes, { pointOptions: POINTS });
   assert.equal(withRail.validation.ok, false);
   assert.ok(withRail.validation.errors.some((issue) => issue.code === 'axis.bindings.empty' && issue.part === rail.name));
+});
+
+// ---------------------------------------------------------------- 水平偏角 yaw 与置信度口径
+
+test('偏角扣分：3° 不扣，30° 与 45° 按实际夹角扣，且 30–54.7° 不再是平台', () => {
+  assert.equal(directionPenalty(0), 0);
+  assert.equal(directionPenalty(3), 0, '3° 以内视为几何噪声');
+  assert.equal(directionPenalty(3.1).toFixed(2), '0.00');
+  assert.equal(directionPenalty(30).toFixed(2), '0.27');
+  assert.equal(directionPenalty(45).toFixed(2), '0.42');
+  assert.equal(directionPenalty(54.7) > directionPenalty(45), true, '30–54.7° 必须单调，不能像旧 min() 一样恒等');
+  assert.equal(directionPenalty(90), RESIDUAL_PENALTY_CAP);
+  // 逐度检查不再有平台区（旧口径这一段全部等于 0.3）
+  for (let deg = 30; deg <= 50; deg += 1) {
+    assert.ok(directionPenalty(deg + 1) > directionPenalty(deg), `${deg}° → ${deg + 1}° 必须严格变大`);
+  }
+});
+
+test('水平面内的 30°/45°/60° 都可精确标注：yaw 拿到角度、残差 0，不扣分', () => {
+  const cases = [
+    { deg: 30, axis: 'x', yaw: 30 },
+    { deg: 45, axis: 'x', yaw: 45 },
+    // 60° 的最近主轴已经换成 Y（|sin| > |cos|），偏角从 Y 往 X 量 = -30°
+    { deg: 60, axis: 'y', yaw: -30 }
+  ];
+  for (const entry of cases) {
+    const rad = (entry.deg * Math.PI) / 180;
+    const vector = [Math.cos(rad), Math.sin(rad), 0];
+    const snapped = snapAxis(vector);
+    assert.equal(snapped.axis, entry.axis, `${entry.deg}°`);
+    assert.equal(snapped.yawDeg, entry.yaw, `${entry.deg}°`);
+    assert.equal(snapped.residualDeg, 0, `${entry.deg}° 应能精确表达`);
+    // offAxisDeg 是与最近主轴的夹角：60° 的最近主轴是 Y，所以是 30°
+    assert.equal(snapped.offAxisDeg, Math.min(entry.deg, 90 - entry.deg), `${entry.deg}° offAxisDeg`);
+    assert.equal(directionPenalty(snapped.residualDeg), 0);
+    // direction × (axis 绕 Z 偏 yaw) 必须还原出原向量
+    const rebuilt = axisDirectionVector(snapped.axis, snapped.yawDeg, snapped.direction);
+    assert.ok(Math.abs(rebuilt[0] - vector[0]) < 1e-6 && Math.abs(rebuilt[1] - vector[1]) < 1e-6, `${entry.deg}° 还原`);
+  }
+});
+
+test('偏出水平面的 3°/30°/45°：置信度按残余倾角分别处理', () => {
+  const make = (dir) => allSuggestions(suggestKinematics(cylinderPair({ dir })))[0];
+  const straight = make([1, 0, 0]);
+  const rad = (deg) => (deg * Math.PI) / 180;
+  const three = make([Math.cos(rad(3)), 0, Math.sin(rad(3))]);
+  const thirty = make([Math.cos(rad(30)), 0, Math.sin(rad(30))]);
+  const fortyFive = make([Math.SQRT1_2, 0, Math.SQRT1_2]);
+
+  assert.equal(three.residualDeg, 3);
+  assert.equal(three.confidence, straight.confidence, '3° 以内不扣分');
+  assert.equal(thirty.residualDeg, 30);
+  assert.ok(thirty.confidence < three.confidence, '30° 残差要扣');
+  assert.ok(Math.abs(three.confidence - thirty.confidence - 0.27) < 0.011);
+  assert.equal(fortyFive.residualDeg, 45);
+  assert.ok(Math.abs(thirty.confidence - fortyFive.confidence - 0.15) < 0.011);
+  assert.ok(fortyFive.confidence < 0.6, `45° 不得进高置信档，实际 ${fortyFive.confidence}`);
+});
+
+test('采纳链路：建议的 yawDeg 会原样进 MovingPart / KinematicsAxis（不能只存主轴名）', () => {
+  const meshes = cylinderPair({ dir: [Math.cos(Math.PI / 6), Math.sin(Math.PI / 6), 0], path: ['M', 'ST1_PRESS'] });
+  const suggestion = suggestKinematics(meshes, { pointOptions: POINTS }).suggestions[0];
+  assert.equal(suggestion.yawDeg, 30);
+  const part = suggestionToMovingPart(suggestion, meshes);
+  assert.equal(part.yawDeg, 30);
+  assert.equal(part.axis, 'x');
+  const axis = partToAxis(part);
+  assert.equal(axis.yawDeg, 30);
+  // 存进标注的位移方向 = 真实方向（行程沿 30°），而不是只走 X
+  const pose = axisPose(axis, { [part.point]: true });
+  const expected = axisDirectionVector(axis.axis, axis.yawDeg, axis.direction).map((value) => value * part.travelMm);
+  assert.ok(Math.abs(pose.offset[0] - expected[0]) < 1e-9);
+  assert.ok(Math.abs(pose.offset[1] - expected[1]) < 1e-9);
+  assert.ok(Math.abs(pose.offset[1]) > 1, '横向分量必须非 0，否则又退化成单轴');
 });

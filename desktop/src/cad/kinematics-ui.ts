@@ -5,6 +5,8 @@
 import {
   axisPose,
   checkKinematics,
+  MAX_YAW_DEG,
+  YAW_EPSILON_DEG,
   type AxisPose,
   type KinematicsAxis,
   type KinematicsAxisName,
@@ -60,6 +62,11 @@ export interface MovingPart {
   size: [number, number, number];
   kind: KinematicsKind;
   axis: KinematicsAxisName;
+  /**
+   * 水平偏角（deg，绕 Z 从 `axis` 主轴算起，逆时针为正）。缺省 0 = 沿主轴，旧标注不需要这个字段。
+   * 取值域 (-180, 180]；`axis === 'z'` 时只能为 0（绕 Z 不改变方向）。
+   */
+  yawDeg?: number;
   direction: 1 | -1;
   /** 直线轴：行程 mm；旋转轴忽略。 */
   travelMm: number;
@@ -184,6 +191,7 @@ export function emptyMovingPart(overrides: PartOverrides = {}): MovingPart {
     size: [0, 0, 0],
     kind: overrides.kind ?? 'linear',
     axis: overrides.axis ?? 'z',
+    yawDeg: overrides.yawDeg ?? 0,
     direction: overrides.direction ?? 1,
     travelMm: overrides.travelMm ?? 0,
     retractedMm: overrides.retractedMm ?? 0,
@@ -273,12 +281,16 @@ export function partToAxis(part: MovingPart): KinematicsAxis {
   const role = part.role || defaultRole(part.kind);
   const bindings = point ? [{ role, point }] : [];
   const direction: 1 | -1 = part.direction === -1 ? -1 : 1;
+  // 水平偏角：0 一律不写进数据层，保证「没填过偏角」的旧动件序列化后与旧版逐字节相同
+  const yaw = part.axis === 'z' ? 0 : (part.yawDeg ?? 0);
+  const yawField = Number.isFinite(yaw) && yaw !== 0 ? { yawDeg: yaw } : {};
   if (part.kind === 'rotary') {
     const sign: 1 | -1 = part.rangeDeg < 0 ? -1 : 1;
     return {
       part: part.name,
       kind: 'rotary',
       axis: part.axis,
+      ...yawField,
       rangeDeg: Math.abs(part.rangeDeg),
       direction: (direction * sign) as 1 | -1,
       bindings
@@ -288,6 +300,7 @@ export function partToAxis(part: MovingPart): KinematicsAxis {
     part: part.name,
     kind: 'linear',
     axis: part.axis,
+    ...yawField,
     travelMm: part.travelMm,
     retractedMm: part.retractedMm,
     direction,
@@ -372,6 +385,25 @@ export function validateDraft(
     maxRangeDeg: options.maxRangeDeg ?? 360
   });
   const issues: KinematicsIssue[] = [...check.issues];
+  // 水平偏角：先于网格校验，且不依赖 meshes（保存前必须挡住非法值，而不是等下游渲染才发现）
+  for (const part of parts) {
+    const yaw = part.yawDeg ?? 0;
+    if (!Number.isFinite(yaw) || yaw <= -MAX_YAW_DEG || yaw > MAX_YAW_DEG) {
+      issues.push({
+        code: 'part.yawDeg.range',
+        level: 'error',
+        message: `动件「${part.name}」的水平偏角必须在 (-${MAX_YAW_DEG}°, ${MAX_YAW_DEG}°] 之间（当前 ${String(part.yawDeg)}）`,
+        part: part.name
+      });
+    } else if (part.axis === 'z' && Math.abs(yaw) > YAW_EPSILON_DEG) {
+      issues.push({
+        code: 'part.yawDeg.zAxis',
+        level: 'error',
+        message: `动件「${part.name}」的轴方向是 Z，绕 Z 的水平偏角没有意义，请改为 0（当前 ${yaw}°）`,
+        part: part.name
+      });
+    }
+  }
   const meshes = options.meshes;
   if (meshes) {
     const known = new Set(meshes.map((mesh) => mesh.id));
@@ -480,6 +512,7 @@ export function serializeAnnotation(annotation: KinematicsAnnotation): string {
         size: [...part.size],
         kind: part.kind,
         axis: part.axis,
+        ...(part.yawDeg ? { yawDeg: part.yawDeg } : {}),
         direction: part.direction,
         travelMm: part.travelMm,
         retractedMm: part.retractedMm,
@@ -554,6 +587,17 @@ export function deserializeAnnotation(text: string): AnnotationParseResult {
     }
     const direction = rawPart.direction === -1 ? -1 : 1;
     const role = rawPart.role;
+    // 水平偏角：可选字段。类型不对 → 显式报错（不静默当 0）；越界 → 原样带进动件，
+    // 由 validateDraft 的 part.yawDeg.range 报中文错误（保存路径挡在保存按钮上）。
+    const yawRaw = rawPart.yawDeg;
+    if (yawRaw !== undefined && (typeof yawRaw !== 'number' || !Number.isFinite(yawRaw))) {
+      issues.push({
+        code: 'part.yawDeg',
+        level: 'error',
+        message: `parts[${index}] 的水平偏角 yawDeg 必须是数字`
+      });
+    }
+    const yawDeg = typeof yawRaw === 'number' && Number.isFinite(yawRaw) ? yawRaw : 0;
     parts.push({
       id: typeof rawPart.id === 'string' && rawPart.id.trim() ? rawPart.id : `mp-import-${index + 1}`,
       name: name || `未命名动件 ${index + 1}`,
@@ -566,6 +610,7 @@ export function deserializeAnnotation(text: string): AnnotationParseResult {
       size: asVec3(rawPart.size),
       kind: kind === 'rotary' ? 'rotary' : 'linear',
       axis: axis === 'x' || axis === 'y' ? axis : 'z',
+      yawDeg,
       direction,
       travelMm: asNumber(rawPart.travelMm),
       retractedMm: asNumber(rawPart.retractedMm),
@@ -883,7 +928,11 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
 
   const applyPose = (part: MovingPart, percent: number): SlidePose => {
     const pose = applySlide(part, percent);
-    viewer.setKinematicsPose(part.meshIds, { offset: pose.offset, rotationRad: pose.rotationRad, axis: part.axis }, part.center);
+    viewer.setKinematicsPose(
+      part.meshIds,
+      { offset: pose.offset, rotationRad: pose.rotationRad, axis: part.axis, yawDeg: part.yawDeg ?? 0 },
+      part.center
+    );
     return pose;
   };
 
@@ -926,6 +975,8 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
     const strokeLabel = isRotary ? '行程角度' : '行程';
     const strokeUnit = isRotary ? '°' : 'mm';
     const retractLabel = isRotary ? '缩回角度' : '缩回位置';
+    const yaw = part.axis === 'z' ? 0 : part.yawDeg ?? 0;
+    const directionText = `${axisValue(part)}${yaw ? ` 偏 ${yaw}°` : ''}`;
     const optionsHtml = pointOptions()
       .map(
         (option) =>
@@ -942,6 +993,7 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
         <button type="button" class="cad-kin-del" data-kin-delete aria-label="删除动件">删除</button>
       </header>
       <div class="cad-kin-meta">网格 ${part.meshIds.length} 个 · ${escapeHtml(part.meshNames.join('、') || '—')}</div>
+      <div class="cad-kin-meta">运动方向 ${escapeHtml(directionText)}</div>
       <div class="cad-kin-grid">
         <label class="cad-kin-field"><span>轴类型</span><select data-kin-field="kind">
           <option value="linear"${!isRotary ? ' selected' : ''}>直线</option>
@@ -952,6 +1004,7 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
             .map((value) => `<option value="${value}"${axisValue(part) === value ? ' selected' : ''}>${value}</option>`)
             .join('')}
         </select></label>
+        <label class="cad-kin-field"><span>水平偏角 (°)</span><input type="number" step="1" min="-179.9" max="180" data-kin-field="yawDeg" value="${yaw}"${part.axis === 'z' ? ' disabled title="Z 向轴绕 Z 旋转不改变方向"' : ''} aria-label="水平偏角（度，绕 Z）"></label>
         <label class="cad-kin-field"><span>${strokeLabel} (${strokeUnit})</span><input type="number" step="0.1" data-kin-field="${isRotary ? 'rangeDeg' : 'travelMm'}" value="${isRotary ? part.rangeDeg : part.travelMm}"></label>
         <label class="cad-kin-field"><span>${retractLabel} (${strokeUnit})</span><input type="number" step="0.1" data-kin-field="${isRotary ? 'retractedDeg' : 'retractedMm'}" value="${isRotary ? part.retractedDeg : part.retractedMm}"></label>
         <label class="cad-kin-field cad-kin-field-wide"><span>绑定点位</span><select data-kin-field="point">
@@ -995,17 +1048,21 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
   };
 
   const suggestionCard = (item: KinematicsSuggestion): string => {
+    const signedAxis = `${item.direction < 0 ? '-' : '+'}${item.axis.toUpperCase()}`;
+    // 轴名后面必须带出水平偏角，否则卡片上的「+Y」与真实方向自相矛盾（+Y 偏 30° 的夹爪）
+    const axisText = item.yawDeg ? `${signedAxis} 偏 ${item.yawDeg}°` : signedAxis;
+    const residualText = item.residualDeg > 3 ? ` · 残差倾角 ${item.residualDeg}°（标注层表达不了）` : '';
     const motion =
       item.kind === 'rotary'
-        ? `旋转 · 绕 ${item.direction < 0 ? '-' : '+'}${item.axis.toUpperCase()} · ${item.rangeDeg}°`
-        : `直线 · ${item.direction < 0 ? '-' : '+'}${item.axis.toUpperCase()} · 行程 ${item.travelMm > 0 ? `${item.travelMm} mm` : '待填写'} · 缩回 ${item.retractedMm} mm`;
+        ? `旋转 · 绕 ${axisText} · ${item.rangeDeg}°`
+        : `直线 · ${axisText} · 行程 ${item.travelMm > 0 ? `${item.travelMm} mm` : '待填写'} · 缩回 ${item.retractedMm} mm`;
     const vector = item.directionVector.map((value) => value.toFixed(2)).join(', ');
     return `<article class="cad-kin-suggest" data-kin-suggest-id="${escapeHtml(item.id)}" data-level="${item.level}">
       <header class="cad-kin-suggest-head">
         <b>${escapeHtml(item.name)}</b>
         <span class="cad-kin-suggest-conf" title="置信度">${Math.round(item.confidence * 100)}%</span>
       </header>
-      <div class="cad-kin-meta">${escapeHtml(CATEGORY_LABELS[item.category])} · ${escapeHtml(motion)} · 方向 (${vector})</div>
+      <div class="cad-kin-meta">${escapeHtml(CATEGORY_LABELS[item.category])} · ${escapeHtml(motion)} · 方向 (${vector})${escapeHtml(residualText)}</div>
       <div class="cad-kin-meta">动件网格：${escapeHtml(item.meshNames.join('、'))} · 点位：${escapeHtml(item.point || '未匹配')}</div>
       <p class="cad-kin-suggest-reason">${escapeHtml(item.reason)}</p>
       <div class="cad-kin-actions">
@@ -1225,6 +1282,23 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
       const parsed = parseAxisValue(raw);
       part.axis = parsed.axis;
       part.direction = parsed.direction;
+      // 切到 Z 向轴时绕 Z 的偏角不再有意义：显式清零，避免留下一条永远不生效的旧值
+      if (part.axis === 'z') part.yawDeg = 0;
+      return;
+    }
+    if (field === 'yawDeg') {
+      const value = Number(raw);
+      if (!Number.isFinite(value) || value <= -MAX_YAW_DEG || value > MAX_YAW_DEG) {
+        part.yawDeg = 0;
+        notify(`水平偏角必须是 (-${MAX_YAW_DEG}°, ${MAX_YAW_DEG}°] 之间的度数，已重置为 0`, true);
+        return;
+      }
+      if (part.axis === 'z' && Math.abs(value) > YAW_EPSILON_DEG) {
+        part.yawDeg = 0;
+        notify('轴方向是 Z 时，绕 Z 的水平偏角不改变方向，已重置为 0', true);
+        return;
+      }
+      part.yawDeg = value;
       return;
     }
     if (field === 'point') {
@@ -1406,7 +1480,7 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
   partList.addEventListener('change', (event) => {
     const target = event.target as HTMLElement;
     const field = target.dataset.kinField;
-    if (!field || field === 'name' || !['kind', 'axis', 'point'].includes(field)) return;
+    if (!field || field === 'name' || !['kind', 'axis', 'point', 'yawDeg'].includes(field)) return;
     const card = target.closest<HTMLElement>('[data-kin-part]');
     const part = card ? partById(card.dataset.kinPart ?? '') : undefined;
     if (!part) return;

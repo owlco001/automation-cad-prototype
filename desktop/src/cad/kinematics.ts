@@ -17,6 +17,13 @@ export interface KinematicsAxis {
   part: string;
   kind: KinematicsKind;
   axis: KinematicsAxisName;
+  /**
+   * 水平偏角（deg，绕 Z 轴从 `axis` 主轴算起，逆时针为正），缺省 0 = 完全沿主轴。
+   * 转盘工位上斜装 30°/60° 的夹爪、法向不在 ±X/±Y/±Z 上的推料气缸靠它精确落位：
+   * 直线位移按 yaw 旋转后写 x/y 两个分量，而不是把方向销毁成单一主轴分量。
+   * 取值域 (-180, 180]；`axis === 'z'` 时绕 Z 旋转不改变方向，只能为 0。
+   */
+  yawDeg?: number;
   /** 直线轴行程（mm），kind=linear 必填 */
   travelMm?: number;
   /** 缩回状态的位移读数（mm），默认 0，必须小于 travelMm */
@@ -73,6 +80,8 @@ export interface AxisPose {
   part: string;
   kind: KinematicsKind;
   axis: KinematicsAxisName;
+  /** 实际参与解算的水平偏角（deg，绕 Z）；轴为 z 时恒为 0 */
+  yawDeg: number;
   /** 直线：当前位移 mm；旋转：当前角度 deg */
   amount: number;
   unit: 'mm' | 'deg';
@@ -91,6 +100,43 @@ const DEFAULT_MAX_TRAVEL_MM = 20000;
 const DEFAULT_MAX_RANGE_DEG = 3600;
 const AXIS_NAMES: readonly KinematicsAxisName[] = ['x', 'y', 'z'];
 const ROLES: readonly KinematicsRole[] = ['extend', 'retract', 'rotate'];
+
+/** 水平偏角上界（deg，含）：(-180, 180] 保证一个方向只有一种写法，序列化可比。 */
+export const MAX_YAW_DEG = 180;
+/** 判定「偏角是否为 0」的浮点容差（deg）。 */
+export const YAW_EPSILON_DEG = 1e-9;
+
+/**
+ * 轴 + 水平偏角 → 单位方向向量（模型坐标，Z 向上）。
+ * yaw 是绕 Z 的右手旋转：x 轴 (1,0,0) → (cos,sin,0)，y 轴 (0,1,0) → (-sin,cos,0)。
+ * `axis === 'z'` 时绕 Z 旋转不改变方向，yaw 一律按 0 处理（校验层会拒绝非 0 值，避免静默丢信息）。
+ * 缺省 yaw=0、direction=1 时精确返回 [1,0,0]/[0,1,0]/[0,0,1]，与加 yaw 之前逐位一致。
+ */
+export function axisDirectionVector(
+  axis: KinematicsAxisName,
+  yawDeg = 0,
+  direction: 1 | -1 = 1
+): [number, number, number] {
+  const sign = direction === -1 ? -1 : 1;
+  const yaw = axis === 'z' || !Number.isFinite(yawDeg) ? 0 : yawDeg;
+  // 归一 -0：(-0).toFixed(0) 是 "-0"，会污染 offset 的深比较与序列化（"[-0,50,0]"）。
+  const clean = (value: number): number => (value === 0 ? 0 : value);
+  if (axis === 'z') return [0, 0, sign];
+  const rad = (yaw * Math.PI) / 180;
+  const cos = yaw === 0 ? 1 : Math.cos(rad);
+  const sin = yaw === 0 ? 0 : Math.sin(rad);
+  if (axis === 'x') return [clean(cos * sign), clean(sin * sign), 0];
+  return [clean(-sin * sign), clean(cos * sign), 0];
+}
+
+/** 两个方向向量的夹角（deg），按轴线处理（忽略正负号）。 */
+export function directionAngleDeg(a: readonly number[], b: readonly number[]): number {
+  const na = Math.hypot(a[0] ?? 0, a[1] ?? 0, a[2] ?? 0);
+  const nb = Math.hypot(b[0] ?? 0, b[1] ?? 0, b[2] ?? 0);
+  if (na < 1e-12 || nb < 1e-12) return 90;
+  const dot = ((a[0] ?? 0) * (b[0] ?? 0) + (a[1] ?? 0) * (b[1] ?? 0) + (a[2] ?? 0) * (b[2] ?? 0)) / (na * nb);
+  return (Math.acos(Math.min(1, Math.abs(dot))) * 180) / Math.PI;
+}
 
 function isRecord(value: unknown): value is UnknownRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -239,6 +285,30 @@ export function checkKinematics(input: unknown, options: KinematicsOptions = {})
 
     const axis: KinematicsAxis = { part: partName, kind, axis: axisName, bindings: [] };
     let axisBroken = false;
+
+    // 水平偏角：可选、缺省 0（旧标注完全不受影响）。非法值给中文错误码，不抛英文。
+    if (raw.yawDeg !== undefined) {
+      const yaw = raw.yawDeg;
+      if (!isFiniteNumber(yaw) || yaw <= -MAX_YAW_DEG || yaw > MAX_YAW_DEG) {
+        push(
+          'axis.yaw.range',
+          'error',
+          `动件「${partName}」的水平偏角 yawDeg 必须是大于 -${MAX_YAW_DEG}° 且不大于 ${MAX_YAW_DEG}° 的数字（当前 ${String(yaw)}）`,
+          partName
+        );
+        axisBroken = true;
+      } else if (axisName === 'z' && Math.abs(yaw) > YAW_EPSILON_DEG) {
+        push(
+          'axis.yaw.zAxis',
+          'error',
+          `动件「${partName}」的轴是 Z 向，绕 Z 的水平偏角不改变方向，yawDeg 只能为 0（当前 ${yaw}°）`,
+          partName
+        );
+        axisBroken = true;
+      } else if (yaw !== 0) {
+        axis.yawDeg = yaw;
+      }
+    }
 
     if (kind === 'linear') {
       if (raw.rangeDeg !== undefined) {
@@ -419,6 +489,7 @@ function bindingPoint(axis: KinematicsAxis, role: KinematicsRole): string | unde
 /** 按当前点位状态解算单轴姿态。双信号同时为真时标记 conflict，并按伸出优先。 */
 export function axisPose(axis: KinematicsAxis, values: Record<string, boolean | number>): AxisPose {
   const direction = axis.direction ?? 1;
+  const yawDeg = axis.axis === 'z' ? 0 : (axis.yawDeg ?? 0);
   const offset: [number, number, number] = [0, 0, 0];
 
   if (axis.kind === 'rotary') {
@@ -428,6 +499,7 @@ export function axisPose(axis: KinematicsAxis, values: Record<string, boolean | 
       part: axis.part,
       kind: 'rotary',
       axis: axis.axis,
+      yawDeg,
       amount,
       unit: 'deg',
       offset,
@@ -449,15 +521,18 @@ export function axisPose(axis: KinematicsAxis, values: Record<string, boolean | 
     amount = retracted;
     source = 'retract';
   }
-  const signed = amount * direction;
-  if (axis.axis === 'x') offset[0] = signed;
-  else if (axis.axis === 'y') offset[1] = signed;
-  else offset[2] = signed;
+  // 位移 = 单位方向（主轴绕 Z 偏 yaw、带正负号）× 行程：x/y 两个分量都写，
+  // 不再把斜装方向压成单一主轴分量。yaw=0 时与原实现逐位相同（cos=1、sin=0）。
+  const unit = axisDirectionVector(axis.axis, yawDeg, direction);
+  offset[0] = unit[0] * amount;
+  offset[1] = unit[1] * amount;
+  offset[2] = unit[2] * amount;
 
   return {
     part: axis.part,
     kind: 'linear',
     axis: axis.axis,
+    yawDeg,
     amount,
     unit: 'mm',
     offset,

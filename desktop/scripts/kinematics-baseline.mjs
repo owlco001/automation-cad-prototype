@@ -10,12 +10,21 @@
 //      该夹具同时被单元测试覆盖（in-sample），结果单独列出、不计入主指标。
 //
 // 用法：
-//   node scripts/kinematics-baseline.mjs                     # 人类可读摘要
+//   node scripts/kinematics-baseline.mjs                     # 人类可读摘要（默认 vector 口径）
+//   node scripts/kinematics-baseline.mjs --stored-axis        # 只看「按存储轴打分」口径
+//   node scripts/kinematics-baseline.mjs --both               # 两种口径都打（推荐复核用）
 //   node scripts/kinematics-baseline.mjs --json              # 只输出 JSON（stdout）
 //   node scripts/kinematics-baseline.mjs --json=out.json     # 摘要 + 写 JSON 文件
 //   KIN_BASELINE_SRC=/path/to/src node scripts/kinematics-baseline.mjs
 //       对指定源码目录跑（默认 desktop/src）。工作树被并发修改时，用 git archive 导出的
 //       干净版本跑，保证数字对应确定的代码状态。
+//
+// 两种打分口径（为什么必须都报）：
+//   vector（历史口径）—— 方向用 suggestion.directionVector（吸附前的真实方向）比真值，
+//     衡量「识别器看得准不准」。它看不见「看准了但存错了」：旧版标注层只认 ±X/±Y/±Z，
+//     30° 斜装夹爪被存成 +Y，这条错误在 vector 口径下永远是"方向一致"。
+//   stored（P0.5 新增）—— 方向用「实际写进标注的 axis + yawDeg + 正负号」还原出的向量比真值，
+//     衡量「标注存得对不对」。yawDeg 落地前它与 vector 差 18 条（6 台机器 × 3 种命名约定）。
 //
 // 只读：不修改任何产品代码，不写仓库文件（除非显式 --json=<path>）。
 
@@ -37,11 +46,24 @@ const { synthMachine } = await load('machine/synth.ts');
 const { generateMachineGeometry } = await load('machine/geometry.ts');
 const { pointOptionsFromMachineConfig } = await load('cad/kinematics-ui.ts');
 const { suggestKinematics } = await load('cad/kinematics-auto.ts');
+const { axisDirectionVector } = await load('cad/kinematics.ts');
 const { parseOcctBuffer } = await load('cad/step.ts');
 
 const args = process.argv.slice(2);
 const jsonOnly = args.includes('--json');
 const jsonPath = args.find((arg) => arg.startsWith('--json='))?.slice('--json='.length);
+/**
+ * 打分口径：
+ *   vector（默认）= 旧口径，拿 prediction.directionVector（**吸附前**的真实方向）比真值。
+ *   stored        = 拿「实际会被写进标注的轴 + yawDeg + 正负号」拼出的向量比真值。
+ * 两者必须都报：vector 口径反映「识别器看得准不准」，stored 口径反映「标注存得对不对」。
+ * 只报 vector 会把「方向看准了但存成错轴」的条目算成正确（历史报表里 6 条夹爪错误就是这样被藏住的）。
+ */
+const scoreModes = args.includes('--stored-axis')
+  ? ['stored']
+  : args.includes('--both')
+    ? ['vector', 'stored']
+    : ['vector'];
 
 // ───────────────────────────────────────────── 1. 夹具：GeomPart → AutoKinMesh
 //
@@ -357,6 +379,14 @@ const travelAgrees = (truth, prediction) => {
 };
 
 /**
+ * 一条建议「实际存进标注」的方向向量：轴名 + 水平偏角 + 正负号。
+ * 这正是采纳后 `MovingPart`/`KinematicsAxis` 能被 axisPose 还原出来的唯一信息 ——
+ * 也正因为如此，旧版（只有轴名）会把 30° 的夹爪存成 90° 偏的方向。
+ */
+const storedVectorOf = (prediction) =>
+  axisDirectionVector(prediction.axis, prediction.yawDeg ?? 0, prediction.direction === -1 ? -1 : 1);
+
+/**
  * 一个装配单元的打分：真值机制 ↔ 建议 1:1 匹配（按重叠网格数贪心）。
  */
 function evaluateCase(testCase) {
@@ -383,6 +413,8 @@ function evaluateCase(testCase) {
     const prediction = predictions[pair.pi];
     const categoryOk = prediction.category === item.expectedCategory;
     const directionOk = axisAgrees(item.axis, prediction.directionVector, item.kind);
+    const storedVector = storedVectorOf(prediction);
+    const directionOkStored = axisAgrees(item.axis, storedVector, item.kind);
     const strokeOk = travelAgrees(item, prediction);
     matched.push({
       machine: testCase.id,
@@ -398,14 +430,19 @@ function evaluateCase(testCase) {
       meshRecall: item.partIds.length ? pair.overlap / item.partIds.length : 0,
       categoryOk,
       directionOk,
+      directionOkStored,
       strokeOk,
       pointOk: item.point ? prediction.point === item.point : null,
       pointExpected: item.point,
       pointPredicted: prediction.point,
       strict: categoryOk && directionOk && strokeOk,
+      strictStored: categoryOk && directionOkStored && strokeOk,
       truthAxis: item.axis,
       predictedVector: prediction.directionVector,
+      predictedStoredVector: storedVector,
       predictedSnappedAxis: prediction.axis,
+      predictedYawDeg: prediction.yawDeg ?? 0,
+      residualDeg: prediction.residualDeg ?? 0,
       offAxisDeg: prediction.offAxisDeg,
       truthTravel: travelTarget(item),
       predictedTravel: travelValue(prediction),
@@ -478,18 +515,25 @@ function evaluateCase(testCase) {
 
 const ratio = (numerator, denominator) => (denominator === 0 ? null : numerator / denominator);
 
-function band(records, truthTotal, minConfidence) {
+/**
+ * 一个置信度档位的指标。`mode` 决定「方向正确」用哪个口径：
+ *   'vector' = 建议里的真实方向向量（吸附前）；'stored' = 实际会存进标注的轴 + yaw。
+ */
+function band(records, truthTotal, minConfidence, mode = 'vector') {
   const predictions = records.flatMap((record) => record.predictions).filter((entry) => entry.confidence >= minConfidence);
   const matched = records.flatMap((record) => record.matched).filter((entry) => entry.confidence >= minConfidence);
   const falsePositives = records.flatMap((record) => record.falsePositives).filter((entry) => entry.confidence >= minConfidence);
   const extraByType = {};
   for (const item of falsePositives) extraByType[item.type] = (extraByType[item.type] ?? 0) + 1;
   const unlabeled = falsePositives.filter((entry) => entry.type === 'unlabeled-mechanism').length;
-  const tp = matched.filter((entry) => entry.strict).length;
+  const strictKey = mode === 'stored' ? 'strictStored' : 'strict';
+  const directionKey = mode === 'stored' ? 'directionOkStored' : 'directionOk';
+  const tp = matched.filter((entry) => entry[strictKey]).length;
   const precision = ratio(tp, predictions.length);
   const recall = ratio(tp, truthTotal);
   return {
     minConfidence,
+    mode,
     predictions: predictions.length,
     truth: truthTotal,
     matched: matched.length,
@@ -498,7 +542,7 @@ function band(records, truthTotal, minConfidence) {
     recall,
     f1: precision === null || recall === null || precision + recall === 0 ? 0 : (2 * precision * recall) / (precision + recall),
     looseRecall: ratio(matched.length, truthTotal),
-    directionAccuracy: matched.length ? matched.filter((entry) => entry.directionOk).length / matched.length : null,
+    directionAccuracy: matched.length ? matched.filter((entry) => entry[directionKey]).length / matched.length : null,
     strokeAccuracy: matched.length ? matched.filter((entry) => entry.strokeOk).length / matched.length : null,
     extraByType,
     /** 扣掉「真值缺口」（生成器未标注的分度盘/输送线电机）后的 precision。 */
@@ -512,9 +556,14 @@ function band(records, truthTotal, minConfidence) {
   };
 }
 
-function aggregate(records, label) {
+function aggregate(records, label, mode = 'vector') {
   const truthTotal = records.reduce((sum, record) => sum + record.testCase.truth.length, 0);
-  const bands = [0, 0.6, 0.8, 0.9].map((minConfidence) => band(records, truthTotal, minConfidence));
+  const bands = [0, 0.6, 0.8, 0.9].map((minConfidence) => band(records, truthTotal, minConfidence, 'vector'));
+  const bandsStored = [0, 0.6, 0.8, 0.9].map((minConfidence) => band(records, truthTotal, minConfidence, 'stored'));
+  // 本次汇总的主口径：整张表、错误计数、分类明细统一用它，避免同一份报表里混两种口径
+  const shown = mode === 'stored' ? bandsStored : bands;
+  const strictKey = mode === 'stored' ? 'strictStored' : 'strict';
+  const directionKey = mode === 'stored' ? 'directionOkStored' : 'directionOk';
   const matched = records.flatMap((record) => record.matched);
   const falsePositives = records.flatMap((record) => record.falsePositives);
   const falseNegatives = records.flatMap((record) => record.falseNegatives);
@@ -530,27 +579,29 @@ function aggregate(records, label) {
   for (const entry of matched) {
     byCategory[entry.category] ??= { matched: 0, strict: 0, directionOk: 0, strokeOk: 0 };
     byCategory[entry.category].matched += 1;
-    if (entry.strict) byCategory[entry.category].strict += 1;
-    if (entry.directionOk) byCategory[entry.category].directionOk += 1;
+    if (entry[strictKey]) byCategory[entry.category].strict += 1;
+    if (entry[directionKey]) byCategory[entry.category].directionOk += 1;
     if (entry.strokeOk) byCategory[entry.category].strokeOk += 1;
   }
   const byCategoryAt06 = {};
   for (const entry of matched.filter((item) => item.confidence >= 0.6)) {
     byCategoryAt06[entry.category] ??= { matched: 0, strict: 0 };
     byCategoryAt06[entry.category].matched += 1;
-    if (entry.strict) byCategoryAt06[entry.category].strict += 1;
+    if (entry[strictKey]) byCategoryAt06[entry.category].strict += 1;
   }
   return {
     label,
+    mode,
     byCategoryAt06,
     assemblies: records.length,
     meshes: records.reduce((sum, record) => sum + record.testCase.meshes.length, 0),
     truthMechanisms: truthTotal,
     predicted: records.reduce((sum, record) => sum + record.predictions.length, 0),
-    bands,
+    bands: shown,
+    bandsByMode: { vector: bands, stored: bandsStored },
     errorCounts: {
       roleOrCategoryWrong: matched.filter((entry) => !entry.categoryOk).length,
-      directionWrong: matched.filter((entry) => !entry.directionOk).length,
+      directionWrong: matched.filter((entry) => !entry[directionKey]).length,
       strokeWrong: matched.filter((entry) => !entry.strokeOk).length,
       extra: falsePositives.length,
       missing: falseNegatives.length
@@ -604,7 +655,15 @@ const main = async () => {
   const determinism = JSON.stringify(probeA.predictions) === JSON.stringify(probeB.predictions) && JSON.stringify(probeA.matched) === JSON.stringify(probeB.matched);
 
   const overall = aggregate(records, '生成器整机 × 三种命名约定');
-  const byRegime = REGIMES.map((regime) => aggregate(records.filter((record) => record.testCase.regime === regime.id), regime.label));
+  const overallStored = aggregate(records, '生成器整机 × 三种命名约定', 'stored');
+  const byRegime = REGIMES.map((regime) => {
+    const subset = records.filter((record) => record.testCase.regime === regime.id);
+    return aggregate(subset, regime.label);
+  });
+  const byRegimeStored = REGIMES.map((regime) => {
+    const subset = records.filter((record) => record.testCase.regime === regime.id);
+    return aggregate(subset, regime.label, 'stored');
+  });
   const fixture = aggregate([fixtureRecord], '仓库 STEP 夹具（in-sample）');
 
   const headCommit = (() => {
@@ -632,6 +691,10 @@ const main = async () => {
       unit: '机构（一条可动轴）',
       matchRule: '预测建议与真值轴按重叠网格 1:1 贪心匹配（至少 1 个网格重叠）',
       strictRule: '类别一致 + 方向一致（±20°；直线还要求正负号一致）+ 行程一致（±max(1mm, 5%)；夹爪按单指行程、旋转按角度）',
+      scoreBases: {
+        vector: '方向按 suggestion.directionVector（吸附前的真实方向）判定 —— 识别器看得准不准',
+        stored: '方向按「实际写进标注的 axis + yawDeg + 正负号」还原出的向量判定 —— 标注存得对不对；两份数字都可能出现差异，必须都报'
+      },
       bands: [0, 0.6, 0.8, 0.9]
     },
     dataset: {
@@ -648,11 +711,14 @@ const main = async () => {
       ]
     },
     overall,
+    overallStored,
     byRegime,
+    byRegimeStored,
     byMachine: records
       .concat([fixtureRecord])
       .map((record) => {
-        const bands = [0, 0.6, 0.8, 0.9].map((minConfidence) => band([record], record.testCase.truth.length, minConfidence));
+        const bands = [0, 0.6, 0.8, 0.9].map((minConfidence) => band([record], record.testCase.truth.length, minConfidence, 'vector'));
+        const bandsStored = [0, 0.6, 0.8, 0.9].map((minConfidence) => band([record], record.testCase.truth.length, minConfidence, 'stored'));
         return {
           id: record.testCase.id,
           dataset: record.testCase.dataset,
@@ -663,9 +729,13 @@ const main = async () => {
           strictAt06: bands[1].truePositives,
           precisionAt06: bands[1].precision,
           recallAt06: bands[1].recall,
+          strictAt06Stored: bandsStored[1].truePositives,
+          precisionAt06Stored: bandsStored[1].precision,
+          recallAt06Stored: bandsStored[1].recall,
           errorCounts: {
             roleOrCategoryWrong: record.matched.filter((entry) => !entry.categoryOk).length,
             directionWrong: record.matched.filter((entry) => !entry.directionOk).length,
+            directionWrongStored: record.matched.filter((entry) => !entry.directionOkStored).length,
             strokeWrong: record.matched.filter((entry) => !entry.strokeOk).length,
             extra: record.falsePositives.length,
             missing: record.falseNegatives.length
@@ -713,23 +783,66 @@ const main = async () => {
   console.log(
     `数据集：${records.length} 套整机（${BRIEFS.length} 种需求 × ${REGIMES.length} 种命名约定）+ 1 套 STEP 夹具 · 真值机构 ${overall.truthMechanisms} 条 · 网格 ${overall.meshes} 个`
   );
-  printBandTable('总体（生成器整机，三种命名约定合计）', overall);
-  printErrors(overall);
-  for (const summary of byRegime) {
-    printBandTable(summary.label, summary);
-    printErrors(summary);
+  const storedMode = scoreModes.includes('stored');
+
+  if (storedMode) {
+    console.log(
+      '\n★ 打分口径：stored —— 方向用「实际写进标注的 axis + yawDeg + 正负号」还原，' +
+        '"方向"列即存储轴一致率。\n'
+    );
+    printBandTable('总体（生成器整机，三种命名约定合计）', overallStored);
+    printErrors(overallStored);
+    for (const summary of byRegimeStored) {
+      printBandTable(summary.label, summary);
+      printErrors(summary);
+    }
+    printBandTable('仓库 STEP 夹具（in-sample，仅供参考）', fixture);
   }
-  printBandTable('仓库 STEP 夹具（in-sample，仅供参考）', fixture);
+
+  if (scoreModes.includes('vector')) {
+    if (storedMode) console.log('\n──────────────── 对照：vector 口径（吸附前真实方向）────────────────\n');
+    printBandTable('总体（生成器整机，三种命名约定合计）', overall);
+    printErrors(overall);
+    for (const summary of byRegime) {
+      printBandTable(summary.label, summary);
+      printErrors(summary);
+    }
+    if (!storedMode) printBandTable('仓库 STEP 夹具（in-sample，仅供参考）', fixture);
+  }
+
   console.log(`  夹具预测：${fixtureRecord.predictions.map((entry) => `${entry.category}@${entry.confidence}(${entry.meshNames.join('+')})`).join(' · ')}`);
   console.log(`  夹具应保持低置信度的固定件：${fixtureRecord.mustNotBeHigh.map((entry) => `${entry.name}→${entry.level}(${entry.confidence})`).join(' · ')}`);
-  console.log('\n按机构类别（≥0.6 档严格正确 / 真值条数）：');
-  for (const summary of byRegime) {
-    const strictAt06 = summary.bands.find((row) => row.minConfidence === 0.6);
-    const row = Object.entries(summary.truthByCategory)
-      .map(([key, total]) => `${key} ${summary.byCategoryAt06[key]?.strict ?? 0}/${total}`)
-      .join(' · ');
-    console.log(`  ${summary.label}：${row}（≥0.6 档严格正确合计 ${strictAt06.truePositives}）`);
+
+  const categoryTable = (title, summaries) => {
+    console.log(`\n按机构类别（≥0.6 档严格正确 / 真值条数）· ${title}：`);
+    for (const summary of summaries) {
+      const strictAt06 = summary.bands.find((row) => row.minConfidence === 0.6);
+      const row = Object.entries(summary.truthByCategory)
+        .map(([key, total]) => `${key} ${summary.byCategoryAt06[key]?.strict ?? 0}/${total}`)
+        .join(' · ');
+      console.log(`  ${summary.label}：${row}（≥0.6 档严格正确合计 ${strictAt06.truePositives}）`);
+    }
+  };
+  if (scoreModes.includes('stored')) categoryTable('stored 存储轴口径', byRegimeStored);
+  if (scoreModes.includes('vector')) categoryTable('vector 真实方向口径', byRegime);
+
+  // 两种口径并列的一张速查表：哪几条被存储轴口径判错，一眼可见
+  const mismatched = records
+    .flatMap((record) => record.matched)
+    .filter((entry) => entry.directionOk !== entry.directionOkStored);
+  console.log(
+    `\n两种口径的分歧条目：${mismatched.length} 条` +
+      (mismatched.length === 0
+        ? '（存储轴与真实方向完全一致）'
+        : `（这些条目"看得准"但"存错了"，vector 口径看不见）`)
+  );
+  for (const entry of mismatched.slice(0, 20)) {
+    console.log(
+      `  ${entry.machine} ${entry.kind} conf=${entry.confidence} 存成 ${entry.predictedSnappedAxis}${entry.predictedYawDeg ? `@${entry.predictedYawDeg}°` : ''}` +
+        ` 向量(${entry.predictedStoredVector.map((value) => value.toFixed(2)).join(',')}) vs 真值(${entry.truthAxis.map((value) => value.toFixed(2)).join(',')})`
+    );
   }
+  console.log(`\n（明细：--both 两种口径都打；--stored-axis 只看存储轴；默认 vector。JSON 里 overall / overallStored 同时给出。）`);
   if (jsonPath) console.log(`\nJSON 已写入 ${resolve(process.cwd(), jsonPath)}`);
 };
 

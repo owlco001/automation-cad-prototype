@@ -91,6 +91,8 @@ export function compactKinematicsSuggestion(value: unknown): Record<string, unkn
     category: typeof value.category === 'string' ? value.category : '',
     kind,
     axis: `${num(value.direction) < 0 ? '-' : '+'}${typeof value.axis === 'string' ? value.axis.toUpperCase() : '?'}`,
+    // 水平偏角（deg）：斜装的夹爪/气缸不在 ±X/±Y/±Z 上，不带上这个字段模型复述方向时会把偏角丢掉
+    ...(Number.isFinite(num(value.yawDeg)) && num(value.yawDeg) !== 0 ? { yawDeg: num(value.yawDeg) } : {}),
     ...(kind === 'rotary' ? { rangeDeg: num(value.rangeDeg) } : { travelMm: num(value.travelMm) }),
     strokeSource: typeof value.strokeSource === 'string' ? value.strokeSource : 'none',
     modelCode: typeof value.modelCode === 'string' ? value.modelCode : '',

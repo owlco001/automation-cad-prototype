@@ -247,13 +247,16 @@ test('高置信批量只挑三条件全过的项：导轨（几何行程）与�
   assert.deepEqual(outcome.audit.before, []);
 });
 
-test('方向回落：引擎给出 0.8 且型号行程，但偏主轴 10° → 仍不进批量（偏角是独立条件）', () => {
+test('方向水平偏 10°：已能精确标注成 yawDeg，不再扣分；但批量闸门仍按 offAxisDeg 挡住', () => {
   const tilted = [Math.cos(Math.PI / 18), Math.sin(Math.PI / 18), 0]; // 10°
   const meshes = cylinderPair({ dir: tilted, path: ['M', 'ST1_PRESS'], ids: [100, 101] });
   const result = suggestKinematics(meshes, { pointOptions: POINTS });
   const suggestion = result.suggestions[0];
   assert.equal(suggestion.level, 'high');
-  assert.equal(suggestion.confidence, 0.8);
+  // yaw 可以精确表示 10°，残余倾角 0 → 不扣分（旧口径这里扣 0.1，给出 0.8）
+  assert.equal(suggestion.yawDeg, 10);
+  assert.equal(suggestion.residualDeg, 0);
+  assert.equal(suggestion.confidence, 0.9);
   assert.equal(suggestion.strokeSource, 'model-code');
   assert.equal(suggestion.offAxisDeg, 10);
   const gate = batchGate(suggestion);
