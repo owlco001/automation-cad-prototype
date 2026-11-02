@@ -31,6 +31,7 @@
     "screenshots": "node scripts/capture-screenshots.mjs",
     "screenshots:machine": "npm run build:ext && node scripts/capture-machine-screenshots.mjs",
     "screenshots:wizard": "npm run build:ext && node scripts/capture-wizard-screenshots.mjs",
+    "screenshots:linkage": "npm run build:ext && node scripts/capture-linkage-screenshots.mjs",
     "dist:win": "node scripts/vendor-qt.mjs && node scripts/build-pipeline.mjs && node scripts/vendor-dwg.mjs && electron-builder --win nsis --x64",
     "build:mcp": "node scripts/build-mcp.mjs",
     "mcp": "node dist-electron/mcp.cjs",

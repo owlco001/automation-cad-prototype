@@ -691,3 +691,608 @@ export async function captureDesignWizardScreenshots(
     return { captured: shots.length, failed: 1 };
   }
 }
+
+// ---------------------------------------------------------------------------
+// 「联动播放中」真机截图（21-linkage-01/02/03）
+//
+// 为什么单开一组：15/16 与 20-wizard-07 拍的都是「静态的联调面板 / 保存后的 CAD 面板」，
+// 镜头里从来没有「零件正在动」。P0（3D 联动空场景）修好后必须有图能证明零件真的在动，
+// 所以这里既要出图，也要把坐标证据打出来（不靠肉眼）。
+//
+// 抽屉互斥（重要）：`src/ui/panels.ts` 的 createDrawer.open() 会先 closeOtherDrawers()——
+// 智能体抽屉（联动面板所在）与联调抽屉（3D 视口所在）停在同一位置，同一时刻只能开一个。
+// 因此：
+//   - 「点播放 → 零件动」用真实 UI 走一遍（点 [data-linkage-play]），证据是坐标：
+//     LINKAGE_UI_PLAY_OK / LINKAGE_UI_RESET_OK；
+//   - 三张图在联调抽屉里拍（只有那里看得见 3D）。mid 的位姿不是编的：它取自同一条
+//     `machine.linkage()` 时间线上 t≈cycleMs/2 的真实关键帧，通过
+//     `window.__cadApplyLinkagePose`（面板播放时调用的同一个写入点）施加，
+//     施加后立刻用 `__cadLinkageDebugSnapshot()` 前后对比断言零件确实动了。
+// ---------------------------------------------------------------------------
+
+type PoseSnapshot = Record<string, [number, number, number]>;
+
+interface PoseDelta {
+  movedParts: number;
+  maxDeltaMm: number;
+  ids: string[];
+}
+
+/** 两次坐标快照的逐件欧氏位移；movedParts/maxDeltaMm 就是「零件真的动了」的证据 */
+function poseDelta(before: PoseSnapshot | null, after: PoseSnapshot | null): PoseDelta {
+  const ids: string[] = [];
+  let maxDeltaMm = 0;
+  for (const [id, point] of Object.entries(after ?? {})) {
+    const base = before?.[id];
+    if (!base) continue;
+    const delta = Math.hypot(point[0] - base[0], point[1] - base[1], point[2] - base[2]);
+    if (delta > 1e-6) {
+      ids.push(id);
+      if (delta > maxDeltaMm) maxDeltaMm = delta;
+    }
+  }
+  return { movedParts: ids.length, maxDeltaMm, ids };
+}
+
+/**
+ * 像素级对比两张 PNG：nativeImage.toBitmap() 给的是 BGRA 原始位图，
+ * 不需要 sharp/ffmpeg，也不依赖 PNG 压缩率（字节数只能算弱证据）。
+ * 阈值 6/255 用来吃掉抗锯齿与合成噪声，但抓得住「零件挪了几十毫米」这种成片变化。
+ *
+ * 可选 viewport 矩形：额外统计「差异是否落在 3D 视口里」——面板/顶栏闪一下也会让
+ * 全局像素差变大，只有落在视口内的差异才说明零件真的动了。
+ */
+interface BitmapDiff {
+  differentPixels: number;
+  totalPixels: number;
+  maxChannelDelta: number;
+  ratio: number;
+  differentInsideViewport: number;
+  insideRatio: number;
+  outsideRatio: number;
+}
+
+function bitmapDiff(
+  leftPng: Buffer,
+  rightPng: Buffer,
+  viewport?: { x: number; y: number; width: number; height: number } | null
+): BitmapDiff {
+  const leftImage = nativeImage.createFromBuffer(leftPng);
+  const rightImage = nativeImage.createFromBuffer(rightPng);
+  const left = leftImage.toBitmap();
+  const right = rightImage.toBitmap();
+  const size = leftImage.getSize();
+  const length = Math.min(left.length, right.length);
+  const totalPixels = Math.floor(length / 4);
+  const width = Math.max(1, size.width);
+  // 位图可能被 devicePixelRatio 放大：视口矩形（CSS px）按同比例换算
+  const scale = SHOT_WIDTH > 0 ? width / SHOT_WIDTH : 1;
+  const rect = viewport
+    ? {
+        x: Math.round(viewport.x * scale),
+        y: Math.round(viewport.y * scale),
+        width: Math.round(viewport.width * scale),
+        height: Math.round(viewport.height * scale)
+      }
+    : null;
+  let differentPixels = 0;
+  let differentInsideViewport = 0;
+  let viewportPixels = 0;
+  let maxChannelDelta = 0;
+  for (let index = 0; index + 3 < length; index += 4) {
+    const pixelX = (index / 4) % width;
+    const pixelY = Math.floor(index / 4 / width);
+    const inside = Boolean(rect
+      && pixelX >= rect.x && pixelX < rect.x + rect.width
+      && pixelY >= rect.y && pixelY < rect.y + rect.height);
+    if (inside) viewportPixels += 1;
+    let delta = 0;
+    for (let channel = 0; channel < 3; channel += 1) {
+      const diff = Math.abs((left[index + channel] ?? 0) - (right[index + channel] ?? 0));
+      if (diff > delta) delta = diff;
+    }
+    if (delta > 6) {
+      differentPixels += 1;
+      if (inside) differentInsideViewport += 1;
+    }
+    if (delta > maxChannelDelta) maxChannelDelta = delta;
+  }
+  const outsidePixels = totalPixels - viewportPixels;
+  return {
+    differentPixels,
+    totalPixels,
+    maxChannelDelta,
+    ratio: totalPixels > 0 ? differentPixels / totalPixels : 0,
+    differentInsideViewport,
+    insideRatio: viewportPixels > 0 ? differentInsideViewport / viewportPixels : 0,
+    outsideRatio: outsidePixels > 0 ? (differentPixels - differentInsideViewport) / outsidePixels : 0
+  };
+}
+
+/**
+ * 用滚轮把联调 3D 视口拉近（OrbitControls 的 wheel 入口，等于用户滚鼠标）。
+ * 返回画布是否存在；notches 格 × 120 的 deltaY，实测 5 格约 1.29 倍近且不裁切机体。
+ */
+async function zoomCommissionViewport(window: BrowserWindow, notches: number): Promise<boolean> {
+  return await window.webContents.executeJavaScript(
+    `(async () => {
+      const canvas = document.querySelector('#commission3dHost canvas');
+      if (!canvas) return false;
+      for (let index = 0; index < ${Math.max(0, Math.round(notches))}; index += 1) {
+        canvas.dispatchEvent(new WheelEvent('wheel', { deltaY: -120, bubbles: true, cancelable: true }));
+        await new Promise((resolve) => setTimeout(resolve, 120));
+      }
+      return true;
+    })()`
+  ) as boolean;
+}
+
+/** 联动面板迟迟不出现时的现场快照：不靠猜是「桥没了」还是「管线报错」 */
+async function describeLinkageSlot(window: BrowserWindow): Promise<string> {
+  try {
+    const state = await window.webContents.executeJavaScript(
+      `(() => {
+        const slot = document.querySelector('.acp-linkage-slot');
+        const drawer = document.getElementById('agentDrawer');
+        return {
+          hasSlot: Boolean(slot),
+          hasPanel: Boolean(slot?.querySelector('[data-linkage-panel]')),
+          hasError: Boolean(slot?.querySelector('.acp-linkage-error')),
+          loading: Boolean(slot?.querySelector('.acp-linkage-loading')),
+          bridge: typeof window.desktop?.machine?.linkage === 'function',
+          legacyBridge: typeof window.machine?.linkage === 'function',
+          drawerOpen: Boolean(drawer && !drawer.hidden),
+          slotText: (slot?.textContent || '').slice(0, 200)
+        };
+      })()`
+    );
+    return JSON.stringify(state);
+  } catch (error) {
+    return `诊断失败：${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+/**
+ * 关掉「检测到软件渲染」顶部横幅：它是 fixed + z-index 12000，横跨顶栏 44px，
+ * 出现时机由渲染统计的 4.5 s 节流决定——不主动收掉就会在两次截图之间突然出现。
+ * 先等它（最多 12 s，真 GPU 机器上不会出现），有就点 ×（真实 UI 入口，幂等）。
+ */
+async function dismissSoftwareRenderNotice(window: BrowserWindow): Promise<void> {
+  await waitForSoft(window, `Boolean(document.getElementById('orbitSoftwareNotice'))`, 12_000);
+  const dismissed = await window.webContents.executeJavaScript(
+    `(() => {
+      const button = document.querySelector('#orbitSoftwareNotice .orbit-software-close');
+      if (!button) return false;
+      button.click();
+      return true;
+    })()`
+  ) as boolean;
+  await waitForSoft(window, `!document.getElementById('orbitSoftwareNotice')`, 3_000);
+  console.log(`LINKAGE_SOFTWARE_NOTICE dismissed=${dismissed} present=${Boolean(
+    await window.webContents.executeJavaScript(`Boolean(document.getElementById('orbitSoftwareNotice'))`)
+  )}`);
+}
+
+export async function captureLinkageScreenshots(
+  window: BrowserWindow,
+  options: MachineScreenshotOptions
+): Promise<{ captured: number; failed: number }> {
+  mkdirSync(options.outputDir, { recursive: true });
+  const evalDir = process.env.AUTOMATIONCAD_EVAL_DIR
+    ? resolve(process.env.AUTOMATIONCAD_EVAL_DIR)
+    : resolve(options.outputDir, '..', 'eval');
+  mkdirSync(evalDir, { recursive: true });
+  const baseUrl = process.env.AUTOMATIONCAD_STUB_BASE_URL;
+  if (!baseUrl) throw new Error('缺少 AUTOMATIONCAD_STUB_BASE_URL，无法启动离线模型桩');
+
+  window.setContentSize(SHOT_WIDTH, SHOT_HEIGHT);
+  window.webContents.setBackgroundThrottling(false);
+  await delay(350);
+  await waitForExtension(window);
+
+  await window.webContents.executeJavaScript(
+    `(async () => {
+      const result = await window.desktop.agent.saveLlmConfig({
+        baseUrl: ${JSON.stringify(baseUrl)},
+        apiKey: 'offline-stub',
+        model: 'offline-stub',
+        maxIterations: 4
+      });
+      return result;
+    })()`
+  );
+
+  const shots: MachineShotValidation[] = [];
+  // base 与 mid 必须互异（否则说明画面没刷新 / 没动）；reset 单独一份去重表 ——
+  // 复位后本来就该和 base 一模一样，字节相同正是「回得到基准」的表现。
+  const seenHashes = new Map<string, string>();
+  const step = (name: string, label: string, hashes: Map<string, string> = seenHashes) =>
+    capture(window, options.outputDir, name, label, hashes);
+  let evidence: Record<string, unknown> = {};
+
+  try {
+    // 1) 真实智能体链路：一句话 → 机型方案卡 → 应用到工程（3D 换成 6 工位几何）
+    await window.webContents.executeJavaScript(
+      `(async () => {
+        const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const home = document.getElementById('homeScreen');
+        if (home && !home.hidden) {
+          document.querySelector('.home-link')?.click();
+          await wait(600);
+        }
+        window.AutomationCadViewer?.close();
+        window.AutomationCadParametric?.close();
+        document.getElementById('commissionDrawer')?.setAttribute('hidden', '');
+        document.querySelector('#agentEntryButton')?.click();
+        await wait(260);
+        const input = document.querySelector('#agentChatInput');
+        if (!input) throw new Error('智能体输入框缺失');
+        input.value = ${JSON.stringify(BRIEF)};
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        document.querySelector('#agentChatSend')?.click();
+        return true;
+      })()`
+    );
+    await waitFor(
+      window,
+      `document.querySelector('.acp-machine-card') && document.querySelectorAll('.acp-machine-card .acp-machine-stats b').length >= 6`,
+      '机型方案卡渲染'
+    );
+    await settle(window, 400);
+
+    await window.webContents.executeJavaScript(
+      `(() => {
+        if (window.__linkageShotAutoConfirm) return true;
+        const state = { count: 0 };
+        window.__linkageShotAutoConfirm = state;
+        const accept = () => {
+          const button = document.querySelector('#acwConfirmMask [data-acw="once"]');
+          if (button) { button.click(); state.count += 1; }
+        };
+        new MutationObserver(accept).observe(document.body, { childList: true, subtree: true });
+        accept();
+        return true;
+      })()`
+    );
+    await window.webContents.executeJavaScript(
+      `(() => {
+        const button = document.querySelector('.acp-machine-card [data-apply-machine]');
+        if (!button) throw new Error('应用按钮缺失');
+        button.click();
+        return true;
+      })()`
+    );
+    const applied = await waitForSoft(
+      window,
+      `(() => {
+        const pill = document.querySelector('.acp-machine-card .acp-pill.is-ok');
+        return pill && (pill.textContent || '').includes('已应用');
+      })()`,
+      30_000
+    );
+    if (!applied) throw new Error('机型方案应用完成超时（联动截图需要 6 工位几何）');
+    console.log('LINKAGE_APPLY_OK machine=已应用');
+
+    // 2) 真实 UI 播放：点「联动调试…」→ 点「▶ 播放联动」，轮询坐标证明零件动了
+    await window.webContents.executeJavaScript(
+      `(() => {
+        const button = document.querySelector('.acp-machine-card [data-linkage-machine]');
+        if (!button) throw new Error('联动调试按钮缺失');
+        button.click();
+        return true;
+      })()`
+    );
+    // 面板要主进程跑一次整机管线（实测 0.2 s，但 CI 冷启动可能慢），给足 120 s；
+    // 超时不能只说「等待超时」：把 slot 状态与桥的可见性一起打出来，否则没法判断卡在哪。
+    const panelReady = await waitForSoft(
+      window,
+      `Boolean(document.querySelector('.acp-linkage-slot [data-linkage-panel]'))`,
+      120_000
+    );
+    if (!panelReady) throw new Error(`联动面板未渲染：${await describeLinkageSlot(window)}`);
+    const panelState = await window.webContents.executeJavaScript(
+      `(() => {
+        const slot = document.querySelector('.acp-linkage-slot');
+        const play = slot?.querySelector('[data-linkage-play]');
+        return {
+          panel: Boolean(slot?.querySelector('[data-linkage-panel]')),
+          steps: slot?.querySelectorAll('[data-linkage-step]').length ?? 0,
+          playDisabled: play ? play.disabled : null,
+          playTitle: play?.title || '',
+          text: (slot?.textContent || '').slice(0, 260)
+        };
+      })()`
+    ) as { panel: boolean; steps: number; playDisabled: boolean | null; playTitle: string; text: string };
+    if (!panelState.panel || panelState.steps < 6) {
+      throw new Error(`联动面板没有步序（面板内容：${panelState.text}）`);
+    }
+    if (panelState.playDisabled !== false) {
+      // 播放按钮不可用 = 真实 UI 路径断了，不允许退化去「只调函数」然后拍一张没动的图
+      throw new Error(`播放按钮不可用：${panelState.playTitle || panelState.text}`);
+    }
+
+    const playState = await window.webContents.executeJavaScript(
+      `(async () => {
+        const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const slot = document.querySelector('.acp-linkage-slot');
+        const play = slot?.querySelector('[data-linkage-play]');
+        const clock = slot?.querySelector('[data-linkage-clock]');
+        const snap = window.__cadLinkageDebugSnapshot;
+        if (typeof snap !== 'function') return { ok: false, reason: 'no_snapshot_bridge' };
+        if (typeof window.__cadApplyLinkagePose !== 'function') return { ok: false, reason: 'no_pose_bridge' };
+        const base = snap();
+        if (!base || Object.keys(base).length === 0) return { ok: false, reason: 'empty_scene' };
+        play.click();
+        let best = { movedParts: 0, maxDeltaMm: 0, clock: '', step: 0 };
+        for (let attempt = 0; attempt < 70; attempt += 1) {
+          await wait(45);
+          const now = snap() || {};
+          let moved = 0;
+          let max = 0;
+          for (const [id, point] of Object.entries(now)) {
+            const origin = base[id];
+            if (!origin) continue;
+            const delta = Math.hypot(point[0] - origin[0], point[1] - origin[1], point[2] - origin[2]);
+            if (delta > 1e-6) { moved += 1; if (delta > max) max = delta; }
+          }
+          if (max > best.maxDeltaMm) {
+            best = {
+              movedParts: moved,
+              maxDeltaMm: max,
+              clock: clock?.textContent || '',
+              step: Number(slot?.querySelector('[data-linkage-step].is-active')?.dataset.linkageStep || 0)
+            };
+          }
+          // 播到明显位移就停（不必等整轮循环），后面的复位/截图不依赖播放是否结束
+          if (best.maxDeltaMm > 25 && attempt > 8) break;
+        }
+        return { ok: true, base, parts: Object.keys(base).length, ...best };
+      })()`
+    ) as { ok: boolean; reason?: string; base?: PoseSnapshot; parts?: number; movedParts?: number; maxDeltaMm?: number; clock?: string; step?: number };
+    if (!playState.ok) throw new Error(`联动播放失败：${playState.reason ?? 'unknown'}`);
+    if (!(Number(playState.movedParts) > 0) || !(Number(playState.maxDeltaMm) > 0)) {
+      throw new Error(`点了播放但零件没动：movedParts=${playState.movedParts} maxDeltaMm=${playState.maxDeltaMm}`);
+    }
+    console.log(
+      `LINKAGE_UI_PLAY_OK parts=${playState.parts} movedParts=${playState.movedParts} `
+      + `maxDeltaMm=${Number(playState.maxDeltaMm).toFixed(3)} clock=${playState.clock} step=${playState.step}`
+    );
+
+    // 3) 关闭抽屉（abortLinkagePlayback → resetLinkagePose 的真实入口）→ 坐标必须回基准
+    const closed = await window.webContents.executeJavaScript(
+      `(async () => {
+        const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        document.querySelector('#agentDrawer [data-acp-close]')?.click();
+        await wait(320);
+        const snap = window.__cadLinkageDebugSnapshot;
+        return {
+          drawerHidden: Boolean(document.getElementById('agentDrawer')?.hidden),
+          after: typeof snap === 'function' ? snap() : null
+        };
+      })()`
+    ) as { drawerHidden: boolean; after: PoseSnapshot | null };
+    if (!closed.drawerHidden) throw new Error('关闭联动抽屉失败（复位路径没走到）');
+    const uiResetDelta = poseDelta(playState.base ?? null, closed.after);
+    if (uiResetDelta.maxDeltaMm > 1e-6) {
+      throw new Error(`关闭抽屉后姿态没回基准：maxDeltaMm=${uiResetDelta.maxDeltaMm}`);
+    }
+    console.log(`LINKAGE_UI_RESET_OK maxDeltaMm=${uiResetDelta.maxDeltaMm.toFixed(9)}`);
+
+    // 4) 打开联调抽屉：3D 视口在这里才可见（抽屉互斥，见文件头注释）
+    await window.webContents.executeJavaScript(
+      `(async () => {
+        const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        document.querySelector('#commissionEntryButton')?.click();
+        await wait(420);
+        const body = document.querySelector('#commissionDrawer .acp-drawer-body');
+        if (body) body.scrollTop = 0;
+        return true;
+      })()`
+    );
+    await waitFor(
+      window,
+      `(() => {
+        const stats = window.__Commission3D?.stats?.();
+        return Boolean(stats && stats.webgl === true && (stats.ticks || 0) > 0);
+      })()`,
+      '联调 3D 视口就绪',
+      30_000
+    );
+    await settle(window, 600);
+
+    const baseSnapshot = await window.webContents.executeJavaScript(
+      `(() => {
+        const snap = window.__cadLinkageDebugSnapshot;
+        const value = typeof snap === 'function' ? snap() : null;
+        return value && Object.keys(value).length > 0 ? value : null;
+      })()`
+    ) as PoseSnapshot | null;
+    if (!baseSnapshot) throw new Error('3D 场景没有可联动零件（debugPositions 为空）');
+    const partCount = Object.keys(baseSnapshot).length;
+    if (partCount < 20) throw new Error(`3D 场景只有 ${partCount} 个零件，不足以证明联动`);
+    console.log(`LINKAGE_SCENE_OK parts=${partCount}`);
+
+    // SwiftShader 下 ~5 s 才会弹「检测到软件渲染」的顶部横幅（#orbitSoftwareNotice，
+    // position:fixed; inset:0 0 auto 0 → 正好盖住 44px 顶栏）。等它出现过再关掉，
+    // 三张图的顶部才一致——否则 base 先拍（没横幅）、mid/reset 后拍（有横幅），
+    // 4% 的像素差全是这条横幅，会把「零件动没动」彻底淹掉。
+    await dismissSoftwareRenderNotice(window);
+    await settle(window, 500);
+
+    // 5) 把 3D 视口拉近一点再拍：视口只有 670×368（抽屉里的 3D 区），
+    //    整机在这个窗口里很小，40 mm 的位移只剩几个像素——真实用户看机构动作也会先滚轮拉近。
+    //    用 WheelEvent 滚 5 格（OrbitControls 的真实入口，实测约 1.29 倍近），
+    //    三张图共用同一机位，对比才成立。缩放失败不影响结论（下面像素阈值按不缩放也能过）。
+    const zoomed = await zoomCommissionViewport(window, 5);
+    console.log(`LINKAGE_VIEWPORT_ZOOM notches=5 applied=${zoomed}`);
+    await settle(window, 600);
+    const viewportRect = await window.webContents.executeJavaScript(
+      `(() => {
+        const rect = document.getElementById('commission3dHost')?.getBoundingClientRect();
+        return rect ? { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) } : null;
+      })()`
+    ) as { x: number; y: number; width: number; height: number } | null;
+
+    // 6) 基准姿态（t=0）
+    const baseShot = await step('21-linkage-01-base.png', '联动 t=0 基准姿态');
+    shots.push(baseShot);
+    console.log(`LINKAGE_SHOT_OK name=${baseShot.name} bytes=${baseShot.bytes} movedParts=0 maxDeltaMm=0.000 parts=${partCount}`);
+
+    // 7) 中间帧：取同一条时间线上 t≈cycleMs/2 的真实关键帧（不是手工编的位移）
+    const midFrame = await window.webContents.executeJavaScript(
+      `(async () => {
+        const doc = await window.desktop.machine.linkage(${JSON.stringify(BRIEF)});
+        const linkage = doc && doc.linkage ? doc.linkage : doc;
+        const frames = Array.isArray(linkage?.frames) ? linkage.frames : [];
+        const cycleMs = Number(linkage?.cycleMs ?? 0);
+        if (frames.length === 0) return { ok: false, reason: 'no_frames', message: String(doc?.message || '') };
+        const target = cycleMs > 0 ? cycleMs / 2 : Number(frames[Math.floor(frames.length / 2)]?.tMs ?? 0);
+        let mid = frames[0];
+        for (const frame of frames) {
+          if (Number(frame?.tMs ?? 0) <= target) mid = frame;
+        }
+        return {
+          ok: true,
+          cycleMs,
+          frames: frames.length,
+          tMs: Number(mid?.tMs ?? 0),
+          pose: { offsets: mid?.offsets ?? {}, rotZDeg: mid?.rotZDeg ?? {} }
+        };
+      })()`
+    ) as { ok: boolean; reason?: string; message?: string; cycleMs?: number; frames?: number; tMs?: number; pose?: unknown };
+    if (!midFrame.ok || !midFrame.pose) {
+      throw new Error(`拿不到联动帧：${midFrame.reason ?? 'unknown'} ${midFrame.message ?? ''}`);
+    }
+
+    const appliedMid = await window.webContents.executeJavaScript(
+      `(() => {
+        const snap = window.__cadLinkageDebugSnapshot;
+        if (typeof window.__cadApplyLinkagePose !== 'function') return { ok: false, reason: 'bridge_missing' };
+        window.__cadApplyLinkagePose(${JSON.stringify(midFrame.pose)});
+        return { ok: true, after: typeof snap === 'function' ? snap() : null };
+      })()`
+    ) as { ok: boolean; reason?: string; after?: PoseSnapshot | null };
+    if (!appliedMid.ok) throw new Error(`联动位姿桥缺失：${appliedMid.reason}`);
+    const midDelta = poseDelta(baseSnapshot, appliedMid.after ?? null);
+    if (midDelta.movedParts < 1 || midDelta.maxDeltaMm <= 0) {
+      throw new Error(`中间帧位姿没落到零件上：movedParts=${midDelta.movedParts} maxDeltaMm=${midDelta.maxDeltaMm}`);
+    }
+    await settle(window, 320);
+    const midShot = await step('21-linkage-02-mid.png', `联动播放中 t≈${Math.round(Number(midFrame.tMs))} ms`);
+    shots.push(midShot);
+    console.log(
+      `LINKAGE_SHOT_OK name=${midShot.name} bytes=${midShot.bytes} movedParts=${midDelta.movedParts} `
+      + `maxDeltaMm=${midDelta.maxDeltaMm.toFixed(3)} tMs=${midFrame.tMs} frames=${midFrame.frames} `
+      + `sample=${midDelta.ids.slice(0, 3).join(',')}`
+    );
+
+    // 8) 复位（与 abortLinkagePlayback 调的同一个 resetLinkagePose 写入点）
+    const resetState = await window.webContents.executeJavaScript(
+      `(() => {
+        const reset = window.__cadResetLinkagePose;
+        if (typeof reset !== 'function') return { ok: false, reason: 'reset_bridge_missing' };
+        reset();
+        const snap = window.__cadLinkageDebugSnapshot;
+        return { ok: true, after: typeof snap === 'function' ? snap() : null };
+      })()`
+    ) as { ok: boolean; reason?: string; after?: PoseSnapshot | null };
+    if (!resetState.ok) throw new Error(`复位桥缺失：${resetState.reason}`);
+    const resetDelta = poseDelta(baseSnapshot, resetState.after ?? null);
+    if (resetDelta.maxDeltaMm > 1e-6) {
+      throw new Error(`复位后没回到基准：maxDeltaMm=${resetDelta.maxDeltaMm}（${resetDelta.ids.slice(0, 3).join(',')}）`);
+    }
+    await settle(window, 320);
+    // reset 用独立去重表（只拦「和 mid 一模一样」）：与 base 字节相同恰恰说明复位到位
+    const midHash = createHash('sha256')
+      .update(readFileSync(join(options.outputDir, '21-linkage-02-mid.png')))
+      .digest('hex');
+    const resetSeen = new Map<string, string>([[midHash, '21-linkage-02-mid.png']]);
+    const resetShot = await step('21-linkage-03-reset.png', '取消播放后回到 t=0 基准', resetSeen);
+    shots.push(resetShot);
+    console.log(
+      `LINKAGE_RESET_OK name=${resetShot.name} maxDeltaMm=${resetDelta.maxDeltaMm.toFixed(9)} `
+      + `movedParts=${resetDelta.movedParts}`
+    );
+
+    // 9) 像素证据（不靠肉眼）：base↔mid 必须成片不同，base↔reset 必须几乎相同。
+    //    同时按 3D 视口矩形分区统计：差异应该几乎全落在视口里（= 零件在动，不是顶栏/面板在闪）。
+    const basePng = readFileSync(join(options.outputDir, '21-linkage-01-base.png'));
+    const midPng = readFileSync(join(options.outputDir, '21-linkage-02-mid.png'));
+    const resetPng = readFileSync(join(options.outputDir, '21-linkage-03-reset.png'));
+    const baseVsMid = bitmapDiff(basePng, midPng, viewportRect);
+    const baseVsReset = bitmapDiff(basePng, resetPng, viewportRect);
+    console.log(
+      `LINKAGE_PIXEL_OK base_vs_mid=${(baseVsMid.ratio * 100).toFixed(3)}% `
+      + `in_viewport=${(baseVsMid.insideRatio * 100).toFixed(3)}% `
+      + `maxChannelDelta=${baseVsMid.maxChannelDelta} `
+      + `base_vs_reset=${(baseVsReset.ratio * 100).toFixed(3)}% `
+      + `maxChannelDelta=${baseVsReset.maxChannelDelta}`
+    );
+    // 阈值按本机实测留余量（SwiftShader 1600×1000）：base↔mid 实测 0.075%，
+    // 其中 ~100% 落在 670×368 的 3D 视口内；base↔reset 实测 0.000%（字节相同）。
+    if (baseVsMid.ratio < 0.0003) {
+      throw new Error(`base 与 mid 只有 ${(baseVsMid.ratio * 100).toFixed(3)}% 像素不同，看不出零件在动`);
+    }
+    if (baseVsMid.insideRatio < 0.0002) {
+      throw new Error(`base 与 mid 的差异不在 3D 视口内（视口内仅 ${(baseVsMid.insideRatio * 100).toFixed(3)}%），可能是面板噪声`);
+    }
+    if (baseVsReset.ratio > 0.0002) {
+      throw new Error(`base 与 reset 有 ${(baseVsReset.ratio * 100).toFixed(3)}% 像素不同，复位没回到基准`);
+    }
+
+    evidence = {
+      parts: partCount,
+      uiPlay: {
+        movedParts: playState.movedParts,
+        maxDeltaMm: playState.maxDeltaMm,
+        clock: playState.clock,
+        activeStep: playState.step,
+        resetMaxDeltaMm: uiResetDelta.maxDeltaMm
+      },
+      midFrame: {
+        tMs: midFrame.tMs,
+        frames: midFrame.frames,
+        cycleMs: midFrame.cycleMs,
+        movedParts: midDelta.movedParts,
+        maxDeltaMm: midDelta.maxDeltaMm,
+        sampleParts: midDelta.ids.slice(0, 5)
+      },
+      reset: { maxDeltaMm: resetDelta.maxDeltaMm },
+      viewport: { rect: viewportRect, zoomNotches: zoomed ? 5 : 0 },
+      pixels: {
+        baseVsMid: baseVsMid.ratio,
+        baseVsMidInsideViewport: baseVsMid.insideRatio,
+        baseVsReset: baseVsReset.ratio,
+        baseVsMidMaxChannelDelta: baseVsMid.maxChannelDelta,
+        baseVsResetMaxChannelDelta: baseVsReset.maxChannelDelta
+      }
+    };
+    const validationFile = join(evalDir, 'linkage-screenshots.json');
+    writeFileSync(validationFile, `${JSON.stringify({
+      schemaVersion: 1,
+      kind: 'linkage-screenshots',
+      size: { width: SHOT_WIDTH, height: SHOT_HEIGHT },
+      shots,
+      evidence
+    }, null, 2)}\n`, 'utf8');
+    console.log(`LINKAGE_SHOTS_DONE captured=${shots.length} failed=0 validation=${validationFile}`);
+    return { captured: shots.length, failed: 0 };
+  } catch (error) {
+    console.error('LINKAGE_SHOTS_FAIL', error);
+    try {
+      const validationFile = join(evalDir, 'linkage-screenshots.json');
+      writeFileSync(validationFile, `${JSON.stringify({
+        schemaVersion: 1,
+        kind: 'linkage-screenshots',
+        size: { width: SHOT_WIDTH, height: SHOT_HEIGHT },
+        shots,
+        evidence,
+        error: error instanceof Error ? error.message : String(error)
+      }, null, 2)}\n`, 'utf8');
+    } catch (writeError) {
+      console.warn('[LINKAGE_SCREENSHOT_FAILURE_REPORT]', { site: 'desktop/electron/machine-screenshots.ts' }, writeError);
+    }
+    return { captured: shots.length, failed: 1 };
+  }
+}
+

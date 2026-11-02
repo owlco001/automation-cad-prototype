@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "kind": "linkage-screenshots",
+  "size": {
+    "width": 1600,
+    "height": 1000
+  },
+  "shots": [
+    {
+      "label": "联动 t=0 基准姿态",
+      "name": "21-linkage-01-base.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 481205,
+      "uniqueColors": 12152
+    },
+    {
+      "label": "联动播放中 t≈945 ms",
+      "name": "21-linkage-02-mid.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 481006,
+      "uniqueColors": 12142
+    },
+    {
+      "label": "取消播放后回到 t=0 基准",
+      "name": "21-linkage-03-reset.png",
+      "width": 1600,
+      "height": 1000,
+      "bytes": 481205,
+      "uniqueColors": 12152
+    }
+  ],
+  "evidence": {
+    "parts": 101,
+    "uiPlay": {
+      "movedParts": 5,
+      "maxDeltaMm": 28.611418704257265,
+      "clock": "723 / 1890 ms",
+      "activeStep": 0,
+      "resetMaxDeltaMm": 0
+    },
+    "midFrame": {
+      "tMs": 945,
+      "frames": 120,
+      "cycleMs": 1890,
+      "movedParts": 8,
+      "maxDeltaMm": 40.6911538297945,
+      "sampleParts": [
+        "st1-rotary-2-fixture",
+        "st2-rotary-2-fixture",
+        "st3-rotary-2-fixture",
+        "st4-rotary-2-fixture",
+        "st5-gripper-1-jaw-l"
+      ]
+    },
+    "reset": {
+      "maxDeltaMm": 0
+    },
+    "viewport": {
+      "rect": {
+        "x": 904,
+        "y": 304,
+        "width": 670,
+        "height": 368
+      },
+      "zoomNotches": 5
+    },
+    "pixels": {
+      "baseVsMid": 0.0007525,
+      "baseVsMidInsideViewport": 0.004883192731992213,
+      "baseVsReset": 0,
+      "baseVsMidMaxChannelDelta": 208,
+      "baseVsResetMaxChannelDelta": 0
+    }
+  }
+}
