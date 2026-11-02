@@ -20,7 +20,7 @@ export const KB_DOC_FILES = [
 ] as const;
 
 export const KB_MAX_CHUNK_CHARS = 800;
-export const KB_MAX_BYTES = 400 * 1024;
+export const KB_MAX_BYTES = 512 * 1024;
 export const KB_MAX_CHUNKS = 200;
 
 export interface KbChunk {

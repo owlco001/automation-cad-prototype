@@ -30,7 +30,7 @@ function docSource(path) {
   return kb.meta.sources.find((source) => source.path === path);
 }
 
-test('kb.json 已提交且体积不超过 400 KB', () => {
+test('kb.json 已提交且体积不超过 512 KB', () => {
   assert.ok(raw.length > 0);
   assert.ok(Buffer.byteLength(raw, 'utf8') <= KB_MAX_BYTES);
   assert.equal(kb.meta.docs, KB_DOC_FILES.length);

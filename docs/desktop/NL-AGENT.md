@@ -112,10 +112,10 @@
 
 - **输入**：`docs/desktop/` 下 13 份文档（NL-AGENT / MODULES / BACKLOG / STATUS / PLUGIN-PACKS / PARAMETRIC-CAD / SKETCH-SPIKE / COSTING / PLC-CODEGEN / SMART-FACTORY-INTEGRATION / MACHINE-DESIGN / DIMS-GAPS / HARDENING）、`docs/desktop/screenshots/` 文件名、`packs/builtin/*/parts.json` 的元件库分类名。
 - **分块**：`kb/index.ts` 按 Markdown 标题切分，块 ≤800 字符，超长按行贪心拆、单行再硬切；每块保留 `source`（`文件#标题路径`）、`heading`、`line` 与唯一 `id`。标题层级用 ` > ` 连接。
-- **构建期生成**：`cd desktop && npm run kb:build` 输出 `src/agent/kb/kb.json`（提交入库）。索引目标 ≤400 KB；若超限只保留前 200 块，并在 `meta.truncated/droppedChunks` 记录。启动只加载这份 JSON，不扫盘、不联网。
+- **构建期生成**：`cd desktop && npm run kb:build` 输出 `src/agent/kb/kb.json`（提交入库）。索引目标 ≤512 KB；若超限只保留前 200 块，并在 `meta.truncated/droppedChunks` 记录。启动只加载这份 JSON，不扫盘、不联网。
 - **检索**：`kb/search.ts` 是纯函数。中文按 2-gram、英文/数字按词切分，简化 BM25（k1=1.5、b=0.75）加 IDF 排序，默认 top 3（`limit` 1–5）；没有任何查询词命中时返回空数组，不做相近词硬凑。返回结果整体 ≤2 KB 注入上下文。
 - **工具**：`search_docs({query, limit?})` 只读，返回 `{ok,query,hits:[{source,heading,snippet,score}]}`。系统提示要求涉及「怎么操作 / 限制 / 决策 / 为什么」先查文档；命中要引用来源，无命中就直说。
-- **同步校验**：`kb.json` 为每份文档保存标题列表 SHA-256；测试会重新扫描当前 Markdown 并比对。改了标题却忘记运行 `npm run kb:build` 会直接失败。另覆盖 800 字符上限、source/line、2-gram 命中「导轨/干涉/D2」、top3 排序、无命中、2 KB 上限与 400 KB 体积。
+- **同步校验**：`kb.json` 为每份文档保存标题列表 SHA-256；测试会重新扫描当前 Markdown 并比对。改了标题却忘记运行 `npm run kb:build` 会直接失败。另覆盖 800 字符上限、source/line、2-gram 命中「导轨/干涉/D2」、top3 排序、无命中、2 KB 上限与 512 KB 体积。
 - **冒烟**：`SMOKE_AGENT_KB_OK docs=13 chunks=N query=D2 hits=1`；评估集新增 3 条文档类用例（导轨、D2、缺尺寸）。
 
 ### 4.2 多轮与续跑（P7-L）
