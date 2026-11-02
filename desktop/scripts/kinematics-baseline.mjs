@@ -13,6 +13,8 @@
 //   node scripts/kinematics-baseline.mjs                     # 人类可读摘要（默认 vector 口径）
 //   node scripts/kinematics-baseline.mjs --stored-axis        # 只看「按存储轴打分」口径
 //   node scripts/kinematics-baseline.mjs --both               # 两种口径都打（推荐复核用）
+//   node scripts/kinematics-baseline.mjs --angle-variance     # 追加「角度有方差」样本组（只改
+//        config.rotationRangeDeg，几何/件名/工位布局不变），历史 21 套的数字不受影响
 //   node scripts/kinematics-baseline.mjs --json              # 只输出 JSON（stdout）
 //   node scripts/kinematics-baseline.mjs --json=out.json     # 摘要 + 写 JSON 文件
 //   KIN_BASELINE_SRC=/path/to/src node scripts/kinematics-baseline.mjs
@@ -45,7 +47,7 @@ const { parseMachineBrief } = await load('machine/spec.ts');
 const { synthMachine } = await load('machine/synth.ts');
 const { generateMachineGeometry } = await load('machine/geometry.ts');
 const { pointOptionsFromMachineConfig } = await load('cad/kinematics-ui.ts');
-const { suggestKinematics } = await load('cad/kinematics-auto.ts');
+const { suggestKinematics, batchGate } = await load('cad/kinematics-auto.ts');
 const { axisDirectionVector } = await load('cad/kinematics.ts');
 const { parseOcctBuffer } = await load('cad/step.ts');
 
@@ -64,6 +66,14 @@ const scoreModes = args.includes('--stored-axis')
   : args.includes('--both')
     ? ['vector', 'stored']
     : ['vector'];
+
+/**
+ * 角度方差样本（--angle-variance）：单独一组，不进上面的 21 套历史口径。
+ * 唯一自变量是 config.actuators[].rotationRangeDeg —— 它只写进 GeomMovingAxis.rangeDeg（真值），
+ * 不参与 mesh 生成（geometry.ts:681-717 的台面/治具几何与角度无关，脚本内会实测核对）。
+ * 因此「同一台机器、同一布局、同一件名，只有真值角度不同」，角度是干净的自变量。
+ */
+const angleVarianceMode = args.includes('--angle-variance');
 
 // ───────────────────────────────────────────── 1. 夹具：GeomPart → AutoKinMesh
 //
@@ -230,19 +240,65 @@ const MODEL_TRAVEL = {
   rotary: { rotationRangeDeg: 180 }
 };
 
-function baseConfig(brief) {
+// ───────────────────────────────────────────── 3b. 角度方差样本（--angle-variance）
+//
+// 目的：历史 21 套里 14 条 rotary 真值**全是 180°**（角度方差 = 0），任何常数先验都满分，
+// 因此「rotary 能不能推出角度」从未被真正测过。这里保持工位数、布局、件名、几何完全不变，
+// 只把 config.actuators[].rotationRangeDeg 换成不同值，得到角度有方差的同一批装配。
+//
+// 核心 4 组（90 / 120 / 180 / 270）用于「常数先验」对比：每组 14 条 rotary 真值，均匀覆盖 4 个角度。
+// 扩展组：45 / 360（边界与超程）、360N（控制组：把每条轴的真值设成该机 360/工位数，
+//   即「这条轴其实是分度盘」的世界，用来检验 360/N 先验到底在什么前提下成立）。
+
+const ANGLE_VARIANTS = [
+  { id: '45', deg: () => 45, core: false, label: '45°' },
+  { id: '90', deg: () => 90, core: true, label: '90°' },
+  { id: '120', deg: () => 120, core: true, label: '120°' },
+  { id: '180', deg: () => 180, core: true, label: '180°（= 历史基线角度）' },
+  { id: '270', deg: () => 270, core: true, label: '270°' },
+  { id: '360', deg: () => 360, core: false, label: '360°（整周）' },
+  { id: '360N', deg: (_brief, stations) => 360 / stations, core: false, label: '360/N（分度盘口径，控制组）' }
+];
+
+/**
+ * R4：型号后缀带角度（`MSQB20A-90`）。不是仓库现有导出约定，是一条**假设性**命名约定，
+ * 用来回答「如果角度真的写在名字里，recall 是多少」—— 把「角度不可见」与「算法不会读角度」分开。
+ * 旋转外的件名与 R2 完全相同，作为对照不变。
+ */
+const ANGLE_MODEL_REGIME = {
+  id: 'R4',
+  label: 'R4 型号后缀带角度（假设性命名约定）',
+  config: (base) => ({
+    ...base,
+    actuators: base.actuators.map((entry) => ({
+      ...entry,
+      name:
+        entry.kind === 'rotary'
+          ? `${entry.station} ${KIND_CN.rotary} ${MODELS.rotary}-${Math.round(entry.rotationRangeDeg ?? 180)}`
+          : `${entry.station} ${KIND_CN[entry.kind]} ${MODELS[entry.kind]}`
+    }))
+  }),
+  path: (part) => ['MACHINE', stationTag(part)]
+};
+
+function baseConfig(brief, angleDeg) {
   const parsed = parseMachineBrief(brief.text);
   // id 必须是 design-<process>-<n>st：geometry.ts 的 inferProcess() 靠它推断工艺，进而决定布局
   // （dial / linear / single）。用别的 id 会让所有机器退化成默认 linear 布局。
   const design = synthMachine(parsed, { id: `design-${parsed.process}-${parsed.stations}st` });
   return {
     ...design.config,
-    actuators: design.config.actuators.map((entry) => ({ ...entry, ...MODEL_TRAVEL[entry.kind] }))
+    actuators: design.config.actuators.map((entry) => ({
+      ...entry,
+      ...MODEL_TRAVEL[entry.kind],
+      // 角度变体：只改真值来源（rotationRangeDeg），不动任何几何参数
+      ...(angleDeg !== undefined && entry.kind === 'rotary' ? { rotationRangeDeg: angleDeg } : {})
+    }))
   };
 }
 
-function machineCase(brief, regime) {
-  const config = regime.config(baseConfig(brief));
+function machineCase(brief, regime, angleDeg) {
+  const config = regime.config(baseConfig(brief, angleDeg));
   const geometry = generateMachineGeometry(config, { bypassCache: true });
   const parts = geometry.parts.map((part) => ({ ...part, __actuators: config.actuators }));
   const meshes = meshesFromParts(parts, regime.path);
@@ -270,6 +326,8 @@ function machineCase(brief, regime) {
     regime: regime.id,
     layout: geometry.layout,
     parts: parts.length,
+    // 360/N 先验用的工位数：全台不同工位标签数（与历史文档 §2.3 同口径）
+    stations: new Set(config.actuators.map((entry) => entry.station)).size,
     meshes,
     points: pointOptionsFromMachineConfig(config),
     truth,
@@ -447,6 +505,8 @@ function evaluateCase(testCase) {
       truthTravel: travelTarget(item),
       predictedTravel: travelValue(prediction),
       strokeSource: prediction.strokeSource,
+      // 产品里「批量采纳」的实际闸门（conf≥0.8 + 来源∈{model-code,catalog} + 偏轴≤5°）
+      batchOk: batchGate(prediction).ok,
       name: prediction.name,
       meshNames: prediction.meshNames
     });
@@ -642,6 +702,303 @@ function printErrors(summary) {
   );
 }
 
+// ───────────────────────────────────────────── 7. 角度方差样本（--angle-variance）
+
+/** 与 travelAgrees 同一容差：|c − 真值| ≤ max(1, 5%·真值)。 */
+const angleWithinTol = (value, expected) => Math.abs(value - expected) <= Math.max(1, 0.05 * Math.abs(expected));
+
+/** 几何指纹：件名 + 中心 + 形状 + 自身 rotationZ。用来实测「角度只改真值、不改几何」。 */
+const geometrySignature = (parts) =>
+  JSON.stringify(parts.map((part) => [part.name, part.center, part.shape, part.rotationZDeg]));
+
+function stationsOf(brief) {
+  const parsed = parseMachineBrief(brief.text);
+  return Math.max(1, Number(parsed.stations) || 1);
+}
+
+/** 实测核对：同一台机器切换 rotationRangeDeg，几何指纹必须逐字相同。 */
+function geometryInvariantCheck() {
+  const mismatches = [];
+  for (const brief of BRIEFS) {
+    const reference = geometrySignature(generateMachineGeometry(baseConfig(brief), { bypassCache: true }).parts);
+    for (const variant of ANGLE_VARIANTS) {
+      const deg = variant.deg(brief, stationsOf(brief));
+      const signature = geometrySignature(generateMachineGeometry(baseConfig(brief, deg), { bypassCache: true }).parts);
+      if (signature !== reference) mismatches.push(`${brief.id}@${variant.id}`);
+    }
+  }
+  return mismatches;
+}
+
+/** 角度变体的整批录制：变体 × 约定（R1/R2/R3/R4）× 7 台。 */
+function angleVarianceRecords() {
+  const regimes = [...REGIMES, ANGLE_MODEL_REGIME];
+  const records = [];
+  for (const variant of ANGLE_VARIANTS) {
+    for (const regime of regimes) {
+      for (const brief of BRIEFS) {
+        const deg = variant.deg(brief, stationsOf(brief));
+        const record = evaluateCase(machineCase(brief, regime, deg));
+        record.variant = variant.id;
+        record.variantDeg = deg;
+        records.push(record);
+      }
+    }
+  }
+  return records;
+}
+
+/** 某一变体 × 某一约定的 rotary 明细（真值条数 / 命中 / 严格 / 角度对 / 预测角度分布）。 */
+function rotarySlice(records) {
+  const truths = records.flatMap((record) => record.testCase.truth.filter((item) => item.kind === 'rotary'));
+  const matched = records.flatMap((record) =>
+    record.matched
+      .filter((entry) => entry.kind === 'rotary')
+      .map((entry) => ({ ...entry, stations: record.testCase.stations, layout: record.testCase.layout }))
+  );
+  const at06 = matched.filter((entry) => entry.confidence >= 0.6);
+  const predictedAt06 = records
+    .flatMap((record) => record.predictions)
+    .filter((entry) => entry.category === 'rotary' && entry.confidence >= 0.6).length;
+  const predictedAngles = {};
+  const sources = {};
+  for (const entry of matched) {
+    const key = `${entry.predictedTravel}°`;
+    predictedAngles[key] = (predictedAngles[key] ?? 0) + 1;
+    sources[entry.strokeSource] = (sources[entry.strokeSource] ?? 0) + 1;
+  }
+  return {
+    truth: truths.length,
+    matched: matched.length,
+    strict: matched.filter((entry) => entry.strict).length,
+    strictAt06: at06.filter((entry) => entry.strict).length,
+    predictedAt06,
+    angleOk: matched.filter((entry) => entry.strokeOk).length,
+    highConfidenceWrongAngle: matched.filter((entry) => entry.confidence >= 0.6 && !entry.strokeOk).length,
+    // 能通过产品「批量采纳」闸门、但角度是错的条数（会无提示写进标注）
+    batchOk: matched.filter((entry) => entry.batchOk).length,
+    batchOkWrongAngle: matched.filter((entry) => entry.batchOk && !entry.strokeOk).length,
+    predictedAngles,
+    sources,
+    truthAngles: [...new Set(truths.map((item) => item.rangeDeg))].sort((a, b) => a - b),
+    entries: matched
+  };
+}
+
+/**
+ * 常数先验：把每条建议的**角度**替换成常数 c（或 360/N），其余字段（类别/方向/置信度）不动，
+ * 再用同一容差重判行程。这样得到的是「若产品预填 c，会有多少条对」——与历史 §2.3 的
+ * KIN_ROTARY_PRIOR 实验同口径，但这里的数据集角度有方差。
+ */
+function priorHits(entries, prior) {
+  return entries.filter((entry) => {
+    const value = typeof prior === 'function' ? prior(entry) : prior;
+    return Number.isFinite(value) && angleWithinTol(value, entry.truthTravel);
+  }).length;
+}
+
+const PRIOR_CONSTANTS = [45, 60, 90, 120, 150, 180, 270, 360];
+
+/** 汇总「角度方差」这一组：不做产品代码改动，全部是对真实运行的统计。 */
+function buildAngleVariance() {
+  const geometryMismatches = geometryInvariantCheck();
+  const records = angleVarianceRecords();
+  const regimes = [...REGIMES, ANGLE_MODEL_REGIME];
+  const sliceOf = (variantId, regimeId) =>
+    rotarySlice(records.filter((record) => record.variant === variantId && record.testCase.regime === regimeId));
+
+  const variants = ANGLE_VARIANTS.map((variant) => ({
+    id: variant.id,
+    label: variant.label,
+    core: variant.core,
+    byRegime: regimes.map((regime) => {
+      const slice = sliceOf(variant.id, regime.id);
+      return {
+        regime: regime.id,
+        truth: slice.truth,
+        matched: slice.matched,
+        strict: slice.strict,
+        strictAt06: slice.strictAt06,
+        predictedAt06: slice.predictedAt06,
+        angleOk: slice.angleOk,
+        highConfidenceWrongAngle: slice.highConfidenceWrongAngle,
+        batchOk: slice.batchOk,
+        batchOkWrongAngle: slice.batchOkWrongAngle,
+        truthAngles: slice.truthAngles,
+        predictedAngles: slice.predictedAngles,
+        sources: slice.sources
+      };
+    })
+  }));
+
+  // 常数先验矩阵：口径 = R1（无型号，产品今天就是靠 default 90° 兜底的那一档）
+  const priorRows = PRIOR_CONSTANTS.map((value) => ({
+    prior: String(value),
+    hits: Object.fromEntries(
+      ANGLE_VARIANTS.map((variant) => [variant.id, priorHits(sliceOf(variant.id, 'R1').entries, value)])
+    )
+  }));
+  priorRows.push({
+    prior: '360/N',
+    hits: Object.fromEntries(
+      ANGLE_VARIANTS.map((variant) => [
+        variant.id,
+        priorHits(sliceOf(variant.id, 'R1').entries, (entry) => 360 / entry.stations)
+      ])
+    )
+  });
+  priorRows.push({
+    prior: '识别器(R1)',
+    hits: Object.fromEntries(ANGLE_VARIANTS.map((variant) => [variant.id, sliceOf(variant.id, 'R1').angleOk]))
+  });
+  priorRows.push({
+    prior: '识别器(R2)',
+    hits: Object.fromEntries(ANGLE_VARIANTS.map((variant) => [variant.id, sliceOf(variant.id, 'R2').angleOk]))
+  });
+  priorRows.push({
+    prior: '识别器(R4)',
+    hits: Object.fromEntries(ANGLE_VARIANTS.map((variant) => [variant.id, sliceOf(variant.id, 'R4').angleOk]))
+  });
+
+  const coreVariants = ANGLE_VARIANTS.filter((variant) => variant.core).map((variant) => variant.id);
+  // 每命名约定的 rotary 真值条数（跨 7 台求和，取任一约定 — 三种约定几何相同，条数必然一致）
+  const rotaryTruthPerConvention = records
+    .filter((record) => record.variant === ANGLE_VARIANTS[0].id && record.testCase.regime === 'R1')
+    .reduce((total, record) => total + record.testCase.truth.filter((item) => item.kind === 'rotary').length, 0);
+  const perRegime = regimes.map((regime) => {
+    const slices = coreVariants.map((variantId) => sliceOf(variantId, regime.id));
+    const sum = (key) => slices.reduce((total, slice) => total + slice[key], 0);
+    return {
+      regime: regime.id,
+      label: regime.label,
+      truth: sum('truth'),
+      matched: sum('matched'),
+      strict: sum('strict'),
+      strictAt06: sum('strictAt06'),
+      predictedAt06: sum('predictedAt06'),
+      angleOk: sum('angleOk'),
+      highConfidenceWrongAngle: sum('highConfidenceWrongAngle'),
+      batchOk: sum('batchOk'),
+      batchOkWrongAngle: sum('batchOkWrongAngle'),
+      predictedAngles: slices.reduce((acc, slice) => {
+        for (const [key, value] of Object.entries(slice.predictedAngles)) acc[key] = (acc[key] ?? 0) + value;
+        return acc;
+      }, {}),
+      sources: slices.reduce((acc, slice) => {
+        for (const [key, value] of Object.entries(slice.sources)) acc[key] = (acc[key] ?? 0) + value;
+        return acc;
+      }, {})
+    };
+  });
+
+  // 确定性核对（与历史组同样的口径）：任取一例跑两遍
+  const probeA = evaluateCase(machineCase(BRIEFS[1], REGIMES[0], 90));
+  const probeB = evaluateCase(machineCase(BRIEFS[1], REGIMES[0], 90));
+  const determinism =
+    JSON.stringify(probeA.predictions) === JSON.stringify(probeB.predictions) &&
+    JSON.stringify(probeA.matched) === JSON.stringify(probeB.matched);
+
+  return {
+    geometryInvariant: geometryMismatches.length === 0,
+    geometryMismatches,
+    determinism,
+    variants: ANGLE_VARIANTS.length,
+    regimes: regimes.map((regime) => regime.id),
+    assemblies: records.length,
+    rotaryTruthPerConvention,
+    coreVariants,
+    byVariant: variants,
+    priorRows,
+    perRegime,
+    note:
+      '角度变体只改 config.actuators[].rotationRangeDeg（GeomMovingAxis.rangeDeg 的真值来源），几何/件名/工位布局不变；' +
+      '常数先验 = 把建议角度替换成常数后按同一容差重判，其余字段不动。'
+  };
+}
+
+const visualWidth = (text) => [...text].reduce((width, ch) => width + (/[\u3000-\u9fff\uff00-\uffef]/.test(ch) ? 2 : 1), 0);
+const padEndW = (text, width) => text + ' '.repeat(Math.max(0, width - visualWidth(text)));
+const padStartW = (text, width) => ' '.repeat(Math.max(0, width - visualWidth(text))) + text;
+
+function printAngleVariance(report) {
+  console.log('\n════════════════ 角度方差样本（--angle-variance · 独立于历史 21 套口径）════════════════');
+  console.log(
+    `几何不受角度影响的实测核对：${report.geometryInvariant ? '通过' : `失败（${report.geometryMismatches.join(' ')}）`}` +
+      '（7 台 × 7 个角度：件名 / 中心 / 形状 / 自身 rotationZ 逐字一致）'
+  );
+  console.log(
+    `确定性核对（同一输入两次运行一致）：${report.determinism ? '通过' : '失败'} ｜ 规模：${report.variants} 个角度变体 × ` +
+      `${report.regimes.length} 种命名约定 × 7 台 = ${report.assemblies} 套装配 · 每个命名约定 rotary 真值 ${report.rotaryTruthPerConvention} 条`
+  );
+  console.log(
+    `核心 4 组（${report.coreVariants.join(' / ')}）各 ${report.rotaryTruthPerConvention} 条 rotary 真值 = ` +
+      `${report.rotaryTruthPerConvention * report.coreVariants.length} 条/命名约定；4 个角度等量，角度方差不再为 0。`
+  );
+
+  console.log('\nA. rotary 逐角度表现（严格 = 类别 + 方向 + 角度；角度容差 ±max(1°, 5%)）');
+  console.log(
+    `  ${padEndW('变体', 26)}${padEndW('约定', 6)}${padStartW('真值', 6)}${padStartW('命中', 6)}` +
+      `${padStartW('严格≥0.6', 10)}${padStartW('角度对', 8)}${padStartW('高置信错填', 12)}  ${padEndW('预测角度', 24)}来源`
+  );
+  for (const variant of report.byVariant) {
+    for (const row of variant.byRegime) {
+      const angles = Object.entries(row.predictedAngles)
+        .map(([key, value]) => `${key}×${value}`)
+        .join(' ');
+      const sources = Object.entries(row.sources)
+        .map(([key, value]) => `${key} ${value}`)
+        .join(' ');
+      console.log(
+        `  ${padEndW(variant.label, 26)}${padEndW(row.regime, 6)}${padStartW(String(row.truth), 6)}` +
+          `${padStartW(String(row.matched), 6)}${padStartW(`${row.strictAt06}`, 10)}${padStartW(`${row.angleOk}`, 8)}` +
+          `${padStartW(`${row.highConfidenceWrongAngle}`, 12)}  ${padEndW(angles, 24)}${sources}`
+      );
+    }
+  }
+
+  console.log(
+    `\nB. 核心对比：若「只允许一个先验值」，各常数在角度有方差的数据上能对几条（R1 口径；每列 = 该角度变体的 ${report.rotaryTruthPerConvention} 条 rotary 真值）`
+  );
+  const columns = ['90', '120', '180', '270', '45', '360', '360N'];
+  const columnHead = (id) => (id === '360N' ? '360/N' : `${id}°`);
+  console.log(
+    `  ${padEndW('先验值', 14)}${columns.map((id) => padStartW(columnHead(id), 10)).join('')}${padStartW('核心4组平均', 14)}`
+  );
+  for (const row of report.priorRows) {
+    const cells = columns.map((id) => `${row.hits[id]}/${report.rotaryTruthPerConvention}`);
+    const coreAverage =
+      report.coreVariants.reduce((total, id) => total + row.hits[id], 0) /
+      (report.coreVariants.length * report.rotaryTruthPerConvention);
+    console.log(
+      `  ${padEndW(row.prior, 14)}${cells.map((cell) => padStartW(cell, 10)).join('')}` +
+        `${padStartW(`${(coreAverage * 100).toFixed(1)}%`, 14)}`
+    );
+  }
+
+  console.log(
+    `\nC. 按命名约定汇总（核心 4 组合计，每约定 ${report.rotaryTruthPerConvention * report.coreVariants.length} 条 rotary 真值）`
+  );
+  console.log(
+    `  ${padEndW('约定', 6)}${padStartW('真值', 6)}${padStartW('命中', 6)}${padStartW('严格≥0.6', 10)}` +
+      `${padStartW('P≥0.6', 8)}${padStartW('高置信错填', 12)}${padStartW('可批量且角度错', 16)}  预测角度`
+  );
+  for (const row of report.perRegime) {
+    const angles = Object.entries(row.predictedAngles)
+      .map(([key, value]) => `${key}×${value}`)
+      .join(' ');
+    console.log(
+      `  ${padEndW(row.regime, 6)}${padStartW(String(row.truth), 6)}${padStartW(String(row.matched), 6)}` +
+        `${padStartW(`${row.strictAt06}`, 10)}` +
+        `${padStartW(row.predictedAt06 ? `${((row.strictAt06 / row.predictedAt06) * 100).toFixed(1)}%` : '—', 8)}` +
+        `${padStartW(`${row.highConfidenceWrongAngle}`, 12)}${padStartW(`${row.batchOkWrongAngle}/${row.batchOk}`, 16)}  ${angles}`
+    );
+  }
+  console.log(
+    `  （「高置信错填」= 置信度 ≥0.6 且角度错；「可批量且角度错」= 直接调用产品 batchGate() 判过、同时角度错的条数 /` +
+      ` 通过 batchGate 的总条数 —— 这批会无提示批量写进标注）`
+  );
+}
+
 const main = async () => {
   const records = [];
   for (const regime of REGIMES) {
@@ -665,6 +1022,7 @@ const main = async () => {
     return aggregate(subset, regime.label, 'stored');
   });
   const fixture = aggregate([fixtureRecord], '仓库 STEP 夹具（in-sample）');
+  const angleVariance = angleVarianceMode ? buildAngleVariance() : null;
 
   const headCommit = (() => {
     try {
@@ -748,6 +1106,7 @@ const main = async () => {
       matched: records.flatMap((record) => record.matched)
     },
     fixture,
+    ...(angleVariance ? { angleVariance } : {}),
     fixtureDetails: {
       predictions: fixtureRecord.predictions.map((entry) => ({
         category: entry.category,
@@ -841,6 +1200,10 @@ const main = async () => {
       `  ${entry.machine} ${entry.kind} conf=${entry.confidence} 存成 ${entry.predictedSnappedAxis}${entry.predictedYawDeg ? `@${entry.predictedYawDeg}°` : ''}` +
         ` 向量(${entry.predictedStoredVector.map((value) => value.toFixed(2)).join(',')}) vs 真值(${entry.truthAxis.map((value) => value.toFixed(2)).join(',')})`
     );
+  }
+  if (angleVariance) {
+    printAngleVariance(angleVariance);
+    console.log('\n（以上角度方差样本不进历史 21 套口径：关掉 --angle-variance 时，上面所有数字与改动前逐字相同。）');
   }
   console.log(`\n（明细：--both 两种口径都打；--stored-axis 只看存储轴；默认 vector。JSON 里 overall / overallStored 同时给出。）`);
   if (jsonPath) console.log(`\nJSON 已写入 ${resolve(process.cwd(), jsonPath)}`);
