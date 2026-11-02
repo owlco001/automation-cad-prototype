@@ -836,6 +836,19 @@ jobs:
         run: npm ci
       - name: 构建扩展（smoke 需要 dist/）
         run: npm run build:ext
+      # 沙箱加固是"构建产物才生效"的：preload 一旦重新引入 node: 内置，沙箱渲染下会直接抛
+      # module not found，而单测只看得见源码。这里对产物再做一次守卫。
+      - name: 校验 preload 仍是沙箱安全的
+        run: |
+          if grep -nE "require\((['\"])node:" dist-electron/preload.cjs; then
+            echo "::error::preload.cjs 里出现了 node: 内置常量 —— 沙箱 preload 无法 require，会整页失联" >&2
+            exit 1
+          fi
+          grep -q "security:renderer-state" dist-electron/preload.cjs || {
+            echo "::error::preload.cjs 缺少沙箱自述上报（security:renderer-state）" >&2; exit 1; }
+          # 主窗口是唯一挂 preload 的窗口：断言它的 webPreferences 仍是 sandbox: true
+          grep -A 6 "preload.cjs" dist-electron/main.cjs | grep -q "sandbox: true" || {
+            echo "::error::主窗口 webPreferences 不再是 sandbox: true" >&2; exit 1; }
       # smoke 覆盖画布/设计向导/机型/Agent 等的真实渲染路径，之前只在本机跑，CI 永远发现不了回归
       - name: 冒烟（xvfb + 真实 Electron，降级渲染）
         timeout-minutes: 12

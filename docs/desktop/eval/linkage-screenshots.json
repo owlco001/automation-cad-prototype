@@ -35,8 +35,8 @@
     "parts": 101,
     "uiPlay": {
       "movedParts": 5,
-      "maxDeltaMm": 28.611418704257265,
-      "clock": "723 / 1890 ms",
+      "maxDeltaMm": 25.30986445219007,
+      "clock": "668 / 1890 ms",
       "activeStep": 0,
       "resetMaxDeltaMm": 0
     },

@@ -1,6 +1,21 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+
+/**
+ * 沙箱 preload 里**没有** Node 的 path/url/fs，也没有 `__dirname`、`Buffer`
+ * （Electron 45 起渲染层 preload 只保留 events/timers/url 的 polyfill，且我们连这些都不用）。
+ * 因此这里不能 `import 'node:path'`：扩展脚本与 wasm 的基础地址改由主进程用
+ * `webPreferences.additionalArguments` 传下来（见 main.ts createWindow），取值与
+ * `app.getAppPath()/dist/` 完全一致；传不进来时返回 null，渲染层已有
+ * `new URL('./', window.location.href)` 兜底（desktop/src/extension.ts）。
+ */
+const EXTENSION_BASE_URL_ARG = '--cad-extension-base-url=';
+
+function readExtensionBaseUrl(): string | null {
+  const argv = Array.isArray(process.argv) ? process.argv : [];
+  const hit = argv.find((arg) => arg.startsWith(EXTENSION_BASE_URL_ARG));
+  const value = hit ? hit.slice(EXTENSION_BASE_URL_ARG.length) : '';
+  return value.length > 0 ? value : null;
+}
 
 interface OpenCadPayload {
   path: string;
@@ -36,7 +51,7 @@ const desktopApi = {
       return () => ipcRenderer.removeListener('update:state-changed', listener);
     }
   },
-  extensionBaseUrl: pathToFileURL(join(__dirname, '..', 'dist') + '/').href,
+  extensionBaseUrl: readExtensionBaseUrl(),
   openCadDialog: () => ipcRenderer.invoke('cad:open-dialog'),
   readFileBuffer: (filePath: string) => ipcRenderer.invoke('cad:read-file', filePath),
   openDrawing: (filePath: string) => ipcRenderer.invoke('cad:open-drawing', filePath),
@@ -275,3 +290,15 @@ const desktopApi = {
 };
 
 contextBridge.exposeInMainWorld('desktop', desktopApi);
+
+// 一次性安全自述：主进程收到后打印 SECURITY_RENDERER_PRELOAD 日志。
+// 这样"沙箱是否真生效"不是靠配置推断，而是渲染进程里 preload 实测的 process.sandboxed。
+ipcRenderer.send('security:renderer-state', {
+  sandboxed: process.sandboxed === true,
+  contextIsolated: process.contextIsolated === true,
+  nodeRequire: typeof (globalThis as { require?: unknown }).require === 'function',
+  // OS 级是否真关了沙箱：root/排障时 Chromium 会给渲染进程塞 --no-sandbox，沙箱 preload 也挡不住，
+  // 必须和 process.sandboxed（preload 变体）分开看，日志里不能只报一个 true。
+  osNoSandbox: Array.isArray(process.argv) && process.argv.includes('--no-sandbox'),
+  osSandboxSwitch: Array.isArray(process.argv) && process.argv.includes('--enable-sandbox')
+});

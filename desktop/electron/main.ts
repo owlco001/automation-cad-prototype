@@ -140,8 +140,36 @@ if (HEADLESS_SMOKE && HEADLESS_DESIGN_WEBGL_SMOKE) {
 const APP_NAME = 'AutomationCAD';
 app.setName(APP_NAME);
 
-if (process.platform === 'linux' && typeof process.getuid === 'function' && process.getuid() === 0) {
+/**
+ * 沙箱策略：默认**开启**（每个渲染进程 + 沙箱化 preload）。
+ * 只有下面三种"确定需要"的情况才关，且必须打 SECURITY_NO_SANDBOX 日志：
+ * 1. Linux 下以 root 运行（容器/CI 镜像/本机 sudo）：Chromium 直接拒绝启动
+ *    （electron_main_delegate.cc:224 "Running as root without --no-sandbox is not supported"），
+ *    属于运行环境限制，不是产品行为；
+ * 2. 显式 AUTOMATIONCAD_NO_SANDBOX=1（排障开关）；
+ * 3. 显式 ELECTRON_DISABLE_SANDBOX（Chromium 自带开关，npm 脚本里给 root 本地跑用）。
+ * headless 冒烟/截图**不再**作为关沙箱的理由：CI 以非 root 用户跑，沙箱本身可用；
+ * 真需要时由上面的 root 判断自动覆盖，不必按 --headless-* 放宽。
+ */
+function sandboxDisabledReason(): string | null {
+  if (process.env.AUTOMATIONCAD_NO_SANDBOX === '1') return 'env:AUTOMATIONCAD_NO_SANDBOX=1';
+  if (process.env.ELECTRON_DISABLE_SANDBOX) return `env:ELECTRON_DISABLE_SANDBOX=${process.env.ELECTRON_DISABLE_SANDBOX}`;
+  if (process.platform === 'linux' && typeof process.getuid === 'function' && process.getuid() === 0) return 'linux-root-uid0';
+  return null;
+}
+
+const NO_SANDBOX_REASON = sandboxDisabledReason();
+
+if (NO_SANDBOX_REASON) {
   app.commandLine.appendSwitch('no-sandbox');
+  console.warn(
+    `SECURITY_NO_SANDBOX reason=${NO_SANDBOX_REASON} platform=${process.platform} ` +
+      `headless=${HEADLESS} —— 渲染进程无沙箱；仅 root 运行环境/显式排障开关会走到这里，生产正常启动不应出现`
+  );
+} else {
+  // 进程级兜底：即使将来某个窗口误写 sandbox:false，也不会悄悄退回无沙箱渲染进程。
+  app.enableSandbox();
+  console.log(`SECURITY_SANDBOX mode=enabled headless=${HEADLESS} ci=${process.env.CI ? 'yes' : 'no'} —— 全部渲染进程走沙箱化 preload`);
 }
 if (HEADLESS_SMOKE) {
   app.disableHardwareAcceleration();
@@ -222,6 +250,7 @@ let cdpForwarderError: string | null = null;
 let writeAgentAudit: ((record: AgentAuditRecord) => void) | null = null;
 
 let crashHandlersInstalled = false;
+let securityReportLoggerInstalled = false;
 
 function installCrashHandlers(): void {
   if (crashHandlersInstalled) return;
@@ -1195,7 +1224,23 @@ async function runHeadlessDesignWebglSmoke(window: BrowserWindow): Promise<void>
   setTimeout(() => app.exit(0), 100);
 }
 
+function installSecurityReportLogger(): void {
+  if (securityReportLoggerInstalled) return;
+  securityReportLoggerInstalled = true;
+  ipcMain.on('security:renderer-state', (event, state: {
+    sandboxed?: boolean; contextIsolated?: boolean; nodeRequire?: boolean; osNoSandbox?: boolean; osSandboxSwitch?: boolean;
+  }) => {
+    // 渲染进程里 preload 实测：switches 区分"沙箱 preload"与"OS 级沙箱是否真开"（root/排障会关）。
+    console.log(
+      `SECURITY_RENDERER_PRELOAD sandboxed=${state?.sandboxed === true} context_isolated=${state?.contextIsolated === true} ` +
+        `node_require=${state?.nodeRequire === true} os_no_sandbox_switch=${state?.osNoSandbox === true} ` +
+        `os_enable_sandbox_switch=${state?.osSandboxSwitch === true} web_contents=${event.sender.id}`
+    );
+  });
+}
+
 function createWindow(): BrowserWindow {
+  installSecurityReportLogger();
   const trustedUiPath = indexHtmlPath();
   const isTrustedNavigation = (url: string): boolean => isTrustedUiUrl(url, trustedUiPath);
   const window = new BrowserWindow({
@@ -1211,9 +1256,20 @@ function createWindow(): BrowserWindow {
       preload: join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false,
+      // 沙箱 preload：只能用 ipcRenderer/contextBridge/webUtils，没有 Node path/url/fs/Buffer/__dirname。
+      // preload.ts 所需的基础地址由 additionalArguments 传下去，因此这里不能再用 sandbox:false 图省事。
+      sandbox: true,
+      // 沙箱 preload 拿不到 __dirname：扩展脚本/wasm 基础地址由主进程单向传入（与 app.getAppPath()/dist/ 同源）。
+      additionalArguments: [`--cad-extension-base-url=${extensionBaseUrl()}`],
       spellcheck: false
     }
+  });
+
+  window.webContents.on('did-finish-load', () => {
+    console.log(
+      `SECURITY_WINDOW window=main preload_sandbox=true context_isolation=true node_integration=false ` +
+        `no_sandbox_switch=${app.commandLine.hasSwitch('no-sandbox')} sandbox_disabled_reason=${NO_SANDBOX_REASON ?? 'none'}`
+    );
   });
 
   window.webContents.on('will-navigate', (event, url) => {
@@ -4413,7 +4469,7 @@ function createWindow(): BrowserWindow {
         // 重新打开：新窗口（同一 userData）加载原型 + 扩展，应从工程存储恢复 3D 几何。
         // 渲染进程的 localStorage 写入是批量提交到浏览器进程的，先等一个提交周期。
         await new Promise((resolveWait) => setTimeout(resolveWait, 1200));
-        const reopen = new BrowserWindow({ show: false, width: 1280, height: 800, webPreferences: { contextIsolation: true, sandbox: false } });
+        const reopen = new BrowserWindow({ show: false, width: 1280, height: 800, webPreferences: { contextIsolation: true, sandbox: true } });
         type ReopenState = { restored: boolean; overrides: Record<string, Record<string, number>>; railZ: number; sensorZ: number; reason: string | null };
         let reopened = null as ReopenState | null;
         try {
