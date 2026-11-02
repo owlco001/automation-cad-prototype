@@ -842,7 +842,6 @@ jobs:
       - name: 确保 Electron 二进制就位
         run: |
           node node_modules/electron/install.js
-          ./node_modules/.bin/electron --version
           ls -l node_modules/electron/dist/chrome-sandbox
       # Chromium 的 SUID 沙箱助手必须 root:root + 4755，否则非 root 下 Electron 直接 abort：
       #   FATAL:sandbox/linux/suid/client/setuid_sandbox_host.cc:172 ... is not configured correctly
@@ -855,6 +854,8 @@ jobs:
             sudo chmod 4755 "$SANDBOX"
             ls -l "$SANDBOX"
             echo "CHROME_SANDBOX_OK mode=$(stat -c '%a' "$SANDBOX") owner=$(stat -c '%U:%G' "$SANDBOX")"
+            # chown 之后才敢启动 electron 自检：之前跑 --version 会直接撞 SUID FATAL
+            ./node_modules/.bin/electron --version
           else
             echo "::error::找不到 chrome-sandbox（electron 未安装？）"; exit 1
           fi
