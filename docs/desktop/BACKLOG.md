@@ -122,11 +122,10 @@ BOOLEAN_RECHECK_OK checked=8 confirmed=0 misreported=8 unchecked=0
 
 ## 双端整合（v0.6.1）遗留待办
 
-一体化安装包（Electron + Qt 原生 OCCT 工作台）已随 `AutomationCAD-Setup-0.6.1.exe`（161 MB）交付。
-以下三条需要真机或证书，云端 CI 证明不了：
+安装包 `AutomationCAD-Setup-0.6.1.exe`（161 MB）已交付，以下三条云端 CI 证明不了：
 
-1. **物理工控机首装验证**：干净 Win11（无 VS、无 conda、无 Node）安装 → 打开「Qt 工作台」→ 跑一次联动调试 → 导一次 STEP。CI 的自检只覆盖「进程能起来 + 版本号正确」，覆盖不到 OpenGL 视口与真实磁盘路径。
-2. **`resources/qt/*` 未签名**：安装器本身能签（`CSC_LINK`/`CSC_KEY_PASSWORD`），但 Qt 子程序目前是未签名 PE，SmartScreen/Defender 可能对「签名安装器内含未签名 PE」启发式告警。拿到证书后给 `resources/qt` 补 `signtool sign /fd sha256`，并在 CI 加一条验签核对。
-3. **便携包未随 0.6.1 重出**：0.6.0 的便携 zip 是 392.8 MB（含未瘦身的 Qt 目录），0.6.1 需重新产出（约 320 MB）；`windows-build` 已有 `AutomationCAD-Portable-win-x64` 产物，只是没下载挂到 Release。
+1. **物理工控机首装**：干净 Win11（无 VS/conda/Node）安装 → 开 Qt 工作台 → 跑联动 → 导 STEP；CI 只证明「进程能起、版本对、依赖闭包完整」。
+2. **`resources/qt/*` 未签名**：安装器可签，Qt 子程序是未签名 PE；拿到证书后补 `signtool /fd sha256` + CI 验签。
+3. **便携包未随 0.6.1 重出**：0.6.0 的 392.8 MB 未瘦身；CI 已产出 `AutomationCAD-Portable-win-x64`，尚未挂 Release。
 
-另：`windows.yml` 目前仍只有 `workflow_dispatch` 触发；等真机验过一次再考虑加 `push: tags: ['v*']` 自动出包（加之前要确认证书齐全，否则 tag 构建会按 fail-closed 阻断）。
+`windows.yml` 仍手动触发；真机验过后再加 `push: tags: ['v*']`。
