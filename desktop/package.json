@@ -55,7 +55,7 @@
     "@types/adm-zip": "^0.5.7",
     "@types/node": "^24.7.2",
     "@types/three": "^0.186.0",
-    "electron": "^45.0.0",
+    "electron": "^45.2.0",
     "electron-builder": "^26.0.12",
     "esbuild": "^0.25.11",
     "typescript": "^5.9.3",
