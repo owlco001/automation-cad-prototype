@@ -13,6 +13,7 @@ import {
   parsePointAddress,
   pointAreaHint
 } from './io.ts';
+import { validateDesign, type DesignIssue } from '../machine/validate.ts';
 
 interface PointDefinition {
   point: string;
@@ -196,7 +197,18 @@ function checkActuatorPoints(config: PlcGenConfig, errors: Issue[]): void {
   }
 }
 
-function checkActuatorSensors(config: PlcGenConfig, errors: Issue[]): void {
+/**
+ * 传感器绑定（part 指向哪个工位/执行机构）只在 machine/validate.ts 判定一次，
+ * 这里把它的 SENSOR_UNBOUND 结论并入预检，再补预检自己的「执行机构是否有到位传感器」检查。
+ */
+function checkActuatorSensors(config: PlcGenConfig, unbound: readonly DesignIssue[], errors: Issue[]): void {
+  const unboundPaths = new Set<string>();
+  for (const item of unbound) {
+    const path = item.path.replace(/^config\./, '');
+    unboundPaths.add(path);
+    errors.push(issue(item.code, item.message, path));
+  }
+
   const safetyPoints = new Set<string>();
   const safety = extractSafetyRefs(config);
   for (const point of [...safety.estop, ...safety.safetyDoor]) safetyPoints.add(normalizePointKey(point));
@@ -204,20 +216,15 @@ function checkActuatorSensors(config: PlcGenConfig, errors: Issue[]): void {
   const bound = new Map<string, number>();
   for (const [index, rawSensor] of (config.sensors ?? []).entries()) {
     const sensor = rawSensor as SensorExtras;
+    if (unboundPaths.has(`sensors[${index}].part`)) continue;
     const address = sensor.ioAddress ?? sensor.address;
     if (safetyPoints.has(normalizePointKey(sensor.point)) || (address && safetyPoints.has(normalizePointKey(address)))) continue;
     const part = normalizedName(sensor.part);
     const actuator = (config.actuators ?? []).find((candidate) => (
       normalizedName(candidate.id) === part || normalizedName(candidate.name) === part
     ));
-    if (!actuator) {
-      errors.push(issue(
-        'SENSOR_UNBOUND',
-        `传感器 ${sensor.point} 未绑定执行机构：part「${sensor.part}」不在 actuators 的 id/name 中`,
-        `sensors[${index}].part`
-      ));
-      continue;
-    }
+    // 绑到「工位」而非具体执行机构的传感器已由 validateDesign 判为合法，只是不计入到位传感器。
+    if (!actuator) continue;
     bound.set(actuator.id, (bound.get(actuator.id) ?? 0) + 1);
   }
 
@@ -517,7 +524,9 @@ export function precheck(config: PlcGenConfig, bom?: PlcBomInput): PrecheckResul
 
   checkAddresses(definitions, errors);
   checkActuatorPoints(config, errors);
-  checkActuatorSensors(config, errors);
+  // 绑定规则只认 validateDesign 的结论（与方案落盘校验同源），预检不再自己跑一套正则。
+  const sensorBinding = validateDesign(config).issues.filter((item) => item.code === 'SENSOR_UNBOUND');
+  checkActuatorSensors(config, sensorBinding, errors);
 
   const safety = extractSafetyRefs(config);
   if (safety.estop.length === 0) {

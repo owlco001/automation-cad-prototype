@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node
 import { recordDiagnosticError } from '../shared/diagnostics.ts';
 import { dirname, join } from 'node:path';
 import { validateMachineConfig, type MachineConfig } from '../commission/machine-config.ts';
+import { formKindUnsupportedIssue, isSupportedFormKind } from './validate.ts';
 import type { MachineBomItem, MachineCycleEstimate, MachinePowerEstimate } from './synth.ts';
 import { normalizeStationGeometryLayout, type StationGeometryLayout } from './station-layout.ts';
 import { baselineStationIdentities, isStationIdentityList, type StationIdentity } from './station-identity.ts';
@@ -149,17 +150,15 @@ function parseMachineForm(value: unknown): MachineFormSummary {
       : String(value.layout) === 'parallel' || id.startsWith('gantry-')
         ? 'gantry'
         : 'linear';
-  // 白名单必须与 MachineFormGeometryKind 一致：forms.ts 的 belt-line 形态声明的是
-  // kind:'conveyor'，下面第 170 行也已经在读 geometry.conveyor —— 少列 conveyor 会让
-  // 任何输送机方案在「应用到工程」时被判非法（整机 E2E 就是这么撞上的）。
-  const acceptedKinds: ReadonlySet<string> = new Set(['dial', 'linear', 'gantry', 'dual', 'hybrid', 'cell', 'conveyor']);
-  const kind = typeof rawKind === 'string' && acceptedKinds.has(rawKind)
+  // 白名单来自 machine/validate.ts（MACHINE_FORM_GEOMETRY_KINDS），与 forms.ts 的
+  // MachineFormGeometryKind 保持同一处定义：少列 conveyor 会让任何输送机方案被判非法。
+  const kind = isSupportedFormKind(rawKind)
     ? rawKind as MachineFormGeometry['kind']
     : geometryRaw.kind === undefined
       ? inferredKind
       : null;
   if (kind === null) {
-    throw new Error('design.form.geometry.kind 必须是 dial/linear/gantry/dual/hybrid/cell/conveyor');
+    throw new Error(formKindUnsupportedIssue().message);
   }
   const geometry: MachineFormGeometry = { kind };
   if (typeof geometryRaw.lanes === 'number' && Number.isInteger(geometryRaw.lanes) && geometryRaw.lanes > 0) {
@@ -234,21 +233,8 @@ export function validateMachineDesign(value: unknown): NormalizedMachineDesign {
     stationGeometryWarning = '稳定工位身份映射无效，已为当前配置建立新身份；请检查几何平移。';
   }
 
-  const actuatorIds = new Set<string>();
-  for (const actuator of config.actuators) {
-    if (actuatorIds.has(actuator.id)) throw new Error(`执行机构 id 重复：${actuator.id}`);
-    actuatorIds.add(actuator.id);
-  }
-  const stationSet = new Set(config.stations);
-  // 安全回路传感器（急停/安全门/光栅）不属于任何工位或执行机构：它们绑的是安全回路本身。
-  // 这里放行安全角色，否则带安全集的机型方案会在这里被判非法（PLC 侧 extractSafetyRefs 用同一套词识别）。
-  const SAFETY_ROLE_RE = /急停|estop|e-stop|emergency|安全门|光栅|safety.?door|door|light.?curtain/i;
-  for (const sensor of config.sensors) {
-    const isSafety = SAFETY_ROLE_RE.test(sensor.part);
-    if (!isSafety && !stationSet.has(sensor.part) && !actuatorIds.has(sensor.part)) {
-      throw new Error(`传感器「${sensor.point}」引用了未定义工位或执行机构「${sensor.part}」`);
-    }
-  }
+  // 执行机构 id 唯一、传感器 part 绑定已在 validateMachineConfig（machine/validate.ts）判定，
+  // 这里不再自己跑一套规则，避免同一份方案在本文件与预检里结论不一致。
 
   const configPoints = machineConfigPoints(config);
   const pointSet = new Set(configPoints.map((point) => point.toUpperCase()));
