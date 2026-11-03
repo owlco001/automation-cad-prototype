@@ -286,6 +286,17 @@ test('传感器绑不存在的执行机构 → SENSOR_UNBOUND', () => {
 | F | 机型库面板（IPC + UI + 截图） | 1 天 | 不用命令行也能选机型 |
 | G | P0 契约缺陷（裁剪/形状/导入校验） | 1 天 | 导入外部包后不炸 |
 
+**夜间队列（含智能体加强全部任务 + 上一轮遗留；状态随时更新）**
+
+- [~] A1 哨兵去硬编码（运行中）
+- [~] C1 单一校验源 `validate.ts`（运行中，与 A 并行）
+- [ ] B1 `list_machine_library`　B2 `save_machine_to_library`　B3 `load_machine_from_library`　B4 BOM 回填　B5 `export_machine_package`
+- [ ] C2 `validate_machine_design`　C3 `repair_plc_config`（默认 dryRun）　C4 错误码→hint
+- [ ] G1 assumptions 落盘不裁剪　G2 `ListResult` 统一　G3 导入即校验
+- [ ] F1 IPC 白名单　F2 机型库面板　F3 截图取证
+- [ ] D1 `capture_view`　D2 三态干涉自查
+- [ ] E1 12 条评测集　E2 `npm run agent:eval` + CI 门槛
+
 **夜间执行顺序**（总管派工，每阶段独立验收后再进下一阶段）：
 `A`（阻塞项，必须先） → `B ∥ C1`（文件基本不重叠） → `G`（依赖 C1） → `F`（UI，独立） → `D` → `E`
 每阶段完成即：`tsc` + 全量 `npm test` + 相关 E2E 真跑 → 通过才提交；**不通过不提交**，把失败原文留给下一轮。
