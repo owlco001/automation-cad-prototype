@@ -9,7 +9,7 @@ import {
   type AgentContext
 } from './context.ts';
 import { AgentMemory, resultCode, summarizeToolCall } from './memory.ts';
-import { serializeToolResult, toolResultByteLimit } from './trim.ts';
+import { readListResult, serializeToolResult, toolResultByteLimit } from './trim.ts';
 import {
   addTokenUsage,
   DEFAULT_SECTION_CAPS,
@@ -265,8 +265,10 @@ function failedTool(code: string, message: string): Record<string, unknown> {
 function docsSourceCount(result: unknown): number | undefined {
   if (!isRecord(result)) return undefined;
   const data = isRecord(result.data) ? result.data : result;
-  const hits = Array.isArray(data.hits) ? data.hits : Array.isArray(result.hits) ? result.hits : null;
-  return hits ? hits.length : undefined;
+  // G2：命中列表可能是 {items,total} 或老形状 {hits:[…]}；读不出形状时返回 undefined
+  // （不静默报 0 个来源——那会让「检索坏了」看起来像「没查到」）。
+  const list = readListResult(data, ['hits']) ?? readListResult(result, ['hits']);
+  return list ? list.items.length : undefined;
 }
 
 type PreparedToolCalls =

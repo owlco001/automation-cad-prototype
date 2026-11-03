@@ -57,6 +57,23 @@ jobs:
       # 离线规则评估与能力报告此前没人跑，工具加了却不进评估集也发现不了（本轮就是 eval:agent 红的）
       - name: 离线规则评估（含工具覆盖校验）
         run: npm run eval:agent
+      # 任务级评测：6 个「末态断言」（117/117 全过但机器是错的 那类回归只有它能抓住）。
+      # 不加 `|| true`：TASK_EVAL_SUMMARY 里 failed>0 时脚本本身 exit 1，这里必须跟着红。
+      - name: 任务级评测（末态断言，失败即红）
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          npm run eval:tasks 2>&1 | tee /tmp/eval-tasks.log
+      # 摘要只做展示，不承担判定：用 if: always() 保证评测失败时 summary 里也能看到哪条 FAIL。
+      - name: 任务级评测摘要写入 job summary
+        if: always()
+        run: |
+          {
+            echo '### eval:tasks'
+            echo '```'
+            grep -E '^TASK_EVAL' /tmp/eval-tasks.log || echo '(没有 TASK_EVAL 输出：评测在用例跑起来之前就退出了)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Agent 能力报告（防止脚本本身崩）
         run: npm run agent:report
 

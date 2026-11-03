@@ -53,6 +53,7 @@ import { AgentCancelledError, AgentSession, emptyAgentUsage } from '../src/agent
 import { BYPASS_CONFIRMATION_NOTICE } from '../src/agent/policy.ts';
 import { requestWriteConfirmation } from './write-confirm.ts';
 import { collectAgentContext } from '../src/agent/context.ts';
+import { readListResult } from '../src/agent/trim.ts';
 import type { AgentPlan, PlanStep } from '../src/agent/planner.ts';
 import { READ_ONLY_TOOLS } from '../src/agent/router.ts';
 import { AgentThread, planSignature, projectFingerprint, runPlan, type ThreadState } from '../src/agent/thread.ts';
@@ -2236,7 +2237,11 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
     if (!Array.isArray(ctx.bom)) {
       try {
         const bom = await bus.execute('get_bom');
-        if (bom.ok && Array.isArray(bom.data)) ctx.bom = bom.data;
+        // G2：get_bom 现在返回 {items,total,truncated,rows}；以前这里按 `Array.isArray(bom.data)`
+        // 读，形状一变就永远读不到，成本流程前置条件把「25 行 BOM」当成空 BOM 拦下来。
+        const list = bom.ok ? readListResult(bom.data, ['rows']) : null;
+        if (list) ctx.bom = list.items;
+        else console.warn(`[COST_BOM_PRECHECK_UNEXPECTED_SHAPE]`, { site: 'desktop/electron/ipc.ts:2236', data: bom.ok ? Object.keys(bom.data ?? {}) : null });
       } catch (error) {
         // BOM 只影响成本流程前置条件；读取失败时让前置条件如实拦截。
         console.warn(`[COST_BOM_PRECHECK_READ_FAILED]`, { site: 'desktop/electron/ipc.ts:1155' }, error);

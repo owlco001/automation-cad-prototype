@@ -11,6 +11,7 @@
  */
 
 import type { AgentContext, AgentSelectionKind } from './context.ts';
+import { readListResult } from './trim.ts';
 import { resolveReference } from './reference.ts';
 import { routeIntent } from './router.ts';
 import type { CompletedStep } from './feedback.ts';
@@ -133,7 +134,8 @@ export function projectFacts(context: AgentContext | unknown | null | undefined)
   const bomContainer = source.bom ?? source.bomRows;
   const bomRows = Array.isArray(bomContainer)
     ? bomContainer.length
-    : finiteCount(source.bomRows ?? source.bomCount ?? source.bomLineCount);
+    : readListResult(bomContainer, ['rows'])?.items.length
+      ?? finiteCount(source.bomRows ?? source.bomCount ?? source.bomLineCount);
   const hasCadModel = source.hasCadModel === true
     || source.cad === true
     || (isRecord(source.cad) && source.cad.hasModel === true)

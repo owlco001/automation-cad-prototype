@@ -1,11 +1,17 @@
 /**
- * 工具结果裁剪（P7-E）
+ * 工具结果裁剪（P7-E）+ 列表结果统一形状（G2）
  *
  * 三条硬约束：
- * - 列表 > 20 条：只留前 20 条，补 `total` 与 `truncated:true`；
+ * - 列表 > 20 条：**条目一条不删**，只把条目内的长字符串按 2 KB 截断，并补
+ *   `total` 与 `truncated:true`（此前按条数切前 20，导致 25 行 BOM 的消费方
+ *   拿到 `{items,total,truncated}` 却按数组读 → 静默变成空数组，BOM 面板空白）；
  * - 长文本 > 2 KB：按 UTF-8 码点边界截断并附中文提示；
  * - 单个工具结果默认 ≤ 10 KB；`design_machine` 例外（64 KB），因为方案卡与
  *   「应用到工程」需要完整 config/BOM，截断后无法解析或落盘。
+ *
+ * 列表型工具的结果统一为 `ListResult<T> = { items, total, truncated? }`，小列表
+ * 也照样返回该形状（不做「少于 20 就裸数组」的双形状）。老字段名（`rows`/`components`/
+ * `hits`）作为镜像字段保留一代，消费方应改读 `items`。
  */
 
 import { byteLength, truncateUtf8 } from './context.ts';
@@ -35,17 +41,87 @@ export interface TrimmedList<T> {
   truncated: boolean;
 }
 
-/** 列表裁剪：≤ limit 原样返回；超过则返回前 limit 条 + total + truncated。 */
-export function trimListResult<T>(items: readonly T[], limit = LIST_RESULT_LIMIT): TrimmedList<T> {
+/**
+ * 列表型工具的统一返回形状。
+ *
+ * 语义（容易被误读，写清楚）：
+ * - `items` 永远是**全量条目**，裁剪不会删条目（删条目就是「25 行 BOM 变空数组」那类 bug 的源头）；
+ * - `total` 是条目总数，正常情况下等于 `items.length`；
+ * - `truncated` 为 true 表示列表超过 `LIST_RESULT_LIMIT`，条目内的长字符串已按 2 KB 截断，
+ *   上层可以据此提示「结果很大，建议缩小范围」，但不能据此认为条目丢了。
+ */
+export interface ListResult<T> {
+  items: T[];
+  total: number;
+  truncated?: boolean;
+}
+
+/** 把任意条目数组包成统一形状；小列表也是同一形状（不再返回裸数组）。 */
+export function listResult<T>(items: readonly T[], limit = LIST_RESULT_LIMIT): ListResult<T> {
   const safeLimit = Math.max(0, Math.trunc(limit));
-  if (items.length <= safeLimit) {
-    return { items: items.slice(), total: items.length, truncated: false };
-  }
   return {
-    items: items.slice(0, safeLimit),
+    items: items.slice(),
     total: items.length,
-    truncated: true
+    truncated: items.length > safeLimit
   };
+}
+
+/**
+ * 宽容读取列表结果：新形状 `{items,total}` → 裸数组（旧形状） → `mirrors` 里的镜像字段。
+ * 都读不出来返回 null —— 调用方**不能**把 null 静默当空数组，必须报错或回落到镜像字段
+ * （否则「形状变了」和「真的空」就永远分不清）。
+ */
+export function readListResult<T>(
+  value: unknown,
+  mirrors: readonly string[] = []
+): ListResult<T> | null {
+  if (Array.isArray(value)) return listResult(value as T[]);
+  if (!isRecord(value)) return null;
+  if (Array.isArray(value.items)) {
+    const items = value.items as T[];
+    const declared = typeof value.total === 'number' && Number.isFinite(value.total)
+      ? Math.max(items.length, Math.trunc(value.total))
+      : items.length;
+    return { items, total: declared, truncated: value.truncated === true };
+  }
+  for (const key of mirrors) {
+    const mirror = value[key];
+    if (Array.isArray(mirror)) return listResult(mirror as T[]);
+  }
+  return null;
+}
+
+function describeShape(value: unknown): string {
+  if (value === null || value === undefined) return String(value);
+  if (Array.isArray(value)) return `array(${value.length})`;
+  if (typeof value === 'object') {
+    return `object(keys=${Object.keys(value as Record<string, unknown>).slice(0, 6).join(',') || '空'})`;
+  }
+  return typeof value;
+}
+
+/**
+ * 严格读取列表条目：形状不认识就抛错并带上实际形状，绝不退化成空数组。
+ * 只读展示层（面板/侧栏）请用 `readListResult` 并显式处理 null。
+ */
+export function requireListItems<T>(
+  value: unknown,
+  mirrors: readonly string[] = [],
+  label = '列表'
+): T[] {
+  const list = readListResult<T>(value, mirrors);
+  if (!list) {
+    throw new Error(
+      `${label}结果形状不合法：期望 {items,total}、数组或 ${mirrors.length > 0 ? mirrors.join('/') : '镜像字段'}，实际 ${describeShape(value)}`
+    );
+  }
+  return list.items;
+}
+
+/** 列表裁剪：条目一条不删，只标记 total/truncated；字符串内容由 trimValue 逐条截断。 */
+export function trimListResult<T>(items: readonly T[], limit = LIST_RESULT_LIMIT): TrimmedList<T> {
+  const result = listResult(items, limit);
+  return { items: result.items, total: result.total, truncated: result.truncated === true };
 }
 
 export interface TrimmedText {
@@ -73,41 +149,52 @@ export function trimLongText(text: string, limit = LONG_TEXT_BYTE_LIMIT): Trimme
 function trimValue(value: unknown): unknown {
   if (typeof value === 'string') return trimLongText(value).text;
   if (Array.isArray(value)) {
-    if (value.length <= LIST_RESULT_LIMIT) return value.map(trimValue);
-    return {
-      items: value.slice(0, LIST_RESULT_LIMIT).map(trimValue),
-      total: value.length,
-      truncated: true
-    };
+    // 列表一律返回统一形状：条目一条不删，只截断条目内的长字符串。
+    return { ...listResult(value.map(trimValue)) };
   }
   if (!isRecord(value)) return value;
 
   const output: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value)) {
     if (Array.isArray(entry) && (LIST_KEYS.has(key) || key === 'data')) {
-      const list = key === 'data' ? entry.map(trimValue) : entry.map(trimValue);
-      if (list.length > LIST_RESULT_LIMIT) {
-        output[key] = {
-          items: list.slice(0, LIST_RESULT_LIMIT),
-          total: list.length,
-          truncated: true
-        };
-      } else {
-        output[key] = list;
-      }
+      // 列表型字段：不论条数一律统一形状（小列表也照样 {items,total}）。
+      output[key] = listResult(entry.map(trimValue));
       continue;
     }
     if (Array.isArray(entry)) {
+      // 非列表型数组（warnings/steps/坐标三元组…）保持数组语义；只有超长时
+      // 才收敛成统一形状，且同样一条不删。
       output[key] = entry.length > LIST_RESULT_LIMIT
-        ? {
-            items: entry.slice(0, LIST_RESULT_LIMIT).map(trimValue),
-            total: entry.length,
-            truncated: true
-          }
+        ? listResult(entry.map(trimValue))
         : entry.map(trimValue);
       continue;
     }
     output[key] = trimValue(entry);
+  }
+
+  // 已经是统一形状的记录：total/truncated 以原值为准（trimValue 递归后 items 仍是全量）。
+  if (Array.isArray(value.items)) {
+    const items = output.items as unknown;
+    const list = Array.isArray(items) ? items : (items as ListResult<unknown>).items;
+    const declared = typeof value.total === 'number' && Number.isFinite(value.total)
+      ? Math.max(list.length, Math.trunc(value.total))
+      : list.length;
+    output.items = list;
+    output.total = declared;
+    output.truncated = value.truncated === true || declared > LIST_RESULT_LIMIT;
+    // 镜像字段（rows/components/hits…）与 items 是同一份数据时不再重复输出，
+    // 否则 10 KB 预算会被同一份数据吃掉两遍。listResult 会复制数组、trimValue 又复制一遍
+    // 条目，所以只能拿**原始** value.items 比对：同长度且首元素同一对象即视为同一份数据
+    // （过滤/改写过就对不上，那就老实保留两份）。
+    const originalItems = value.items as unknown[];
+    const sameAsItems = (candidate: unknown): boolean =>
+      Array.isArray(candidate) &&
+      candidate.length === originalItems.length &&
+      (candidate.length === 0 || candidate[0] === originalItems[0]);
+    for (const key of LIST_KEYS) {
+      if (key === 'items') continue;
+      if (sameAsItems(value[key])) delete output[key];
+    }
   }
   return output;
 }

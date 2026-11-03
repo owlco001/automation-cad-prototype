@@ -18,6 +18,7 @@ import {
   type DrawerHandle
 } from '../ui/panels';
 import { computeCost, type CostBomRow, type CostInput, type CostReport } from './engine.ts';
+import { readListResult } from '../agent/trim.ts';
 import { isUsablePricebookItem, validatePricebook, type Pricebook } from './pricebook.ts';
 import { costReportCsv, describeCost, money, renderCostReportHtml } from './report.ts';
 import { bomSignatureFromRows } from '../agent/advisor.ts';
@@ -220,14 +221,16 @@ function syncOptionValues(): void {
 }
 
 function bomFromSource(input: Partial<CostInput> | null): CostBomRow[] | null {
-  const explicit = input?.bom;
-  if (Array.isArray(explicit) && explicit.length > 0) return explicit;
+  // G2：BOM 可能是裸数组、{items,total}（工具统一形状）或 {rows:[…]}（老镜像）。
+  const explicit = readListResult<CostBomRow>(input?.bom, ['rows', 'bom']);
+  if (explicit && explicit.items.length > 0) return explicit.items;
   const provider = window.__CostBomProvider;
   if (typeof provider === 'function') {
-    const rows = provider();
-    if (Array.isArray(rows) && rows.length > 0) return rows;
+    const rows = readListResult<CostBomRow>(provider(), ['rows', 'bom']);
+    if (rows && rows.items.length > 0) return rows.items;
   }
-  if (pendingBom?.bom && pendingBom.bom.length > 0) return pendingBom.bom;
+  const pending = readListResult<CostBomRow>(pendingBom?.bom, ['rows', 'bom']);
+  if (pending && pending.items.length > 0) return pending.items;
   return null;
 }
 

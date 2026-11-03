@@ -2,6 +2,7 @@ import type { PackRegistry } from '../packs/registry';
 import type { ComponentPart } from '../shared/types';
 import type { CommandHistoryEntry, CommandResult } from './commands';
 import { resolvePartReference } from './placement.ts';
+import { listResult } from './trim.ts';
 import { checkExportTargetPath } from './policy.ts';
 import type { PlcGenConfig } from '../plcgen/types.ts';
 import { summarizeVerification, verifyGenerated, type VerifyOptions } from '../plcgen/verify.ts';
@@ -722,7 +723,8 @@ export class AgentTools {
       inputSchema: COMPONENT_FILTER_SCHEMA,
       handler: async (args) => {
         const components = this.componentQuery(args);
-        return { ok: true, count: components.length, components };
+        // G2：统一 {items,total,truncated}；`components`/`count` 是保留一代的老字段。
+        return { ok: true, ...listResult(components), count: components.length, components };
       }
     });
 
@@ -737,7 +739,13 @@ export class AgentTools {
         const q = getString(args.q);
         if (!q) return { ok: false, code: 'INVALID_ARGUMENT', message: '缺少必填参数：q' };
         const components = this.componentQuery(args);
-        return { ok: true, query: q, count: components.length, components };
+        return {
+          ok: true,
+          query: q,
+          ...listResult(components),
+          count: components.length,
+          components
+        };
       }
     });
 
@@ -757,7 +765,8 @@ export class AgentTools {
         }
         const limit = getNumber(args.limit);
         const hits = searchDocs(query, limit);
-        return { ok: true, query, hits };
+        // G2：统一列表形状；`hits` 是老字段名镜像（冒烟与既有调用方仍在读）。
+        return { ok: true, query, ...listResult(hits), hits };
       }
     });
 
@@ -894,7 +903,7 @@ export class AgentTools {
     this.add({
       name: 'list_machine_library',
       description:
-        '只读列出本机机型库（userData/machine-library）里已有的机型包：id、名称、版本、包体字节数、来源（local/remote）与更新时间。空库返回空数组与 total=0，不报错；写库前先用它查 id。',
+        '只读列出本机机型库（userData/machine-library）里已有的机型包：id、名称、版本、包体字节数、来源（local/remote）与更新时间。统一返回 {items,total,truncated}，空库返回 items=[] 与 total=0，不报错；写库前先用它查 id。',
       inputSchema: LIST_MACHINE_LIBRARY_SCHEMA,
       handler: async () => {
         const result = await this.execute('list_machine_library', {});

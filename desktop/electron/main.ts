@@ -3739,7 +3739,8 @@ function createWindow(): BrowserWindow {
           uiContext.recentActions.length !== 3 ||
           deictic.target?.id !== 'p1' ||
           geometry.target?.id !== 'p3' ||
-          trimmed.items.length !== 20 ||
+          trimmed.items.length !== 25 ||   // G2：裁剪一条不删，只标 total/truncated
+          trimmed.items[24]?.index !== 24 ||
           trimmed.total !== 25 ||
           !trimmed.truncated
         ) {

@@ -436,3 +436,34 @@ test('同一机型重复导出字节稳定（包哈希可用于去重/校验）'
   assert.equal(sha256(first), sha256(second));
   rmSync(root, { recursive: true, force: true });
 });
+
+test('G3：传感器绑了不存在的执行机构 → 导入被严格校验拒绝，带 path 与 hint', () => {
+  // 宽松的 validateMachineConfig 只查结构（现场 IO 映射表里的 part 常常是「主回路反馈」这类信号名），
+  // 机型包是「方案」，必须过 validateDesign 严格模式，否则坏方案能进库、被 apply、被生成 PLC。
+  const root = freshRoot();
+  const design = sampleDesign();
+  const sensors = design.config.sensors;
+  assert.ok(sensors.length > 0, '样例方案应当有传感器');
+  const brokenConfig = {
+    ...design.config,
+    sensors: sensors.map((sensor, index) =>
+      index === 0 ? { ...sensor, part: '不存在的执行机构' } : sensor
+    )
+  };
+
+  // 打包用宽松校验（buildMachinePackage 走 validateMachineConfig），所以包里确实带着坏配置。
+  const brokenPackage = buildMachinePackage({ ...design, config: brokenConfig });
+  expectCode(() => readMachinePackage(brokenPackage), 'LIBRARY_INVALID_CONFIG');
+  const error = expectCode(() => importPackage(root, brokenPackage), 'LIBRARY_INVALID_CONFIG');
+  assert.match(error.message, /config\.sensors\[0\]\.part/, `消息必须带 path：${error.message}`);
+  assert.match(error.message, /SENSOR_UNBOUND/);
+  assert.equal(error.hint, '把 part 改成已定义的工位名或执行机构 id；急停/安全门/光栅等安全传感器可不绑定工位');
+  assertNoResidue(root, design.config.id);
+  assert.deepEqual(listLibrary(root), [], '被拒的包不能在库里留下任何条目');
+
+  // 合法包仍然能导入（严格校验只挡真错误）
+  const good = saveToLibrary(root, design, { appVersion: APP_VERSION });
+  assert.equal(good.entry.id, design.config.id);
+  assert.deepEqual(listLibrary(root).map((entry) => entry.id), [design.config.id]);
+  rmSync(root, { recursive: true, force: true });
+});

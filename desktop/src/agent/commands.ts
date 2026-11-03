@@ -31,6 +31,7 @@ import {
 import { createZip } from '../shared/zip.ts';
 import { recordDiagnosticError } from '../shared/diagnostics.ts';
 import { resolvePartReference } from './placement.ts';
+import { listResult } from './trim.ts';
 import { checkExportTargetPath } from './policy.ts';
 import { captureAgentView, type AgentViewCapture } from './self-evidence.ts';
 import { runInterferenceStates } from '../machine/interference-states.ts';
@@ -689,7 +690,11 @@ function registerReadCommands(bus: CommandBus): void {
       if (category) filter.category = category;
       if (packId) filter.packId = packId;
       const components = ctx.registry.listParts(filter);
-      return { ok: true, data: { count: components.length, components } };
+      // G2：列表型结果统一 {items,total,truncated}；`components` 作为老字段名镜像保留一代。
+      return {
+        ok: true,
+        data: { ...listResult(components), count: components.length, components }
+      };
     }
   });
 
@@ -703,7 +708,10 @@ function registerReadCommands(bus: CommandBus): void {
       if (category) filter.category = category;
       if (packId) filter.packId = packId;
       const components = ctx.registry.listParts(filter);
-      return { ok: true, data: { query: q, count: components.length, components } };
+      return {
+        ok: true,
+        data: { query: q, ...listResult(components), count: components.length, components }
+      };
     }
   });
 
@@ -714,7 +722,7 @@ function registerReadCommands(bus: CommandBus): void {
       if (!Array.isArray(rows)) {
         throw new CommandFailure('RENDERER_ERROR', bridgeFailureMessage(rows, '读取 BOM 失败'));
       }
-      return { ok: true, data: { rows, note: SIMPLE_BOM_NOTE } };
+      return { ok: true, data: { ...listResult(rows), rows, note: SIMPLE_BOM_NOTE } };
     }
   });
 
@@ -2353,7 +2361,7 @@ function registerMachineLibraryCommands(bus: CommandBus): void {
           source: entry.source,
           updatedAt: entry.updatedAt
         }));
-        return { ok: true, data: { items, total: items.length } };
+        return { ok: true, data: { ...listResult(items) } };
       } catch (error) {
         return asFailure(error);
       }

@@ -40,18 +40,18 @@
 
 | 工具 | 类型 | 说明 |
 |---|---|---|
-| `list_components` | 只读 | 按类别 / 数据包列出元件 |
-| `search_components` | 只读 | 型号、品牌、类别、规格全文检索 |
-| `search_docs` | 只读 | 离线检索 13 份项目文档、截图索引与元件库分类；返回 `{source,heading,snippet,score}`，无命中返回空 |
+| `list_components` | 只读 | 按类别 / 数据包列出元件，返回统一列表形状 `{items,total,truncated}`（`components`/`count` 为兼容镜像） |
+| `search_components` | 只读 | 型号、品牌、类别、规格全文检索，同一套列表形状（`components`/`count` 为兼容镜像） |
+| `search_docs` | 只读 | 离线检索 13 份项目文档、截图索引与元件库分类；命中条目在 `items`（`{source,heading,snippet,score}`，`hits` 为兼容镜像），无命中返回空列表 |
 | `design_machine` | 只读 | 从中文 brief 合成 `MachineConfig` 方案：工艺/工位/执行机构/传感器/节拍瓶颈/功率估算/BOM 草案/警告与假设；缺执行机构时按 5 类工艺模板补全，返回 `needs/question` 供会话层最多追问一次；不落盘、不改工程（见 MACHINE-DESIGN.md） |
 | `apply_machine_design` | 写 | 把 brief 或完整 design 写入 `userData/machine/<id>.json` 并更新 `active.json`；默认追加 BOM 草稿，可选生成 PLC `io-map.csv`，成功后刷新 3D；需确认，可用 `undo_last` 撤销 |
-| `list_machine_library` | 只读 | 列出本机机型库：`{items:[{id,name,version,sizeBytes,source,updatedAt}], total}`；空库返回空数组，不报错 |
+| `list_machine_library` | 只读 | 列出本机机型库：`{items:[{id,name,version,sizeBytes,source,updatedAt}], total, truncated}`；空库返回空列表，不报错 |
 | `save_machine_to_library` | 写 | 把当前（或指定 id 的）机型打包成 `.machine.zip` 入库；同名返回 `LIBRARY_EXISTS` 且带 `hint`「同名机型已存在，确认覆盖请显式传 overwrite: true」，**绝不自动覆盖**（需确认） |
 | `load_machine_from_library` | 写 | 从库加载机型：写回 `machine/<id>.json` + `active.json`，`bom.csv` 回填 `bomDraft.items`，再 `applyMachineConfig` 刷 3D；返回 `{id,machineId,name,parts,stations,...}`（需确认） |
 | `export_machine_package` | 写 | 导出 `.machine.zip` 到 `userData/exports/machines/<id>.machine.zip`，返回 `{path,bytes,sha256}`；`targetPath` 只接受 exports 之内的位置，越界返回 `LIBRARY_BAD_PATH`（需确认） |
 | `validate_machine_design` | 只读 | 自查机型方案：结构/字段/点位唯一/工位引用/执行机构 id 唯一/传感器 part 绑定，与 `apply_machine_design` 落盘、`run_plc_generate` 预检同一份判定源（`machine/validate.ts`）。缺省校验当前 active 机型，也可传 `config`（或整份方案，取其中 `config`）。返回 `{ok,issues:[{code,path,message,hint}],summary:{errors,warnings}}`；方案有问题返回 `ok:false` 而不是工具失败，**不抛错**。只做结构与绑定校验，PLC 轴/信号预检仍属 `run_plc_generate` |
 | `repair_plc_config` | 写 | 补齐当前 active 机型的 PLC 预检缺口（执行机构缺到位检测、缺急停/安全门回路）：默认 `dryRun=true` 只返回 `willAdd`（不写盘）；`dryRun=false` 才写回 `machine/<id>.json`、同步联调配置并让预检归零，写前过 `assertDesign`。已补齐时 `willAdd`/`added`/`remainingIssues` 均为空且不报错（需确认） |
-| `get_bom` | 只读 | 当前装配体简化 BOM |
+| `get_bom` | 只读 | 当前装配体简化 BOM，统一列表形状：`{items:[{partId,name,qty,remark,…}], total, truncated, rows, note}`（`rows` 为兼容镜像，已弃用） |
 | `get_project_context` | 只读 | 当前域 / 视图 / 选中对象 / 机型 / 底板 / 单位制 / 最近操作；缺失项返回 null |
 | `run_interference_check` | 只读 | 包围盒干涉初筛。不传 `states` 只查当前场景静态位姿（旧行为，前 20 条）；传 `states:['rest'/'lift'/'sweep']` 按 active 机型做位姿化检查：`lift` 把可动件按 config 里 `turner-lift.travelMm` 真实行程平移，`sweep` 按 10 mm 逐步顶升到行程；返回 `{ok,states:{rest/lift/sweep:{pairs,hits,mm3}},lift:{actuatorId,strokeMm,direction,partIds}}`；无顶升轴返回 `STATE_UNAVAILABLE`，不拿 static 冒充 lift |
 | `capture_view` | 只读 | 截当前真实界面并落盘 `userData/agent-shots/<timestamp>-<view>.png`（view=`3d`/`linkage`/`library`/`exports`），返回 `{path,bytes,sha256,width,height,view}`；窗口未就绪或仍在首页返回 `VIEW_NOT_READY`（**绝不返回首页截图冒充**），单张 >5 MiB 缩尺寸重拍一次，仍超限返回 `SHOT_TOO_LARGE` |
@@ -88,6 +88,8 @@
 
 稳定错误码：`INVALID_ARGUMENT`（缺参/类型错误/方案校验失败）、`FILE_EXISTS`（同名机型未允许覆盖）、`PART_NOT_FOUND`（新型号不在数据包）、`NOT_PLACED`（删除目标不在底板/BOM）、`PRECHECK_FAILED`（PLC 预检错误，不落盘）、`UNSUPPORTED_FORMAT`（导出格式不在白名单）、`WRITE_FAILED` / `EXPORT_FAILED`（落盘与内容生成失败）。
 
+**机型包导入走严格校验（G3）**：`readMachinePackage` / `importPackage` 在宽松的 `validateMachineConfig`（结构）之外，额外跑 `validateDesign`（`machine/validate.ts`）严格模式；issues 非空即以 `LIBRARY_INVALID_CONFIG` 拒包，消息带 issue 的 `code @ path`、中文说明，`hint` 直接取该 issue 的修复建议（例如 `SENSOR_UNBOUND @ config.sensors[0].part`）。宽松模式只留给现场 IO 映射导入（`setMachineConfig`，那里的 `part` 常常是「主回路反馈」这类信号名）；机型包是「方案」，传感器绑了不存在的工位/执行机构就不该进库。
+
 ## 4. 上下文注入与指代消解（已实现）
 
 每次会话固定注入 `AgentContext` 快照（序列化 ≤1.5 KB，`CONTEXT_BYTE_LIMIT=1536`）：
@@ -109,7 +111,13 @@
 
 路由接入：`planTool` / `planToolSequence` / `planReadOnly` 接受可选 `AgentContext`，命中指代时补全对象参数，并在计划步骤上标 `resolvedFrom: 'selection'|'recent'|'geometry'` 与 `resolvedLabel`。侧栏计划预览与步骤卡片显示「已使用选中对象：QF1」这类依据；会话系统提示同时注入上下文快照与会话内记忆。
 
-会话内记忆（`desktop/src/agent/memory.ts`）只保留最近 5 次工具调用（工具名、关键参数、结果码），滚动丢弃，不落盘、不上传，并追加在系统提示末尾。工具结果进入模型前统一经 `desktop/src/agent/trim.ts` 裁剪：列表 >20 条保留前 20 + `total` + `truncated:true`，长文本按 2 KB 截断，单个结果硬上限 10 KB。
+会话内记忆（`desktop/src/agent/memory.ts`）只保留最近 5 次工具调用（工具名、关键参数、结果码），滚动丢弃，不落盘、不上传，并追加在系统提示末尾。工具结果进入模型前统一经 `desktop/src/agent/trim.ts` 裁剪：列表**一条不删**（超过 20 条只把条目内的长字符串按 2 KB 截断并标 `truncated:true`），长文本按 2 KB 截断，单个结果硬上限 10 KB。
+
+**列表结果统一形状（G2）**：列表型工具（`get_bom` / `list_components` / `search_components` / `search_docs` / `list_machine_library`）一律返回 `ListResult<T> = { items: T[]; total: number; truncated?: boolean }`，小列表也是同一形状——不再有「少于 20 条给裸数组、多了给对象」的双形状（真实事故：25 行 BOM 时消费方 `Array.isArray(rows)` 拿到空数组，面板空白）。
+
+- 读列表一律 `.items`；`total` 是条目总数，`truncated:true` 只表示「超过 20 条、条目内长字符串被截断」，不代表条目丢了。
+- 兼容镜像字段**保留一代但已弃用**：`get_bom` 的 `rows`、`list_components`/`search_components` 的 `components`（与 `count`）、`search_docs` 的 `hits`。新代码不要再读镜像，也不要再写 `Array.isArray(result.rows)` 这种判断——形状一变就静默变空。
+- 读取用 `readListResult(value, ['rows'])`（新形状 → 裸数组 → 镜像，读不出返回 `null`）或 `requireListItems()`（形状不认识直接抛错并带出实际形状）；**不允许把读取失败静默当空数组**。
 
 冒烟：`SMOKE_AGENT_CONTEXT_OK selection=1 recent=3`；单测覆盖采集容错、1.5 KB 体积、指代优先级、几何排序、低置信不猜、记忆滚动、UTF-8 截断与 10 KB 封顶。
 
@@ -306,7 +314,7 @@ UI 与 IPC：
 - 通道：本机 JSON-RPC `127.0.0.1:7420`（Bearer）+ MCP stdio（供外部 Agent 调用）
 - 模型：可配置本地（llama.cpp / Ollama）或远程 OpenAI 兼容端点；按任务路由（分类用小模型、规划用大模型）
 - 工具调用协议：OpenAI tools schema；对不支持 function calling 的模型走「JSON 文本 + 解析 + 重试一次」
-- 上下文预算：系统提示 ≤1.5k tokens，工具结果按需截断（列表类只回前 20 条 + 总数）
+- 上下文预算：系统提示 ≤1.5k tokens，工具结果按需截断（列表类统一 `{items,total,truncated}`，条目一条不删）
 - 离线优先：无网络时仍可用规则路由完成「查件、算成本、跑校验」这些确定性任务
 
 UI：侧栏「流程」下拉选择模板 → 预览前置条件与步骤（可取消勾选）→ 开始 → 步骤进度与结果 → 「导出本次执行记录」（Markdown）。IPC 为 `agent:recipe:execute` / `agent:recipe:cancel`，写操作仍弹主进程确认。

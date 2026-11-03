@@ -6,6 +6,7 @@ import {
   escapeHtml
 } from '../ui/panels';
 import { recordDiagnosticError } from '../shared/diagnostics.ts';
+import { readListResult } from './trim.ts';
 import {
   auditSummaryText,
   buildPlanPreview,
@@ -1188,7 +1189,13 @@ function currentRecipeContext(): RecipeContext {
   let bom: unknown[] = [];
   try {
     const rows = window.__AgentBridge?.getBom?.() as unknown;
-    if (Array.isArray(rows)) bom = rows;
+    // G2：桥直连时是裸数组；若上游改成统一形状也能读，形状不认识就保持空并告警，
+    // 而不是把「形状变了」当成「没有 BOM」静默过掉。
+    const list = readListResult<unknown>(rows, ['rows']);
+    if (list) bom = list.items;
+    else if (rows !== null && rows !== undefined) {
+      console.warn('[AGENT_RECIPE_BOM_UNEXPECTED_SHAPE]', rows);
+    }
   } catch {
     bom = [];
   }
@@ -1411,9 +1418,11 @@ function advisorStateFromBridge(value: unknown): AdvisorProjectState | null {
 }
 
 function bomPartIds(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
+  // G2：接受裸数组、{items} 与 {rows} 三种形状；读不出来返回空列表（调用方另有形状告警）。
+  const list = readListResult<unknown>(value, ['rows']);
+  if (!list) return [];
   const ids = new Set<string>();
-  for (const row of value) {
+  for (const row of list.items) {
     if (!row || typeof row !== 'object') continue;
     const partId = (row as Record<string, unknown>).partId;
     if (typeof partId === 'string' && partId.trim()) ids.add(partId.trim());
@@ -1459,7 +1468,7 @@ async function collectAdvisorState(): Promise<AdvisorProjectState> {
   }
   return {
     ...state,
-    bomRows: Array.isArray(bom) ? bom.length : state.bomRows,
+    bomRows: readListResult(bom, ['rows'])?.items.length ?? state.bomRows,
     missingDimensions
   };
 }

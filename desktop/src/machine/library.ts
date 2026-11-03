@@ -34,6 +34,7 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { recordDiagnosticError } from '../shared/diagnostics.ts';
 import { createZip } from '../shared/zip.ts';
 import { validateMachineConfig, type MachineConfig } from '../commission/machine-config.ts';
+import { validateDesign } from './validate.ts';
 import {
   activeMachinePath,
   buildMachineBomRows,
@@ -105,16 +106,19 @@ export type MachineLibraryErrorCode =
 
 export class MachineLibraryError extends Error {
   readonly code: MachineLibraryErrorCode;
+  /** 具体到这一条错误的修复建议；缺省时由 `MACHINE_LIBRARY_HINTS[code]` 兜底。 */
+  readonly hint?: string;
 
-  constructor(code: MachineLibraryErrorCode, message: string) {
+  constructor(code: MachineLibraryErrorCode, message: string, hint?: string) {
     super(message);
     this.name = 'MachineLibraryError';
     this.code = code;
+    if (hint) this.hint = hint;
   }
 }
 
-function fail(code: MachineLibraryErrorCode, message: string): never {
-  throw new MachineLibraryError(code, message);
+function fail(code: MachineLibraryErrorCode, message: string, hint?: string): never {
+  throw new MachineLibraryError(code, message, hint);
 }
 
 export interface MachinePackageFileRef {
@@ -492,7 +496,30 @@ function parseConfigFile(files: Map<string, Buffer>, manifest: MachinePackageMan
       `config.id（${config.id}）与 manifest.id（${manifest.id}）不一致，已拒绝导入`
     );
   }
+  assertStrictDesign(config);
   return config;
+}
+
+/**
+ * 机型包是「方案」，不是现场 IO 映射表，所以导入必须过 `validateDesign` 的**严格**模式。
+ *
+ * `validateMachineConfig`（commission/machine-config.ts）是宽松版：它只查结构，并用
+ * `requirePartBinding:false` 放行「传感器 part 不是工位/执行机构」的现场点位表。机型包从外面
+ * 拿进来，若也走宽松模式，一个传感器绑着不存在的执行机构的方案就能进库、能被 apply、能生成 PLC，
+ * 到现场才以「点位没有归属」的形式炸掉。严格模式在这里只挡真错误（SENSOR_UNBOUND /
+ * ACTUATOR_ID_DUPLICATE / 结构问题），合法包不受影响。
+ */
+function assertStrictDesign(config: MachineConfig): void {
+  const result = validateDesign(config);
+  if (result.ok) return;
+  const first = result.issues[0];
+  if (!first) fail('LIBRARY_INVALID_CONFIG', '机型包 config.json 未通过严格方案校验（无具体原因）');
+  const rest = result.issues.length > 1 ? `；另有 ${result.issues.length - 1} 项同类问题` : '';
+  fail(
+    'LIBRARY_INVALID_CONFIG',
+    `机型包 config.json 未通过严格方案校验：${first.code} @ ${first.path} —— ${first.message}${rest}`,
+    first.hint
+  );
 }
 
 /**
@@ -1174,7 +1201,7 @@ export function serializeMachineLibraryError(error: unknown): {
   hint?: string;
 } {
   if (error instanceof MachineLibraryError) {
-    const hint = MACHINE_LIBRARY_HINTS[error.code];
+    const hint = error.hint ?? MACHINE_LIBRARY_HINTS[error.code];
     return { ok: false, code: error.code, message: error.message, ...(hint ? { hint } : {}) };
   }
   return {

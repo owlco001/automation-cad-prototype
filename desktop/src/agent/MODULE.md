@@ -222,6 +222,7 @@ collectAgentContext(providers, now?): AgentContext          // 每字段独立�
 serializeAgentContext(ctx, limit=1536): { text, bytes, truncated, droppedRecent, context }
 resolveReference(text, ctx): { target, confidence, reason }
 trimListResult / trimLongText / trimToolResult / serializeToolResult
+listResult / readListResult / requireListItems                    // 列表统一形状与读取（G2）
 AgentMemory.record / entries / prompt / clear
 ```
 
@@ -230,7 +231,7 @@ AgentMemory.record / entries / prompt / clear
 - **指代优先级**：选中对象 0.95 → 最近操作对象 0.72 → 几何 placement 0.78；没有候选返回 `NO_CANDIDATES`，对象信息不足返回 `LOW_CONFIDENCE`，低于 0.6 统一 `target:null`。几何排序：左边 x 升序、右边 x 降序、上面 y 升序、下面 y 降序，读序 y→x。
 - **路由补全**：`planTool/planToolSequence/planReadOnly` 接收可选 `AgentContext`；命中后把对象填进 `partId` / `ref`，清掉对应 `missing`，并写 `resolvedFrom` / `resolvedLabel`。`preview.ts` 与侧栏步骤卡片据此显示「已使用选中对象：QF1」。
 - **会话记忆**：`AgentSession` 每次工具调用后记录 `{tool, args, code}`（关键参数白名单，不含密钥），最多 5 条；系统提示顺序为 `SYSTEM_PROMPT → [上一轮会话] → 上下文快照 → [最近工具调用]`。`clear()` 同时清空记忆。
-- **结果裁剪**：`serializeToolResult` 是模型上下文的唯一入口；列表字段 >20 条变成 `{items,total,truncated}`，字符串 >2 KB 截断并附原文字节数，最终 JSON >10 KB 时保留 `ok` 与 `preview` 兜底。
+- **结果裁剪**：`serializeToolResult` 是模型上下文的唯一入口；列表字段一律统一成 `{items,total,truncated}` 且**条目一条不删**（>20 条只截条目内长字符串），字符串 >2 KB 截断并附原文字节数，最终 JSON >10 KB 时保留 `ok` 与 `preview` 兜底。消费方用 `readListResult` / `requireListItems` 读，形状不认识返回 `null`/抛错，不允许静默当空数组。
 
 冒烟：`SMOKE_AGENT_CONTEXT_OK selection=1 recent=3`、`SMOKE_AGENT_THREAD_OK turns=3 resume=1 stale=1`。单测在 `test/agent/context-memory-trim.test.mjs`（28 条）。
 

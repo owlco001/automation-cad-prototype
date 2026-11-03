@@ -295,14 +295,16 @@ test('会话记忆：提示包含工具名、关键参数与结果码，且不�
   assert.equal(summarizeToolArguments({ apiKey: 'x' }), '');
 });
 
-test('列表裁剪：20 条不截断，21 条保留前 20 并给 total', () => {
+test('列表裁剪：20 条不截断，21 条一条不删只标 total/truncated', () => {
   const twenty = trimListResult(Array.from({ length: LIST_RESULT_LIMIT }, (_unused, index) => index));
   assert.equal(twenty.items.length, 20);
   assert.equal(twenty.truncated, false);
   const twentyOne = trimListResult(Array.from({ length: 21 }, (_unused, index) => index));
-  assert.equal(twentyOne.items.length, 20);
+  // G2：条目一条都不许丢（旧实现切前 20，25 行 BOM 的消费方就拿到空数组）。
+  assert.equal(twentyOne.items.length, 21);
   assert.equal(twentyOne.total, 21);
   assert.equal(twentyOne.truncated, true);
+  assert.deepEqual(twentyOne.items, Array.from({ length: 21 }, (_unused, index) => index));
 });
 
 test('长文本裁剪：≤2 KB，附中文提示且不破坏字符', () => {
@@ -313,11 +315,15 @@ test('长文本裁剪：≤2 KB，附中文提示且不破坏字符', () => {
   assert.equal(trimmed.text.includes('\uFFFD'), false);
 });
 
-test('工具结果裁剪：嵌套列表超过 20 条也收敛', () => {
+test('工具结果裁剪：嵌套列表超过 20 条也一条不删', () => {
   const result = trimToolResult({ ok: true, data: { rows: Array.from({ length: 25 }, (_unused, index) => ({ index })) } });
-  assert.equal(result.data.rows.items.length, 20);
+  assert.equal(result.data.rows.items.length, 25);
   assert.equal(result.data.rows.total, 25);
   assert.equal(result.data.rows.truncated, true);
+  assert.deepEqual(
+    result.data.rows.items.map((row) => row.index),
+    Array.from({ length: 25 }, (_unused, index) => index)
+  );
 });
 
 test('工具结果序列化：>10 KB 时给 preview，最终不超过 10 KB', () => {
