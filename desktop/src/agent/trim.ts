@@ -91,6 +91,12 @@ export function readListResult<T>(
   return null;
 }
 
+/** 读字符串列表（裁剪后的 {items,total} 或裸数组都认）；读不出来返回空数组，调用方自行决定是否提示。 */
+export function readStringList(value: unknown): string[] {
+  const items = readListResult<unknown>(value)?.items ?? [];
+  return items.filter((item): item is string => typeof item === 'string');
+}
+
 function describeShape(value: unknown): string {
   if (value === null || value === undefined) return String(value);
   if (Array.isArray(value)) return `array(${value.length})`;

@@ -19,6 +19,7 @@ import {
   LIST_RESULT_LIMIT,
   listResult,
   readListResult,
+  readStringList,
   requireListItems,
   serializeToolResult,
   trimListResult,
@@ -173,4 +174,23 @@ test('裁剪不改变条目内容：长字符串按 2 KB 截断但条目保留',
   assert.equal(trimmed.data.rows.items[1].partId, 'P1');
   assert.equal(trimmed.data.rows.items.at(-1).partId, `P${BOM_ROWS - 1}`);
   assert.equal(trimmed.data.rows.total, BOM_ROWS);
+});
+
+test('方案卡从裁剪后的结果里仍能读到 warnings（CI 机型截图红过的地方）', () => {
+  // 真实回归：design_machine 结果进模型前被裁剪成 {items,total}，
+  // ui.ts 里还按裸数组读 → 方案卡 warnings 全丢 → 显示「无已知警告」，
+  // CI 的机型全流程截图因此报「方案卡缺少安全光栅选型/安全距离提示」。
+  // 这里测的是 ui.ts 实际使用的读取器（readStringList），而不是把 DOM 层搬进单测。
+  const warnings = [
+    '缺少安全光栅选型：需按安全距离与响应时间确认。',
+    '断路器交叉校验：主回路与分支回路短路容量需核对。',
+    '成本缺价：2 项物料无历史价格。'
+  ];
+  const trimmed = trimToolResult({ ok: true, data: { warnings } });
+  assert.deepEqual(trimmed.data.warnings.items, warnings, '裁剪后条目一条不少');
+  assert.deepEqual(readStringList(trimmed.data.warnings), warnings);
+  // 兼容旧形状（裸数组）与异常输入
+  assert.deepEqual(readStringList(warnings), warnings);
+  assert.deepEqual(readStringList({ nope: 1 }), []);
+  assert.deepEqual(readStringList(undefined), []);
 });

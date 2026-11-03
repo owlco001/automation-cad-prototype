@@ -6,7 +6,7 @@ import {
   escapeHtml
 } from '../ui/panels';
 import { recordDiagnosticError } from '../shared/diagnostics.ts';
-import { readListResult } from './trim.ts';
+import { readListResult, readStringList } from './trim.ts';
 import {
   auditSummaryText,
   buildPlanPreview,
@@ -584,7 +584,7 @@ function failureSuggestionHtml(input: {
       </div>`;
 }
 
-function parseMachineCard(result: DesktopAgentChatMessage | undefined): {
+export function parseMachineCard(result: DesktopAgentChatMessage | undefined): {
   design: Record<string, unknown>;
   /** design_machine 结果里带回的原始需求（联动重算时间线要用同一句话） */
   brief: string;
@@ -610,9 +610,10 @@ function parseMachineCard(result: DesktopAgentChatMessage | undefined): {
       design: designRecord,
       brief: typeof record.brief === 'string' ? record.brief : '',
       config: config as Record<string, unknown>,
-      warnings: Array.isArray(designRecord.warnings)
-        ? designRecord.warnings.filter((value): value is string => typeof value === 'string')
-        : [],
+      // 方案卡拿的是**裁剪后**的工具结果：列表已被统一成 {items,total,truncated}，
+      // 这里还按裸数组读就会把 warnings 全丢掉（CI 的机型截图步骤就是这样红的：
+      // 「方案卡缺少安全光栅选型/安全距离提示」而实际只有「无已知警告」）。
+      warnings: readStringList(designRecord.warnings),
       cycle: typeof designRecord.cycle === 'object' && designRecord.cycle !== null && !Array.isArray(designRecord.cycle)
         ? designRecord.cycle as Record<string, unknown>
         : null,
@@ -638,9 +639,10 @@ function renderMachineCard(call: DesktopAgentToolCall, result: DesktopAgentChatM
   if (!card) return '';
   machineDesignCards.set(call.id, { design: card.design, brief: card.brief });
   const appliedName = appliedMachineCards.get(call.id);
-  const stations = Array.isArray(card.config.stations) ? card.config.stations.length : 0;
-  const actuators = Array.isArray(card.config.actuators) ? card.config.actuators.length : 0;
-  const sensors = Array.isArray(card.config.sensors) ? card.config.sensors.length : 0;
+  // config 里的列表同样可能被裁剪（{items,total}），长度要按两种形状读
+  const stations = readListResult(card.config.stations)?.items.length ?? 0;
+  const actuators = readListResult(card.config.actuators)?.items.length ?? 0;
+  const sensors = readListResult(card.config.sensors)?.items.length ?? 0;
   const name = typeof card.config.name === 'string' ? card.config.name : '机型方案';
   const perMin = typeof card.cycle?.perMin === 'number' ? card.cycle.perMin : null;
   const seconds = typeof card.cycle?.estimatedSecondsPerPiece === 'number'
@@ -684,12 +686,9 @@ function renderMachineCard(call: DesktopAgentToolCall, result: DesktopAgentChatM
     : null;
   const dc24Margin = typeof dc24?.marginPct === 'number' ? dc24.marginPct : null;
   const cost = card.cost;
-  const powerWarnings = Array.isArray(card.power?.warnings)
-    ? card.power.warnings.filter((value): value is string => typeof value === 'string')
-    : [];
-  const costWarnings = Array.isArray(card.cost?.warnings)
-    ? card.cost.warnings.filter((value): value is string => typeof value === 'string')
-    : [];
+  // 同理：power/cost 的 warnings 也经过裁剪（{items,total}），裸数组读会全丢
+  const powerWarnings = readStringList(card.power?.warnings);
+  const costWarnings = readStringList(card.cost?.warnings);
   const money = (value: unknown): string | null => typeof value === 'number' && Number.isFinite(value)
     ? `¥${Math.round(value).toLocaleString('zh-CN')}`
     : null;
@@ -735,8 +734,10 @@ function renderMachineCard(call: DesktopAgentToolCall, result: DesktopAgentChatM
   const formName = typeof form?.name === 'string' ? form.name : null;
   const formId = typeof form?.id === 'string' ? form.id : null;
   const formRationale = typeof form?.rationale === 'string' ? form.rationale : null;
-  const formAlternatives = Array.isArray(form?.alternatives)
-    ? form.alternatives.filter((entry): entry is Record<string, unknown> =>
+  // 同 warnings：form.alternatives 也可能被裁成 {items,total}，两种形状都要认
+  const formAltItems = readListResult<unknown>(form?.alternatives)?.items ?? [];
+  const formAlternatives = formAltItems.length > 0
+    ? formAltItems.filter((entry): entry is Record<string, unknown> =>
       typeof entry === 'object' && entry !== null && !Array.isArray(entry))
     : [];
   const formBlock = formName
