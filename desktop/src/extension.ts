@@ -39,7 +39,9 @@ import {
 import { initModuleSettingsUi } from './modules/ui';
 import { initUpdatePanel } from './update/ui';
 import { initCommissionPanel, type CommissionPanelHandle } from './commission/ui';
+import { initMachineLibraryPanel, type MachineLibraryUiHandle } from './commission/machine-library-drawer.ts';
 import type { MachineConfig } from './commission/machine-config';
+import type { StoredMachineDesign } from './machine/store';
 import { buildOptionalSyncPlcPayload } from './sync/plc.ts';
 import { initSyncPanel } from './sync/ui';
 import { initAgentPanel, setAgentResumeModuleEnabled } from './agent/ui';
@@ -142,6 +144,7 @@ let currentModelObjectIdentities: CadModelObjectIdentity[] = [];
 let stressConclusions: StressConclusion[] = [];
 let interference: InterferencePanelHandle | null = null;
 let commission: CommissionPanelHandle | null = null;
+let machineLibrary: MachineLibraryUiHandle | null = null;
 let kinematics: KinematicsUiHandle | null = null;
 let parametric: ParametricUiHandle | null = null;
 let plcGenUi: PlcGenUiHandle | null = null;
@@ -3758,6 +3761,28 @@ function init(): void {
   commission = initCommissionPanel({
     onExportReport: async () => {
       await exportPdfReport();
+    }
+  });
+  machineLibrary = initMachineLibraryPanel({
+    onApplied: (design) => {
+      const source = design && typeof design === 'object'
+        ? design as Partial<StoredMachineDesign>
+        : null;
+      if (!source || !source.config) throw new Error('机型方案缺少 config，无法应用到当前工程');
+      const bridge = window.__AgentBridge;
+      if (!bridge) throw new Error('渲染桥尚未就绪，无法刷新 3D/BOM');
+      // 与智能体的 load_machine_from_library 走同一个载荷：config 驱动 3D 联调视图，
+      // design（BOM 草稿 + 功率）驱动电气出图；layout 取机型形态的几何种类。
+      const result = bridge.applyMachineConfig({
+        config: source.config,
+        machineId: source.id,
+        name: source.config.name,
+        layout: source.form?.geometry?.kind ?? null,
+        ...(source.bomDraft && source.power
+          ? { design: { bomDraft: source.bomDraft, power: source.power } }
+          : {})
+      });
+      if (result && result.ok === false) throw new Error(result.message ?? '应用机型失败');
     }
   });
   initPackPanel();

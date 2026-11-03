@@ -291,6 +291,22 @@ const desktopApi = {
 
 contextBridge.exposeInMainWorld('desktop', desktopApi);
 
+/**
+ * 机型库（`library:*`）单独一个全局，不与 `desktop` 混在一起：
+ * 渲染层这里只拿到五个**动作**，没有任何 fs/path 面——导入的文件路径由主进程
+ * showOpenDialog 选、字节在主进程读；导出同理走 showSaveDialog。
+ * `importPackage` 只收 `{ overwrite }`，即使渲染层硬塞路径也不会被主进程采用。
+ */
+const machineLibraryApi = {
+  list: () => ipcRenderer.invoke('library:list'),
+  apply: (id: string) => ipcRenderer.invoke('library:apply', id),
+  importPackage: (options?: { overwrite?: boolean }) => ipcRenderer.invoke('library:import', options ?? {}),
+  exportPackage: (id: string) => ipcRenderer.invoke('library:export', id),
+  remove: (id: string) => ipcRenderer.invoke('library:remove', id)
+};
+
+contextBridge.exposeInMainWorld('__machineLibrary', machineLibraryApi);
+
 // 一次性安全自述：主进程收到后打印 SECURITY_RENDERER_PRELOAD 日志。
 // 这样"沙箱是否真生效"不是靠配置推断，而是渲染进程里 preload 实测的 process.sandboxed。
 ipcRenderer.send('security:renderer-state', {

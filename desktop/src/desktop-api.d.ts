@@ -20,6 +20,24 @@ interface DesktopVersion {
   platform: string;
 }
 
+/** 机型库索引项（主进程 `library:list` 的条目形状，与 src/machine/library.ts 一致）。 */
+interface MachineLibraryEntryInfo {
+  id: string;
+  name: string;
+  version: string;
+  updatedAt: string;
+  sizeBytes: number;
+  source: 'local' | 'remote' | string;
+}
+
+/** 机型库 IPC 的失败形状：只有码与给用户看的文案，没有堆栈。 */
+interface MachineLibraryIpcFailure {
+  ok: false;
+  code: string;
+  message: string;
+  hint?: string;
+}
+
 interface DesktopPackInfo {
   id: string;
   name: string;
@@ -1214,6 +1232,23 @@ interface Window {
     setEnabled(id: string, enabled: boolean): DesktopModuleStatus[];
   };
   __AgentBridge?: AgentBridgeApi;
+  /**
+   * 机型库（preload 暴露，见 electron/preload.ts）。只有动作，没有 fs/path：
+   * 导入导出时的文件选择与读写全在主进程。
+   */
+  __machineLibrary?: {
+    list(): Promise<
+      | { ok: true; entries: MachineLibraryEntryInfo[] }
+      | MachineLibraryIpcFailure
+    >;
+    apply(id: string): Promise<{ ok: true; entry: MachineLibraryEntryInfo; design: unknown } | MachineLibraryIpcFailure>;
+    importPackage(options?: { overwrite?: boolean }): Promise<
+      | { ok: true; cancelled?: boolean; overwritten?: boolean; entry?: MachineLibraryEntryInfo }
+      | MachineLibraryIpcFailure
+    >;
+    exportPackage(id: string): Promise<{ ok: true; cancelled?: boolean; path?: string; bytes?: number } | MachineLibraryIpcFailure>;
+    remove(id: string): Promise<{ ok: true; entry?: MachineLibraryEntryInfo } | MachineLibraryIpcFailure>;
+  };
   __Commission3D?: {
     stats(): {
       frames: number;

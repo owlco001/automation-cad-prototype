@@ -60,6 +60,16 @@ interface StepResult {
 
 `export/report.ts` 新增 `commission` 章节，包含 PLC 类型/状态、上电明细、用例明细、期望/实际与耗时。主进程仍走 `webContents.printToPDF` 的 A3 横向通道。
 
+## 机型库抽屉
+
+入口是顶栏「工具 → 模块 → 机型库」（`machineLibraryEntryButton`，带 `data-machine-library-open` 锚点），抽屉 `machineLibraryDrawer` 列出本机机型：名称 / 版本 / 大小 / 来源 / 更新时间，底部四个动作：导入 `.machine.zip` / 导出 / 删除 / 加载。
+
+- 渲染层不碰文件系统：`window.__machineLibrary`（preload）只有 `list/apply/importPackage/exportPackage/remove`，导入的文件路径由主进程 `showOpenDialog` 选、字节在主进程读；导出走 `showSaveDialog`。
+- 所有 id 先过 `machine/library-ipc.ts` 的 `validateLibraryId`（`sanitizeMachineId` 净化不动点 + 显式拒 `..`、斜杠、盘符、控制字符），非法 id 连库目录都不会被拼出来。
+- 加载会替换当前方案，必须二次确认；成功后交给 `window.__AgentBridge.applyMachineConfig` 重建 3D/BOM/电气（与智能体 `load_machine_from_library` 同一载荷）。
+- 导入遇 `LIBRARY_EXISTS` 先问人，确认后带 `overwrite` 重试，并复用刚才选中的文件（路径只存在主进程内存里，5 分钟过期）。
+- 纯渲染逻辑在 `machine-library-panel.ts`（不 import 样式，可被 `node --test` 直接加载），DOM 装配在 `machine-library-drawer.ts`；单测见 `desktop/test/commission/machine-library-panel.test.mjs` 与 `desktop/test/machine/library-ipc.test.mjs`。
+
 ## 坑点
 
 1. **动作只写线圈/保持寄存器**，传感器输入只读；否则换到真实 PLC 会因写离散输入失败。

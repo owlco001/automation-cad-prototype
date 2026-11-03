@@ -46,6 +46,7 @@
 - `qt-client-01`–`qt-client-17`：Qt 客户端（树/属性/3D/撤销重做/材质/新建特征/视角），逐张说明见 `qt-client/README.md`
 - `20-wizard-00`–`20-wizard-07`：从零建机分步（首页→工艺→候选→预览→工位→布局→校核→BOM→3D），`npm run screenshots:wizard`
 - `21-linkage-01`–`21-linkage-03`：联动播放中（t=0 基准 → 真实时间线 t≈945 ms 的中间帧 → 复位回基准），`npm run screenshots:linkage`。三张都在联调抽屉里拍（3D 视口只有那里可见，抽屉互斥），每张都带坐标自证：`LINKAGE_SHOT_OK movedParts=N maxDeltaMm=…`、`LINKAGE_RESET_OK maxDeltaMm≈0`；复位图与基准图像素级一致（实测 0.000%），中间帧与基准图差异全部落在 3D 视口内（实测视口内 0.49%）
+- `24-machine-library.png`：机型库抽屉（1600×1000），`npm run screenshots:library`。主进程先用 `saveToLibrary()` 往临时 userData 预置两台机型（真包 + 逐条 SHA-256），再经 preload → `library:list` 打开抽屉抓图；日志给 `LIBRARY_SEED`/`LIBRARY_IPC_OK`/`LIBRARY_DOM_OK`/`LIBRARY_RECT`/`LIBRARY_SHOT_OK bytes=… path=… sha256=…`，并与「抽屉打开前」的参照帧比对 hash，相同即判定抓到旧帧并失败
 
 抓图脚本自带 sha256 去重与尺寸/色数校验：同一帧重复即报错，不产出「看起来成功」的假图。
 普通 headless 下 Chromium 若把 WebGL 列入 blocklist，CAD 3D 区会显示解析统计降级面板；

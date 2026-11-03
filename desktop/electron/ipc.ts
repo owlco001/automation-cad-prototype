@@ -86,6 +86,8 @@ import {
 } from '../src/project-archive/desktop.ts';
 import { planPlcExportDirectory } from '../src/plcgen/export.ts';
 import { readActiveMachineDesign } from '../src/machine/store.ts';
+import { exportPackage, importPackage, listLibrary, loadFromLibrary, removeFromLibrary, MACHINE_LIBRARY_LIMITS } from '../src/machine/library.ts';
+import { machineLibraryFailure, validateLibraryId } from '../src/machine/library-ipc.ts';
 import { deleteProject, listProjects, openProject, saveProject, saveProjectLayout } from './projects.ts';
 import { clearDesignDraft, readDesignDraft, writeDesignDraft } from '../src/design/draft-store.ts';
 import { validateMachineDesign } from '../src/machine/store.ts';
@@ -1579,6 +1581,143 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
       return { ok: true, audit };
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : String(error), audit: null };
+    }
+  });
+
+  /* ---------------------------------------------------------------- */
+  /* 机型库（library:*）                                               */
+  /*                                                                  */
+  /* 安全边界（渲染进程永远碰不到文件系统）：                          */
+  /* - 导入：路径只能来自**这里**的 showOpenDialog，字节在这里读；      */
+  /*   渲染层只能传 { overwrite } 这种布尔开关，传路径也不接受。         */
+  /* - 导出：落点只能来自 showSaveDialog，字节在这里写。                */
+  /* - 所有 id 先过 validateLibraryId（净化不动点 + 绝对路径/穿越/盘符/ */
+  /*   控制字符一律拒），非法 id 连库目录都不会被拼出来。                */
+  /* - 失败统一 { ok:false, code, message, hint }，异常堆栈只进诊断日志。*/
+  /* ---------------------------------------------------------------- */
+
+  /** 同名冲突被拒后记住「刚才选的是哪个文件」，覆盖确认后不必让用户再选一遍。 */
+  let lastRejectedImport: { path: string; atMs: number } | null = null;
+  const REJECTED_IMPORT_TTL_MS = 5 * 60_000;
+
+  handle('library:list', () => {
+    try {
+      return { ok: true as const, entries: listLibrary(context.userDataDir) };
+    } catch (error) {
+      return machineLibraryFailure(error);
+    }
+  });
+
+  // 加载：写回 machine/<id>.json + active.json，并把方案交回渲染层去刷新 3D/BOM/电气。
+  handle('library:apply', (_event, id: unknown) => {
+    const checked = validateLibraryId(id);
+    if (!checked.ok) return checked;
+    try {
+      const loaded = loadFromLibrary(context.userDataDir, checked.id);
+      return {
+        ok: true as const,
+        entry: loaded.entry,
+        design: loaded.design,
+        copied: loaded.copied
+      };
+    } catch (error) {
+      return machineLibraryFailure(error);
+    }
+  });
+
+  handle('library:import', async (_event, options: unknown) => {
+    const window = context.getWindow();
+    if (!window || window.isDestroyed()) {
+      return { ok: false as const, code: 'LIBRARY_IO_FAILED', message: '主窗口不可用，无法选择机型包' };
+    }
+    const overwrite = Boolean(
+      options && typeof options === 'object' && (options as Record<string, unknown>).overwrite === true
+    );
+    /** 本次真正读的那个文件（只在本进程内存里）；同名冲突时留着给覆盖重试复用。 */
+    let usedPath: string | null = null;
+    try {
+      // 覆盖重试沿用同一个文件（路径只在本进程内存里，没经过渲染层）——
+      // 否则用户刚点完「确认覆盖」还得再把同一个包选一遍。
+      const now = Date.now();
+      const reusable = overwrite
+        && lastRejectedImport !== null
+        && now - lastRejectedImport.atMs <= REJECTED_IMPORT_TTL_MS
+        && existsSync(lastRejectedImport.path);
+      let filePath: string | null = reusable ? lastRejectedImport!.path : null;
+      if (!filePath) {
+        const picked = await dialog.showOpenDialog(window, {
+          title: '导入机型包',
+          properties: ['openFile'],
+          filters: [
+            { name: '机型包', extensions: ['zip'] },
+            { name: '所有文件', extensions: ['*'] }
+          ]
+        });
+        if (picked.canceled || !picked.filePaths[0]) return { ok: true as const, cancelled: true };
+        filePath = picked.filePaths[0] as string;
+      }
+      usedPath = filePath;
+      // 先按文件大小挡一次：超限的包不值得先读进内存再拒。
+      const size = statSync(filePath).size;
+      if (size > MACHINE_LIBRARY_LIMITS.maxPackageBytes) {
+        return {
+          ok: false as const,
+          code: 'LIBRARY_TOO_LARGE',
+          message: `机型包 ${size} 字节，超过 ${MACHINE_LIBRARY_LIMITS.maxPackageBytes} 字节上限`,
+          hint: '请导出体积更小的机型包（去掉 shots/ 大图或 plc/ 里的大文件）'
+        };
+      }
+      const result = importPackage(context.userDataDir, readFileSync(filePath), { overwrite, source: 'remote' });
+      lastRejectedImport = null;
+      return {
+        ok: true as const,
+        entry: result.entry,
+        overwritten: result.overwritten === true
+      };
+    } catch (error) {
+      const failure = machineLibraryFailure(error);
+      // 同名冲突：记住这次的文件，等渲染层确认覆盖后带 overwrite 回来直接重试。
+      if (failure.code === 'LIBRARY_EXISTS' && usedPath && !overwrite) {
+        lastRejectedImport = { path: usedPath, atMs: Date.now() };
+      }
+      return failure;
+    }
+  });
+
+  handle('library:export', async (_event, id: unknown) => {
+    const checked = validateLibraryId(id);
+    if (!checked.ok) return checked;
+    const window = context.getWindow();
+    if (!window || window.isDestroyed()) {
+      return { ok: false as const, code: 'LIBRARY_IO_FAILED', message: '主窗口不可用，无法选择导出位置' };
+    }
+    try {
+      // 先读包（顺带校验 manifest 与逐条 SHA-256），再让用户选落点：
+      // 库里的包被手工改坏时不该先让用户填一个文件名再报错。
+      const bytes = exportPackage(context.userDataDir, checked.id);
+      const saved = await dialog.showSaveDialog(window, {
+        title: '导出机型包',
+        defaultPath: `${checked.id}.machine.zip`,
+        filters: [{ name: '机型包', extensions: ['zip'] }]
+      });
+      if (saved.canceled || !saved.filePath) return { ok: true as const, cancelled: true };
+      const target = saved.filePath.endsWith('.machine.zip') ? saved.filePath : `${saved.filePath}.machine.zip`;
+      writeFileSync(target, bytes);
+      return { ok: true as const, path: target, bytes: bytes.byteLength };
+    } catch (error) {
+      return machineLibraryFailure(error);
+    }
+  });
+
+  handle('library:remove', (_event, id: unknown) => {
+    const checked = validateLibraryId(id);
+    if (!checked.ok) return checked;
+    try {
+      const entry = removeFromLibrary(context.userDataDir, checked.id);
+      if (lastRejectedImport) lastRejectedImport = null;
+      return { ok: true as const, entry };
+    } catch (error) {
+      return machineLibraryFailure(error);
     }
   });
 

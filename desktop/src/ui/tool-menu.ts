@@ -30,6 +30,7 @@ const GROUPS: ReadonlyArray<ToolGroup> = [
     keys: [
       'factoryEntryButton',
       'commissionEntryButton',
+      'machineLibraryEntryButton',
       'packEntryButton',
       'canvasWorkbenchEntryButton',
       'enclosureEntryButton',
