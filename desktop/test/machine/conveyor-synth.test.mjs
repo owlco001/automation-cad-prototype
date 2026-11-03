@@ -9,7 +9,8 @@ test('输送需求解析：工艺/单工位/尺寸四件套', () => {
   const brief = parseMachineBrief('设计一台水平皮带输送机：总长 2000mm、带宽 300mm、工件 5kg、线速度 0.2m/s');
   assert.equal(brief.process, 'conveyor');
   assert.equal(brief.stations, 1, '输送线不存在多工位');
-  assert.deepEqual(brief.conveyor, { lengthMm: 2000, widthMm: 300, speedMps: 0.2, loadKg: 5 });
+  // layers：单层线体没有层数线索时为 null（有转向工位时合成器据此判断 ≥2 层不做转向）
+  assert.deepEqual(brief.conveyor, { lengthMm: 2000, widthMm: 300, speedMps: 0.2, loadKg: 5, layers: null });
 });
 
 test('米/m 单位换算成 mm，mm/s 换算成 m/s', () => {

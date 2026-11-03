@@ -123,7 +123,7 @@ export function refineConveyor(brief: { conveyor?: ConveyorSpec; cyclePerMin: nu
       `启动加速 a=${ACCEL_MPS2} m/s² → ${estimate.accelN} N；合计 ${estimate.forceN} N。`,
     `驱动功率：P = F·v / η = ${estimate.forceN} × ${speedMps} / ${MECH_EFFICIENCY} = ${estimate.powerW} W；` +
       `乘 ${MOTOR_MARGIN} 倍余量后选 ${estimate.motorW} W 减速电机，滚筒扭矩 ${estimate.torqueNm} N·m。`,
-    '三维模型不走代理体：由 conveyor-assembly 生成 28 个真实零件的参数化装配，交给 build123d 内核布尔求并并导出 STEP/STL。'
+    '三维模型不走代理体：由 conveyor-assembly 生成整机参数化装配（零件数随线体长度与是否带转向工位变化），交给 build123d 内核布尔求并并导出 STEP/STL。'
   ];
   const summary = `驱动 ${estimate.motorW} W（需 ${estimate.powerW} W，F=${estimate.forceN} N）· 产能 ${estimate.throughputPerMin} 件/分（${speedMps} m/s，间距 ${estimate.pitchMm} mm）`;
   return { estimate, speedMps, loadKg, summary, assumptions };

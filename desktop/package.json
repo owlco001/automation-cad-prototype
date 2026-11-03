@@ -18,6 +18,7 @@
     "build:machine-case": "node scripts/build-machine-case.mjs",
     "bench:render": "node scripts/bench-render-plan.mjs",
     "smoke": "xvfb-run -a node scripts/electron-run.mjs --headless-smoke",
+    "machine:e2e": "npm run build:ext && node scripts/machine-e2e.mjs",
     "smoke:design:webgl": "xvfb-run -a -s \"-screen 0 1920x1200x24\" node scripts/electron-run.mjs --headless-design-webgl-smoke",
     "smoke:win": "electron . --headless-smoke --disable-gpu --disable-gpu-compositing --disable-software-rasterizer",
     "update:installed": "node scripts/update-installed.mjs",

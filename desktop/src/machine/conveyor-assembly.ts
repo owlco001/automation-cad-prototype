@@ -48,10 +48,17 @@ export interface ConveyorParams {
   layers?: number;
   /** 层间距，mm（layers ≥ 2 时才有意义） */
   layerPitchMm?: number;
+  /**
+   * 转向工位：线体中段把工件就地旋转多少度（45/90/180），0 或省略表示不做转向。
+   *
+   * 只在单层线体（layers === 1）生效：立体缓存的中段要给升降台让位，两套机构抢同一个空间。
+   * 角度只影响回转轴的分度范围与动作时间，不影响静态几何（转台在任一角度都是同一个圆柱）。
+   */
+  turnerAngleDeg?: number;
 }
 
 /** 归一化之后的参数：层数一定存在，内部构建器只用这个类型。 */
-export type ResolvedConveyorParams = ConveyorParams & { layers: number; layerPitchMm: number };
+export type ResolvedConveyorParams = ConveyorParams & { layers: number; layerPitchMm: number; turnerAngleDeg: number };
 
 export const DEFAULT_CONVEYOR: Required<ConveyorParams> = {
   lengthMm: 2000,
@@ -61,7 +68,8 @@ export const DEFAULT_CONVEYOR: Required<ConveyorParams> = {
   beltThicknessMm: 4,
   frameSectionMm: 40,
   layers: 1,
-  layerPitchMm: 400
+  layerPitchMm: 400,
+  turnerAngleDeg: 0
 };
 
 export interface ConveyorPart {
@@ -97,12 +105,243 @@ function cylinder(id: string, name: string, diameter: number, height: number, ax
  * - 滚筒中心 z = 皮带面高 - 滚筒半径
  * - 侧梁中心 z = 滚筒中心 z - (frameSection/2 + 10)  ← 留出皮带绕包空间
  * - 支腿从地面顶到侧梁下沿
+ * - 有转向工位时：上行程/回程/侧挡边在转向段断开，中段装底板 + 回转支承 + 转台面
  */
 export function buildConveyorParts(params: ConveyorParams): ConveyorPart[] {
   const p = normalizeParams(params);
   const parts = buildSingleLayerParts(p);
   // 立体缓存：底层还是输送线（进出料），上方按层数叠托架 + 一套升降机构
   return p.layers > 1 ? [...parts, ...buildBufferStackParts(p)] : parts;
+}
+
+/* ------------------------------------------------------------------ *
+ * 转向工位（turner）
+ *
+ * 需求里「把光伏板旋转 90° 改变方向」要落到真实零件上，不能只在 BOM 上写一行。
+ * 做法是**皮带断开 + 断口处下沉回转台**，而不是「在皮带上架一个转台」：
+ *
+ * - 转台面必须托住 1200 mm 宽的光伏板，直径必然 ≥ 带宽，任何摆在皮带面之上
+ *   的转台都会与上行程、侧挡边实打实互穿（皮带 |y| ≤ 带宽/2，挡边在 ±(带宽/2+3)）；
+ * - 真实设备也是把转向单元装在两段皮带之间的断口处（顶升/回转/再落回皮带），
+ *   所以有转向工位时上行程、回程、侧挡边都在 |x| ≤ gapHalf 处断开。
+ *
+ * 垂直空间：纵梁顶到皮带面之间正好是「滚筒直径」那么高（railZ = 皮带面 - 滚筒直径 - 型材/2），
+ * 扣掉底板 18 + 台面 12，φ50 滚筒只剩 20 mm 给回转支承 —— 所以这里做成薄壁环。
+ * 滚筒更小（φ<42）时连 12 mm 都不剩，直接不做转向工位（turnerSkipReason 会说明）。
+ *
+ * 转台面与皮带面齐平（不抬料）：光伏板从皮带平推到台面，滚轮顶再高 2 mm。
+ * ------------------------------------------------------------------ */
+
+/** 台面滚轮：嵌入台面通孔，滚出方向沿 Y（垂直输送方向）。 */
+const TURNER_ROLLER_DIAMETER_MM = 30;
+const TURNER_ROLLER_LENGTH_MM = 40;
+/** 台面通孔直径：必须能把「长 40 的横轴滚轮」整个让开，否则滚轮两端穿进台面实体。 */
+const TURNER_ROLLER_HOLE_MM = 56;
+/** 滚轮顶相对台面的凸出量（mm） */
+const TURNER_ROLLER_LIFT_MM = 2;
+const TURNER_PLATE_THICKNESS_MM = 18;
+const TURNER_TABLE_THICKNESS_MM = 12;
+/** 转台面与皮带断开处的间隙（mm） */
+const TURNER_GAP_CLEARANCE_MM = 6;
+
+export interface TurnerLayout {
+  angleDeg: number;
+  /** 转台面直径（mm） */
+  tableDiameterMm: number;
+  /** 皮带断开处的半宽：|x| ≤ gapHalfMm 为转向段 */
+  gapHalfMm: number;
+  /** 底板（坐在两侧纵梁上） */
+  plateLengthMm: number;
+  plateWidthMm: number;
+  plateThicknessMm: number;
+  plateCenterZ: number;
+  /** 回转支承环（薄壁）：外径 / 内径 / 高度 / 中心 z */
+  ringDiameterMm: number;
+  ringBoreMm: number;
+  ringHeightMm: number;
+  ringCenterZ: number;
+  /** 转台面：直径 / 厚度 / 台面顶 z（= 皮带面） */
+  tableThicknessMm: number;
+  tableTopZ: number;
+  /** 台面滚轮：中心 z / 4 个中心坐标 */
+  rollerTopZ: number;
+  rollerCenters: Array<[number, number]>;
+  /** 转向减速电机安装位 */
+  motorCenter: [number, number, number];
+  /** 一次转向的动作时间（s），按 90° ≈ 1.8 s 线性外推 */
+  actionSeconds: number;
+}
+
+/** 一次转向的时间：0.6 s 起停 + 每 90° 1.2 s，90° → 1.8 s、45° → 1.2 s、180° → 3.0 s。 */
+export function turnerActionSeconds(angleDeg: number): number {
+  const angle = Math.abs(angleDeg);
+  if (!Number.isFinite(angle) || angle <= 0) return 0;
+  return Math.round((0.6 + (angle / 90) * 1.2) * 10) / 10;
+}
+
+/**
+ * 为什么不能做转向工位；能做的返回 null。
+ * 三种情形：没要求、立体缓存、线体太短、滚筒直径太小（放不下回转支承）。
+ */
+export function turnerSkipReason(params: ConveyorParams): string | null {
+  const p = normalizeParams(params);
+  if (!(p.turnerAngleDeg > 0)) return null;
+  if (p.layers > 1) {
+    return `立体缓存（${p.layers} 层）不加转向工位：转向机构与升降机构都要占线体中段，空间互斥；转向需单独做一段转向线体`;
+  }
+  if (p.lengthMm - 600 < p.widthMm + 100) {
+    return `线体长 ${p.lengthMm} mm 放不下转向段：转台直径按带宽 ${p.widthMm} mm + 200 取，两端还要各留 300 mm 输送段`;
+  }
+  const verticalRoom = p.pulleyDiameterMm - TURNER_TABLE_THICKNESS_MM - TURNER_PLATE_THICKNESS_MM;
+  if (verticalRoom < 12) {
+    return `滚筒 φ${p.pulleyDiameterMm} mm 的垂直空间不够：纵梁顶到皮带面只有 ${p.pulleyDiameterMm} mm，扣掉底板 ${TURNER_PLATE_THICKNESS_MM} + 台面 ${TURNER_TABLE_THICKNESS_MM} 后回转支承不足 12 mm`;
+  }
+  return null;
+}
+
+/** 转向工位的全部尺寸；不需要/做不了时返回 null。 */
+export function turnerLayout(params: ConveyorParams): TurnerLayout | null {
+  const p = normalizeParams(params);
+  if (!(p.turnerAngleDeg > 0)) return null;
+  if (turnerSkipReason(p) !== null) return null;
+  const angle = p.turnerAngleDeg;
+  const halfW = p.widthMm / 2;
+  const section = p.frameSectionMm;
+  const railTop = p.beltHeightMm - p.pulleyDiameterMm; // = railZ + section/2
+  const plateTop = railTop + TURNER_PLATE_THICKNESS_MM;
+  const tableTopZ = p.beltHeightMm;
+  const ringHeightMm = tableTopZ - TURNER_TABLE_THICKNESS_MM - plateTop;
+
+  const outerY = halfW + section / 2 + 15;
+  const wanted = Math.max(600, p.widthMm + 200);
+  const tableDiameterMm = Math.min(wanted, p.lengthMm - 600);
+  const ringDiameterMm = Math.round((tableDiameterMm * 0.62) / 10) * 10;
+  const ringBoreMm = ringDiameterMm - 90; // 45 mm 壁厚的薄壁环，实心柱体会被当成 90 kg 的饼
+  const rollerOffset = Math.round((tableDiameterMm / 2) * 0.55);
+
+  return {
+    angleDeg: angle,
+    tableDiameterMm,
+    gapHalfMm: tableDiameterMm / 2 + TURNER_GAP_CLEARANCE_MM,
+    plateLengthMm: tableDiameterMm + 80,
+    plateWidthMm: (outerY + section / 2) * 2, // 盖住两侧纵梁全宽（纵梁外沿）
+    plateThicknessMm: TURNER_PLATE_THICKNESS_MM,
+    plateCenterZ: railTop + TURNER_PLATE_THICKNESS_MM / 2,
+    ringDiameterMm,
+    ringBoreMm,
+    ringHeightMm,
+    ringCenterZ: plateTop + ringHeightMm / 2,
+    tableThicknessMm: TURNER_TABLE_THICKNESS_MM,
+    tableTopZ,
+    rollerTopZ: tableTopZ + TURNER_ROLLER_LIFT_MM,
+    rollerCenters: [
+      [-rollerOffset, -rollerOffset],
+      [rollerOffset, -rollerOffset],
+      [-rollerOffset, rollerOffset],
+      [rollerOffset, rollerOffset]
+    ],
+    // 电机沿 X 让开转台圆面（转台半径 700，电机箱在 |y| ≥ 665 处只能允许 |x| ≤ 220），
+    // 否则箱体内角压进台面（实测 64268 mm³）；外挂在驱动侧纵梁旁，与主驱动电机同一挂法
+    motorCenter: [tableDiameterMm / 2 + 60, -(outerY + section / 2 + 70), railTop + 20],
+    actionSeconds: turnerActionSeconds(angle)
+  };
+}
+
+/**
+ * 转向工位零件：底板 / 回转支承环 / 转台面 / 4 只台面滚轮 / 转向减速电机。
+ *
+ * 台面滚轮为什么是「短横轴（沿 Y）+ 嵌入 φ56 通孔」而不是整幅长滚筒：
+ * 整幅长滚筒要么在台面之上（顶得比皮带面高 30 mm，光伏板推不过去），要么嵌在台面里
+ * （实心台面与滚筒互穿，特征集里只有通孔/通槽能切，长滚筒横穿台面必然撞上实体）。
+ * 沿 Y 的短滚轮让光伏板在进/出料方向（X）上滚动进出；台面转 90° 后滚轮轴随之转到 X 向，
+ * 此时它只作点支承（真实设备用万向球，原型用短滚轮表达同一件事，差别写进 assumptions）。
+ */
+function buildTurnerParts(t: TurnerLayout): ConveyorPart[] {
+  const parts: ConveyorPart[] = [];
+
+  // 1) 底板：跨两侧纵梁、坐在纵梁上沿（railTop），中间不用开孔——回转支承直接法兰坐在板面上
+  parts.push({
+    id: 'turner-base',
+    name: '转向工位底板',
+    material: 'AL6063',
+    spec: `${Math.round(t.plateLengthMm)}×${Math.round(t.plateWidthMm)}×${t.plateThicknessMm}`,
+    features: [box('turner-base-body', '底板', t.plateLengthMm, t.plateWidthMm, t.plateThicknessMm)],
+    transform: { x: 0, y: 0, z: round(t.plateCenterZ), rz: 0 }
+  });
+
+  // 2) 回转支承环：薄壁环（中孔 φ ringBore），外圈与底板螺栓连接、内圈随转台旋转
+  parts.push({
+    id: 'turner-ring',
+    name: '回转支承环',
+    material: 'STEEL45',
+    spec: `φ${t.ringDiameterMm}/φ${t.ringBoreMm} × ${t.ringHeightMm}`,
+    features: [
+      cylinder('turner-ring-body', '回转支承外圈', t.ringDiameterMm, t.ringHeightMm, 'z'),
+      feature('turner-ring-bore', 'holes', '内孔', { diameter: t.ringBoreMm, positions: [[0, 0]] })
+    ],
+    // 实心柱体会把 18 kg 的薄壁环算成 93 kg 的饼，用样本质量覆盖
+    massOverrideKg: Math.round((t.ringDiameterMm / 870) ** 2 * 18 * 10) / 10,
+    transform: { x: 0, y: 0, z: round(t.ringCenterZ), rz: 0 }
+  });
+
+  // 3) 转台面：圆形，直径 ≥ 带宽 + 200 才托得住 1200 宽的光伏板；台面顶与皮带面齐平
+  parts.push({
+    id: 'turner-table',
+    name: '转向转台面',
+    material: 'AL6063',
+    spec: `φ${t.tableDiameterMm} × ${t.tableThicknessMm}`,
+    features: [
+      cylinder('turner-table-body', '台面', t.tableDiameterMm, t.tableThicknessMm, 'z'),
+      feature('turner-table-holes', 'holes', '滚轮安装孔', {
+        diameter: TURNER_ROLLER_HOLE_MM,
+        positions: t.rollerCenters
+      })
+    ],
+    transform: { x: 0, y: 0, z: round(t.tableTopZ - t.tableThicknessMm / 2), rz: 0 }
+  });
+
+  // 4) 台面滚轮 ×4：沿 Y 的横轴，轮顶比台面高 2 mm，落在台面通孔里（不碰台面实体）
+  t.rollerCenters.forEach(([x, y], index) => {
+    parts.push({
+      id: `turner-roller-${index + 1}`,
+      name: `台面滚轮 ${index + 1}`,
+      material: 'STEEL45',
+      spec: `φ${TURNER_ROLLER_DIAMETER_MM} × ${TURNER_ROLLER_LENGTH_MM}`,
+      massOverrideKg: 0.25,
+      features: [
+        cylinder(
+          `turner-roller-${index + 1}-body`,
+          '滚轮',
+          TURNER_ROLLER_DIAMETER_MM,
+          TURNER_ROLLER_LENGTH_MM,
+          'y'
+        )
+      ],
+      transform: { x, y, z: round(t.rollerTopZ - TURNER_ROLLER_DIAMETER_MM / 2), rz: 0 }
+    });
+  });
+
+  // 5) 转向减速电机：外挂在驱动侧纵梁外侧（与主驱动电机同一挂法），输出轴朝外
+  //    注：原型只表达安装位与输出轴；实际用同步带/锥齿轮从底板下方驱动回转支承外齿。
+  parts.push({
+    id: 'turner-motor',
+    name: '转向减速电机',
+    material: 'Q235',
+    spec: `0.75 kW · i=180 · 输出约 8 rpm · ${t.angleDeg}°/${t.actionSeconds}s`,
+    massOverrideKg: 6.5,
+    features: [
+      box('turner-motor-body', '电机+减速箱', 160, 120, 140),
+      cylinder('turner-motor-shaft', '输出轴', 25, 80, 'y', [0, -60, 0])
+    ],
+    transform: {
+      x: t.motorCenter[0],
+      y: round(t.motorCenter[1]),
+      z: round(t.motorCenter[2]),
+      rz: 0
+    }
+  });
+
+  return parts;
 }
 
 function buildSingleLayerParts(p: ResolvedConveyorParams): ConveyorPart[] {
@@ -116,6 +355,8 @@ function buildSingleLayerParts(p: ResolvedConveyorParams): ConveyorPart[] {
   const legCenterZ = legHeight / 2;
   const outerY = halfW + section / 2 + 15;
   const parts: ConveyorPart[] = [];
+  // 转向工位：有就把皮带/挡边在线体中段断开，转台装在断口处（见 turnerLayout 注释）
+  const turner = turnerLayout(p);
 
   // 1) 两侧纵梁（4040 型材）
   for (const [label, sign] of [['left', -1], ['right', 1]] as const) {
@@ -230,31 +471,68 @@ function buildSingleLayerParts(p: ResolvedConveyorParams): ConveyorPart[] {
   }
 
   // 6) 皮带：上行程 + 回程 + 两侧挡边
-  parts.push({
-    id: 'belt-top',
-    name: '皮带上行程',
-    material: 'PVC',
-    spec: `${Math.round(p.lengthMm - 40)} × ${Math.round(p.widthMm)} × ${p.beltThicknessMm}`,
-    features: [box('belt-top-body', '皮带', p.lengthMm - 40, p.widthMm, p.beltThicknessMm)],
-    transform: { x: 0, y: 0, z: p.beltHeightMm - p.beltThicknessMm / 2, rz: 0 }
-  });
-  parts.push({
-    id: 'belt-return',
-    name: '皮带回程',
-    material: 'PVC',
-    spec: `${Math.round(p.lengthMm - 40)} × ${Math.round(p.widthMm)} × ${p.beltThicknessMm}`,
-    features: [box('belt-return-body', '皮带', p.lengthMm - 40, p.widthMm, p.beltThicknessMm)],
-    transform: { x: 0, y: 0, z: pulleyZ - pulleyRadius - p.beltThicknessMm / 2, rz: 0 }
-  });
+  //    有转向工位时，这三样都在 |x| ≤ gapHalf 处断开成「进料段 + 出料段」：
+  //    转台面直径 ≥ 带宽，与皮带/挡边同高必然互穿，真实设备同样是两段线体夹一台转向单元。
+  const beltTopZ = p.beltHeightMm - p.beltThicknessMm / 2;
+  const beltReturnZ = pulleyZ - pulleyRadius - p.beltThicknessMm / 2;
+  for (const [run, name, z] of [
+    ['top', '皮带上行程', beltTopZ],
+    ['return', '皮带回程', beltReturnZ]
+  ] as const) {
+    const outerX = halfL - 20;
+    if (!turner) {
+      parts.push({
+        id: `belt-${run}`,
+        name,
+        material: 'PVC',
+        spec: `${Math.round(p.lengthMm - 40)} × ${Math.round(p.widthMm)} × ${p.beltThicknessMm}`,
+        features: [box(`belt-${run}-body`, '皮带', p.lengthMm - 40, p.widthMm, p.beltThicknessMm)],
+        transform: { x: 0, y: 0, z, rz: 0 }
+      });
+      continue;
+    }
+    const innerX = turner.gapHalfMm;
+    const segmentLength = outerX - innerX;
+    for (const [label, sign] of [['in', -1], ['out', 1]] as const) {
+      const centerX = (sign * (outerX + innerX)) / 2;
+      parts.push({
+        id: `belt-${run}-${label}`,
+        name: `${name}（${label === 'in' ? '进料段' : '出料段'}）`,
+        material: 'PVC',
+        spec: `${Math.round(segmentLength)} × ${Math.round(p.widthMm)} × ${p.beltThicknessMm}`,
+        features: [box(`belt-${run}-${label}-body`, '皮带', segmentLength, p.widthMm, p.beltThicknessMm)],
+        transform: { x: round(centerX), y: 0, z, rz: 0 }
+      });
+    }
+  }
   for (const [label, sign] of [['left', -1], ['right', 1]] as const) {
-    parts.push({
-      id: `guard-${label}`,
-      name: `侧挡边（${label === 'left' ? '左' : '右'}）`,
-      material: 'Q235',
-      spec: `3 × 60 × ${Math.round(p.lengthMm)}`,
-      features: [box(`guard-${label}-body`, '挡边', p.lengthMm - 60, 3, 60)],
-      transform: { x: 0, y: sign * (halfW + 3), z: p.beltHeightMm + 26, rz: 0 }
-    });
+    const side = label === 'left' ? '左' : '右';
+    if (!turner) {
+      parts.push({
+        id: `guard-${label}`,
+        name: `侧挡边（${side}）`,
+        material: 'Q235',
+        spec: `3 × 60 × ${Math.round(p.lengthMm)}`,
+        features: [box(`guard-${label}-body`, '挡边', p.lengthMm - 60, 3, 60)],
+        transform: { x: 0, y: sign * (halfW + 3), z: p.beltHeightMm + 26, rz: 0 }
+      });
+      continue;
+    }
+    // 挡边比皮带还往里（±(带宽/2+3)），转台一转就会扫到；同样断开
+    const outerX = halfL - 30;
+    const innerX = turner.gapHalfMm;
+    const segmentLength = outerX - innerX;
+    for (const [seg, segSign] of [['in', -1], ['out', 1]] as const) {
+      const centerX = (segSign * (outerX + innerX)) / 2;
+      parts.push({
+        id: `guard-${label}-${seg}`,
+        name: `侧挡边（${side}·${seg === 'in' ? '进料段' : '出料段'}）`,
+        material: 'Q235',
+        spec: `3 × 60 × ${Math.round(segmentLength)}`,
+        features: [box(`guard-${label}-${seg}-body`, '挡边', segmentLength, 3, 60)],
+        transform: { x: round(centerX), y: sign * (halfW + 3), z: p.beltHeightMm + 26, rz: 0 }
+      });
+    }
   }
 
   // 7) 减速电机（驱动侧端部，含输出轴）
@@ -304,6 +582,9 @@ function buildSingleLayerParts(p: ResolvedConveyorParams): ConveyorPart[] {
       transform: { x: sign * (halfL - 160), y, z: p.beltHeightMm + 40, rz: 0 }
     });
   }
+
+  // 10) 转向工位（转向段内：底板 + 回转支承 + 转台面 + 台面滚轮 + 转向电机）
+  if (turner) parts.push(...buildTurnerParts(turner));
 
   return parts;
 }
@@ -476,7 +757,9 @@ function normalizeParams(params: Partial<ConveyorParams> | undefined): ResolvedC
   const frameSectionMm = clamp(positive(merged.frameSectionMm, DEFAULT_CONVEYOR.frameSectionMm), 20, 100);
   const layers = clamp(Math.round(positive(merged.layers ?? DEFAULT_CONVEYOR.layers, 1)), 1, 8);
   const layerPitchMm = clamp(positive(merged.layerPitchMm ?? DEFAULT_CONVEYOR.layerPitchMm, 400), 250, 900);
-  return { lengthMm, widthMm, beltHeightMm, pulleyDiameterMm, beltThicknessMm, frameSectionMm, layers, layerPitchMm };
+  // 转向角度：0 = 不做转向；只接受 1–180（超过 180 的「旋转」实际是一圈以上的分度，需要另做机构）
+  const turnerAngleDeg = clamp(Math.round(merged.turnerAngleDeg ?? 0), 0, 180);
+  return { lengthMm, widthMm, beltHeightMm, pulleyDiameterMm, beltThicknessMm, frameSectionMm, layers, layerPitchMm, turnerAngleDeg };
 }
 
 function clamp(value: number, min: number, max: number): number {

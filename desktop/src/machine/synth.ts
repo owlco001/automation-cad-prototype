@@ -27,7 +27,8 @@ import {
 import { DIAL_MAX_STATIONS, DIAL_PROCESSES } from './geometry.ts';
 import { evaluateFlow, type FlowEvaluation, type FlowModel, type FlowOp, type MachineLayout } from './flow.ts';
 import { TEMPLATES, templateFor, templateKinds } from './templates.ts';
-import { refineConveyor } from './conveyor-synth.ts';
+import { conveyorParamsFromBrief, refineConveyor } from './conveyor-synth.ts';
+import { turnerLayout, turnerSkipReason } from './conveyor-assembly.ts';
 import {
   ACTUATOR_SECONDS,
   PROCESS_BASE_SECONDS,
@@ -180,6 +181,10 @@ const ACTUATOR_POSITION: Record<MachineActuatorKind, [number, number, number]> =
   gripper: [0.05, 0.55, -0.38],
   rotary: [0.76, 0.65, 0.35]
 };
+
+/** 转向工位：输送线上的独立工位名与回转轴场景位置（线体中段偏驱动侧）。 */
+const TURNER_STATION_NAME = '转向工位';
+const TURNER_AXIS_POSITION: [number, number, number] = [0, 0, -0.1];
 
 function assertStations(value: number): number {
   if (!Number.isInteger(value) || value < MACHINE_STATIONS_MIN || value > MACHINE_STATIONS_MAX) {
@@ -420,9 +425,18 @@ function applyConveyorRefinement(
   });
   assumptions.push(...ref.assumptions);
 
-  const targetPerMin = brief.cyclePerMin ?? ref.estimate.throughputPerMin;
-  const throughput = ref.estimate.throughputPerMin;
+  // 转向工位：从 config 里找到回转轴（synthMachine 已加好），节拍再按它的动作时间封顶
+  const turnerAxis = design.config.actuators.find((actuator) => actuator.id === 'turner-rotary');
+  const turnerAngle = turnerAxis?.rotationRangeDeg ?? 0;
+  const turnerSeconds = turnerAxis ? (turnerAxis.durationMs ?? 0) / 1000 : 0;
+  const turnerCapacity = turnerSeconds > 0 ? Math.round((60 / turnerSeconds) * 100) / 100 : Infinity;
+
+  const beltThroughput = ref.estimate.throughputPerMin;
+  const targetPerMin = brief.cyclePerMin ?? beltThroughput;
+  // 光伏板必须逐件转过 90°，转台是串行工位：产能 = min(线速产能, 60 / 转向时间)
+  const throughput = Math.min(beltThroughput, turnerCapacity);
   const meetsTarget = throughput + 1e-9 >= targetPerMin;
+  const turnerLimited = turnerSeconds > 0 && turnerCapacity < beltThroughput;
   design.cycle.perMin = targetPerMin;
   design.cycle.throughputPerMin = throughput;
   design.cycle.partsPerMinute = throughput;
@@ -430,15 +444,25 @@ function applyConveyorRefinement(
   design.cycle.stationSeconds = round(60 / throughput);
   design.cycle.estimatedSecondsPerPiece = design.cycle.stationSeconds;
   design.cycle.slowestStation = 0;
-  design.cycle.slowestActionSeconds = 0;
+  design.cycle.slowestActionSeconds = round(turnerSeconds);
   design.cycle.requiredParallelStations = Math.max(1, Math.ceil(targetPerMin / throughput));
   design.cycle.requiredTotalStations = design.cycle.requiredParallelStations;
   design.cycle.meetsTarget = meetsTarget;
   design.cycle.mode = 'linear';
   design.cycle.bottleneck =
-    `线速 ${ref.speedMps} m/s ÷ 工件间距 ${ref.estimate.pitchMm} mm → ${throughput} 件/分钟` +
+    `线速 ${ref.speedMps} m/s ÷ 工件间距 ${ref.estimate.pitchMm} mm → ${beltThroughput} 件/分钟` +
+    (turnerSeconds > 0
+      ? `；转向工位每件 ${turnerSeconds} s（${turnerAngle}°）→ ${turnerCapacity} 件/分钟` +
+        `${turnerLimited ? '（转向为瓶颈）' : '（不构成瓶颈）'}，取小值 ${throughput} 件/分钟`
+      : '') +
     `（目标 ${targetPerMin} 件/分钟${meetsTarget ? '，满足' : '，未达标'}）；输送线没有工位节拍，产能靠提速或减小间距。`;
-  if (!meetsTarget) {
+  if (turnerLimited && !meetsTarget) {
+    warnings.push(
+      `节拍瓶颈在转向工位：${turnerAngle}° 转向一次 ${turnerSeconds} s，只有 ${turnerCapacity} 件/分钟，` +
+        `低于目标 ${targetPerMin} 件/分钟；需要提高回转速度（${turnerAngle}° 建议 ≤ ${round(60 / targetPerMin, 2)} s）或加双工位转台。`
+    );
+  }
+  if (!meetsTarget && !turnerLimited) {
     warnings.push(
       `产能不足：线速 ${ref.speedMps} m/s、间距 ${ref.estimate.pitchMm} mm 只有 ${throughput} 件/分钟，` +
       `低于目标 ${targetPerMin} 件/分钟；需要把线速提到 ${round((targetPerMin * ref.estimate.pitchMm) / 60_000, 2)} m/s 或减小工件间距。`
@@ -447,7 +471,10 @@ function applyConveyorRefinement(
 
   // BOM：把「旋转轴」占位换成输送机结构件与驱动
   const before = design.bomDraft.items.length;
-  design.bomDraft.items = design.bomDraft.items.filter((item) => item.role !== 'rotary');
+  // 只清掉通用模型的「旋转轴」占位行（伺服驱动行保留）：转向工位的回转轴另有专行
+  design.bomDraft.items = design.bomDraft.items.filter(
+    (item) => item.role !== 'rotary' && !(item.kind === 'actuator' && item.name === '旋转轴')
+  );
   const removed = before - design.bomDraft.items.length;
   const params = ref.estimate.params;
   design.bomDraft.items.push(
@@ -481,10 +508,71 @@ function applyConveyorRefinement(
       role: 'other'
     }
   );
+
+  // 转向工位 BOM：按 conveyorBom() 的口径归并（同类同规格合一行），成品件与加工件分行
+  if (turnerAxis) {
+    const layout = turnerLayout({ ...params, turnerAngleDeg: turnerAngle });
+    if (layout) {
+      design.bomDraft.items.push(
+        {
+          kind: 'actuator',
+          name: `转向工位底板 ${Math.round(layout.plateLengthMm)}×${Math.round(layout.plateWidthMm)}×${layout.plateThicknessMm}`,
+          qty: 1,
+          note: '自制加工件：跨两侧纵梁，坐在纵梁上沿，回转支承法兰坐其上',
+          role: 'other'
+        },
+        {
+          kind: 'actuator',
+          name: `回转支承环 φ${layout.ringDiameterMm}/φ${layout.ringBoreMm}×${layout.ringHeightMm}`,
+          qty: 1,
+          note: '外购成品件：薄壁回转支承，外圈与底板螺栓连接（原型不建螺栓孔）',
+          role: 'other'
+        },
+        {
+          kind: 'actuator',
+          name: `转向转台面 φ${layout.tableDiameterMm}×${layout.tableThicknessMm}`,
+          qty: 1,
+          note: '自制加工件：圆形台面，直径 ≥ 带宽 200 mm 才托得住光伏板；台面顶与皮带面齐平',
+          role: 'other'
+        },
+        {
+          kind: 'actuator',
+          name: '台面滚轮 φ30×40',
+          qty: 4,
+          note: '外购成品件：嵌在台面 φ56 通孔内，轮顶高出台面 2 mm',
+          role: 'other'
+        },
+        {
+          kind: 'actuator',
+          name: '转向减速电机 0.75 kW（i=180，输出约 8 rpm）',
+          qty: 1,
+          note: `${layout.angleDeg}° 转向一次 ${layout.actionSeconds} s（点位 ST-TURN-ROT）`,
+          role: 'other',
+          ratedW: 750
+        }
+      );
+    }
+  }
   if (removed > 0) {
     assumptions.push(`BOM 已把通用模型的 ${removed} 行「旋转轴」替换为输送机结构件、减速电机与张紧组件。`);
   }
-  assumptions.push(`整机几何：调用 conveyor-assembly 生成 ${28} 个真实零件的参数化装配，由 build123d 内核布尔求并并导出 STEP/STL。`);
+  assumptions.push(
+    `整机几何：调用 conveyor-assembly 生成参数化装配（${turnerAxis ? '两段线体 + 8 个转向零件（底板/回转支承/台面/4 滚轮/电机）' : '单段线体'}；` +
+      `零件总数随线体长度变化（横撑数 = 长度/500+1），以建模回传为准），由 build123d 内核布尔求并并导出 STEP/STL。`
+  );
+
+  // 工件长边 > 转台直径：旋转 90° 后两端会悬出，台面托不住，必须加托板或加大台面
+  if (turnerAxis) {
+    const layout = turnerLayout({ ...params, turnerAngleDeg: turnerAngle });
+    const partLength = brief.workpiece?.lengthMm ?? 0;
+    if (layout && partLength > layout.tableDiameterMm) {
+      const overhang = Math.round((partLength - layout.tableDiameterMm) / 2);
+      warnings.push(
+        `工件长边 ${Math.round(partLength)} mm 大于转台直径 φ${layout.tableDiameterMm} mm：旋转 ${turnerAngle}° 后两端各悬出约 ${overhang} mm，` +
+          '台面托不住；需在台面加托板/加长台面，或改用两排支承滚轮。'
+      );
+    }
+  }
 }
 
 export function synthMachine(brief: MachineBrief, options: SynthOptions = {}): MachineDesign {
@@ -635,6 +723,25 @@ export function synthMachine(brief: MachineBrief, options: SynthOptions = {}): M
   }
 
   const stationNames = Array.from({ length: stations }, (_unused, index) => `工位${index + 1}`);
+  /**
+   * 转向工位（需求「把光伏板旋转 90° 改变方向」）。
+   *
+   * 只对单层输送线成立：立体缓存的中段被升降机构占着，两套机构抢同一个空间，
+   * 这时如实不加工位、只给 warning，不假装做了转向。
+   */
+  const turnerAngleDeg = process === 'conveyor' && brief.turner?.present ? brief.turner.angleDeg : 0;
+  const turnerParams = {
+    ...conveyorParamsFromBrief(brief.conveyor),
+    layers: brief.conveyor?.layers ?? 1,
+    turnerAngleDeg
+  };
+  const turnerPlan = turnerAngleDeg > 0 ? turnerLayout(turnerParams) : null;
+  const turnerBlockedReason = turnerAngleDeg > 0 && !turnerPlan ? turnerSkipReason(turnerParams) : null;
+  if (turnerBlockedReason) {
+    warnings.push(`需求要求转向工位，但本方案不做：${turnerBlockedReason}。`);
+    assumptions.push(`转向需求已记录（旋转 ${turnerAngleDeg}°），但几何未建转向工位：${turnerBlockedReason}。`);
+  }
+  if (turnerPlan) stationNames.push(TURNER_STATION_NAME);
   const actuators: MachineConfig['actuators'] = [];
   const sensors: MachineConfig['sensors'] = [];
   const points: string[] = [];
@@ -674,6 +781,41 @@ export function synthMachine(brief: MachineBrief, options: SynthOptions = {}): M
       });
       points.push(point);
     }
+  }
+
+  // 转向工位的回转轴：进 config.actuators → 自动进 BOM / PLC io-map / 联动时间线
+  if (turnerPlan) {
+    const turnerPoint = 'ST-TURN-ROT';
+    actuators.push({
+      id: 'turner-rotary',
+      name: `${TURNER_STATION_NAME}回转台`,
+      kind: 'rotary',
+      station: TURNER_STATION_NAME,
+      point: turnerPoint,
+      rotationRangeDeg: turnerPlan.angleDeg,
+      durationMs: Math.round(turnerPlan.actionSeconds * 1000),
+      position: TURNER_AXIS_POSITION
+    });
+    points.push(turnerPoint);
+    // 回转台必须有自己的到位传感器，否则 PLC 预检拒签（ACTUATOR_SENSOR_MISSING）：
+    // 原位（0°）+ 到位（目标角度）两个信号，part 绑到 turner-rotary 上。
+    for (const [point, label] of [
+      ['ST-TURN-HOME', '原位'],
+      ['ST-TURN-POS', `转 ${turnerPlan.angleDeg}° 到位`]
+    ] as const) {
+      sensors.push({ point, station: TURNER_STATION_NAME, part: 'turner-rotary' });
+      points.push(point);
+      assumptions.push(`转向工位传感器「${label}」：点位 ${point}（绑定 turner-rotary）`);
+    }
+    assumptions.push(
+      `转向工位：线体中段加回转台（转台面 φ${turnerPlan.tableDiameterMm}、回转支承 φ${turnerPlan.ringDiameterMm}×${turnerPlan.ringHeightMm}），` +
+        `把光伏板就地旋转 ${turnerPlan.angleDeg}° 改变方向；回转轴 turner-rotary（点位 ${turnerPoint}）` +
+        `动作 ${turnerPlan.actionSeconds} s/次，已计入工位时间。`
+    );
+    assumptions.push(
+      '转向段把皮带断成两段（上行程/回程/侧挡边各两段）：实际需两段各自张紧与驱动，或用同步传动；' +
+        '当前 BOM 仍按 1 套主驱动估算，需人工确认驱动方案。'
+    );
   }
 
   const config = validateMachineConfig({

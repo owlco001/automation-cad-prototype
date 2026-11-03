@@ -149,13 +149,17 @@ function parseMachineForm(value: unknown): MachineFormSummary {
       : String(value.layout) === 'parallel' || id.startsWith('gantry-')
         ? 'gantry'
         : 'linear';
-  const kind = rawKind === 'dial' || rawKind === 'linear' || rawKind === 'gantry' || rawKind === 'dual'
-    ? rawKind
+  // 白名单必须与 MachineFormGeometryKind 一致：forms.ts 的 belt-line 形态声明的是
+  // kind:'conveyor'，下面第 170 行也已经在读 geometry.conveyor —— 少列 conveyor 会让
+  // 任何输送机方案在「应用到工程」时被判非法（整机 E2E 就是这么撞上的）。
+  const acceptedKinds: ReadonlySet<string> = new Set(['dial', 'linear', 'gantry', 'dual', 'hybrid', 'cell', 'conveyor']);
+  const kind = typeof rawKind === 'string' && acceptedKinds.has(rawKind)
+    ? rawKind as MachineFormGeometry['kind']
     : geometryRaw.kind === undefined
       ? inferredKind
       : null;
   if (kind === null) {
-    throw new Error('design.form.geometry.kind 必须是 dial/linear/gantry/dual');
+    throw new Error('design.form.geometry.kind 必须是 dial/linear/gantry/dual/hybrid/cell/conveyor');
   }
   const geometry: MachineFormGeometry = { kind };
   if (typeof geometryRaw.lanes === 'number' && Number.isInteger(geometryRaw.lanes) && geometryRaw.lanes > 0) {

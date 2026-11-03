@@ -44,7 +44,9 @@ const CONVEYOR_PARAMS: ModelParamSpec[] = [
   { name: 'beltThicknessMm', label: '皮带厚度', defaultValue: DEFAULT_CONVEYOR.beltThicknessMm, min: 1, max: 20, unit: 'mm' },
   { name: 'frameSectionMm', label: '型材截面', defaultValue: DEFAULT_CONVEYOR.frameSectionMm, min: 20, max: 100, unit: 'mm' },
   { name: 'layers', label: '缓存层数（1=普通线体，≥2=立体缓存）', defaultValue: DEFAULT_CONVEYOR.layers, min: 1, max: 8, unit: '层' },
-  { name: 'layerPitchMm', label: '层间距', defaultValue: DEFAULT_CONVEYOR.layerPitchMm, min: 250, max: 900, unit: 'mm' }
+  { name: 'layerPitchMm', label: '层间距', defaultValue: DEFAULT_CONVEYOR.layerPitchMm, min: 250, max: 900, unit: 'mm' },
+  // 转向工位：0 = 不做；45/90/180 = 线体中段把工件就地旋转多少度
+  { name: 'turnerAngleDeg', label: '转向角度（0=不做转向工位，90=旋转 90°）', defaultValue: DEFAULT_CONVEYOR.turnerAngleDeg, min: 0, max: 180, unit: '°' }
 ];
 
 export const MODEL_BUILDERS: Partial<Record<MachineProcess, ModelBuilder>> = {
@@ -123,6 +125,7 @@ export function toConveyorParams(params: Record<string, number>): ConveyorParams
     beltThicknessMm: params.beltThicknessMm ?? DEFAULT_CONVEYOR.beltThicknessMm,
     frameSectionMm: params.frameSectionMm ?? DEFAULT_CONVEYOR.frameSectionMm,
     layers: params.layers ?? DEFAULT_CONVEYOR.layers,
-    layerPitchMm: params.layerPitchMm ?? DEFAULT_CONVEYOR.layerPitchMm
+    layerPitchMm: params.layerPitchMm ?? DEFAULT_CONVEYOR.layerPitchMm,
+    turnerAngleDeg: params.turnerAngleDeg ?? DEFAULT_CONVEYOR.turnerAngleDeg
   };
 }

@@ -214,7 +214,35 @@ if (HEADLESS) {
   app.setPath('userData', fixedUserData && fixedUserData.trim() ? fixedUserData : mkdtempSync(join(tmpdir(), prefix)));
 }
 
-const CDP_INTERNAL_PORT = 9229;
+/**
+ * 整机全流程 E2E 宿主模式（`npm run machine:e2e` → scripts/machine-e2e.mjs）。
+ *
+ * 只做两件事：把 userData 固定到脚本指定的目录（可复现、不污染真实配置、拿到独立的
+ * 单实例锁），并把该路径打到 stdout 让脚本自己去读 active.json / exports。
+ * 交互仍走**真实窗口 + 真实 DOM**，脚本从外部用 CDP 驱动（端口见下面的
+ * AUTOMATIONCAD_E2E_CDP_PORT）；因此这里不能进 HEADLESS 分支——HEADLESS 会关掉 CDP，
+ * 还会跑它自己那套截图流程。
+ */
+const MACHINE_E2E_HOST = process.argv.includes('--machine-e2e-host');
+if (MACHINE_E2E_HOST) {
+  const requested = process.env.AUTOMATIONCAD_E2E_USERDATA?.trim();
+  app.setPath(
+    'userData',
+    requested ? resolve(requested) : mkdtempSync(join(tmpdir(), 'automationcad-e2e-'))
+  );
+  console.log(`MACHINE_E2E_HOST_READY userData=${app.getPath('userData')}`);
+}
+
+/**
+ * CDP 端口：E2E 宿主模式允许用 AUTOMATIONCAD_E2E_CDP_PORT 指定。
+ * 固定 9229 时，机器上若还挂着另一个 AutomationCAD 实例，外部驱动会连到**别人的窗口**上
+ * （实测踩过：跑到一半发现方案里没有转向工位，其实连着 17 分钟前那个旧实例）。
+ * 正常启动仍然是 9229，行为不变。
+ */
+const CDP_INTERNAL_PORT = ((): number => {
+  const override = Number(process.env.AUTOMATIONCAD_E2E_CDP_PORT ?? '');
+  return MACHINE_E2E_HOST && Number.isInteger(override) && override > 0 && override < 65536 ? override : 9229;
+})();
 const CDP_EXTERNAL_PORT = 9222;
 const BOOT_LAN_CONFIG = readLanConfig(app.getPath('userData'));
 if (!HEADLESS && !DIAGNOSE) {

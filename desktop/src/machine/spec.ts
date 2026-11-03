@@ -37,6 +37,18 @@ export interface ConveyorSpec {
   speedMps: number | null;
   /** 单件重量（kg） */
   loadKg: number | null;
+  /** 缓存层数（「3 层」这类显式写法）；null = 单层。几何与转向工位的取舍都看它。 */
+  layers: number | null;
+}
+
+/**
+ * 转向工位：线体中段把工件（光伏板）就地旋转 45°/90°/180° 改变方向。
+ * 只表达「需求里要转向」这一件事；能不能真的做（层数、线体长度）由几何层判定。
+ */
+export interface TurnerSpec {
+  present: true;
+  /** 旋转角度（度），缺省 90。 */
+  angleDeg: number;
 }
 
 /** 工程师明确输入的整机占地边界；仅用于与实际几何包络比较，不缩放实体。 */
@@ -65,6 +77,8 @@ export interface MachineBrief {
   processes?: string[];
   /** 工件尺寸；大件（≥1.5m）会触发「模板几何不含工件夹持空间」告警。 */
   workpiece?: WorkpieceSpec;
+  /** 需求里明确要求「转向/旋转 90°」时存在；输送线据此加转向工位。 */
+  turner?: TurnerSpec;
   actuators: { kind: MachineActuatorKind; count: number }[];
   sensors: { kind: MachineSensorKind; count: number }[];
   brand: string | null;
@@ -256,7 +270,9 @@ export function detectConveyorSpec(text: string): ConveyorSpec | null {
   const load = /(?:工件|负载|载重|单件)\s*[:：]?\s*(\d+(?:\.\d+)?)\s*(kg|公斤|千克)/i.exec(text);
   // 「占地 3000×1800」这类写法：缓存/线体类需求通常只给包络，不给"线体长/带宽"
   const envelope = /(?:占地|外形|包络|尺寸)[^\d]{0,6}(\d{3,5})\s*[×xX*]\s*(\d{3,5})/.exec(text);
-  if (!length && !width && !speed && !load && !envelope) return null;
+  // 层数要一起带出来：合成器判定「≥2 层不做转向工位」时不能再去要原文
+  const layers = detectBufferLayers(text);
+  if (!length && !width && !speed && !load && !envelope && layers === null) return null;
   const toMm = (value: string, unit: string): number => {
     const number = Number(value);
     return /^(米|m)$/i.test(unit) ? number * 1000 : number;
@@ -269,7 +285,8 @@ export function detectConveyorSpec(text: string): ConveyorSpec | null {
     lengthMm: length ? toMm(length[1] ?? '0', length[2] ?? 'mm') : envelope ? Number(envelope[1]) : null,
     widthMm: width ? Number(width[1]) : envelope ? Number(envelope[2]) : null,
     speedMps: speed ? toMps(speed[1] ?? '0', speed[2] ?? 'm/s') : null,
-    loadKg: load ? Number(load[1]) : null
+    loadKg: load ? Number(load[1]) : null,
+    layers
   };
 }
 
@@ -310,6 +327,52 @@ export function detectBufferLayers(text: string): number | null {
     if (!raw) continue;
     const value = parseChineseNumber(raw);
     if (value !== null && value >= 1 && value <= 8) return value;
+  }
+  return null;
+}
+
+/**
+ * 转向工位识别：需求里要「把工件转 90° 改变方向」。
+ *
+ * 两路线索，缺一不可地互补：
+ * - 明确的转向词（转向/调头/换向/改变方向…）→ 有意图，角度缺省 90°；
+ * - 「旋转/回转/转向 + 数字 + 度」→ 有意图且有角度（「旋转 90°」「旋转90度」「转 90 度」）；
+ * - 「90° 转向」这种角度在前的写法。
+ *
+ * 单位（° / 度 / deg）是硬要求：没有单位的「旋转轴 4 个」「旋转台 2 台」是执行机构数量，
+ * 不是转向角度——把 4 当成 4° 会让输送线凭空长出一个转向工位。
+ */
+export function detectTurner(text: string): TurnerSpec | null {
+  const angle = detectTurnerAngle(text);
+  if (!TURNER_INTENT.test(text) && angle === null) return null;
+  return { present: true, angleDeg: angle ?? DEFAULT_TURNER_ANGLE_DEG };
+}
+
+export const DEFAULT_TURNER_ANGLE_DEG = 90;
+/** 需求里常见的三种转向角度；其它角度也接受（1–180），只是会写进 notes 提醒复核。 */
+export const TURNER_COMMON_ANGLES = [45, 90, 180] as const;
+
+/** 只认明确的转向词；单字「转」「旋转」不算，否则「旋转轴」「分度盘回转」都会命中。 */
+const TURNER_INTENT = /转向|调头|掉头|换向|改变方向|改向|旋转方向/;
+
+const TURNER_ANGLE_PATTERNS: RegExp[] = [
+  // 旋转 90° / 旋转 90 ° / 旋转90度 / 回转 180deg / 转 90 度（单位必填）
+  /(?:旋转|回转|转向|调头|掉头|转)\s*(?:角度|方向)?\s*[:：=]?\s*(\d{1,3})\s*(?:°|度|deg)/i,
+  // 角度在前：90° 转向 / 90 度旋转
+  /(\d{1,3})\s*(?:°|度|deg)\s*(?:转向|旋转|调头|换向)/i,
+  // 无单位但写了「角度/方向」：旋转角度 90
+  /(?:旋转|回转|转向)\s*(?:角度|方向)\s*[:：=]?\s*(\d{1,3})/i
+];
+
+function detectTurnerAngle(text: string): number | null {
+  for (const pattern of TURNER_ANGLE_PATTERNS) {
+    const match = pattern.exec(text);
+    const raw = match?.[1];
+    if (!raw) continue;
+    const value = Number(raw);
+    if (!Number.isFinite(value) || value <= 0) continue;
+    if (value > 180) continue;
+    return Math.round(value);
   }
   return null;
 }
@@ -637,6 +700,14 @@ export function parseMachineBrief(text: string): MachineBrief {
   }
 
   const conveyor = process === 'conveyor' ? detectConveyorSpec(source) : null;
+  const turner = detectTurner(source);
+  if (turner) {
+    const standard = (TURNER_COMMON_ANGLES as readonly number[]).includes(turner.angleDeg);
+    notes.push(
+      `转向工位：需求要求把工件旋转 ${turner.angleDeg}° 改变方向` +
+        (standard ? '' : '（非常用角度，按原值建模，需复核回转机构分度能力）')
+    );
+  }
   const workpiece = detectWorkpiece(source);
   if (workpiece) {
     const dims = [workpiece.lengthMm, workpiece.widthMm, workpiece.heightMm]
@@ -654,6 +725,7 @@ export function parseMachineBrief(text: string): MachineBrief {
     ...(conveyor ? { conveyor } : {}),
     ...(processNames.length > 0 ? { processes: processNames } : {}),
     ...(workpiece ? { workpiece } : {}),
+    ...(turner ? { turner } : {}),
     actuators,
     sensors,
     brand,
