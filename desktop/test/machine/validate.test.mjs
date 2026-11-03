@@ -206,7 +206,10 @@ test('三处入口对同一份配置结论一致：合法配置全通过', () =>
   assert.deepEqual(precheck(value).errors, []);
 });
 
-test('三处入口对同一份配置结论一致：未绑定传感器都报 SENSOR_UNBOUND', () => {
+test('严格入口对同一份配置结论一致：未绑定传感器都报 SENSOR_UNBOUND', () => {
+  // 严格入口 = validateDesign / validateMachineDesign(store 落盘) / precheck。
+  // validateMachineConfig 是「外部 IO 映射导入」入口，见下一条测试：它历史上就不校验 part，
+  // 这里不把它算进一致性断言，避免用一条测试同时要求「同源」和「对现场点位表放行」。
   const value = baseConfig({
     safety: { emergencyStop: 'X8', safetyDoor: 'X9' },
     sensors: [
@@ -220,10 +223,26 @@ test('三处入口对同一份配置结论一致：未绑定传感器都报 SENS
   const designCodes = codes(design).filter((code) => code === 'SENSOR_UNBOUND');
   assert.equal(designCodes.length, 1);
 
-  assert.throws(() => validateMachineConfig(value), /传感器「X1」引用了未定义工位或执行机构「cyl-ghost」/);
   assert.throws(() => validateMachineDesign({ config: value }), /未定义工位或执行机构「cyl-ghost」/);
 
   const precheckCodes = precheck(value).errors.map((error) => error.code);
   assert.ok(precheckCodes.includes('SENSOR_UNBOUND'), `预检也应报 SENSOR_UNBOUND，实际 ${precheckCodes.join(',')}`);
   assert.equal(precheckCodes.filter((code) => code === 'SENSOR_UNBOUND').length, 1, '同一条绑定问题只报一次');
+});
+
+test('外部 IO 映射走宽松模式：part 是信号名也合法；方案落盘走严格模式必须拒', () => {
+  // 回归：联调面板导入的现场点位表，part 是「主回路反馈」这类信号名，既不是工位也不是执行机构。
+  // validateMachineConfig（commission 路径）历史上就不校验 part，收紧会让既有联调样机不可用；
+  // 而方案落盘/应用/PLC 生成必须继续严格拒绝。
+  const config = {
+    id: 'signal-map',
+    name: '信号名点位表',
+    stations: ['上料', '压铸'],
+    actuators: [{ id: 'a1', name: '滑台', kind: 'cylinder', station: '上料' }],
+    sensors: [{ point: 'X0', station: '上料', part: '主回路反馈' }]
+  };
+  assert.doesNotThrow(() => validateMachineConfig(config), '外部 IO 映射不该因 part 是信号名被拒');
+  const strict = validateDesign(config);
+  assert.equal(strict.ok, false);
+  assert.equal(strict.issues[0].code, 'SENSOR_UNBOUND');
 });

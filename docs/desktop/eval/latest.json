@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-03T15:47:42.775Z",
+  "generatedAt": "2026-11-03T17:29:12.993Z",
   "version": "0.6.3",
   "mode": "offline-rules",
   "dataset": {
     "path": "docs/desktop/eval/cases.json",
-    "count": 117,
+    "count": 120,
     "references": 17,
     "ambiguous": 7,
     "multiStep": 5,
@@ -13,6 +13,7 @@
       "apply_machine_design",
       "build_canvas_assembly",
       "build_machine_model",
+      "capture_view",
       "design_machine",
       "export_cost_report",
       "export_files",
@@ -61,19 +62,19 @@
   "passed": true,
   "metrics": {
     "intent": {
-      "correct": 117,
-      "total": 117,
+      "correct": 120,
+      "total": 120,
       "rate": 1
     },
     "tools": {
-      "correct": 117,
-      "total": 117,
+      "correct": 120,
+      "total": 120,
       "rate": 1
     },
     "params": {
-      "correct": 60,
-      "total": 60,
-      "rate": 1
+      "correct": 62,
+      "total": 63,
+      "rate": 0.9841269841269841
     },
     "refused": {
       "correct": 7,
@@ -3527,6 +3528,103 @@
         }
       ],
       "passed": true
+    },
+    {
+      "id": "cv01",
+      "input": "把当前三维视图截图给我",
+      "tags": [
+        "capture"
+      ],
+      "note": "截图请求 → capture_view，视图缺省 3d；返回 path/bytes/sha256",
+      "expectedIntent": "query",
+      "actualIntent": "query",
+      "intentOk": true,
+      "expectedTools": [
+        "capture_view"
+      ],
+      "actualTools": [
+        "capture_view"
+      ],
+      "toolOk": true,
+      "paramsApplicable": true,
+      "paramsOk": true,
+      "refusedOk": true,
+      "actualPlans": [
+        {
+          "tool": "capture_view",
+          "args": {
+            "view": "3d"
+          },
+          "readOnly": true,
+          "missing": []
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "cv02",
+      "input": "截一张机型库的图",
+      "tags": [
+        "capture"
+      ],
+      "note": "带视图关键词时按关键词选 view",
+      "expectedIntent": "query",
+      "actualIntent": "query",
+      "intentOk": true,
+      "expectedTools": [
+        "capture_view"
+      ],
+      "actualTools": [
+        "capture_view"
+      ],
+      "toolOk": true,
+      "paramsApplicable": true,
+      "paramsOk": true,
+      "refusedOk": true,
+      "actualPlans": [
+        {
+          "tool": "capture_view",
+          "args": {
+            "view": "library"
+          },
+          "readOnly": true,
+          "missing": []
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "cv03",
+      "input": "截图功能怎么用",
+      "tags": [
+        "capture",
+        "doc"
+      ],
+      "note": "负向：求助/文档句式（怎么用）走知识库，不触发截图",
+      "expectedIntent": "query",
+      "actualIntent": "query",
+      "intentOk": true,
+      "expectedTools": [
+        "search_docs"
+      ],
+      "actualTools": [
+        "search_docs"
+      ],
+      "toolOk": true,
+      "paramsApplicable": true,
+      "paramsOk": false,
+      "refusedOk": true,
+      "actualPlans": [
+        {
+          "tool": "search_docs",
+          "args": {
+            "query": "截图功能"
+          },
+          "readOnly": true,
+          "missing": []
+        }
+      ],
+      "passed": false
     }
   ]
 }

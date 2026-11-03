@@ -418,7 +418,16 @@ function readId(raw: UnknownRecord): string | undefined {
  * 直接读原始输入而不是归一化结果，因此解析阶段就失败时结论同样可见（预检要一次报全），
  * 并且两个入口看到的是同一份规则。
  */
-function crossCheck(value: UnknownRecord): DesignIssue[] {
+/**
+ * `requirePartBinding`：传感器 part 是否必须绑到工位/执行机构。
+ * - 方案（design/apply/PLC）走严格模式（默认 true）：part 必须是工位名或执行机构 id。
+ * - 外部 IO 映射导入（联调面板 setMachineConfig）走宽松模式：现场点位表里的 part 往往是
+ *   「主回路反馈」这类信号名，既不是工位也不是执行机构；这类配置以前也从没校验过 part
+ *   （旧的 machine-config.ts 只校验 station），放宽是为了保持既有行为、不是新增豁免。
+ */
+export interface ValidateOptions { requirePartBinding?: boolean }
+
+function crossCheck(value: UnknownRecord, options: ValidateOptions = {}): DesignIssue[] {
   const issues: DesignIssue[] = [];
   const rawActuators = Array.isArray(value.actuators) ? value.actuators : [];
   const actuatorIds = new Set<string>();
@@ -455,6 +464,7 @@ function crossCheck(value: UnknownRecord): DesignIssue[] {
     if (point === '' || part === '') continue;
     if (isSafetySensor(raw, { point, part }, safetyRefs)) continue;
     if (stationSet.has(part) || actuatorIds.has(part)) continue;
+    if (options.requirePartBinding === false) continue;
     issues.push({
       code: 'SENSOR_UNBOUND',
       path: `config.sensors[${index}].part`,
@@ -466,7 +476,7 @@ function crossCheck(value: UnknownRecord): DesignIssue[] {
 }
 
 /** 校验并归一化机型配置；不抛错，结论全在返回值里。 */
-export function validateDesign(value: unknown): ValidateResult {
+export function validateDesign(value: unknown, options: ValidateOptions = {}): ValidateResult {
   const issues: DesignIssue[] = [];
   let config: MachineConfig | undefined;
   try {
@@ -475,7 +485,7 @@ export function validateDesign(value: unknown): ValidateResult {
     if (!(error instanceof DesignIssueError)) throw error;
     issues.push(error.issue);
   }
-  if (isRecord(value)) issues.push(...crossCheck(value));
+  if (isRecord(value)) issues.push(...crossCheck(value, options));
   if (issues.length > 0 || config === undefined) {
     return issues.length > 0 ? { ok: false, issues } : { ok: false, issues: [configShapeIssue()] };
   }
@@ -483,8 +493,8 @@ export function validateDesign(value: unknown): ValidateResult {
 }
 
 /** 校验并归一化机型配置；ok=false 时抛 issues[0].message（保持既有调用方式）。 */
-export function assertDesign(value: unknown): MachineConfig {
-  const result = validateDesign(value);
+export function assertDesign(value: unknown, options: ValidateOptions = {}): MachineConfig {
+  const result = validateDesign(value, options);
   const config = result.config;
   if (!result.ok || config === undefined) {
     throw new Error(result.issues[0]?.message ?? '机型配置不合法');

@@ -197,6 +197,18 @@ export function isMachineApplyRequest(text: string): boolean {
  * 机型方案自查请求（只读）：检查/校验当前方案的结构与绑定。
  * 与 apply 区分：这里只出 issues，不写盘；与 verify_plc_program 区分：不看 PLC 轴/信号。
  */
+/**
+ * 截图请求：让智能体拿证据（capture_view）。
+ * 负向：文档类提问（「截图索引在哪」「截图说明」）走知识库，不触发截图。
+ */
+export function isCaptureRequest(text: string): boolean {
+  const value = (text ?? '').trim();
+  if (!value) return false;
+  // 文档/求助句式不触发截图：「截图怎么用」「截图索引在哪」「截图保存在哪个目录」
+  if (/(索引|文档|说明|帮助|怎么|如何|怎样|在哪|哪里|哪个目录|保存到哪|支持|限制|能不能)/.test(value)) return false;
+  return /(?:截(?:个|一|张|一下)|截屏|截图|抓个图|抓一张|屏幕快照|screenshot|capture\s+view)/i.test(value);
+}
+
 export function isMachineValidateRequest(text: string): boolean {
   const value = (text ?? '').trim();
   if (!value) return false;
@@ -255,6 +267,10 @@ export function routeIntent(text: string): IntentMatch {
     if (/(?:存进|存入|保存|入库|收录|收进|放进|写入|打包进|加载|载入|读取|恢复|切换|切到|调出)/.test(normalized)) {
       return { intent: 'modify', confidence: 'high', score: 4, hits: ['机型库'], reason: '机型库存取（写操作，需确认）' };
     }
+  }
+  // 截图请求：先于通用打分，否则「截图」既不匹配意图词也会被拆句拆坏。
+  if (isCaptureRequest(normalized)) {
+    return { intent: 'query', confidence: 'high', score: 3, hits: ['截图'], reason: '截取当前视图作为证据（只读，落盘返回 path 与 sha256）' };
   }
   // 多步指令以最后一步的目标分类：「读 BOM 然后做干涉」应算计算而不是查询。
   const steps = splitInstructionSteps(normalized);
@@ -870,6 +886,16 @@ function planToolBase(text: string): ToolPlan | null {
       readOnly: false,
       missing: [],
       why: '按当前机型生成 PLC 工程文件与 ZIP（写入 userData/exports/，需确认）'
+    };
+  }
+  if (isCaptureRequest(value)) {
+    const view = /机型库/.test(value) ? 'library' : /联动|动作|播放/.test(value) ? 'linkage' : /导出|文件|产物/.test(value) ? 'exports' : '3d';
+    return {
+      tool: 'capture_view',
+      args: { view },
+      readOnly: true,
+      missing: [],
+      why: `截取 ${view} 视图并落盘，返回文件路径、字节数与 sha256（默认 1600×1000）`
     };
   }
   if (/(?:渲染统计|渲染指标|渲染状态|帧率|帧时间|每帧|fps|不跟手|拖动.{0,8}(?:卡|慢)|软件渲染|swiftshader|llvmpipe)/i.test(value)) {

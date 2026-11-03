@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node
 import { recordDiagnosticError } from '../shared/diagnostics.ts';
 import { dirname, join } from 'node:path';
 import { validateMachineConfig, type MachineConfig } from '../commission/machine-config.ts';
+import { assertDesign } from './validate.ts';
 import { formKindUnsupportedIssue, isSupportedFormKind } from './validate.ts';
 import type { MachineBomItem, MachineCycleEstimate, MachinePowerEstimate } from './synth.ts';
 import { normalizeStationGeometryLayout, type StationGeometryLayout } from './station-layout.ts';
@@ -223,7 +224,8 @@ function parseMachineForm(value: unknown): MachineFormSummary {
 export function validateMachineDesign(value: unknown): NormalizedMachineDesign {
   if (!isRecord(value)) throw new Error('design 必须是对象');
   if (!isRecord(value.config)) throw new Error('design.config 必须是对象');
-  const config = validateMachineConfig(value.config);
+  // 方案落盘走严格绑定校验（外部 IO 映射才走 validateMachineConfig 的宽松模式）
+  const config = assertDesign(value.config);
   const stationIdentityMapValid = isStationIdentityList(value.stationIdentities, config.stations.length);
   const stationIdentities = stationIdentityMapValid
     ? [...(value.stationIdentities as StationIdentity[])]

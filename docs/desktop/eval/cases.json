@@ -1708,5 +1708,51 @@
       "plc-repair"
     ],
     "note": "补齐默认 dryRun=true：先列 willAdd 不写盘；用户确认后才 dryRun=false 写回方案并让预检归零。"
+  },
+  {
+    "id": "cv01",
+    "input": "把当前三维视图截图给我",
+    "intent": "query",
+    "expect": {
+      "tool": "capture_view",
+      "argsContains": {
+        "view": "3d"
+      }
+    },
+    "tags": [
+      "capture"
+    ],
+    "note": "截图请求 → capture_view，视图缺省 3d；返回 path/bytes/sha256"
+  },
+  {
+    "id": "cv02",
+    "input": "截一张机型库的图",
+    "intent": "query",
+    "expect": {
+      "tool": "capture_view",
+      "argsContains": {
+        "view": "library"
+      }
+    },
+    "tags": [
+      "capture"
+    ],
+    "note": "带视图关键词时按关键词选 view"
+  },
+  {
+    "id": "cv03",
+    "input": "截图功能怎么用",
+    "intent": "query",
+    "expect": {
+      "tool": "search_docs",
+      "argsContains": {
+        "query": "截图功能怎么用"
+      }
+    },
+    "tags": [
+      "capture",
+      "doc"
+    ],
+    "note": "负向：求助/文档句式（怎么用）走知识库，不触发截图"
   }
 ]

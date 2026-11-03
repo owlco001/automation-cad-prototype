@@ -27,9 +27,17 @@ export {
 // 本文件描述的是联调原型的“点位 → 执行机构/工位”配置映射，不代表可从任意 STEP
 // 自动推导机构类型、行程或轴关系。后续若接入机器人/伺服模型，需要额外的运动学数据源。
 
-/** 校验并归一化机型配置。规则在 machine/validate.ts，这里只做抛错方式的兼容包装。 */
+/**
+ * 校验并归一化机型配置。规则在 machine/validate.ts，这里只做抛错方式的兼容包装。
+ *
+ * 注意这里走 `requirePartBinding:false`：本函数服务的是**外部 IO 映射导入**
+ * （联调面板 setMachineConfig），现场点位表的 part 是「主回路反馈」这类信号名，
+ * 既不是工位也不是执行机构。这个函数历史上就只校验 station、从不校验 part，
+ * 收紧它会让既有联调样机直接不可用（CI 的 smoke 就是这么挂的）。
+ * 方案落盘/应用/PLC 生成走的是 store.ts 与 plcgen 里的严格入口，不受影响。
+ */
 export function validateMachineConfig(value: unknown): MachineConfig {
-  return assertDesign(value);
+  return assertDesign(value, { requirePartBinding: false });
 }
 
 export function demoMachineConfig(): MachineConfig {

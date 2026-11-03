@@ -2945,7 +2945,15 @@ function createWindow(): BrowserWindow {
         if (!activeTools) throw new Error('Agent 工具尚未启动');
         const summaries = activeTools.summaries();
         if (
-          summaries.length !== 25 ||
+          // 下限而不是等号：加工具不该让 smoke 红，但少了工具必须红（防悄悄丢工具）
+          summaries.length < 25 ||
+          !summaries.some((tool) => tool.name === 'list_machine_library') ||
+          !summaries.some((tool) => tool.name === 'save_machine_to_library') ||
+          !summaries.some((tool) => tool.name === 'load_machine_from_library') ||
+          !summaries.some((tool) => tool.name === 'export_machine_package') ||
+          !summaries.some((tool) => tool.name === 'capture_view') ||
+          !summaries.some((tool) => tool.name === 'validate_machine_design') ||
+          !summaries.some((tool) => tool.name === 'repair_plc_config') ||
           !summaries.some((tool) => tool.name === 'design_machine') ||
           !summaries.some((tool) => tool.name === 'suggest_kinematics') ||
           !summaries.some((tool) => tool.name === 'apply_machine_design') ||
