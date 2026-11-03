@@ -610,6 +610,37 @@ export function readStoredMachineDesign(userDataRoot: string, machineId: string)
   }
 }
 
+/**
+ * 把已校验的机型方案写成 `machine/<id>.json` 并把 active 指针指过去，返回落盘文档。
+ * 与 apply_machine_design 的落盘口径一致（同一份 JSON 缩进、同一个 active 指针形状），
+ * 供机型库加载等「方案已经校验完、只剩写盘」的场景复用。
+ */
+export function writeStoredMachineDesign(
+  userDataRoot: string,
+  design: NormalizedMachineDesign,
+  appliedAt: string = new Date().toISOString()
+): StoredMachineDesign {
+  const machineId = sanitizeMachineId(design.config.id);
+  const stored: StoredMachineDesign = {
+    ...design,
+    config: { ...design.config, id: machineId },
+    schemaVersion: 1,
+    kind: 'machine-design',
+    id: machineId,
+    name: design.config.name,
+    appliedAt
+  };
+  writeText(machineDesignPath(userDataRoot, machineId), `${JSON.stringify(stored, null, 2)}\n`);
+  writeActivePointer(userDataRoot, {
+    schemaVersion: 1,
+    machineId,
+    name: stored.name,
+    file: `machine/${machineId}.json`,
+    appliedAt
+  });
+  return stored;
+}
+
 export function readActiveMachineDesign(userDataRoot: string): StoredMachineDesign | null {
   const pointer = readActivePointer(userDataRoot);
   if (!pointer) return null;

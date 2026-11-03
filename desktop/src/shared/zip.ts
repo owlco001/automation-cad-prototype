@@ -44,6 +44,11 @@ export function createZip(entries: readonly ZipEntry[]): Buffer {
       : Buffer.from(entry.content);
     zip.addFile(path, data);
   }
+  // 固定条目时间戳：ZIP 头里的 DOS 时间是「打包那一刻」，同一份内容隔几秒再打包 sha256 就变了，
+  // 机型库/导出物要靠包哈希做去重与完整性核对，不能有这种抖动。
+  // 2020-01-01 是任意固定值（DOS 时间域 1980..2107），只要恒定即可。
+  const fixed = new Date(Date.UTC(2020, 0, 1, 0, 0, 0));
+  for (const entry of zip.getEntries()) entry.header.time = fixed;
   return zip.toBuffer();
 }
 
