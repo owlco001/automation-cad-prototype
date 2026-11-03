@@ -876,8 +876,22 @@ export function synthMachine(brief: MachineBrief, options: SynthOptions = {}): M
     }
     // 四个信号合成一条 assumption：trim.ts 会把 >20 条的数组裁成 {items,total,truncated}，
     // 一旦 assumptions 超 20 条，方案卡「应用到工程」会因为「必须是字符串数组」被拒
+    // 安全回路：顶升旋转单元要人工干预（上料/清卡件），没有急停与安全门时 PLC 预检会拒签
+    // （ESTOP_UNDEFINED / SAFETY_DOOR_UNDEFINED）。这里只给**带转向工位的机型**补最小安全回路，
+    // 普通输送线不动——安全范围属设计决策，不全局默认。
+    // 这两个点位的 part 用中文角色名，extractSafetyRefs 的 isSafetyRole 会据此识别成 estop/door，
+    // checkActuatorSensors 也会把安全点位排除在执行机构绑定校验之外。
+    const safetySensors = [
+      ['ST-TURN-ESTOP', '急停'],
+      ['ST-TURN-DOOR', '安全门']
+    ] as const;
+    for (const [point, part] of safetySensors) {
+      sensors.push({ point, station: TURNER_STATION_NAME, part });
+      if (!points.includes(point)) points.push(point);
+    }
     assumptions.push(
-      `转向工位四个到位信号：${turnerSensors.map(([point, label, part]) => `${label} ${point}→${part}`).join('、')}。`
+      `转向工位四个到位信号：${turnerSensors.map(([point, label, part]) => `${label} ${point}→${part}`).join('、')}；` +
+        `安全回路：急停 ${safetySensors[0][0]}、安全门 ${safetySensors[1][0]}（最小安全集，非安全等级认证回路，需按现场风险评估确认）。`
     );
     assumptions.push(
       `转向工位：线体中段加顶升旋转单元（升降台板 ${turnerPlan.plateLengthMm}×${turnerPlan.plateWidthMm} + 回转支承 ` +

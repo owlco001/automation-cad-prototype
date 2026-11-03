@@ -240,8 +240,12 @@ export function validateMachineDesign(value: unknown): NormalizedMachineDesign {
     actuatorIds.add(actuator.id);
   }
   const stationSet = new Set(config.stations);
+  // 安全回路传感器（急停/安全门/光栅）不属于任何工位或执行机构：它们绑的是安全回路本身。
+  // 这里放行安全角色，否则带安全集的机型方案会在这里被判非法（PLC 侧 extractSafetyRefs 用同一套词识别）。
+  const SAFETY_ROLE_RE = /急停|estop|e-stop|emergency|安全门|光栅|safety.?door|door|light.?curtain/i;
   for (const sensor of config.sensors) {
-    if (!stationSet.has(sensor.part) && !actuatorIds.has(sensor.part)) {
+    const isSafety = SAFETY_ROLE_RE.test(sensor.part);
+    if (!isSafety && !stationSet.has(sensor.part) && !actuatorIds.has(sensor.part)) {
       throw new Error(`传感器「${sensor.point}」引用了未定义工位或执行机构「${sensor.part}」`);
     }
   }
