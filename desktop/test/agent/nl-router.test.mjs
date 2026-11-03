@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { agentRegistry } from '../../test-support/agent-registry.mjs';
 import {
   INTENT_LABELS,
   READ_ONLY_TOOLS,
@@ -67,8 +68,9 @@ test('写计划永远不会被离线通道执行', () => {
 });
 
 test('只读/写工具清单与注册表一致且互不重叠', () => {
-  assert.equal(READ_ONLY_TOOLS.size + WRITE_TOOLS.size, 25);
-  assert.equal(READ_ONLY_TOOLS.size, 12);
+  const registry = agentRegistry();
+  assert.equal(READ_ONLY_TOOLS.size + WRITE_TOOLS.size, registry.total);
+  for (const name of registry.names) assert.ok(READ_ONLY_TOOLS.has(name) || WRITE_TOOLS.has(name), `${name} 未分类`);
   assert.equal(WRITE_TOOLS.has('place_component'), true);
   for (const name of READ_ONLY_TOOLS) assert.equal(WRITE_TOOLS.has(name), false, `${name} 同时被标为读写`);
 });

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { PackRegistry } from '../../src/packs/registry.ts';
 import { AgentTools } from '../../src/agent/tools.ts';
+import { agentToolTotal } from '../../test-support/agent-registry.mjs';
 import {
   AgentRpcServer,
   createAgentToken,
@@ -121,7 +122,7 @@ test('错误 token 访问返回 401', async () => {
   assert.equal(response.status, 401);
 });
 
-test('有 token 能列出 25 个工具与健康信息', async () => {
+test(`有 token 能列出 ${agentToolTotal()} 个工具与健康信息`, async () => {
   const response = await fetch(`${url}/rpc`, {
     method: 'POST',
     headers: {
@@ -132,14 +133,14 @@ test('有 token 能列出 25 个工具与健康信息', async () => {
   });
   assert.equal(response.status, 200);
   const body = await response.json();
-  assert.equal(body.result.tools.length, 25);
+  assert.equal(body.result.tools.length, agentToolTotal());
 
   const health = await fetch(`${url}/health`, {
     headers: { authorization: `Bearer ${token}` }
   });
   assert.equal(health.status, 200);
   const healthBody = await health.json();
-  assert.equal(healthBody.toolCount, 25);
+  assert.equal(healthBody.toolCount, agentToolTotal());
   assert.equal(healthBody.version, '0.1.0-test');
 });
 

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { after, test } from 'node:test';
 import { AgentTools } from '../../src/agent/tools.ts';
+import { agentToolTotal } from '../../test-support/agent-registry.mjs';
 import { createAgentCommandBus } from '../../src/agent/commands.ts';
 import { AgentSession } from '../../src/agent/session.ts';
 import { READ_ONLY_TOOLS, WRITE_TOOLS, planTool, routeIntent } from '../../src/agent/router.ts';
@@ -86,7 +87,7 @@ test('apply_machine_design 已注册为写工具，schema 支持 brief/design �
   const { tools } = setup();
   const tool = tools.summaries().find((item) => item.name === 'apply_machine_design');
   assert.ok(tool);
-  assert.equal(tools.list().length, 25);
+  assert.equal(tools.list().length, agentToolTotal());
   assert.equal(READ_ONLY_TOOLS.has('apply_machine_design'), false);
   assert.equal(WRITE_TOOLS.has('apply_machine_design'), true);
   assert.equal(tool.inputSchema.additionalProperties, false);

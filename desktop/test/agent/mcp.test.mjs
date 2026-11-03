@@ -7,6 +7,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { PackRegistry } from '../../src/packs/registry.ts';
 import { AgentTools } from '../../src/agent/tools.ts';
+import { agentToolTotal } from '../../test-support/agent-registry.mjs';
 import { buildMcpServer } from '../../src/agent/mcp.ts';
 import { DesktopRpcUnavailableError } from '../../src/agent/mcp-proxy.ts';
 
@@ -45,7 +46,7 @@ after(async () => {
   rmSync(sandbox, { recursive: true, force: true });
 });
 
-test('MCP server 通过 in-memory transport 列出 25 个复用工具', async () => {
+test(`MCP server 通过 in-memory transport 列出 ${agentToolTotal()} 个复用工具`, async () => {
   const result = await client.listTools();
   assert.deepEqual(result.tools.map((tool) => tool.name).sort(), [
     'apply_machine_design',

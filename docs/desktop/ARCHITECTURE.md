@@ -80,7 +80,7 @@ interface AgentTool { name: string; description: string; inputSchema: object; ha
 
 - **M1 基础外壳 + CAD 查看**（本轮）：Electron 可启动；打开/拖入 STEP/IGES/STL/OBJ/GLTF；零件树与三角面统计；缩放到适合；最近文件。
 - **M2 数据包**：内置包 + 导入 zip + 启停 + 标准件库联动。
-- **M3 Agent 接口**：JSON-RPC + MCP，20 个工具，token 鉴权，命令总线与渲染桥同源。
+- **M3 Agent 接口**：JSON-RPC + MCP，25 个工具（只读 12 / 写 13），token 鉴权，命令总线与渲染桥同源。
 - **M4 智慧工厂**：demo 适配器全通；OPC UA 连接/浏览/订阅；MQTT 订阅；状态回显到装配树。
 - **M5 打包**：GitHub Actions windows-latest 产出 NSIS `.exe`，签名留空但版本信息完整。
 

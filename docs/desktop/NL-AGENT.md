@@ -1,6 +1,6 @@
 # 自然语言交互 Agent · 完整设计方案
 
-状态：P7-A 已完成（离线规则路由 / 上下文裁剪 / 审计 / 只读问答 UI / 评估集）；P7-B 已完成（`place_component` 底板放置 + 二次确认 + 撤销联动）；P7-C 已完成（离线多步规划 + 计划卡片 + 顺序执行 + 失败停止）；P7-D 已完成（Agent 工具扩展 v1，12 → 17 个工具）；P7-E 已完成（上下文快照 / 指代消解 / 会话记忆 / 结果裁剪）；P7-F 已完成（执行进度 / 取消 / 失败建议 / 审计筛选与导出）；P7-G 已完成（真实模型冒烟 + 工具结果抗提示注入）；P7-K 已完成（真实模型评测 30 条 + 失败归因，三轮迭代后 30/30、拒绝率 6/6 过闸）；P7-H 已完成（主动建议 next-best-action：纯函数规则引擎 + 侧栏建议卡片 + 会话内忽略 + 工具执行后刷新）；P7-J 已完成（工具调用纠错与重试：脏 JSON 修复、schema 中文路径、一次重试、两条候选回落）；P7-L 已完成（多轮状态 / 工程指纹 / 续跑与确认中断）；会话安全策略已完成（绕过确认硬拦截 + 导出目标路径澄清）；本地知识检索已完成（`search_docs` + 构建期 `kb.json`）；P7-N 已完成（同轮去重 / 只读并行 / 会话短缓存）；机型方案合成已完成（`design_machine` 只读工具）；机型落盘已完成（`apply_machine_design` 写工具 + 3D/BOM/PLC 联动 + 撤销，工具数 18 → 20）；第三轮已完成（5 类工艺模板 + 追问策略 + 真实模型 36 条评测，评估集 74 条，见 [MACHINE-DESIGN.md](MACHINE-DESIGN.md)）
+状态：P7-A 已完成（离线规则路由 / 上下文裁剪 / 审计 / 只读问答 UI / 评估集）；P7-B 已完成（`place_component` 底板放置 + 二次确认 + 撤销联动）；P7-C 已完成（离线多步规划 + 计划卡片 + 顺序执行 + 失败停止）；P7-D 已完成（Agent 工具扩展 v1，工具数 12 → 17）；P7-E 已完成（上下文快照 / 指代消解 / 会话记忆 / 结果裁剪）；P7-F 已完成（执行进度 / 取消 / 失败建议 / 审计筛选与导出）；P7-G 已完成（真实模型冒烟 + 工具结果抗提示注入）；P7-K 已完成（真实模型评测 30 条 + 失败归因，三轮迭代后 30/30、拒绝率 6/6 过闸）；P7-H 已完成（主动建议 next-best-action：纯函数规则引擎 + 侧栏建议卡片 + 会话内忽略 + 工具执行后刷新）；P7-J 已完成（工具调用纠错与重试：脏 JSON 修复、schema 中文路径、一次重试、两条候选回落）；P7-L 已完成（多轮状态 / 工程指纹 / 续跑与确认中断）；会话安全策略已完成（绕过确认硬拦截 + 导出目标路径澄清）；本地知识检索已完成（`search_docs` + 构建期 `kb.json`）；P7-N 已完成（同轮去重 / 只读并行 / 会话短缓存）；机型方案合成已完成（`design_machine` 只读工具）；机型落盘已完成（`apply_machine_design` 写工具 + 3D/BOM/PLC 联动 + 撤销，工具数 18 → 20）；第三轮已完成（5 类工艺模板 + 追问策略 + 真实模型 36 条评测，评估集 74 条，见 [MACHINE-DESIGN.md](MACHINE-DESIGN.md)）
 目标：用户用中文一句话完成「查、算、改、出图、联调、同步」，不必记菜单路径；Agent 不替代界面，而是并行的快捷通道。
 
 ## 1. 设计边界
@@ -209,12 +209,12 @@ executePlan(plan, deps) → {
 通用多步补充：含「然后 / 接着 / 之后 / 最后 / 并且 / 同时 / 再 / 并」的指令会逐句调用 `planTool()`；任何一句落空都整单拒绝，避免做一半。单句仍回落到 `planTool()`。
 
 工具清单（以 `tools.ts` 注册表为准）：
-- 只读 11：`list_components`、`search_components`、`search_docs`、`design_machine`、`get_bom`、`get_project_context`、`run_interference_check`、`suggest_kinematics`、`run_electrical_check`、`run_cost_report`、`verify_plc_program`
-- 写 10：`apply_machine_design`、`import_cad`、`insert_component`、`place_component`、`update_component`、`remove_component`、`run_plc_generate`、`export_files`、`export_cost_report`、`undo_last`
+- 只读 12：`list_components`、`search_components`、`search_docs`、`design_machine`、`get_bom`、`get_render_stats`、`get_project_context`、`run_interference_check`、`suggest_kinematics`、`run_electrical_check`、`run_cost_report`、`verify_plc_program`
+- 写 13：`apply_machine_design`、`build_machine_model`、`build_canvas_assembly`、`save_scene_as_project`、`import_cad`、`insert_component`、`place_component`、`update_component`、`remove_component`、`run_plc_generate`、`export_files`、`export_cost_report`、`undo_last`
 - 规划中但未注册：`start_commission`、`diagnose_fault`、`sync_design_package`；未注册前不会进入可执行计划
 
 工具名与过滤：
-- 默认工具集合来自 `router.ts` 的 `READ_ONLY_TOOLS + WRITE_TOOLS`，与 `tools.ts` 当前 21 个注册工具一致；IPC/UI 调用时传入实时 `AgentTools.summaries()` 名称。
+- 默认工具集合来自 `router.ts` 的 `READ_ONLY_TOOLS + WRITE_TOOLS`，与 `tools.ts` 当前 25 个注册工具一致；IPC/UI 调用时传入实时 `AgentTools.summaries()` 名称。
 - 规划阶段逐条校验工具名；不存在的工具从步骤中移除并写入 `warnings`（例如 `忽略未注册工具 sync_design_package（第 1 步）`）。全部被过滤时 `refused:true`，不会执行空计划。
 - 不编造工具名；`sync_design_package` 注册后无需改规划规则即可自动纳入。
 
@@ -314,7 +314,7 @@ UI：侧栏「流程」下拉选择模板 → 预览前置条件与步骤（可�
 
 ## 9. 质量评估
 
-固定 102 条中文用例，位于 `docs/desktop/eval/cases.json`：覆盖 7 类意图，其中 17 条含指代、7 条歧义、5 条多步、7 条超纲；21 个已注册工具全部至少命中一次，并覆盖 6 类拒绝场景（缺参数、越权改文件、篡改审计、危险路径、未知位号、跨域误用）。P10-3 新增 6 条：5 类工艺模板（锁螺丝/点胶/装配/检测/包装）+ 1 条信息不足；`kin01` 覆盖运动件自动识别。2026-10-24 新增 27 条同义/口语改写（`sy01`–`sy27`，标签 `synonym`）：24 条覆盖查询/计算/修改/生成与各工具触发的同义说法，2 条非工程话题负例，1 条轮转审计文件篡改拒绝。工具名以 `desktop/src/agent/tools.ts` 的注册表为准，评估脚本会拒绝不存在的工具名与缺失的覆盖项。多步用例用 `expect.steps` 描述有序工具序列，单步用例用 `expect.tool + expect.argsContains`；缺参用例额外用 `expect.missing` 断言计划点名了缺失字段。`desktop/eval/agent-cases.json` 保留为旧路径兼容副本，内容与 docs 版本一致。
+固定 102 条中文用例，位于 `docs/desktop/eval/cases.json`：覆盖 7 类意图，其中 17 条含指代、7 条歧义、5 条多步、7 条超纲；全部已注册工具均至少命中一次，并覆盖 6 类拒绝场景（缺参数、越权改文件、篡改审计、危险路径、未知位号、跨域误用）。P10-3 新增 6 条：5 类工艺模板（锁螺丝/点胶/装配/检测/包装）+ 1 条信息不足；`kin01` 覆盖运动件自动识别。2026-10-24 新增 27 条同义/口语改写（`sy01`–`sy27`，标签 `synonym`）：24 条覆盖查询/计算/修改/生成与各工具触发的同义说法，2 条非工程话题负例，1 条轮转审计文件篡改拒绝。工具名以 `desktop/src/agent/tools.ts` 的注册表为准，评估脚本会拒绝不存在的工具名与缺失的覆盖项。多步用例用 `expect.steps` 描述有序工具序列，单步用例用 `expect.tool + expect.argsContains`；缺参用例额外用 `expect.missing` 断言计划点名了缺失字段。`desktop/eval/agent-cases.json` 保留为旧路径兼容副本，内容与 docs 版本一致。
 
 在 `desktop/` 下运行：
 

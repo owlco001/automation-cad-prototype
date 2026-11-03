@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { AgentTools } from '../../src/agent/tools.ts';
+import { agentToolTotal } from '../../test-support/agent-registry.mjs';
 import { READ_ONLY_TOOLS, planReadOnly, planTool, routeIntent } from '../../src/agent/router.ts';
 
 const tools = new AgentTools({ listParts: () => [] });
@@ -9,7 +10,7 @@ const BRIEF = '设计一台三工位锁螺丝机，节拍 20 件/分钟，用 75
 test('design_machine 已注册且为只读工具', () => {
   assert.equal(tools.has('design_machine'), true);
   assert.equal(READ_ONLY_TOOLS.has('design_machine'), true);
-  assert.equal(tools.list().length, 25);
+  assert.equal(tools.list().length, agentToolTotal());
 });
 
 test('design_machine schema：brief 必填，stationCount 1–12，cyclePerMin > 0', () => {

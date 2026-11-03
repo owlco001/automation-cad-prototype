@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path';
 import { after, before, test } from 'node:test';
 import { PackRegistry } from '../../src/packs/registry.ts';
 import { AgentTools } from '../../src/agent/tools.ts';
+import { agentToolTotal } from '../../test-support/agent-registry.mjs';
 import { createAgentCommandBus, SIMPLE_BOM_NOTE } from '../../src/agent/commands.ts';
 import { READ_ONLY_TOOLS } from '../../src/agent/router.ts';
 
@@ -60,7 +61,7 @@ before(() => {
 
 after(() => rmSync(sandbox, { recursive: true, force: true }));
 
-test('工具表为 25 个且不存在 NOT_IMPLEMENTED', () => {
+test(`工具表为 ${agentToolTotal()} 个且不存在 NOT_IMPLEMENTED`, () => {
   assert.deepEqual(tools.list().map((tool) => tool.name).sort(), [
     'apply_machine_design',
     'build_canvas_assembly',
