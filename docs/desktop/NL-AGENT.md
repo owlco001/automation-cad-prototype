@@ -352,6 +352,17 @@ EVAL_AGENT_OK accuracy=1.00 tools=1.00 refused=1.00
 
 说明：联调/同步工具尚未注册，评估集把这两类记为 `tool: null`，规则层必须明确说“暂不支持”，不能误落到 `search_components`；歧义用例同样要求不调用工具并追问。未知位号 `QF99` 保留给 `update_component` 在工具层返回 `NOT_PLACED`，路由不得猜测或替换成相邻位号。
 
+**任务级评测（末态断言）**：上面这套只验「判得对不对」，判 100% 也可能把机器做错。`desktop/scripts/eval-tasks.mjs` 是新的一层——在 `mkdtemp` 出来的临时 userData 里，用**真实 CommandBus + AgentTools** 按固定工具序列执行（不调模型、不联网、不开 Electron），然后断言磁盘末态：机型 config 的执行机构、整机零件数、PLC 预检与 zip、机型库入库/加载/导出/导入往返、rest/lift/sweep 三态干涉数字、截图真伪。唯一的替身是渲染层桥（`applyMachineConfig` / `getPlcGenConfig` / BOM 追加 / PLC 标记），落盘、几何、预检、打包全部跑真代码。
+
+```bash
+npm run eval:tasks
+# TASK_EVAL t01-conveyor-90 PASS axes=turner-lift,turner-rotary parts=85 geom_parts=47 plc_files=11 blocked=0 zip=8651B
+# ...
+# TASK_EVAL_SUMMARY pass=6/6 failed=0 turns_total=25
+```
+
+6 个用例：`t01` 光伏板 90° 转向输送机（转向两轴 + 参数化整机 ≥80 件 + PLC 预检 0 阻断）、`t02` 缺急停/安全门的方案（自查 ok、PLC 预检拦下 → `repair_plc_config` 写盘 → 再生成通过）、`t03` 机型库入库/切走/加载回来的 active 指针与 config 逐字段一致、`t04` 导出→删库→重新导入后 config 等价且二次导出 sha256 相同、`t05` 三态干涉 rest/lift/sweep 数字不能相同（证明可动件真按 `travelMm` 平移）、`t06` 无 GUI 时 `capture_view` 要么给出可复算 sha256 的真文件、要么明确拒绝且不落文件。任一 FAIL 打印「期望 vs 实际」并以退出码 1 结束。
+
 ### 9.1 真实模型验证
 
 `desktop/scripts/agent-live.mjs` 使用 `src/agent/llm.ts` 的 `OpenAiCompatibleClient`（OpenAI 兼容 `/chat/completions`）和 `AgentSession` 真实跑 36 条固定指令。用例从 `desktop/scripts/agent-live-cases.json` 读取，分为查询 8、操作 10、流程 6、拒绝/澄清 6、机型 6；每条包含 `{id, prompt, expect:{tools, alternatives, mustNot, asksConfirmation?, expectClarify?, allowClarify?}}`，支持单步、多步序列、参数检查、写确认、多轮前置 `history` 与越权工具拦截。

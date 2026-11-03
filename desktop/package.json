@@ -13,6 +13,7 @@
     "test": "node --test",
     "sync:e2e": "bash ../scripts/sync-e2e.sh",
     "eval:agent": "node eval/run-eval.mjs",
+    "eval:tasks": "node scripts/eval-tasks.mjs",
     "eval:agent:multiturn": "node scripts/agent-multiturn.mjs",
     "kb:build": "node scripts/build-kb.mjs",
     "build:machine-case": "node scripts/build-machine-case.mjs",
