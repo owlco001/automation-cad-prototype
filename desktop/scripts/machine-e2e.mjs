@@ -394,11 +394,14 @@ async function main() {
       const stations = (design?.config?.stations ?? []).map((entry) => (typeof entry === 'string' ? entry : entry?.name ?? entry?.id ?? ''));
       const actuators = design?.config?.actuators ?? [];
       const turner = actuators.find((entry) => entry?.id === 'turner-rotary');
+      const turnerLift = actuators.find((entry) => entry?.id === 'turner-lift');
       const bomDraft = design?.bomDraft?.items ?? [];
       const stationsText = stations.join(',');
       if (!stationsText.includes('转向工位')) throw new Error(`方案里没有「转向工位」：${stationsText}`);
       if (!turner) throw new Error(`actuators 里没有 turner-rotary：${actuators.map((a) => a?.id).join(',')}`);
+      if (!turnerLift) throw new Error(`actuators 里没有 turner-lift（顶升轴）：${actuators.map((a) => a?.id).join(',')}`);
       if (Number(turner.rotationRangeDeg) !== 90) throw new Error(`turner-rotary 角度异常：${turner.rotationRangeDeg}`);
+      if (Number(turnerLift.travelMm) !== 60) throw new Error(`turner-lift 行程异常：${turnerLift.travelMm}`);
       if (bomDraft.length === 0) throw new Error('BOM 草稿为空');
       const cardStats = await cdp.evaluate(`(() => {
         const card = document.querySelector('.acp-machine-card');
@@ -415,7 +418,7 @@ async function main() {
       // BOM 草稿（电气）本身只装电气件：转向件出现在结构 BOM / 参数化生成的 BOM 里。
       // 这里如实记录，不做假断言——详见步骤 4 的结构 BOM 断言。
       console.log(`MACHINE_E2E_NOTE bom_draft_electrical=${bomDraft.length} (转向件不在电气草稿里；见步骤 4 结构 BOM)`);
-      return `stations=${stationsText} actuators=${actuators.length} turner=90° bomDraft=${bomDraft.length} cardStats=${cardStats.stats.slice(0, 3).join('/')}`;
+      return `stations=${stationsText} actuators=${actuators.length} turnerAxes=turner-lift(${turnerLift.travelMm}mm)+turner-rotary(${turner.rotationRangeDeg}°) turner=90° bomDraft=${bomDraft.length} cardStats=${cardStats.stats.slice(0, 3).join('/')}`;
     });
 
     // --- 3. 点「应用到工程」→ 真实确认按钮 → 断言 3D + active.json ----------
@@ -517,14 +520,18 @@ async function main() {
       const parts = Number(body?.parts ?? 0);
       const loadedParts = Number(body?.loadedParts ?? 0);
       if (!(parts >= 40)) throw new Error(`零件数 ${parts} < 40`);
-      const bomRows = Array.isArray(body?.bom) ? body.bom : [];
+      // 结构 BOM 现在 25 行（窄带并联 + 顶升单元把零件数从 28 抬到 85），
+      // 工具结果超过 20 行会被 trim.ts 裁成 {items,total,truncated}——两种形状都要认。
+      const bomRaw = body?.bom;
+      const bomRows = Array.isArray(bomRaw) ? bomRaw : Array.isArray(bomRaw?.items) ? bomRaw.items : [];
+      const bomTotal = Number(Array.isArray(bomRaw) ? bomRaw.length : bomRaw?.total ?? bomRows.length);
       const turnerRows = bomRows.filter((row) => /转向|回转支承|台面滚轮/.test(String(row?.name ?? '')));
       if (turnerRows.length === 0) throw new Error('结构 BOM 里没有转向件');
       const partNames = turnerRows.map((row) => row.name).join('/');
       if (loadedParts < 40) throw new Error(`视口只装配了 ${loadedParts} 件（期望 ≥40）`);
       await cdp.waitFor(`(Number(document.getElementById('cadPartCount')?.textContent || 0) >= 40)`, '零件列表 ≥40', 30_000);
       const uiPartCount = await cdp.evaluate(`Number(document.getElementById('cadPartCount').textContent || 0)`);
-      return `parts=${parts} loaded=${loadedParts} ui=${uiPartCount} bomRows=${bomRows.length} turnerRows=${turnerRows.length} (${partNames})`;
+      return `parts=${parts} loaded=${loadedParts} ui=${uiPartCount} bomRows=${bomRows.length}(total=${bomTotal}) turnerRows=${turnerRows.length} (${partNames})`;
     });
 
     // --- 5. PLC 生成 → 断言 io-map.csv 含 ST-TURN-ROT ----------------------

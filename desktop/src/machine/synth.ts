@@ -182,9 +182,11 @@ const ACTUATOR_POSITION: Record<MachineActuatorKind, [number, number, number]> =
   rotary: [0.76, 0.65, 0.35]
 };
 
-/** 转向工位：输送线上的独立工位名与回转轴场景位置（线体中段偏驱动侧）。 */
+/** 转向工位：输送线上的独立工位名与两条轴的场景位置（线体中段）。 */
 const TURNER_STATION_NAME = '转向工位';
 const TURNER_AXIS_POSITION: [number, number, number] = [0, 0, -0.1];
+/** 顶升轴：Z 向向上（场景里 +Z 就是抬升），行程即顶升高度 */
+const TURNER_LIFT_POSITION: [number, number, number] = [0, 0, 0.05];
 
 function assertStations(value: number): number {
   if (!Number.isInteger(value) || value < MACHINE_STATIONS_MIN || value > MACHINE_STATIONS_MAX) {
@@ -425,10 +427,14 @@ function applyConveyorRefinement(
   });
   assumptions.push(...ref.assumptions);
 
-  // 转向工位：从 config 里找到回转轴（synthMachine 已加好），节拍再按它的动作时间封顶
+  // 转向工位：从 config 里找到顶升轴与回转轴（synthMachine 已加好），
+  // 节拍按「顶升 + 旋转 + 回落」三段之和封顶——顶升轴 duration 已经含举升 + 回落两趟
   const turnerAxis = design.config.actuators.find((actuator) => actuator.id === 'turner-rotary');
+  const turnerLiftAxis = design.config.actuators.find((actuator) => actuator.id === 'turner-lift');
   const turnerAngle = turnerAxis?.rotationRangeDeg ?? 0;
-  const turnerSeconds = turnerAxis ? (turnerAxis.durationMs ?? 0) / 1000 : 0;
+  const turnerSeconds = turnerAxis
+    ? ((turnerAxis.durationMs ?? 0) + (turnerLiftAxis?.durationMs ?? 0)) / 1000
+    : 0;
   const turnerCapacity = turnerSeconds > 0 ? Math.round((60 / turnerSeconds) * 100) / 100 : Infinity;
 
   const beltThroughput = ref.estimate.throughputPerMin;
@@ -452,7 +458,7 @@ function applyConveyorRefinement(
   design.cycle.bottleneck =
     `线速 ${ref.speedMps} m/s ÷ 工件间距 ${ref.estimate.pitchMm} mm → ${beltThroughput} 件/分钟` +
     (turnerSeconds > 0
-      ? `；转向工位每件 ${turnerSeconds} s（${turnerAngle}°）→ ${turnerCapacity} 件/分钟` +
+      ? `；转向工位每件 ${turnerSeconds} s（顶升+旋转 ${turnerAngle}°+回落）→ ${turnerCapacity} 件/分钟` +
         `${turnerLimited ? '（转向为瓶颈）' : '（不构成瓶颈）'}，取小值 ${throughput} 件/分钟`
       : '') +
     `（目标 ${targetPerMin} 件/分钟${meetsTarget ? '，满足' : '，未达标'}）；输送线没有工位节拍，产能靠提速或减小间距。`;
@@ -509,44 +515,81 @@ function applyConveyorRefinement(
     }
   );
 
-  // 转向工位 BOM：按 conveyorBom() 的口径归并（同类同规格合一行），成品件与加工件分行
+  // 转向工位 BOM：按 conveyorBom() 的口径归并（同类同规格合一行），成品件与加工件分行。
+  // 顶升旋转单元 = 底座框架 + 下沉框架 + 2 顶升气缸 + 4 导向柱 + 台板 + 回转支承 + 转台盘
+  // + 9 支撑指 + 转向电机；皮带改成 6 条窄带（每带 1 条行程 + 1 条回程、各 1 套滚筒）。
   if (turnerAxis) {
     const layout = turnerLayout({ ...params, turnerAngleDeg: turnerAngle });
     if (layout) {
       design.bomDraft.items.push(
         {
           kind: 'actuator',
-          name: `转向工位底板 ${Math.round(layout.plateLengthMm)}×${Math.round(layout.plateWidthMm)}×${layout.plateThicknessMm}`,
+          name: `转向工位底座框架 ${Math.round(layout.beamLengthMm)}×${layout.beamWidthMm}×${layout.beamThicknessMm}`,
+          qty: 2,
+          note: '自制加工件：两根纵向梁坐在两侧纵梁上沿，吊住顶升下沉框架',
+          role: 'other'
+        },
+        {
+          kind: 'actuator',
+          name: `顶升下沉框架底盘 ${Math.round(layout.frameBaseLengthMm)}×${Math.round(layout.frameBaseWidthMm)}×12 + 4 吊柱`,
           qty: 1,
-          note: '自制加工件：跨两侧纵梁，坐在纵梁上沿，回转支承法兰坐其上',
+          note: '自制加工件：气缸/导向柱/转向电机的安装基面，装在纵梁内侧（不占带面）',
+          role: 'other'
+        },
+        {
+          kind: 'actuator',
+          name: `顶升气缸 φ${layout.cylBodyDiameterMm}×56（行程 ${layout.strokeMm}）`,
+          qty: 2,
+          note: `竖直直线轴 turner-lift：顶升 ${layout.strokeMm} mm，两缸同步，带磁性开关（上/下两个到位点）`,
+          role: 'other'
+        },
+        {
+          kind: 'actuator',
+          name: `升降导向柱 φ${layout.guideDiameterMm}×${Math.round(layout.guideTopZ - layout.guideBottomZ)}`,
+          qty: 4,
+          note: '外购成品件：45# 镀铬光轴 + 自润滑导套，四角布置，抗偏载',
+          role: 'other'
+        },
+        {
+          kind: 'actuator',
+          name: `升降台板 ${layout.plateLengthMm}×${layout.plateWidthMm}×${layout.plateThicknessMm}`,
+          qty: 1,
+          note: `自制加工件：四角开 φ${layout.guideDiameterMm + 4} 导向过孔，全程在皮带面以下升降（行程 ${layout.strokeMm} mm）`,
           role: 'other'
         },
         {
           kind: 'actuator',
           name: `回转支承环 φ${layout.ringDiameterMm}/φ${layout.ringBoreMm}×${layout.ringHeightMm}`,
           qty: 1,
-          note: '外购成品件：薄壁回转支承，外圈与底板螺栓连接（原型不建螺栓孔）',
+          note: '外购成品件：薄壁回转支承，外圈坐升降台板、内圈随转台盘（原型不建齿圈）',
           role: 'other'
         },
         {
           kind: 'actuator',
-          name: `转向转台面 φ${layout.tableDiameterMm}×${layout.tableThicknessMm}`,
+          name: `转向转台盘 φ${layout.tableDiameterMm}×${layout.tableThicknessMm}`,
           qty: 1,
-          note: '自制加工件：圆形台面，直径 ≥ 带宽 200 mm 才托得住光伏板；台面顶与皮带面齐平',
+          note: '自制加工件：圆盘整个待在带面以下（顶升到位时盘顶 844 < 带底 846），不穿带面',
           role: 'other'
         },
         {
           kind: 'actuator',
-          name: '台面滚轮 φ30×40',
-          qty: 4,
-          note: '外购成品件：嵌在台面 φ56 通孔内，轮顶高出台面 2 mm',
+          name: `转向支撑指 ${layout.fingerWidthMm}×${layout.fingerWidthMm} + φ20×55`,
+          qty: layout.fingerCenters.length,
+          note: `自制加工件：指宽 ${layout.fingerWidthMm} < 带间间隙 ${Math.round(layout.beltGapMm)}，从带缝穿过顶升；9 只按 4 折对称布置，转 90° 后落点仍是同一组带缝`,
+          role: 'other'
+        },
+        {
+          kind: 'actuator',
+          name: `窄带并联 ${layout.beltCount} × ${layout.beltWidthMm} mm（带缝 ${Math.round(layout.beltGapMm)}）`,
+          qty: 1,
+          note: 'PVC 窄带整条连续（不为转向断开），每条一套主动/从动滚筒，可用公共轴；工件全程不离开输送面',
           role: 'other'
         },
         {
           kind: 'actuator',
           name: '转向减速电机 0.75 kW（i=180，输出约 8 rpm）',
           qty: 1,
-          note: `${layout.angleDeg}° 转向一次 ${layout.actionSeconds} s（点位 ST-TURN-ROT）`,
+          note: `${layout.angleDeg}° 分度 ${layout.rotateSeconds} s；整段动作 ${layout.actionSeconds} s = 顶升 ${layout.liftSeconds / 2} + 旋转 ${layout.rotateSeconds} + 回落 ${layout.liftSeconds / 2}（点位 ST-TURN-ROT）`,
           role: 'other',
           ratedW: 750
         }
@@ -557,19 +600,24 @@ function applyConveyorRefinement(
     assumptions.push(`BOM 已把通用模型的 ${removed} 行「旋转轴」替换为输送机结构件、减速电机与张紧组件。`);
   }
   assumptions.push(
-    `整机几何：调用 conveyor-assembly 生成参数化装配（${turnerAxis ? '两段线体 + 8 个转向零件（底板/回转支承/台面/4 滚轮/电机）' : '单段线体'}；` +
+    `整机几何：调用 conveyor-assembly 生成参数化装配（${
+      turnerAxis
+        ? '窄带并联线体 + 顶升旋转单元（底座框架/下沉框架/2 顶升气缸/4 导向柱/台板/回转支承/转台盘/9 支撑指/转向电机）'
+        : '单段线体'
+    }；` +
       `零件总数随线体长度变化（横撑数 = 长度/500+1），以建模回传为准），由 build123d 内核布尔求并并导出 STEP/STL。`
   );
 
-  // 工件长边 > 转台直径：旋转 90° 后两端会悬出，台面托不住，必须加托板或加大台面
+  // 工件长边 > 转台盘直径：旋转 90° 后两端会悬出，必须靠支撑指 + 真空吸盘或加托板
   if (turnerAxis) {
     const layout = turnerLayout({ ...params, turnerAngleDeg: turnerAngle });
     const partLength = brief.workpiece?.lengthMm ?? 0;
     if (layout && partLength > layout.tableDiameterMm) {
       const overhang = Math.round((partLength - layout.tableDiameterMm) / 2);
       warnings.push(
-        `工件长边 ${Math.round(partLength)} mm 大于转台直径 φ${layout.tableDiameterMm} mm：旋转 ${turnerAngle}° 后两端各悬出约 ${overhang} mm，` +
-          '台面托不住；需在台面加托板/加长台面，或改用两排支承滚轮。'
+        `工件长边 ${Math.round(partLength)} mm 大于转台盘直径 φ${layout.tableDiameterMm} mm：旋转 ${turnerAngle}° 后两端各悬出约 ${overhang} mm，` +
+          `由 ${layout.fingerCenters.length} 只支撑指（4 折对称）托住板心、板件自身刚性承担悬出段；` +
+          '若工件易变形，需在支撑指上加真空吸盘或另加托板（原型不建模吸盘）。'
       );
     }
   }
@@ -783,9 +831,24 @@ export function synthMachine(brief: MachineBrief, options: SynthOptions = {}): M
     }
   }
 
-  // 转向工位的回转轴：进 config.actuators → 自动进 BOM / PLC io-map / 联动时间线
+  // 转向工位：两条轴（顶升 + 旋转）都进 config.actuators → 自动进 BOM / PLC io-map / 联动时间线。
+  // 顺序是「顶升 → 旋转 → 回落」：顶升轴 durationMs 含举升与回落两趟（气缸往返），
+  // 旋转轴只算分度；两段相加就是工位时间（见 applyConveyorRefinement）。
   if (turnerPlan) {
+    const liftPoint = 'ST-TURN-LIFT';
     const turnerPoint = 'ST-TURN-ROT';
+    actuators.push({
+      id: 'turner-lift',
+      name: `${TURNER_STATION_NAME}顶升台`,
+      // 本域执行机构只有 cylinder/gripper/rotary 三种，顶升气缸就是 Z 向直线轴：
+      // kind=cylinder + travelMm + position[2]=1（向上），语义上是线性轴而不是夹爪/旋转
+      kind: 'cylinder',
+      station: TURNER_STATION_NAME,
+      point: liftPoint,
+      travelMm: turnerPlan.strokeMm,
+      durationMs: Math.round(turnerPlan.liftSeconds * 1000),
+      position: TURNER_LIFT_POSITION
+    });
     actuators.push({
       id: 'turner-rotary',
       name: `${TURNER_STATION_NAME}回转台`,
@@ -793,28 +856,40 @@ export function synthMachine(brief: MachineBrief, options: SynthOptions = {}): M
       station: TURNER_STATION_NAME,
       point: turnerPoint,
       rotationRangeDeg: turnerPlan.angleDeg,
-      durationMs: Math.round(turnerPlan.actionSeconds * 1000),
+      durationMs: Math.round(turnerPlan.rotateSeconds * 1000),
       position: TURNER_AXIS_POSITION
     });
-    points.push(turnerPoint);
-    // 回转台必须有自己的到位传感器，否则 PLC 预检拒签（ACTUATOR_SENSOR_MISSING）：
-    // 原位（0°）+ 到位（目标角度）两个信号，part 绑到 turner-rotary 上。
-    for (const [point, label] of [
-      ['ST-TURN-HOME', '原位'],
-      ['ST-TURN-POS', `转 ${turnerPlan.angleDeg}° 到位`]
-    ] as const) {
-      sensors.push({ point, station: TURNER_STATION_NAME, part: 'turner-rotary' });
-      points.push(point);
-      assumptions.push(`转向工位传感器「${label}」：点位 ${point}（绑定 turner-rotary）`);
+    for (const point of [liftPoint, turnerPoint]) if (!points.includes(point)) points.push(point);
+
+    // 四个到位信号（两条轴各两个），part 必须绑到对应执行机构 id，否则 PLC 预检会报
+    // ACTUATOR_SENSOR_MISSING（precheck.ts: 每条执行机构至少一个绑定传感器）：
+    //   台面在下 / 顶升到位 → turner-lift；旋转原点 / 旋转到位 → turner-rotary
+    const turnerSensors = [
+      ['ST-TURN-LIFT-HOME', '顶升原位（台面在下）', 'turner-lift'],
+      ['ST-TURN-LIFT-POS', `顶升 ${turnerPlan.strokeMm} mm 到位`, 'turner-lift'],
+      ['ST-TURN-ROT-HOME', '旋转原点', 'turner-rotary'],
+      ['ST-TURN-ROT-POS', `转 ${turnerPlan.angleDeg}° 到位`, 'turner-rotary']
+    ] as const;
+    for (const [point, , part] of turnerSensors) {
+      sensors.push({ point, station: TURNER_STATION_NAME, part });
+      if (!points.includes(point)) points.push(point);
     }
+    // 四个信号合成一条 assumption：trim.ts 会把 >20 条的数组裁成 {items,total,truncated}，
+    // 一旦 assumptions 超 20 条，方案卡「应用到工程」会因为「必须是字符串数组」被拒
     assumptions.push(
-      `转向工位：线体中段加回转台（转台面 φ${turnerPlan.tableDiameterMm}、回转支承 φ${turnerPlan.ringDiameterMm}×${turnerPlan.ringHeightMm}），` +
-        `把光伏板就地旋转 ${turnerPlan.angleDeg}° 改变方向；回转轴 turner-rotary（点位 ${turnerPoint}）` +
-        `动作 ${turnerPlan.actionSeconds} s/次，已计入工位时间。`
+      `转向工位四个到位信号：${turnerSensors.map(([point, label, part]) => `${label} ${point}→${part}`).join('、')}。`
     );
     assumptions.push(
-      '转向段把皮带断成两段（上行程/回程/侧挡边各两段）：实际需两段各自张紧与驱动，或用同步传动；' +
-        '当前 BOM 仍按 1 套主驱动估算，需人工确认驱动方案。'
+      `转向工位：线体中段加顶升旋转单元（升降台板 ${turnerPlan.plateLengthMm}×${turnerPlan.plateWidthMm} + 回转支承 ` +
+        `φ${turnerPlan.ringDiameterMm}×${turnerPlan.ringHeightMm} + 转台盘 φ${turnerPlan.tableDiameterMm}），` +
+        `顶升 ${turnerPlan.strokeMm} mm → 旋转 ${turnerPlan.angleDeg}° → 回落；两条轴 turner-lift（点位 ${liftPoint}）/ ` +
+        `turner-rotary（点位 ${turnerPoint}），合计 ${turnerPlan.actionSeconds} s/件，已计入工位时间。`
+    );
+    assumptions.push(
+      `输送面改成 ${turnerPlan.beltCount} 条 ${turnerPlan.beltWidthMm} mm 窄带并联（带缝 ${Math.round(turnerPlan.beltGapMm)} mm），` +
+        `窄带整条连续、不因转向断开：${turnerPlan.fingerCenters.length} 只支撑指（指宽 ${turnerPlan.fingerWidthMm} < 带缝）从带缝穿过顶升，` +
+        '工件全程不离开输送面；会转的回转支承/转台盘/升降台板都待在带面以下（顶升到位时盘顶仍低于带底），不为转台开口。' +
+        `每带一套主动/从动滚筒（可共用通轴，BOM 按 ${turnerPlan.beltCount} 套估），主驱动仍按 1 套减速电机估，多带同步需人工确认。`
     );
   }
 
