@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { after, before, test } from 'node:test';
 import { PackRegistry } from '../../src/packs/registry.ts';
 import { AgentTools } from '../../src/agent/tools.ts';
-import { agentToolTotal } from '../../test-support/agent-registry.mjs';
+import { agentRegistry, agentToolTotal } from '../../test-support/agent-registry.mjs';
 import { createAgentCommandBus, SIMPLE_BOM_NOTE } from '../../src/agent/commands.ts';
 import { READ_ONLY_TOOLS } from '../../src/agent/router.ts';
 
@@ -62,33 +62,21 @@ before(() => {
 after(() => rmSync(sandbox, { recursive: true, force: true }));
 
 test(`工具表为 ${agentToolTotal()} 个且不存在 NOT_IMPLEMENTED`, () => {
-  assert.deepEqual(tools.list().map((tool) => tool.name).sort(), [
-    'apply_machine_design',
-    'build_canvas_assembly',
-    'build_machine_model',
-    'design_machine',
-    'export_cost_report',
-    'export_files',
-    'get_bom',
-    'get_project_context',
-    'get_render_stats',
-    'import_cad',
-    'insert_component',
+  // 名单不再写死：与运行时注册表逐一比对，另点名几个关键工具防止「两边一起空」。
+  assert.deepEqual(tools.list().map((tool) => tool.name).sort(), agentRegistry().names);
+  for (const name of [
     'list_components',
-    'place_component',
-    'remove_component',
-    'run_cost_report',
-    'run_electrical_check',
-    'run_interference_check',
-    'run_plc_generate',
-    'save_scene_as_project',
-    'search_components',
-    'search_docs',
-    'suggest_kinematics',
-    'undo_last',
-    'update_component',
-    'verify_plc_program'
-  ]);
+    'design_machine',
+    'apply_machine_design',
+    'list_machine_library',
+    'save_machine_to_library',
+    'load_machine_from_library',
+    'export_machine_package',
+    'verify_plc_program',
+    'undo_last'
+  ]) {
+    assert.ok(tools.has(name), `注册表少了工具 ${name}`);
+  }
   for (const tool of tools.list()) {
     assert.doesNotMatch(JSON.stringify(tool), /NOT_IMPLEMENTED|尚未实现|未实现/);
   }

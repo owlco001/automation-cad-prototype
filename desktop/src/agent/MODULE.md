@@ -5,7 +5,7 @@
 ## 两个入口，一份注册表
 
 ```
-tools.ts（AgentTools + 25 个 AgentTool；只读 12 / 写 13；含只读 `suggest_kinematics`、`get_render_stats`；含只读 `design_machine` 与写工具 `apply_machine_design`）
+tools.ts（AgentTools + 29 个 AgentTool；只读 13 / 写 16；含只读 `suggest_kinematics`、`get_render_stats`、`list_machine_library`；含只读 `design_machine` 与写工具 `apply_machine_design`；机型库 `save_machine_to_library` / `load_machine_from_library` / `export_machine_package`）
  ├─ kb/index.ts → 构建期分块 + kb.json（≤400 KB，标题 hash）
  ├─ kb/search.ts → 纯函数 BM25（中文 2-gram + 英文词，top 3 / ≤2 KB）
  ├─ rpc.ts        → HTTP JSON-RPC，127.0.0.1:7420，Bearer token
@@ -72,6 +72,10 @@ interface Bridge {
 | `search_docs` | `query / limit?` | 无（直接读内嵌 `kb.json`） | ✅ 只读：来源 + 标题 + 摘要 + 分数；无命中返回空 |
 | `design_machine` | `brief / stationCount? / cyclePerMin?` | 无 | ✅ 只读：需求抽取 + 方案合成，不落盘、不改工程 |
 | `apply_machine_design` | `brief? / design? / name? / overwrite? / withBom? / withPlc?` | `apply_machine_design` | ✅ 写：brief 与 design 二选一；校验后写 `machine/<id>.json` + `active.json`，默认追加 BOM，可选 PLC `io-map.csv`；需确认、可撤销、刷新 3D |
+| `list_machine_library` | 无 | `list_machine_library` | ✅ 只读：`{items:[{id,name,version,sizeBytes,source,updatedAt}],total}`，空库返回空数组 |
+| `save_machine_to_library` | `id? / name? / version? / overwrite?` | `save_machine_to_library` | ✅ 写：打包 `.machine.zip` 入库，缺省取当前 active 机型；同名返回 `LIBRARY_EXISTS` + `hint`，绝不自动覆盖 |
+| `load_machine_from_library` | `id` | `load_machine_from_library` | ✅ 写：写回 `machine/<id>.json` + `active.json`，`bom.csv` 回填 `bomDraft.items`，并 `applyMachineConfig` 刷 3D |
+| `export_machine_package` | `id / targetPath?` | `export_machine_package` | ✅ 写：默认 `userData/exports/machines/<id>.machine.zip`，返回 `{path,bytes,sha256}`；targetPath 必须在 exports 下 |
 | `import_cad` | `path` | `import_cad` | ✅ 可用 |
 | `get_bom` | 无 | `get_bom` | ✅ 简化 BOM |
 | `get_project_context` | 无 | `get_project_context` | ✅ 只读：域/视图/选中/机型/底板/单位/最近操作，缺失为 null |
@@ -91,7 +95,7 @@ interface Bridge {
 
 `get_bom` 的 BOM 由「当前 CAD 零件 + 已插入占位件」生成：序号递增、名称/型号取零件名、数量 1、材料 `—`，并带 `note` 说明这是简化 BOM。没有模型时返回空数组。
 
-机型落盘的校验、文件读写与 BOM 行转换在 `src/machine/store.ts`；PLC 点位映射在 `src/machine/io-map.ts`，复用 `plcgen/io.ts` 与 `plcgen/tags.ts`，只输出 CSV、不复制完整 ST 生成逻辑。`apply_machine_design` 校验失败返回 `INVALID_ARGUMENT`，同名文件默认 `FILE_EXISTS`，写入失败返回 `WRITE_FAILED`；确认拒绝时不调用命令总线、不创建目录。
+机型落盘的校验、文件读写与 BOM 行转换在 `src/machine/store.ts`；机型库（`.machine.zip` 打包/校验/索引/导入导出）在 `src/machine/library.ts`，工具层四个命令统一用 `serializeMachineLibraryError` 折成 `{code,message,hint}`（`LIBRARY_EXISTS` 的 hint 固定为「同名机型已存在，确认覆盖请显式传 overwrite: true」）；`loadFromLibrary` 会把包内 `bom.csv` 解析回 `bomDraft.items`（CSV 没有物料号列，`partId` 无法复原，成本按缺物料号如实统计）。PLC 点位映射在 `src/machine/io-map.ts`，复用 `plcgen/io.ts` 与 `plcgen/tags.ts`，只输出 CSV、不复制完整 ST 生成逻辑。`apply_machine_design` 校验失败返回 `INVALID_ARGUMENT`，同名文件默认 `FILE_EXISTS`，写入失败返回 `WRITE_FAILED`；确认拒绝时不调用命令总线、不创建目录。
 
 ## 本地知识检索（kb/）
 
@@ -399,16 +403,16 @@ IPC 与 UI：
 
 - 独立 stdio MCP 启动时读取 `userData/agent-token`，调用 `POST http://127.0.0.1:7420/rpc` 的 `tools/call`，工具名和参数原样转发，默认 10 秒超时。
 - 桌面可达时所有已知工具都转发，写操作走主进程 CommandBus 与渲染桥。
-- 桌面不可达时：`list_components` / `search_components` 回退本地 registry；其余 13 个桌面工具（含 `place_component`、`update_component`、`run_plc_generate`、`export_files`）返回 `{ok:false,code:'DESKTOP_NOT_RUNNING',message:'请先启动 AutomationCAD 桌面应用，再调用该工具'}`。
+- 桌面不可达时：`list_components` / `search_components` 回退本地 registry；其余 27 个桌面工具（含 `place_component`、`update_component`、`run_plc_generate`、`export_files`、`load_machine_from_library`）返回 `{ok:false,code:'DESKTOP_NOT_RUNNING',message:'请先启动 AutomationCAD 桌面应用，再调用该工具'}`。
 - 代理错误不包含 token；401 单独返回鉴权错误，不降级成“桌面未运行”。
 
 ## 应用内智能体对话
 
 - `agent-llm.json` 保存 `{baseUrl,apiKey,model,maxIterations}`，POSIX 权限 600。默认 `https://api.openai.com/v1`、`gpt-4o-mini`、6 轮。
 - UI 读取时 apiKey 只返回掩码（如 `sk-****abcd`）；保存时掩码/空值保留原密钥。
-- `llm.ts` 以 OpenAI 兼容格式发送 25 工具 JSON Schema，60 秒超时；非 2xx 返回含状态码的中文错误。
+- `llm.ts` 以 OpenAI 兼容格式发送 29 工具 JSON Schema，60 秒超时；非 2xx 返回含状态码的中文错误。
 - `session.ts` 注入 `{llm,bus,confirmWrite}`：工具结果以 `role:'tool'` 回灌，先经 `serializeToolResult` 裁剪、再由 `guard.ts` 包成不可信数据块，失败不中断；历史只保留最近 20 条；超轮返回「已达到最大工具调用轮数（N），请缩小任务范围」。
-- `import_cad`、`insert_component`、`place_component`、`update_component`、`remove_component`、`run_plc_generate`、`export_files`、`export_cost_report`、`undo_last` 执行前由主进程弹出确认；拒绝时回灌 `USER_DENIED`。
+- `import_cad`、`insert_component`、`place_component`、`update_component`、`remove_component`、`run_plc_generate`、`export_files`、`export_cost_report`、`save_machine_to_library`、`load_machine_from_library`、`export_machine_package`、`undo_last` 执行前由主进程弹出确认；拒绝时回灌 `USER_DENIED`。
 - 面板包含对话消息流/工具卡片、模型设置（apiKey 为 password）与测试连接（ping，`max_tokens=8`）。
 
 ## JSON-RPC 协议
@@ -534,7 +538,7 @@ parseFallbackCandidates(text): string[]
   `run_electrical_check` / `verify_plc_program` / `run_plc_generate` 受模块开关（`cost.estimation` /
   `elec.validation` / `plcgen`）门控，而开关由渲染层读完模块设置后回填；渲染层未就绪时这 5 个不在列表里。
   外部客户端要等 `resources/read automationcad://project/current/summary` 返回 `ok:true` 再取工具列表，
-  否则会误判「工具丢了」。`scripts/smoke-mcp.mjs` 就是按这个顺序断言的（20 → 25）。
+  否则会误判「工具丢了」。`scripts/smoke-mcp.mjs` 就是按这个顺序断言的（模块门控 5 个不在早期列表里，等齐后再按注册表实际数量比对）。
 - 外部服务的端口不固定：LAN 关闭时用随机端口，只有开着局域网访问才是 7420；脚本应从启动日志里取
   `[agent] http://127.0.0.1:PORT`，不要写死。
 
@@ -562,7 +566,7 @@ parseFallbackCandidates(text): string[]
 ## 进度
 
 - ✅ 注册表 + 22 工具（只读 12 / 写 10）+ 鉴权 + 结构化错误码 <!-- tool-count:ignore -->
-- ✅ MCP stdio（真实握手 `tools/list` 返回 25 个）
+- ✅ MCP stdio（真实握手 `tools/list` 返回 29 个）
 - ✅ 命令总线：注册/执行/历史/失败记录/撤销
 - ✅ 渲染桥：场景、选择、BOM、插入、移除、底板放置/撤销、干涉、导入
 - ✅ MCP 写工具本机 RPC 代理（转发/降级/超时）

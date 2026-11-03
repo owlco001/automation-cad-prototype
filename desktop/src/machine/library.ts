@@ -30,7 +30,7 @@ import {
   rmSync,
   writeFileSync
 } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { recordDiagnosticError } from '../shared/diagnostics.ts';
 import { createZip } from '../shared/zip.ts';
 import { validateMachineConfig, type MachineConfig } from '../commission/machine-config.ts';
@@ -40,6 +40,7 @@ import {
   machineBomDraftPath,
   machineDesignPath,
   machineGeometryPaths,
+  parseMachineBomCsv,
   readTextIfExists,
   renderMachineBomCsv,
   sanitizeMachineId,
@@ -1004,6 +1005,43 @@ export function exportPackage(userDataRoot: string, id: string): Buffer {
   return createZip(entries);
 }
 
+/** 机型包导出的固定落点：`userData/exports/machines/`（与其它导出同在 exports 下）。 */
+export function machinePackageExportDirectory(userDataRoot: string): string {
+  return join(userDataRoot, 'exports', 'machines');
+}
+
+/**
+ * 解析导出目标路径（`export_machine_package` 的 `targetPath`）。
+ *
+ * 规则：缺省写 `userData/exports/machines/<id>.machine.zip`；显式路径只能是
+ * `userData/exports/` 之内的位置——相对路径按 exports 解析，绝对路径也必须在 exports 下。
+ * 越界（`../`、盘符、`/etc`、`exports-evil` 这类同前缀兄弟目录）一律 LIBRARY_BAD_PATH，
+ * 且校验发生在读包与建目录之前。缺扩展名时补 `.machine.zip`。
+ */
+export function resolveMachinePackageExportPath(
+  userDataRoot: string,
+  id: string,
+  targetPath?: string
+): string {
+  const safeId = sanitizeMachineId(id);
+  if (safeId !== id) fail('LIBRARY_BAD_PATH', `机型 id 不合法（含路径/控制字符或需要净化）：${id}`);
+  const exportsRoot = resolve(userDataRoot, 'exports');
+  const fallback = join(machinePackageExportDirectory(userDataRoot), `${safeId}.machine.zip`);
+  if (targetPath === undefined || targetPath === null) return fallback;
+  if (typeof targetPath !== 'string') fail('LIBRARY_BAD_PATH', 'targetPath 必须是字符串');
+  const trimmed = targetPath.trim();
+  if (!trimmed) return fallback;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f]/.test(trimmed)) fail('LIBRARY_BAD_PATH', 'targetPath 含控制字符');
+  const candidate = isAbsolute(trimmed) ? resolve(trimmed) : resolve(exportsRoot, ...trimmed.split('/'));
+  const withExtension = candidate.endsWith('.machine.zip') ? candidate : `${candidate}.machine.zip`;
+  const inside = relative(exportsRoot, withExtension);
+  if (!inside || inside.startsWith('..') || isAbsolute(inside)) {
+    fail('LIBRARY_BAD_PATH', `导出路径必须位于 ${exportsRoot} 下：${targetPath}`);
+  }
+  return withExtension;
+}
+
 export function removeFromLibrary(userDataRoot: string, id: string): MachineLibraryEntry {
   const directory = machineLibraryEntryDirectory(userDataRoot, id);
   if (!existsSync(directory)) fail('LIBRARY_NOT_FOUND', `机型库里没有 ${id}`);
@@ -1060,11 +1098,20 @@ export function loadFromLibrary(
   if (geometryDoc?.layout !== undefined) designInput.stationGeometryLayout = geometryDoc.layout;
   if (geometryDoc?.form !== undefined) designInput.form = geometryDoc.form;
   if (geometryDoc?.stationIdentities !== undefined) designInput.stationIdentities = geometryDoc.stationIdentities;
+  // 包里的 bom.csv 是 BOM 的事实源：不解析回来，加载完 bomDraft 就是空的，
+  // 之后 run_cost_report / 电气出图会当成「这台机器没有零件」。
+  const bomBytes = files.get(MACHINE_PACKAGE_PATHS.bom);
 
   let design: NormalizedMachineDesign;
   try {
+    if (bomBytes) {
+      const items = parseMachineBomCsv(decodeUtf8(bomBytes, 'bom.csv'));
+      if (items.length > 0) designInput.bomDraft = { items };
+    }
     design = validateMachineDesign(designInput);
   } catch (error) {
+    // decodeUtf8 的 LIBRARY_BAD_ZIP 要原样抛出，别折成配置错误。
+    if (error instanceof MachineLibraryError) throw error;
     fail('LIBRARY_INVALID_CONFIG', `机型 ${id} 无法还原成方案：${error instanceof Error ? error.message : String(error)}`);
   }
   // config 原样保留（包里的 config.json 就是事实源），只把 id 钉回 manifest.id
@@ -1079,7 +1126,6 @@ export function loadFromLibrary(
       writeText(geometryPath, geometryBytes.toString('utf8'));
       copied.push(geometryPath);
     }
-    const bomBytes = files.get(MACHINE_PACKAGE_PATHS.bom);
     if (bomBytes) {
       const bomPath = machineBomDraftPath(userDataRoot, id);
       writeText(bomPath, bomBytes.toString('utf8'));
@@ -1106,10 +1152,30 @@ export function loadFromLibrary(
   };
 }
 
-/** 工具层统一错误出口：把任何异常折成 `{ok:false, code, message}`。 */
-export function serializeMachineLibraryError(error: unknown): { ok: false; code: string; message: string } {
+/**
+ * 工具层统一错误出口：把任何异常折成 `{ok:false, code, message, hint?}`。
+ *
+ * hint 是给模型/用户看的下一步动作，只描述「怎么继续」，不改变错误码语义；
+ * 尤其是 LIBRARY_EXISTS 必须明说「要覆盖得显式传 overwrite」，任何调用方都不得自动覆盖。
+ */
+export const MACHINE_LIBRARY_HINTS: Partial<Record<MachineLibraryErrorCode, string>> = {
+  LIBRARY_EXISTS: '同名机型已存在，确认覆盖请显式传 overwrite: true',
+  LIBRARY_NOT_FOUND: '先用 list_machine_library 查看机型库里已有的机型 id',
+  LIBRARY_BAD_PATH: '导出目标只能落在 userData/exports 下，不要用 ../ 或盘符跳出目录',
+  LIBRARY_BAD_ZIP: '机型包不是合法 .machine.zip，请重新导出或重新导入',
+  LIBRARY_HASH_MISMATCH: '机型包内容与 manifest 不符，可能被手工改过，请重新导出',
+  LIBRARY_UNSUPPORTED_SCHEMA: '机型包格式版本不受支持，请用当前版本重新导出'
+};
+
+export function serializeMachineLibraryError(error: unknown): {
+  ok: false;
+  code: string;
+  message: string;
+  hint?: string;
+} {
   if (error instanceof MachineLibraryError) {
-    return { ok: false, code: error.code, message: error.message };
+    const hint = MACHINE_LIBRARY_HINTS[error.code];
+    return { ok: false, code: error.code, message: error.message, ...(hint ? { hint } : {}) };
   }
   return {
     ok: false,

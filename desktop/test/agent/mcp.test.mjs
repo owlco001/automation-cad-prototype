@@ -7,7 +7,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { PackRegistry } from '../../src/packs/registry.ts';
 import { AgentTools } from '../../src/agent/tools.ts';
-import { agentToolTotal } from '../../test-support/agent-registry.mjs';
+import { agentRegistry, agentToolTotal } from '../../test-support/agent-registry.mjs';
 import { buildMcpServer } from '../../src/agent/mcp.ts';
 import { DesktopRpcUnavailableError } from '../../src/agent/mcp-proxy.ts';
 
@@ -48,33 +48,19 @@ after(async () => {
 
 test(`MCP server 通过 in-memory transport 列出 ${agentToolTotal()} 个复用工具`, async () => {
   const result = await client.listTools();
-  assert.deepEqual(result.tools.map((tool) => tool.name).sort(), [
+  // 不写死名单：与注册表逐一比对（MCP 只是复用同一注册表，不能多发也不能漏发）；
+  // 再加一遍关键工具点名，防止「两边一起变空」这种自证。
+  assert.deepEqual(result.tools.map((tool) => tool.name).sort(), agentRegistry().names);
+  for (const name of [
     'apply_machine_design',
-    'build_canvas_assembly',
-    'build_machine_model',
-    'design_machine',
-    'export_cost_report',
-    'export_files',
-    'get_bom',
-    'get_project_context',
-    'get_render_stats',
-    'import_cad',
-    'insert_component',
-    'list_components',
-    'place_component',
-    'remove_component',
-    'run_cost_report',
-    'run_electrical_check',
-    'run_interference_check',
-    'run_plc_generate',
-    'save_scene_as_project',
-    'search_components',
-    'search_docs',
-    'suggest_kinematics',
-    'undo_last',
-    'update_component',
+    'list_machine_library',
+    'save_machine_to_library',
+    'load_machine_from_library',
+    'export_machine_package',
     'verify_plc_program'
-  ]);
+  ]) {
+    assert.ok(result.tools.some((tool) => tool.name === name), `MCP 少了工具 ${name}`);
+  }
   for (const tool of result.tools) {
     assert.equal(typeof tool.description, 'string');
     assert.equal(tool.inputSchema.type, 'object');

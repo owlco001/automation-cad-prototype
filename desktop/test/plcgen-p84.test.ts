@@ -5,6 +5,7 @@ import { generateProject, type GenerateProjectSuccess } from '../src/plcgen/gene
 import { simulate, type SimResult } from '../src/plcgen/simulate.ts';
 import { summarizeVerification, verifyGenerated } from '../src/plcgen/verify.ts';
 import { AgentTools } from '../src/agent/tools.ts';
+import { agentToolTotal } from '../test-support/agent-registry.mjs';
 import { READ_ONLY_TOOLS, planTool } from '../src/agent/router.ts';
 import { createAgentCommandBus } from '../src/agent/commands.ts';
 
@@ -332,7 +333,7 @@ test('P8-4 校验：支持直接验证已有生成工程（project, config）', 
 test('P8-4 工具：verify_plc_program 已注册为只读且能直接返回摘要', async () => {
   assert.ok(READ_ONLY_TOOLS.has('verify_plc_program'));
   const tools = new AgentTools({} as never);
-  assert.equal(tools.list().length, 25);
+  assert.equal(tools.list().length, agentToolTotal());
   assert.ok(tools.has('verify_plc_program'));
   const summary = await tools.call('verify_plc_program', { config: makeConfig() }) as {
     ok: boolean;

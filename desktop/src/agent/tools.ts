@@ -199,6 +199,45 @@ const EXPORT_FILES_SCHEMA = {
   additionalProperties: false
 };
 
+const LIST_MACHINE_LIBRARY_SCHEMA = {
+  type: 'object',
+  properties: {},
+  additionalProperties: false
+};
+
+const SAVE_MACHINE_TO_LIBRARY_SCHEMA = {
+  type: 'object',
+  properties: {
+    id: { type: 'string', description: '入库机型 id；缺省取当前 active 机型，显式给则把该 id 的已落盘方案入库（另存为）' },
+    name: { type: 'string', description: '可选，入库显示名；缺省沿用方案名' },
+    version: { type: 'string', description: '可选，包版本号，默认 1.0.0' },
+    overwrite: { type: 'boolean', description: '默认 false；同名机型已存在时返回 LIBRARY_EXISTS，只有显式 true 才覆盖', default: false }
+  },
+  additionalProperties: false
+};
+
+const LOAD_MACHINE_FROM_LIBRARY_SCHEMA = {
+  type: 'object',
+  properties: {
+    id: { type: 'string', description: '机型库里的机型 id（先用 list_machine_library 查）' }
+  },
+  required: ['id'],
+  additionalProperties: false
+};
+
+const EXPORT_MACHINE_PACKAGE_SCHEMA = {
+  type: 'object',
+  properties: {
+    id: { type: 'string', description: '机型库里的机型 id' },
+    targetPath: {
+      type: 'string',
+      description: '可选，导出文件路径；相对路径按 userData/exports 解析，绝对路径也必须落在 userData/exports 下，越界返回 LIBRARY_BAD_PATH；缺省 userData/exports/machines/<id>.machine.zip'
+    }
+  },
+  required: ['id'],
+  additionalProperties: false
+};
+
 const SEARCH_DOCS_SCHEMA = {
   type: 'object',
   properties: {
@@ -303,10 +342,13 @@ function exportPathFailure(args: Record<string, unknown>): Record<string, unknow
 }
 
 function commandFailure(result: CommandResult): Record<string, unknown> {
+  const error = result.error;
   return {
     ok: false,
-    code: result.error?.code ?? 'COMMAND_FAILED',
-    message: result.error?.message ?? '命令执行失败'
+    code: error?.code ?? 'COMMAND_FAILED',
+    message: error?.message ?? '命令执行失败',
+    // hint 只有「下一步怎么做」的语义（例如覆盖要显式传 overwrite），不改变错误码。
+    ...(error?.hint ? { hint: error.hint } : {})
   };
 }
 
@@ -792,6 +834,73 @@ export class AgentTools {
           ...(args.withPlc !== undefined ? { withPlc: args.withPlc === true } : {}),
           ...(args.withGeometry !== undefined && args.withGeometry !== null ? { withGeometry: args.withGeometry === true } : {}),
           ...(args.withSolids !== undefined && args.withSolids !== null ? { withSolids: args.withSolids === true } : {})
+        });
+        return result ? commandSuccess(result) : this.unavailable();
+      }
+    });
+
+    this.add({
+      name: 'list_machine_library',
+      description:
+        '只读列出本机机型库（userData/machine-library）里已有的机型包：id、名称、版本、包体字节数、来源（local/remote）与更新时间。空库返回空数组与 total=0，不报错；写库前先用它查 id。',
+      inputSchema: LIST_MACHINE_LIBRARY_SCHEMA,
+      handler: async () => {
+        const result = await this.execute('list_machine_library', {});
+        return result ? commandSuccess(result) : this.unavailable();
+      }
+    });
+
+    this.add({
+      name: 'save_machine_to_library',
+      description:
+        '把机型方案打包成 .machine.zip 存进本机机型库（含 config / geometry / bom.csv）。缺省存当前 active 机型；同名机型已存在时返回 LIBRARY_EXISTS 且绝不自动覆盖，确认要覆盖必须显式传 overwrite: true。需要用户确认。',
+      inputSchema: SAVE_MACHINE_TO_LIBRARY_SCHEMA,
+      handler: async (args) => {
+        for (const key of ['id', 'name', 'version'] as const) {
+          if (args[key] !== undefined && (typeof args[key] !== 'string' || !args[key].trim())) {
+            return { ok: false, code: 'INVALID_ARGUMENT', message: `${key} 必须是非空字符串` };
+          }
+        }
+        if (args.overwrite !== undefined && args.overwrite !== null && typeof args.overwrite !== 'boolean') {
+          return { ok: false, code: 'INVALID_ARGUMENT', message: 'overwrite 必须是布尔值' };
+        }
+        const result = await this.execute('save_machine_to_library', {
+          ...(getString(args.id) ? { id: getString(args.id) } : {}),
+          ...(getString(args.name) ? { name: getString(args.name) } : {}),
+          ...(getString(args.version) ? { version: getString(args.version) } : {}),
+          ...(args.overwrite === true ? { overwrite: true } : {})
+        });
+        return result ? commandSuccess(result) : this.unavailable();
+      }
+    });
+
+    this.add({
+      name: 'load_machine_from_library',
+      description:
+        '从机型库加载一台机型：写回 userData/machine/<id>.json 与 active.json，BOM 草稿按包内 bom.csv 还原，并把 3D 联调视图切到该配置（applyMachineConfig）。需要用户确认；加载后当前工程指向该机型。',
+      inputSchema: LOAD_MACHINE_FROM_LIBRARY_SCHEMA,
+      handler: async (args) => {
+        const id = getString(args.id);
+        if (!id) return { ok: false, code: 'INVALID_ARGUMENT', message: '缺少必填参数：id' };
+        const result = await this.execute('load_machine_from_library', { id });
+        return result ? commandSuccess(result) : this.unavailable();
+      }
+    });
+
+    this.add({
+      name: 'export_machine_package',
+      description:
+        '把机型库里的机型导出成可分享的 .machine.zip，返回实际路径、字节数与 SHA-256。默认写 userData/exports/machines/<id>.machine.zip；targetPath 只接受 userData/exports 之内的位置（相对路径按 exports 解析），../、盘符或跳出 exports 返回 LIBRARY_BAD_PATH。需要用户确认。',
+      inputSchema: EXPORT_MACHINE_PACKAGE_SCHEMA,
+      handler: async (args) => {
+        const id = getString(args.id);
+        if (!id) return { ok: false, code: 'INVALID_ARGUMENT', message: '缺少必填参数：id' };
+        if (args.targetPath !== undefined && args.targetPath !== null && typeof args.targetPath !== 'string') {
+          return { ok: false, code: 'INVALID_ARGUMENT', message: 'targetPath 必须是字符串' };
+        }
+        const result = await this.execute('export_machine_package', {
+          id,
+          ...(getString(args.targetPath) ? { targetPath: getString(args.targetPath) } : {})
         });
         return result ? commandSuccess(result) : this.unavailable();
       }

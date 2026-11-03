@@ -36,7 +36,7 @@
 
 关键约束：**工具层必须是唯一写入口**，UI 与 Agent 共用同一套 API，避免两套逻辑漂移。
 
-## 3. 工具清单（已实现 25 个工具：只读 12 + 写 13；另 3 个规划中）
+## 3. 工具清单（已实现 29 个工具：只读 13 + 写 16；另 3 个规划中）
 
 | 工具 | 类型 | 说明 |
 |---|---|---|
@@ -45,6 +45,10 @@
 | `search_docs` | 只读 | 离线检索 13 份项目文档、截图索引与元件库分类；返回 `{source,heading,snippet,score}`，无命中返回空 |
 | `design_machine` | 只读 | 从中文 brief 合成 `MachineConfig` 方案：工艺/工位/执行机构/传感器/节拍瓶颈/功率估算/BOM 草案/警告与假设；缺执行机构时按 5 类工艺模板补全，返回 `needs/question` 供会话层最多追问一次；不落盘、不改工程（见 MACHINE-DESIGN.md） |
 | `apply_machine_design` | 写 | 把 brief 或完整 design 写入 `userData/machine/<id>.json` 并更新 `active.json`；默认追加 BOM 草稿，可选生成 PLC `io-map.csv`，成功后刷新 3D；需确认，可用 `undo_last` 撤销 |
+| `list_machine_library` | 只读 | 列出本机机型库：`{items:[{id,name,version,sizeBytes,source,updatedAt}], total}`；空库返回空数组，不报错 |
+| `save_machine_to_library` | 写 | 把当前（或指定 id 的）机型打包成 `.machine.zip` 入库；同名返回 `LIBRARY_EXISTS` 且带 `hint`「同名机型已存在，确认覆盖请显式传 overwrite: true」，**绝不自动覆盖**（需确认） |
+| `load_machine_from_library` | 写 | 从库加载机型：写回 `machine/<id>.json` + `active.json`，`bom.csv` 回填 `bomDraft.items`，再 `applyMachineConfig` 刷 3D；返回 `{id,machineId,name,parts,stations,...}`（需确认） |
+| `export_machine_package` | 写 | 导出 `.machine.zip` 到 `userData/exports/machines/<id>.machine.zip`，返回 `{path,bytes,sha256}`；`targetPath` 只接受 exports 之内的位置，越界返回 `LIBRARY_BAD_PATH`（需确认） |
 | `get_bom` | 只读 | 当前装配体简化 BOM |
 | `get_project_context` | 只读 | 当前域 / 视图 / 选中对象 / 机型 / 底板 / 单位制 / 最近操作；缺失项返回 null |
 | `run_interference_check` | 只读 | 包围盒干涉初筛 |
@@ -72,9 +76,9 @@
 
 | 级别 | 范围 | 约束 |
 |---|---|---|
-| 只读 | 10 个查询/计算/验证工具 | 可离线直接执行，不产生副作用；`get_project_context` 缺失项必须返回 null |
+| 只读 | 13 个查询/计算/验证/列举工具 | 可离线直接执行，不产生副作用；`get_project_context` 缺失项必须返回 null |
 | W1 可撤销装配写 | `insert_component`、`place_component`、`update_component`、`remove_component` | 执行前二次确认；成功后写入撤销栈，`undo_last` 恢复插入件 / 放置 / 型号与备注 / 被移除元件 |
-| W2 文件写 | `apply_machine_design`、`import_cad`、`run_plc_generate`、`export_files`、`export_cost_report` | 执行前二次确认；机型方案固定写入 `userData/machine/`，id 净化且 `overwrite=true` 才覆盖，成功后可用 `undo_last` 恢复上一个 active；导入只读用户明确给出的 CAD 路径，导出固定写入 `userData/exports/`，不接受任意写入路径 |
+| W2 文件写 | `apply_machine_design`、`save_machine_to_library`、`load_machine_from_library`、`export_machine_package`、`import_cad`、`run_plc_generate`、`export_files`、`export_cost_report` | 执行前二次确认；机型方案固定写入 `userData/machine/`，id 净化且 `overwrite=true` 才覆盖，成功后可用 `undo_last` 恢复上一个 active；机型库写 `userData/machine-library/`，同名必须显式 `overwrite`；导入只读用户明确给出的 CAD 路径，导出固定写入 `userData/exports/`，不接受任意写入路径 |
 | W3 外部副作用 | 规划的 `start_commission` / `sync_design_package` | 除二次确认外，还需明文展示目标地址与机台编号 |
 
 `undo_last` 本身也走确认，但只回滚栈顶的一条可撤销写。`apply_machine_design` 的撤销会恢复 active 指针、方案文件、BOM 草稿与 PLC 映射，并让 3D 切回上一个配置；外部设备操作仍不可撤销。
@@ -214,7 +218,7 @@ executePlan(plan, deps) → {
 - 规划中但未注册：`start_commission`、`diagnose_fault`、`sync_design_package`；未注册前不会进入可执行计划
 
 工具名与过滤：
-- 默认工具集合来自 `router.ts` 的 `READ_ONLY_TOOLS + WRITE_TOOLS`，与 `tools.ts` 当前 25 个注册工具一致；IPC/UI 调用时传入实时 `AgentTools.summaries()` 名称。
+- 默认工具集合来自 `router.ts` 的 `READ_ONLY_TOOLS + WRITE_TOOLS`，与 `tools.ts` 当前 29 个注册工具一致；IPC/UI 调用时传入实时 `AgentTools.summaries()` 名称。
 - 规划阶段逐条校验工具名；不存在的工具从步骤中移除并写入 `warnings`（例如 `忽略未注册工具 sync_design_package（第 1 步）`）。全部被过滤时 `refused:true`，不会执行空计划。
 - 不编造工具名；`sync_design_package` 注册后无需改规划规则即可自动纳入。
 

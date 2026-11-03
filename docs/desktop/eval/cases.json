@@ -1624,5 +1624,61 @@
       "project-save"
     ],
     "note": "当前视口逐件导出 STL 并落库成工程，需确认。"
+  },
+  {
+    "id": "ml01",
+    "input": "列出机型库里有哪些机型",
+    "intent": "query",
+    "expect": {
+      "tool": "list_machine_library",
+      "argsContains": {}
+    },
+    "tags": [
+      "machine-library"
+    ],
+    "note": "只读列机型库；空库返回空数组与 total=0，不报错。"
+  },
+  {
+    "id": "ml02",
+    "input": "把当前机型保存到机型库",
+    "intent": "modify",
+    "expect": {
+      "tool": "save_machine_to_library",
+      "argsContains": {}
+    },
+    "tags": [
+      "machine-library"
+    ],
+    "note": "缺省存当前 active 机型；同名已存在必须显式 overwrite，需确认。"
+  },
+  {
+    "id": "ml03",
+    "input": "从机型库加载 design-screw-3st 机型",
+    "intent": "modify",
+    "expect": {
+      "tool": "load_machine_from_library",
+      "argsContains": {
+        "id": "design-screw-3st"
+      }
+    },
+    "tags": [
+      "machine-library"
+    ],
+    "note": "加载会改 active.json 并刷新 3D，属写操作，需确认。"
+  },
+  {
+    "id": "ml04",
+    "input": "把机型库里的 design-screw-3st 导出成机器包",
+    "intent": "generate",
+    "expect": {
+      "tool": "export_machine_package",
+      "argsContains": {
+        "id": "design-screw-3st"
+      }
+    },
+    "tags": [
+      "machine-library"
+    ],
+    "note": "导出 .machine.zip 到 userData/exports/machines/，路径越界要拒绝。"
   }
 ]

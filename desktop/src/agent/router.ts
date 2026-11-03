@@ -211,6 +211,19 @@ export function routeIntent(text: string): IntentMatch {
   if (isMachineDesignRequest(normalized)) {
     return { intent: 'generate', confidence: 'high', score: 4, hits: ['机型设计'], reason: '从中文需求合成机型方案（只读，不落盘）' };
   }
+  // 机型库的存取/列举/导出：以「机型库」为锚点直接给意图，别让「保存/列出」这类
+  // 词被通用规则判成超纲（planTool 侧另有 planMachineLibraryRequest 负责选工具）。
+  if (MACHINE_LIBRARY_NOUN.test(normalized) && !/(成本|报价|价格|干涉|电气校验|载流量)/.test(normalized)) {
+    if (/(?:有哪些|有什么|列出|列举|列一下|清单|列表|看看|查看|查一下|几台)/.test(normalized)) {
+      return { intent: 'query', confidence: 'high', score: 3, hits: ['机型库'], reason: '列举机型库（只读）' };
+    }
+    if (/(?:导出|打包|分享|发给|拷贝|复制出)/.test(normalized)) {
+      return { intent: 'generate', confidence: 'high', score: 3, hits: ['机型库导出'], reason: '导出机型包（写 userData/exports，需确认）' };
+    }
+    if (/(?:存进|存入|保存|入库|收录|收进|放进|写入|打包进|加载|载入|读取|恢复|切换|切到|调出)/.test(normalized)) {
+      return { intent: 'modify', confidence: 'high', score: 4, hits: ['机型库'], reason: '机型库存取（写操作，需确认）' };
+    }
+  }
   // 多步指令以最后一步的目标分类：「读 BOM 然后做干涉」应算计算而不是查询。
   const steps = splitInstructionSteps(normalized);
   const lastStep = steps.length > 1 ? steps[steps.length - 1]! : normalized;
@@ -257,7 +270,7 @@ export interface ToolPlan {
   resolvedLabel?: string;
 }
 
-/** 目前注册的 25 个工具里，只读 12 个、写操作 13 个。 */
+/** 目前注册的 29 个工具里，只读 13 个、写操作 16 个。 */
 export const READ_ONLY_TOOLS = new Set([
   'list_components',
   'search_components',
@@ -270,7 +283,9 @@ export const READ_ONLY_TOOLS = new Set([
   'suggest_kinematics',
   'run_electrical_check',
   'run_cost_report',
-  'verify_plc_program'
+  'verify_plc_program',
+  // 只读列机型库：不写库、不改 active
+  'list_machine_library'
 ]);
 
 export const WRITE_TOOLS = new Set([
@@ -289,7 +304,13 @@ export const WRITE_TOOLS = new Set([
   'run_plc_generate',
   'export_files',
   'undo_last',
-  'export_cost_report'
+  'export_cost_report',
+  // 机型库：入库写 userData/machine-library，等同于文件写
+  'save_machine_to_library',
+  // 加载会把 active.json 指过去并刷 3D
+  'load_machine_from_library',
+  // 导出写 userData/exports
+  'export_machine_package'
 ]);
 
 /**
@@ -619,6 +640,59 @@ function planExportFiles(value: string): ToolPlan | null {
   };
 }
 
+const MACHINE_LIBRARY_NOUN = /(?:机型库|机器库|模板库)/;
+
+/**
+ * 机型库的四个动作（离线规则通道）。
+ *
+ * 必须放在 planToolBase 的最前面：`isMachineApplyRequest` 会把「把当前机型写入机型库」
+ * 抢成 apply_machine_design（那是把方案落到工程，不是入库），而 routeIntent 对
+ * 「保存到机型库」这类句子容易判成超纲。这里以「机型库」为锚点先分流。
+ */
+function planMachineLibraryRequest(value: string): ToolPlan | null {
+  if (!MACHINE_LIBRARY_NOUN.test(value)) return null;
+  // 显式「id: xxx」优先；否则取句子里唯一的连字符 token（design-screw-3st 这类机型 id）
+  const id = value.match(/(?:机型|机器|模板)?\s*(?:id|ID|编号)\s*[:：=]?\s*([A-Za-z0-9][A-Za-z0-9._-]*)/)?.[1]
+    ?? value.match(/([A-Za-z][A-Za-z0-9._]*(?:-[A-Za-z0-9._]+)+)/)?.[1];
+  if (/(?:导出|打包|分享|发给|拷贝|复制出)/.test(value)) {
+    return {
+      tool: 'export_machine_package',
+      args: { ...(id ? { id } : {}) },
+      readOnly: false,
+      missing: id ? [] : ['id'],
+      why: '把机型库里的机型导出成 .machine.zip（写 userData/exports，需确认）'
+    };
+  }
+  if (/(?:存进|存入|保存|入库|收录|收进|放进|写入|打包进)/.test(value)) {
+    return {
+      tool: 'save_machine_to_library',
+      args: { ...(id ? { id } : {}) },
+      readOnly: false,
+      missing: [],
+      why: '把当前机型存进机型库（同名已存在必须显式传 overwrite，需确认）'
+    };
+  }
+  if (/(?:加载|载入|读取|恢复|切换|切到|调出)/.test(value)) {
+    return {
+      tool: 'load_machine_from_library',
+      args: { ...(id ? { id } : {}) },
+      readOnly: false,
+      missing: id ? [] : ['id'],
+      why: '从机型库加载机型并刷新 3D（需确认）'
+    };
+  }
+  if (/(?:有哪些|有什么|列出|列举|列一下|清单|列表|看看|查看|查一下|几台)/.test(value)) {
+    return {
+      tool: 'list_machine_library',
+      args: {},
+      readOnly: true,
+      missing: [],
+      why: '只读列出机型库里已有的机型'
+    };
+  }
+  return null;
+}
+
 /**
  * 把中文指令映射成一个工具计划。
  * 返回 null 表示「没有任何工具能接住」，调用方应如实说做不了。
@@ -626,6 +700,8 @@ function planExportFiles(value: string): ToolPlan | null {
 function planToolBase(text: string): ToolPlan | null {
   const value = (text ?? '').trim();
   if (!value) return null;
+  const libraryPlan = planMachineLibraryRequest(value);
+  if (libraryPlan) return libraryPlan;
   // 这两条必须写在最前面：意图分类会把「存为工程」判成 out_of_scope 提前 return null，
   // 也会把「画布方案生成整机 3D」抢成 build_machine_model（那是参数化整机，不是画布占位装配）。
   // 画布方案 → 整机 3D 装配工程（离线规则此前没有入口，评估集因此报「未覆盖工具」）

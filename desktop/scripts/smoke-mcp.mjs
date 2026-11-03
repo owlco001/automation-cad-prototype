@@ -10,9 +10,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { AgentTools } from '../src/agent/tools.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(here, '..');
+/** 工具数从注册表推导：加工具不用再回来改这个脚本（与 test/agent/tool-count-doc 同一口径）。 */
+const EXPECTED_TOOL_COUNT = new AgentTools({ listParts: () => [] }).list().length;
 const electronBin = join(desktopRoot, 'node_modules', '.bin', 'electron');
 /** 端口不写死：LAN 关闭时 agent 服务用随机端口，日志里有 [agent] http://127.0.0.1:PORT 这一行。 */
 let endpoint = process.env.AUTOMATIONCAD_RPC_URL ?? '';
@@ -117,11 +120,11 @@ try {
   for (let attempt = 0; attempt < 40; attempt += 1) {
     const response = await rpc('tools/list', undefined, { token: bearer });
     toolList = Array.isArray(response.body?.result?.tools) ? response.body.result.tools : [];
-    if (toolList.length >= 25) break;
+    if (toolList.length >= EXPECTED_TOOL_COUNT) break;
     await sleep(250);
   }
   const tools = { status: toolList.length > 0 ? 200 : 0 };
-  check('tools/list', tools.status === 200 && toolList.length === 25,
+  check('tools/list', tools.status === 200 && toolList.length === EXPECTED_TOOL_COUNT,
     `count=${toolList.length} names=${toolList.map((tool) => tool.name).join(',')}`);
   for (const name of ['get_bom', 'build_canvas_assembly', 'save_scene_as_project', 'build_machine_model']) {
     check(`tool:${name}`, toolList.some((tool) => tool.name === name));

@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-10-28T09:15:38.757Z",
-  "version": "0.5.0",
+  "generatedAt": "2026-11-03T15:29:08.481Z",
+  "version": "0.6.3",
   "mode": "offline-rules",
   "dataset": {
     "path": "docs/desktop/eval/cases.json",
-    "count": 111,
+    "count": 115,
     "references": 17,
     "ambiguous": 7,
     "multiStep": 5,
@@ -16,18 +16,22 @@
       "design_machine",
       "export_cost_report",
       "export_files",
+      "export_machine_package",
       "get_bom",
       "get_project_context",
       "get_render_stats",
       "import_cad",
       "insert_component",
       "list_components",
+      "list_machine_library",
+      "load_machine_from_library",
       "place_component",
       "remove_component",
       "run_cost_report",
       "run_electrical_check",
       "run_interference_check",
       "run_plc_generate",
+      "save_machine_to_library",
       "save_scene_as_project",
       "search_components",
       "search_docs",
@@ -55,18 +59,18 @@
   "passed": true,
   "metrics": {
     "intent": {
-      "correct": 111,
-      "total": 111,
+      "correct": 115,
+      "total": 115,
       "rate": 1
     },
     "tools": {
-      "correct": 111,
-      "total": 111,
+      "correct": 115,
+      "total": 115,
       "rate": 1
     },
     "params": {
-      "correct": 57,
-      "total": 57,
+      "correct": 59,
+      "total": 59,
       "rate": 1
     },
     "refused": {
@@ -3330,6 +3334,130 @@
         {
           "tool": "save_scene_as_project",
           "args": {},
+          "readOnly": false,
+          "missing": []
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "ml01",
+      "input": "列出机型库里有哪些机型",
+      "tags": [
+        "machine-library"
+      ],
+      "note": "只读列机型库；空库返回空数组与 total=0，不报错。",
+      "expectedIntent": "query",
+      "actualIntent": "query",
+      "intentOk": true,
+      "expectedTools": [
+        "list_machine_library"
+      ],
+      "actualTools": [
+        "list_machine_library"
+      ],
+      "toolOk": true,
+      "paramsApplicable": false,
+      "paramsOk": null,
+      "refusedOk": true,
+      "actualPlans": [
+        {
+          "tool": "list_machine_library",
+          "args": {},
+          "readOnly": true,
+          "missing": []
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "ml02",
+      "input": "把当前机型保存到机型库",
+      "tags": [
+        "machine-library"
+      ],
+      "note": "缺省存当前 active 机型；同名已存在必须显式 overwrite，需确认。",
+      "expectedIntent": "modify",
+      "actualIntent": "modify",
+      "intentOk": true,
+      "expectedTools": [
+        "save_machine_to_library"
+      ],
+      "actualTools": [
+        "save_machine_to_library"
+      ],
+      "toolOk": true,
+      "paramsApplicable": false,
+      "paramsOk": null,
+      "refusedOk": true,
+      "actualPlans": [
+        {
+          "tool": "save_machine_to_library",
+          "args": {},
+          "readOnly": false,
+          "missing": []
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "ml03",
+      "input": "从机型库加载 design-screw-3st 机型",
+      "tags": [
+        "machine-library"
+      ],
+      "note": "加载会改 active.json 并刷新 3D，属写操作，需确认。",
+      "expectedIntent": "modify",
+      "actualIntent": "modify",
+      "intentOk": true,
+      "expectedTools": [
+        "load_machine_from_library"
+      ],
+      "actualTools": [
+        "load_machine_from_library"
+      ],
+      "toolOk": true,
+      "paramsApplicable": true,
+      "paramsOk": true,
+      "refusedOk": true,
+      "actualPlans": [
+        {
+          "tool": "load_machine_from_library",
+          "args": {
+            "id": "design-screw-3st"
+          },
+          "readOnly": false,
+          "missing": []
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "ml04",
+      "input": "把机型库里的 design-screw-3st 导出成机器包",
+      "tags": [
+        "machine-library"
+      ],
+      "note": "导出 .machine.zip 到 userData/exports/machines/，路径越界要拒绝。",
+      "expectedIntent": "generate",
+      "actualIntent": "generate",
+      "intentOk": true,
+      "expectedTools": [
+        "export_machine_package"
+      ],
+      "actualTools": [
+        "export_machine_package"
+      ],
+      "toolOk": true,
+      "paramsApplicable": true,
+      "paramsOk": true,
+      "refusedOk": true,
+      "actualPlans": [
+        {
+          "tool": "export_machine_package",
+          "args": {
+            "id": "design-screw-3st"
+          },
           "readOnly": false,
           "missing": []
         }

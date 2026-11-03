@@ -60,6 +60,15 @@ import {
   type StoredMachineDesign
 } from '../machine/store.ts';
 import { buildMachineIoMap } from '../machine/io-map.ts';
+import {
+  MachineLibraryError,
+  exportPackage,
+  listLibrary,
+  loadFromLibrary,
+  resolveMachinePackageExportPath,
+  saveToLibrary,
+  serializeMachineLibraryError
+} from '../machine/library.ts';
 import { AGENT_COMMAND_MODULES, moduleDisabledResult, moduleIsEnabled, type ModuleEnabledReader } from '../modules/tool-gates.ts';
 import { COST_ESTIMATION_MODULE_ID } from '../modules/cost-estimation-gate.ts';
 import { PARAMETRIC_IMPORT_MODULE_ID, PARAMETRIC_MODULE_DISABLED_MESSAGE } from '../modules/parametric-gate.ts';
@@ -82,6 +91,8 @@ export interface Bridge {
 export interface CommandError {
   code: string;
   message: string;
+  /** 可选的下一步动作提示（例如覆盖前必须显式传 overwrite）；不改变错误码语义。 */
+  hint?: string;
 }
 
 export interface CommandResult {
@@ -247,20 +258,22 @@ export const SIMPLE_BOM_NOTE = '简化 BOM：由当前 CAD 零件与已插入占
 
 export class CommandFailure extends Error {
   readonly code: string;
+  readonly hint: string | undefined;
 
-  constructor(code: string, message: string) {
+  constructor(code: string, message: string, hint?: string) {
     super(message);
     this.name = 'CommandFailure';
     this.code = code;
+    this.hint = hint;
   }
 }
 
-function failed(code: string, message: string): CommandResult {
-  return { ok: false, error: { code, message } };
+function failed(code: string, message: string, hint?: string): CommandResult {
+  return { ok: false, error: { code, message, ...(hint ? { hint } : {}) } };
 }
 
 function errorResult(error: unknown, fallbackCode = 'COMMAND_FAILED'): CommandResult {
-  if (error instanceof CommandFailure) return failed(error.code, error.message);
+  if (error instanceof CommandFailure) return failed(error.code, error.message, error.hint);
   return failed(fallbackCode, error instanceof Error ? error.message : String(error));
 }
 
@@ -2022,6 +2035,207 @@ function registerCostExportCommand(bus: CommandBus): void {
   });
 }
 
+/**
+ * 机型库四个命令（list / save / load / export）。
+ *
+ * 统一出口：任何 `MachineLibraryError` 都折成 `{code, message, hint}`，
+ * 由 `serializeMachineLibraryError` 提供 hint；`LIBRARY_EXISTS` 只说「要覆盖得显式传
+ * overwrite: true」，命令层绝不替用户决定覆盖。
+ */
+function registerMachineLibraryCommands(bus: CommandBus): void {
+  const userDataRoot = (ctx: CommandContext, action: string): string => {
+    if (!ctx.userDataRoot) throw new CommandFailure('LIBRARY_IO_FAILED', `用户数据目录未配置，无法${action}`);
+    return ctx.userDataRoot;
+  };
+  const asFailure = (error: unknown): never => {
+    if (error instanceof CommandFailure) throw error;
+    const serialized = serializeMachineLibraryError(error);
+    throw new CommandFailure(serialized.code, serialized.message, serialized.hint);
+  };
+  const rejectUnknown = (args: Record<string, unknown>, allowed: readonly string[]): void => {
+    for (const key of Object.keys(args)) {
+      if (!allowed.includes(key)) throw new CommandFailure('INVALID_ARGUMENT', `未知参数：${key}`);
+    }
+  };
+  const libraryId = (value: string): string => {
+    const id = sanitizeMachineId(value);
+    if (id !== value) {
+      throw new CommandFailure('INVALID_ARGUMENT', `机型 id 不合法（含路径/控制字符或需要净化）：${value}`);
+    }
+    return id;
+  };
+
+  bus.register({
+    name: 'list_machine_library',
+    async run(args, ctx) {
+      rejectUnknown(args, []);
+      const root = userDataRoot(ctx, '读取机型库');
+      try {
+        const items = listLibrary(root).map((entry) => ({
+          id: entry.id,
+          name: entry.name,
+          version: entry.version,
+          sizeBytes: entry.sizeBytes,
+          source: entry.source,
+          updatedAt: entry.updatedAt
+        }));
+        return { ok: true, data: { items, total: items.length } };
+      } catch (error) {
+        return asFailure(error);
+      }
+    }
+  });
+
+  bus.register({
+    name: 'save_machine_to_library',
+    async run(args, ctx) {
+      rejectUnknown(args, ['id', 'name', 'version', 'overwrite']);
+      const root = userDataRoot(ctx, '写入机型库');
+      const idInput = optionalString(args, 'id');
+      if (args.id !== undefined && !idInput) throw new CommandFailure('INVALID_ARGUMENT', 'id 必须是非空字符串');
+      const id = idInput ? libraryId(idInput) : undefined;
+      const name = optionalString(args, 'name');
+      if (args.name !== undefined && !name) throw new CommandFailure('INVALID_ARGUMENT', 'name 必须是非空字符串');
+      const version = optionalString(args, 'version');
+      if (args.version !== undefined && !version) throw new CommandFailure('INVALID_ARGUMENT', 'version 必须是非空字符串');
+      const overwrite = optionalBoolean(args, 'overwrite', 'overwrite') === true;
+
+      // 缺省存当前 active 机型；显式给 id 时存那台已落盘的方案（可能是别的机器，支持「另存为」）。
+      const source: StoredMachineDesign | null = id
+        ? readStoredMachineDesign(root, id)
+        : readActiveMachineDesign(root);
+      if (!source) {
+        if (id) {
+          const serialized = serializeMachineLibraryError(
+            new MachineLibraryError('LIBRARY_NOT_FOUND', `找不到机型方案：${id}`)
+          );
+          throw new CommandFailure(serialized.code, serialized.message, serialized.hint);
+        }
+        throw new CommandFailure(
+          'LIBRARY_NOT_FOUND',
+          '当前没有 active 机型方案，请先 apply_machine_design，或显式传 id 指定已有方案'
+        );
+      }
+
+      const design: NormalizedMachineDesign = {
+        ...source,
+        config: {
+          ...source.config,
+          ...(id ? { id } : {}),
+          ...(name ? { name } : {})
+        }
+      };
+      try {
+        const result = saveToLibrary(root, design, {
+          overwrite,
+          ...(version ? { version } : {}),
+          ...(ctx.now ? { now: ctx.now() } : {})
+        });
+        return {
+          ok: true,
+          data: {
+            id: result.entry.id,
+            name: result.entry.name,
+            version: result.entry.version,
+            sizeBytes: result.entry.sizeBytes,
+            overwritten: result.overwritten
+          }
+        };
+      } catch (error) {
+        return asFailure(error);
+      }
+    }
+  });
+
+  bus.register({
+    name: 'load_machine_from_library',
+    async run(args, ctx) {
+      rejectUnknown(args, ['id']);
+      const root = userDataRoot(ctx, '读取机型库');
+      const idInput = optionalString(args, 'id');
+      if (!idInput) throw new CommandFailure('INVALID_ARGUMENT', '缺少必填参数：id');
+      const id = libraryId(idInput);
+
+      let loaded;
+      try {
+        loaded = loadFromLibrary(root, id, ctx.now ? { now: ctx.now() } : {});
+      } catch (error) {
+        return asFailure(error);
+      }
+
+      // 文件已经写回 machine/<id>.json 与 active.json；3D 刷新失败不回滚，但如实标记。
+      let sceneRefreshed = false;
+      try {
+        const refreshed = await ctx.bridge.call<{ ok?: boolean; message?: string }>(
+          'applyMachineConfig',
+          machineScenePayload(loaded.design.config, {
+            machineId: id,
+            name: loaded.design.config.name,
+            layout: loaded.design.form?.geometry?.kind ?? null,
+            design: machineElecDesign(loaded.design)
+          })
+        );
+        sceneRefreshed = refreshed?.ok !== false;
+      } catch (error) {
+        recordDiagnosticError('MACHINE_SCENE_REFRESH_FAILED', error, { machineId: id, phase: 'library-load' });
+      }
+
+      return {
+        ok: true,
+        data: {
+          id,
+          machineId: id,
+          name: loaded.design.config.name,
+          // parts = BOM 草稿行数（机型零件清单）；几何件数在 geometry.json 里。
+          parts: loaded.design.bomDraft?.items.length ?? 0,
+          stations: loaded.design.config.stations.length,
+          actuators: loaded.design.config.actuators.length,
+          sensors: loaded.design.config.sensors.length,
+          sceneRefreshed,
+          activePath: loaded.activePath,
+          designPath: loaded.designPath
+        }
+      };
+    }
+  });
+
+  bus.register({
+    name: 'export_machine_package',
+    async run(args, ctx) {
+      rejectUnknown(args, ['id', 'targetPath']);
+      const root = userDataRoot(ctx, '导出机型包');
+      const idInput = optionalString(args, 'id');
+      if (!idInput) throw new CommandFailure('INVALID_ARGUMENT', '缺少必填参数：id');
+      if (args.targetPath !== undefined && typeof args.targetPath !== 'string') {
+        throw new CommandFailure('INVALID_ARGUMENT', 'targetPath 必须是字符串');
+      }
+      const id = libraryId(idInput);
+      try {
+        // 先校验路径再读包：路径被拒时不产生任何文件与目录。
+        const path = resolveMachinePackageExportPath(
+          root,
+          id,
+          typeof args.targetPath === 'string' ? args.targetPath : undefined
+        );
+        const bytes = exportPackage(root, id);
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, bytes);
+        return {
+          ok: true,
+          data: {
+            id,
+            path,
+            bytes: bytes.byteLength,
+            sha256: createHash('sha256').update(bytes).digest('hex')
+          }
+        };
+      } catch (error) {
+        return asFailure(error);
+      }
+    }
+  });
+}
+
 export function createAgentCommandBus(
   registry: PackRegistry,
   bridge: Bridge,
@@ -2054,6 +2268,7 @@ export function createAgentCommandBus(
   registerSaveSceneAsProjectCommand(bus);
   registerMachineApplyCommand(bus);
   registerExportFilesCommand(bus);
+  registerMachineLibraryCommands(bus);
   return bus;
 }
 

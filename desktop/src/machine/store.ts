@@ -673,9 +673,11 @@ function csvCell(value: unknown): string {
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
+export const MACHINE_BOM_CSV_HEADER = ['序号', '名称', '型号', '数量', '分类', '来源包', '来源', '待选型', '备注'] as const;
+
 export function renderMachineBomCsv(rows: readonly MachineBomRow[]): string {
   const lines = [
-    ['序号', '名称', '型号', '数量', '分类', '来源包', '来源', '待选型', '备注'].map(csvCell).join(','),
+    [...MACHINE_BOM_CSV_HEADER].map(csvCell).join(','),
     ...rows.map((row, index) => [
       index + 1,
       row.name,
@@ -689,4 +691,95 @@ export function renderMachineBomCsv(rows: readonly MachineBomRow[]): string {
     ].map(csvCell).join(','))
   ];
   return `\uFEFF${lines.join('\r\n')}`;
+}
+
+const BOM_KIND_BY_LABEL: Record<string, MachineBomItem['kind']> = {
+  [BOM_KIND_LABEL.actuator]: 'actuator',
+  [BOM_KIND_LABEL.sensor]: 'sensor',
+  [BOM_KIND_LABEL.electrical]: 'electrical'
+};
+
+/** CSV 单元格解析：只处理 renderMachineBomCsv 会产出的引号转义（"" → "）。 */
+function parseCsvCells(line: string): string[] {
+  const cells: string[] = [];
+  let cell = '';
+  let quoted = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (quoted) {
+      if (char === '"') {
+        if (line[index + 1] === '"') {
+          cell += '"';
+          index += 1;
+        } else {
+          quoted = false;
+        }
+      } else {
+        cell += char;
+      }
+      continue;
+    }
+    if (char === '"') {
+      quoted = true;
+      continue;
+    }
+    if (char === ',') {
+      cells.push(cell);
+      cell = '';
+      continue;
+    }
+    cell += char;
+  }
+  cells.push(cell);
+  return cells;
+}
+
+/**
+ * `bom.csv` → `bomDraft.items` 的反向解析（机型库加载用，B4）。
+ *
+ * 列头以 `MACHINE_BOM_CSV_HEADER` 为准，按列名取数而不是按位置，列顺序将来变了也不会错位。
+ * 已知损失：该 CSV 没有物料号/role/额定功率列，往返后 `partId` 无法复原（`run_cost_report`
+ * 会按缺物料号处理，不会伪造型号）；`型号` 列是 `模型待定` 时按缺省处理。
+ * 行结构不合法一律抛错，让调用方（`loadFromLibrary`）转成 `LIBRARY_INVALID_CONFIG`，
+ * 不静默跳过行——少一行 BOM 比报错更难查。
+ */
+export function parseMachineBomCsv(text: string): MachineBomItem[] {
+  const rows = text.replace(/^\uFEFF/, '').split(/\r\n|\n|\r/);
+  const headerLine = rows[0] ?? '';
+  const header = parseCsvCells(headerLine).map((cell) => cell.trim());
+  const columnIndex = (name: string): number => header.indexOf(name);
+  for (const required of ['名称', '型号', '数量', '分类']) {
+    if (columnIndex(required) < 0) throw new Error(`bom.csv 缺少必需列「${required}」`);
+  }
+  const cellOf = (cells: string[], name: string): string => {
+    const index = columnIndex(name);
+    return index >= 0 && index < cells.length ? (cells[index] ?? '').trim() : '';
+  };
+  const items: MachineBomItem[] = [];
+  for (let rowIndex = 1; rowIndex < rows.length; rowIndex += 1) {
+    const line = rows[rowIndex];
+    if (!line || !line.trim()) continue;
+    const where = `bom.csv 第 ${rowIndex + 1} 行`;
+    const cells = parseCsvCells(line);
+    if (cells.length !== header.length) {
+      throw new Error(`${where}列数不符（${cells.length} ≠ 表头 ${header.length}）`);
+    }
+    const name = cellOf(cells, '名称');
+    if (!name) throw new Error(`${where}缺少名称`);
+    const qty = Number(cellOf(cells, '数量'));
+    if (!Number.isInteger(qty) || qty < 1) throw new Error(`${where}数量必须是正整数`);
+    const label = cellOf(cells, '分类');
+    const kind = BOM_KIND_BY_LABEL[label];
+    if (!kind) throw new Error(`${where}分类「${label}」不在执行机构/传感器/电气之内`);
+    const item: MachineBomItem = { kind, name, qty };
+    const model = cellOf(cells, '型号');
+    if (model && model !== '模型待定') item.model = model;
+    const packId = cellOf(cells, '来源包');
+    if (packId) item.packId = packId;
+    if (cellOf(cells, '待选型') === '是') item.pendingSelection = true;
+    const note = cellOf(cells, '备注');
+    if (note) item.note = note;
+    items.push(item);
+  }
+  return items;
 }
