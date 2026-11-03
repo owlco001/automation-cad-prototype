@@ -2,6 +2,48 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织，版本号遵循语义化版本。
 
+## [0.6.4] - 2026-11-04
+
+### Added · 转向工位改为顶升旋转单元（真机做法）
+
+机台太长的问题落地：6 m 线体上不再用固定转台，改为「平时台面低于带面 → 到位顶升 60 mm → 旋转 90° → 回落」。
+
+- 输送面 1200 宽单带换成 **6 条窄带并联**（单条 80、带缝 120、节距 200），上行程整条连续，工件全程不离开输送面；回程只在单元处让位 920
+- 顶升单元：底座框架 + 下沉吊柱 + 顶升气缸 + 导向柱 + 升降台板 + 回转支承 + φ880 转台盘 + 9 只支撑指 + 转向电机（整机 85 件）
+- 穿缝原理：指宽 70 < 带缝 120，指位取带缝中心 0/±200/±400 且 4 折对称，转 90° 后落点仍是同一组带缝
+- 两条轴 `turner-lift`（Z 60 mm / 2000 ms）+ `turner-rotary`（90° / 1800 ms），节拍 3.8 s；四个到位信号分别绑到对应执行机构
+- 真实 B-Rep 验证（build123d + OCCT）：静止 / 顶升到位 / z=0..60 扫掠三态全部零干涉；负向自检（故意偏 60 mm）能报出 12 处
+- 带转向工位的机型补最小安全回路（急停 + 安全门），PLC 预检从 blocked=2 到 blocked=0，11 个文件与 ZIP 真正落盘
+
+### Added · 机型库（机型是数据，不是代码）
+
+- `.machine.zip` 包格式（schemaVersion 1）：manifest 逐文件 sha256 + config + 可选 geometry/bom/plc/shots；限额与固定错误码
+- 本地库 `userData/machine-library/<id>/` + catalog（与磁盘对账，索引坏了按 manifest 重建）
+- 导入原子性：先解 `.tmp-<uuid>` 全量校验再 rename；拒绝路径穿越（含 adm-zip 会归一化的 `../`）、篡改、超限、版本不符
+- 导出字节稳定（固定 ZIP 条目时间戳），同一机型重复导出 sha256 相同
+- 面板：工具 → 模块 → 机型库，列表 / 加载 / 导入 / 导出 / 删除；文件选择全在主进程，渲染层拿不到 fs
+
+### Added · 智能体能力（自查、自修、自证、可度量）
+
+- 机型库四工具：`list_machine_library` / `save_machine_to_library` / `load_machine_from_library` / `export_machine_package`
+- `validate_machine_design`（只读自查，返回 code/path/hint）、`repair_plc_config`（默认 dryRun）
+- `capture_view`：真截图落盘并返回 sha256；停在首页时返回 `VIEW_NOT_READY`，不拿首页冒充
+- `run_interference_check` 支持 `rest / lift / sweep` 多态，行程从机型 config 读
+- `npm run eval:tasks`：6 个任务级末态断言（轴/零件数/PLC 预检/库往返/三态/截图真伪），变异自检会红；已接进 CI 门禁
+
+### Fixed · 三处校验器收敛为单一源
+
+`store.ts` / `commission/machine-config.ts` / `plcgen/precheck.ts` 原来各判一套，导致安全传感器被判非法、`conveyor` 白名单漂移。现在统一到 `src/machine/validate.ts`（`DesignIssue{code,path,hint}`），并显式区分两种模式：方案走严格绑定，现场 IO 映射导入走宽松（与历史行为一致）。
+
+### Fixed · 列表结果形状不一致（25 行 BOM 被当空 BOM）
+
+`trim.ts` 原来在 >20 条时把数组裁成 `{items,total}`，消费方仍按数组读，成本流程因此把 25 行 BOM 当空 BOM 拦下。现在统一 `ListResult{items,total,truncated}`，**条目一条不删**，只截条目内长字符串；形状不认识直接抛错而不是静默变空。
+
+### Changed · 工具与测试口径
+
+- 工具 25 → 32（只读 15 / 写 17），工具数哨兵改为注册表自校，加工具不再需要改 8 个测试文件
+- 测试 2866 → 2954（0 fail）；`eval:agent` 120/120；`eval:tasks` 6/6
+
 ## [0.6.3] - 2026-11-02
 
 ### Added · 运动学标注：批量采纳 + 水平偏角

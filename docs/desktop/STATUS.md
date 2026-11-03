@@ -1,20 +1,20 @@
-# 项目状态 · 2026-10-29（晚）
+# 项目状态 · 2026-11-04
 
 ## 概览
 
-- 仓库：`main` @ `d905e2e`（GitHub `owlco001/automation-cad-prototype` 与 Gitee 双推，两侧 SHA 一致）。
-- 版本：`desktop/package.json` → **0.5.0**，已打源码 tag `v0.5.0`；**安装包仍停在 v0.4.2**（Windows 本地构建、未签名），0.4.3 之后未出包。
-- 质量门槛（2026-10-29 本机 Linux 实跑，`main@41dfd1c`）：`npx tsc --noEmit` 0 错误；`npm test` **2645 总计 / 2643 通过 / 0 失败 / 2 跳过**（跳过项为需真实 FreeCAD 的 E2E，未设 `AUTOMATIONCAD_FREECAD_REAL`）；`npm run build:ext` 通过；`npm run smoke` 收尾 `SMOKE_OK`。
+- 仓库：`main` @ `a855ccd`（GitHub `owlco001/automation-cad-prototype` 与 Gitee 双推，两侧 SHA 一致）。
+- 版本：`desktop/package.json` → **0.6.4**；安装包见文末「最近发布」。
+- 质量门槛（2026-11-04 本机 Linux 实跑，`main@a855ccd`）：`npx tsc --noEmit` 0 错误；`npm test` **2954 总计 / 2952 通过 / 0 失败 / 2 跳过**（跳过项为需真实 FreeCAD 的 E2E，未设 `AUTOMATIONCAD_FREECAD_REAL`）；`npm run eval:agent` 120/120；`npm run eval:tasks` 6/6；`npm run build:ext && npm run smoke` 收尾 `SMOKE_OK`（0 条 `SMOKE_FAIL`，`tools=32`）。
 - 平台：**Linux + Windows 双真机**。Linux 用 Qt 6.4.2 + g++（OCCT 头文件在 `/usr/local/include/opencascade`）；Windows 有两条链路——Qt 6.8.3 + MinGW 13.1（`D:\Qt`，`AUTOMATIONCAD_OCCT=OFF`，自绘 STL 视口）与 MSVC 2022 + Qt msvc2022_64 + OCCT 8.0.1（AIS 视口真实可用）。构建全过程见 `qt-client/README.md` 第 291 行起。
 - 排布合规链（本轮新增）：干涉/间距 AABB 初筛 → 建议位移 → 批量解重叠 → 一键排布合规（交替求解）→
   工位级补救建议（内部/跨工位分流，跨工位还要过「推完是否撞」自检）→ 最大可行间距（二分，四工位 25 mm）
   → 合规戳写进方案文件 → 手工挪动后自动标「过期」→ 概览页一键重算 →「加宽多少才够」（工位+机架按比例拉长后二分）。
   Qt 侧支持单件微调与整站挪（`Ctrl + 方向键`）、保存整机方案（`QSaveFile` 原子写）。
 - CI：`.github/workflows/ci.yml` 在 push `main` 与 `pull_request` 上跑 **四个** 并行 job——`unit`（tsc / 单测 / 包校验 / `eval:agent` / 契约服务 35 条 / MCP 11 条 / 落盘 10 条）、`smoke`（xvfb + 真实 Electron：降级 smoke、SwiftShader WebGL、机型截图 + artifact、MCP 冒烟）、`Qt client build`（Qt6 编译 + `--selftest` / `--history-selftest` / `--feature-ops-selftest` / `--sse-selftest` / 自动刷新）、`FeatureTree real geometry`（pip 装 build123d，跑体积/质量/STL/材料）。Windows 打包仍是手动 `workflow_dispatch`。
-- 评估：`npm run eval:agent` **111/111**，`EVAL_AGENT_OK accuracy=1.00 tools=1.00 refused=1.00`；工具注册表 **25 个（只读 12 / 写 13）**。
+- 评估：`npm run eval:agent` **120/120**（`EVAL_AGENT_OK accuracy=1.00 tools=1.00 refused=1.00`）+ `npm run eval:tasks` **6/6**（任务级末态断言，已进 CI 门禁）；工具注册表 **32 个（只读 15 / 写 17）**。
 - 数据包：`npm run packs:validate` → **10 包 / 617 条 / 612 唯一型号 / 0 错误 0 警告**。
 - 离线知识索引：`npm run kb:build` → `docs=13 chunks=361`，约 378 KB（≈94.5%，余量约 22 KB，未截断；实测 385,723 B）——字节数会随文档重建变动，这里只给近似值，精确值由 `npm run kb:build` 输出。
-- 最近发布：`v0.4.0` NSIS `AutomationCAD-Setup-0.4.0.exe`（约 130 MB，未签名），更新通道未做真实签名与跨版本升级验收。
+- 最近发布：见文末「最近发布」小节（v0.6.3 安装包 154,256,389 B；v0.6.4 本轮构建）。更新通道未做真实签名与跨版本升级验收。
 
 
 ## 夜间迭代（2026-10-28 夜）

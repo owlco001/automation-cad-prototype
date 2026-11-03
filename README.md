@@ -2,7 +2,7 @@
 
 面向非标自动化整机的**机械 + 电气协同设计工作台**：机械域覆盖机构选型 → 标准件调用 → 装配 → 干涉校核 → 受力校核 → 出图 → BOM；电气域覆盖原理图 → IO 规划 → 柜体底板布置 → 合规校验 → 成本统计；桌面版在此基础上叠加 **CAD 轻量化查看与运动学标注、电气元件库、PLC 程序生成、PLC 通电联调、参数化建模、智慧工厂数据同步、智能体（JSON-RPC / MCP / 应用内对话）**，单机离线可用。
 
-- 当前版本：**v0.6.3** —— **双端整合** + **运动学标注自动化**：一个安装包同时含 Electron 工作台与 Qt 原生 OCCT 视口（v0.6.2 实测 147.1 MB）；运动学标注支持批量采纳与水平偏角，识别基线见 `docs/desktop/eval/`。逐版变更见 [CHANGELOG.md](./CHANGELOG.md)
+- 当前版本：**v0.6.4** —— **机型库 + 智能体自证**：机型打包成 `.machine.zip` 可存可载可导出（面板在「工具 → 模块 → 机型库」）；智能体能自查（`validate_machine_design`）、自修（`repair_plc_config`）、自证（`capture_view` + 三态干涉）；转向工位改为顶升旋转单元，整机 85 件、三态零干涉。逐版变更见 [CHANGELOG.md](./CHANGELOG.md)
 - 运行环境：Windows 11 x64；Electron 45 + TypeScript + Vite
 - 技术底座：渲染层直接复用仓库根目录的网页原型，桌面能力全部通过**注入扩展**叠加，原型文件（`index.html` / `app.js` / `styles.css` / `electrical.*`）**零改动**
 - 质量基线：**2904 个单元测试全绿**，另有覆盖 CAD / 运动学（含自动识别建议） / 机核 / 导出 / PLC / PLC 代码生成（含 UI 与 zip 导出）/ 联调 / 同步 / 电气库 / 电气校验 / 底板布置 / 参数化装配与 BOM / 成本（引擎 + 面板 + 报告 + Agent）/ 智能体上下文、指代、多轮续跑、本地知识检索、上下文预算与成本可见性、执行效率（去重/并行/缓存）/ 机型方案合成与落盘、并行/流水线节拍模型、工艺模板、11 种整机形态库（工艺 × 布局 × 机型，含预览夹紧与四档选型优先级）、追问策略、统一功率/成本模型（额定功率、系数折算、断路器初选、缺价计数）、BOM/PLC 联动、参数化整机几何（多头龙门 / 混合线 / 单元矩阵 / STL/glTF/sidecar）/ 主视口可旋转 3D（降级路径）/ 工厂的 headless smoke
@@ -196,7 +196,7 @@ STEP/IGES/BREP 本身不含运动学信息，因此右侧新增**运动学标注
 | 上下文快照 | `collectAgentContext()` 采集域 / 视图 / 选中对象（零件、网格、placement、特征）/ 机型 / 底板 / 最近 3 次操作 / 单位；序列化 ≤1.5 KB，采集失败字段为 null 不抛错 | ✅ P7-E |
 | 指代消解 | 选中对象优先（0.95）→ 最近操作对象（0.72）→ 底板几何排序（0.78）；低于 0.6 返回 null 并追问一次，不猜 | ✅ P7-E |
 | 会话记忆 | 最近 5 次工具调用摘要（工具名 / 关键参数 / 结果码）追加到系统提示末尾，滚动丢弃，不落盘、不上传 | ✅ P7-E |
-| 结果裁剪 | 列表 >20 条保留前 20 + `total` + `truncated:true`；长文本按 2 KB 截断；单个工具结果进入模型前硬上限 10 KB | ✅ P7-E |
+| 结果裁剪 | 列表统一 `ListResult{items,total,truncated}`：**条目一条不删**（25 行 BOM 就是 25 行），只截条目内长文本（2 KB）；单个工具结果进入模型前硬上限 10 KB，形状不认识直接报错而不是静默变空 | ✅ P7-E / G2 |
 | 上下文预算 | `budget.ts` 纯函数按 system / selection / memory / docs / toolResults / history 六档装包，默认总量 12k tokens 可配；超限先保留列表首尾各 5 条 + total，再丢最旧 history，最后才动 docs / toolResults；system 策略段永不裁剪，`dropped` 带可读原因 | ✅ P7-M |
 | 执行效率 | 同轮相同 `(tool, canonicalArgs)` 只执行一次并标 `reused:true`；写工具永不合并；单轮上限 12 次，超出 `TOO_MANY_TOOL_CALLS`。一次响应内的无依赖只读工具默认 3 路并发，写工具作为屏障；参数引用前序结果时自动降级串行，失败不吞、结果按原顺序回灌 | ✅ P7-N |
 | 结果缓存 | `get_bom` / `get_project_context` / `list_components` 按工程指纹缓存 30 秒；任何写工具执行后清空；命中审计写 `cacheHit:true`，进度与审计显示「已复用」；仅会话内存，不落盘、不跨会话 | ✅ P7-N |
@@ -212,7 +212,7 @@ STEP/IGES/BREP 本身不含运动学信息，因此右侧新增**运动学标注
 | 失败建议 | `suggest.ts` 按 `PART_NOT_FOUND` / `NO_DIMENSIONS` / `UNAVAILABLE` / `DESKTOP_NOT_RUNNING` / `PRECHECK_FAILED` / `USER_DENIED` 给中文建议与替代方案；未知码只复述消息，不编造原因 | ✅ P7-F |
 | 主动建议 | `advisor.ts` 纯函数按底板重叠 / 干涉 / 缺尺寸 / 电气校验 / 成本过期 / PLC 未生成等真实状态给出 0–3 条 next-best-action；侧栏顶部卡片可直接填入输入框或走单步计划确认，支持本次会话忽略与工具执行后刷新 | ✅ P7-H |
 | 审计面板 | 最近 200 条，按时间倒序；列为时间/工具/参数摘要/结果码/耗时，可按工具与结果筛选、导出当前 CSV、单条展开完整脱敏 JSON；超出上限提示丢弃数量 | ✅ P7-F |
-| 离线评估 | `docs/desktop/eval/cases.json` 117 条中文用例（历史快照：覆盖当时注册表 31 个工具；capture_view 属自证类工具，走单测不走意图集）+ 6 类拒绝场景 + 5 类工艺模板/信息不足；在 `desktop/` 下运行 `npm run eval:agent`，只跑离线规则、不调模型，结果写 `docs/desktop/eval/latest.json` <!-- tool-count:ignore --> | ✅ 100% 意图 / 100% 工具 / 100% 超纲拒绝（[NL-AGENT.md](docs/desktop/NL-AGENT.md)） |
+| 离线评估 | `docs/desktop/eval/cases.json` 120 条中文用例（含 cv01–cv03 截图意图正/负向）+ 6 类拒绝场景 + 5 类工艺模板/信息不足；`npm run eval:agent` 只跑离线规则、不调模型，结果写 `docs/desktop/eval/latest.json`；另有 `npm run eval:tasks` 6 条任务级末态断言（已进 CI 门禁） | ✅ 意图 120/120、工具 120/120、超纲拒绝 7/7（[NL-AGENT.md](docs/desktop/NL-AGENT.md)） |
 | **Agent 能力报告** | 在 `desktop/` 下运行 `npm run agent:report`，读取单轮 / 多轮 / 离线评测 JSON 与本机 `<userData>/agent-audit.jsonl`，生成 `docs/desktop/AGENT-REPORT.md`、`docs/desktop/agent-report.json` 和深色一页图 `docs/desktop/agent-report.svg`；每个数字标注来源文件与生成时间，缺源文件写「缺失：<文件>」并打印 WARN（退出码 0） | ✅ |
 | 底板放置 | `place_component`：坐标 / 旋转 / 导轨吸附；越界与重叠以 `warnings` 返回；成功后进入撤销栈，`undo_last` 返回 `removed` id | ✅ P7-B |
 | 通用产能引擎 | `desktop/src/machine/flow.ts` 的 `evaluateFlow` 按 `single / linear / dial / parallel / cell` 五种布局，由任意工位组成、工序时间、转移/分度时间与目标节拍统一求 cycle、产能、瓶颈和所需工位数；`synthMachine` 只做 `FlowModel` 映射。6 个机型回归（6 工位并行锁螺丝 ≈113 件/分钟、转盘点胶、5 工位直线、单工位检测、2×2 单元、2 副本并行点胶），见 [MACHINE-DESIGN.md](docs/desktop/MACHINE-DESIGN.md) | ✅ |
