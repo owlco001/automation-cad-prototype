@@ -193,6 +193,31 @@ export function isMachineApplyRequest(text: string): boolean {
   return applyVerb && target && /机型|方案|设计|工位/.test(value);
 }
 
+/**
+ * 机型方案自查请求（只读）：检查/校验当前方案的结构与绑定。
+ * 与 apply 区分：这里只出 issues，不写盘；与 verify_plc_program 区分：不看 PLC 轴/信号。
+ */
+export function isMachineValidateRequest(text: string): boolean {
+  const value = (text ?? '').trim();
+  if (!value) return false;
+  if (!/(?:机型|方案|设计|配置|config)/i.test(value)) return false;
+  const verbFirst = /(?:校验|检查|自查|自检|体检|审一下|看看|看一下)[^。；;\n]{0,12}(?:机型|方案|设计|配置)/.test(value);
+  const nounFirst =
+    /(?:机型|方案|配置)[^。；;\n]{0,12}(?:是否合法|合不合法|有没有问题|有没有错|对不对|是否合规|是否有效|能不能落盘|能不能通过校验|自检|自查)/.test(value);
+  return verbFirst || nounFirst;
+}
+
+/** PLC 预检缺口补齐请求（写，默认 dryRun）：缺到位检测 / 缺急停安全回路 / 要补齐预检缺口。 */
+export function isMachineRepairRequest(text: string): boolean {
+  const value = (text ?? '').trim();
+  if (!value) return false;
+  const repairVerb = /(?:补齐|补全|补上|补一个|补个|补一批|修复|修一下)/.test(value);
+  const gapAnchor = /(?:点位|传感器|到位检测|急停|安全回路|安全门|光栅|预检|plc|缺口|io)/i.test(value);
+  if (repairVerb && gapAnchor) return true;
+  const missing = /(?:缺|少)[^。；;\n]{0,8}(?:点位|传感器|到位检测|急停|安全回路|安全门|光栅)/.test(value);
+  return missing && /(?:plc|预检|回路|方案)/i.test(value);
+}
+
 /** 规则分类：取分最高者，同分按写操作优先，全 0 判为超纲。 */
 export function routeIntent(text: string): IntentMatch {
   const normalized = (text ?? '').trim();
@@ -210,6 +235,13 @@ export function routeIntent(text: string): IntentMatch {
   }
   if (isMachineDesignRequest(normalized)) {
     return { intent: 'generate', confidence: 'high', score: 4, hits: ['机型设计'], reason: '从中文需求合成机型方案（只读，不落盘）' };
+  }
+  // PLC 预检缺口补齐 / 机型方案自查：先于通用打分，否则「补齐」会被判超纲或抢成生成。
+  if (isMachineRepairRequest(normalized)) {
+    return { intent: 'modify', confidence: 'high', score: 4, hits: ['PLC 缺口补齐'], reason: '补齐 PLC 预检缺口（写操作，需确认）' };
+  }
+  if (isMachineValidateRequest(normalized)) {
+    return { intent: 'query', confidence: 'high', score: 3, hits: ['机型自查'], reason: '只读校验机型方案的结构与绑定' };
   }
   // 机型库的存取/列举/导出：以「机型库」为锚点直接给意图，别让「保存/列出」这类
   // 词被通用规则判成超纲（planTool 侧另有 planMachineLibraryRequest 负责选工具）。
@@ -270,7 +302,7 @@ export interface ToolPlan {
   resolvedLabel?: string;
 }
 
-/** 目前注册的 29 个工具里，只读 13 个、写操作 16 个。 */
+/** 目前注册的 31 个工具里，只读 14 个、写操作 17 个。 */
 export const READ_ONLY_TOOLS = new Set([
   'list_components',
   'search_components',
@@ -285,7 +317,9 @@ export const READ_ONLY_TOOLS = new Set([
   'run_cost_report',
   'verify_plc_program',
   // 只读列机型库：不写库、不改 active
-  'list_machine_library'
+  'list_machine_library',
+  // 只读自查方案：只返回 issues，不落盘、不改 active
+  'validate_machine_design'
 ]);
 
 export const WRITE_TOOLS = new Set([
@@ -310,7 +344,9 @@ export const WRITE_TOOLS = new Set([
   // 加载会把 active.json 指过去并刷 3D
   'load_machine_from_library',
   // 导出写 userData/exports
-  'export_machine_package'
+  'export_machine_package',
+  // 补齐会写回 machine/<id>.json 并刷新联调配置（默认 dryRun 只读预览，但工具本身是写）
+  'repair_plc_config'
 ]);
 
 /**
@@ -702,6 +738,30 @@ function planToolBase(text: string): ToolPlan | null {
   if (!value) return null;
   const libraryPlan = planMachineLibraryRequest(value);
   if (libraryPlan) return libraryPlan;
+  // PLC 预检缺口补齐 / 机型方案自查：必须在 apply/design/verify 之前判断。
+  // 「补齐方案再写入工程」这类句子会被 isMachineApplyRequest 抢成 apply_machine_design，
+  // 而这里要的是先补齐（apply 需要先有一份合法 config）。
+  if (isMachineRepairRequest(value)) {
+    const write = /(?:确认|直接|落盘|写入|保存|存盘|按这个|就这么)/.test(value);
+    return {
+      tool: 'repair_plc_config',
+      args: { dryRun: !write },
+      readOnly: false,
+      missing: [],
+      why: write
+        ? '按最小改动补齐 PLC 预检缺口并写回机型方案（需确认；只加到位检测与安全回路）'
+        : '先只读预览要补哪些点位与安全回路（dryRun，不写盘）'
+    };
+  }
+  if (isMachineValidateRequest(value)) {
+    return {
+      tool: 'validate_machine_design',
+      args: {},
+      readOnly: true,
+      missing: [],
+      why: '只读自查当前机型方案的结构与绑定（与落盘/预检同一判定源，不写盘、不改工程）'
+    };
+  }
   // 这两条必须写在最前面：意图分类会把「存为工程」判成 out_of_scope 提前 return null，
   // 也会把「画布方案生成整机 3D」抢成 build_machine_model（那是参数化整机，不是画布占位装配）。
   // 画布方案 → 整机 3D 装配工程（离线规则此前没有入口，评估集因此报「未覆盖工具」）

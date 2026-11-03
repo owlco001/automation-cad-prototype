@@ -36,7 +36,7 @@
 
 关键约束：**工具层必须是唯一写入口**，UI 与 Agent 共用同一套 API，避免两套逻辑漂移。
 
-## 3. 工具清单（已实现 29 个工具：只读 13 + 写 16；另 3 个规划中）
+## 3. 工具清单（已实现 31 个工具：只读 14 + 写 17；另 3 个规划中）
 
 | 工具 | 类型 | 说明 |
 |---|---|---|
@@ -49,6 +49,8 @@
 | `save_machine_to_library` | 写 | 把当前（或指定 id 的）机型打包成 `.machine.zip` 入库；同名返回 `LIBRARY_EXISTS` 且带 `hint`「同名机型已存在，确认覆盖请显式传 overwrite: true」，**绝不自动覆盖**（需确认） |
 | `load_machine_from_library` | 写 | 从库加载机型：写回 `machine/<id>.json` + `active.json`，`bom.csv` 回填 `bomDraft.items`，再 `applyMachineConfig` 刷 3D；返回 `{id,machineId,name,parts,stations,...}`（需确认） |
 | `export_machine_package` | 写 | 导出 `.machine.zip` 到 `userData/exports/machines/<id>.machine.zip`，返回 `{path,bytes,sha256}`；`targetPath` 只接受 exports 之内的位置，越界返回 `LIBRARY_BAD_PATH`（需确认） |
+| `validate_machine_design` | 只读 | 自查机型方案：结构/字段/点位唯一/工位引用/执行机构 id 唯一/传感器 part 绑定，与 `apply_machine_design` 落盘、`run_plc_generate` 预检同一份判定源（`machine/validate.ts`）。缺省校验当前 active 机型，也可传 `config`（或整份方案，取其中 `config`）。返回 `{ok,issues:[{code,path,message,hint}],summary:{errors,warnings}}`；方案有问题返回 `ok:false` 而不是工具失败，**不抛错**。只做结构与绑定校验，PLC 轴/信号预检仍属 `run_plc_generate` |
+| `repair_plc_config` | 写 | 补齐当前 active 机型的 PLC 预检缺口（执行机构缺到位检测、缺急停/安全门回路）：默认 `dryRun=true` 只返回 `willAdd`（不写盘）；`dryRun=false` 才写回 `machine/<id>.json`、同步联调配置并让预检归零，写前过 `assertDesign`。已补齐时 `willAdd`/`added`/`remainingIssues` 均为空且不报错（需确认） |
 | `get_bom` | 只读 | 当前装配体简化 BOM |
 | `get_project_context` | 只读 | 当前域 / 视图 / 选中对象 / 机型 / 底板 / 单位制 / 最近操作；缺失项返回 null |
 | `run_interference_check` | 只读 | 包围盒干涉初筛 |
@@ -218,7 +220,7 @@ executePlan(plan, deps) → {
 - 规划中但未注册：`start_commission`、`diagnose_fault`、`sync_design_package`；未注册前不会进入可执行计划
 
 工具名与过滤：
-- 默认工具集合来自 `router.ts` 的 `READ_ONLY_TOOLS + WRITE_TOOLS`，与 `tools.ts` 当前 29 个注册工具一致；IPC/UI 调用时传入实时 `AgentTools.summaries()` 名称。
+- 默认工具集合来自 `router.ts` 的 `READ_ONLY_TOOLS + WRITE_TOOLS`，与 `tools.ts` 当前 31 个注册工具一致；IPC/UI 调用时传入实时 `AgentTools.summaries()` 名称。
 - 规划阶段逐条校验工具名；不存在的工具从步骤中移除并写入 `warnings`（例如 `忽略未注册工具 sync_design_package（第 1 步）`）。全部被过滤时 `refused:true`，不会执行空计划。
 - 不编造工具名；`sync_design_package` 注册后无需改规划规则即可自动纳入。
 
@@ -318,7 +320,7 @@ UI：侧栏「流程」下拉选择模板 → 预览前置条件与步骤（可�
 
 ## 9. 质量评估
 
-固定 102 条中文用例，位于 `docs/desktop/eval/cases.json`：覆盖 7 类意图，其中 17 条含指代、7 条歧义、5 条多步、7 条超纲；全部已注册工具均至少命中一次，并覆盖 6 类拒绝场景（缺参数、越权改文件、篡改审计、危险路径、未知位号、跨域误用）。P10-3 新增 6 条：5 类工艺模板（锁螺丝/点胶/装配/检测/包装）+ 1 条信息不足；`kin01` 覆盖运动件自动识别。2026-10-24 新增 27 条同义/口语改写（`sy01`–`sy27`，标签 `synonym`）：24 条覆盖查询/计算/修改/生成与各工具触发的同义说法，2 条非工程话题负例，1 条轮转审计文件篡改拒绝。工具名以 `desktop/src/agent/tools.ts` 的注册表为准，评估脚本会拒绝不存在的工具名与缺失的覆盖项。多步用例用 `expect.steps` 描述有序工具序列，单步用例用 `expect.tool + expect.argsContains`；缺参用例额外用 `expect.missing` 断言计划点名了缺失字段。`desktop/eval/agent-cases.json` 保留为旧路径兼容副本，内容与 docs 版本一致。
+固定 117 条中文用例，位于 `docs/desktop/eval/cases.json`：覆盖 7 类意图，其中 17 条含指代、7 条歧义、5 条多步、7 条超纲；全部已注册工具均至少命中一次，并覆盖 6 类拒绝场景（缺参数、越权改文件、篡改审计、危险路径、未知位号、跨域误用）。P10-3 新增 6 条：5 类工艺模板（锁螺丝/点胶/装配/检测/包装）+ 1 条信息不足；`kin01` 覆盖运动件自动识别。2026-10-24 新增 27 条同义/口语改写（`sy01`–`sy27`，标签 `synonym`）：24 条覆盖查询/计算/修改/生成与各工具触发的同义说法，2 条非工程话题负例，1 条轮转审计文件篡改拒绝。工具名以 `desktop/src/agent/tools.ts` 的注册表为准，评估脚本会拒绝不存在的工具名与缺失的覆盖项。多步用例用 `expect.steps` 描述有序工具序列，单步用例用 `expect.tool + expect.argsContains`；缺参用例额外用 `expect.missing` 断言计划点名了缺失字段。2026-11-03 新增 2 条：`pc01` 机型方案只读自查（`validate_machine_design`）、`pc02` PLC 预检缺口补齐默认 dryRun（`repair_plc_config`）。`desktop/eval/agent-cases.json` 保留为旧路径兼容副本，内容与 docs 版本一致。
 
 在 `desktop/` 下运行：
 

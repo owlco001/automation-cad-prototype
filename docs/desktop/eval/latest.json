@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-03T15:29:08.481Z",
+  "generatedAt": "2026-11-03T15:47:42.775Z",
   "version": "0.6.3",
   "mode": "offline-rules",
   "dataset": {
     "path": "docs/desktop/eval/cases.json",
-    "count": 115,
+    "count": 117,
     "references": 17,
     "ambiguous": 7,
     "multiStep": 5,
@@ -27,6 +27,7 @@
       "load_machine_from_library",
       "place_component",
       "remove_component",
+      "repair_plc_config",
       "run_cost_report",
       "run_electrical_check",
       "run_interference_check",
@@ -38,6 +39,7 @@
       "suggest_kinematics",
       "undo_last",
       "update_component",
+      "validate_machine_design",
       "verify_plc_program"
     ],
     "rejections": [
@@ -59,18 +61,18 @@
   "passed": true,
   "metrics": {
     "intent": {
-      "correct": 115,
-      "total": 115,
+      "correct": 117,
+      "total": 117,
       "rate": 1
     },
     "tools": {
-      "correct": 115,
-      "total": 115,
+      "correct": 117,
+      "total": 117,
       "rate": 1
     },
     "params": {
-      "correct": 59,
-      "total": 59,
+      "correct": 60,
+      "total": 60,
       "rate": 1
     },
     "refused": {
@@ -3457,6 +3459,68 @@
           "tool": "export_machine_package",
           "args": {
             "id": "design-screw-3st"
+          },
+          "readOnly": false,
+          "missing": []
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "pc01",
+      "input": "检查当前机型方案是否合法",
+      "tags": [
+        "machine-validate"
+      ],
+      "note": "只读自查：与 apply_machine_design 落盘、run_plc_generate 预检同一判定源；返回 issues 而不是抛错，不写盘。",
+      "expectedIntent": "query",
+      "actualIntent": "query",
+      "intentOk": true,
+      "expectedTools": [
+        "validate_machine_design"
+      ],
+      "actualTools": [
+        "validate_machine_design"
+      ],
+      "toolOk": true,
+      "paramsApplicable": false,
+      "paramsOk": null,
+      "refusedOk": true,
+      "actualPlans": [
+        {
+          "tool": "validate_machine_design",
+          "args": {},
+          "readOnly": true,
+          "missing": []
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "pc02",
+      "input": "PLC 预检缺安全回路，先看看要补什么",
+      "tags": [
+        "plc-repair"
+      ],
+      "note": "补齐默认 dryRun=true：先列 willAdd 不写盘；用户确认后才 dryRun=false 写回方案并让预检归零。",
+      "expectedIntent": "modify",
+      "actualIntent": "modify",
+      "intentOk": true,
+      "expectedTools": [
+        "repair_plc_config"
+      ],
+      "actualTools": [
+        "repair_plc_config"
+      ],
+      "toolOk": true,
+      "paramsApplicable": true,
+      "paramsOk": true,
+      "refusedOk": true,
+      "actualPlans": [
+        {
+          "tool": "repair_plc_config",
+          "args": {
+            "dryRun": true
           },
           "readOnly": false,
           "missing": []

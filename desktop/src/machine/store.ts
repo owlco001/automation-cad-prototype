@@ -66,12 +66,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * 列表字段归一化：接受 `string[]`，也接受 `{items: string[]}`。
+ *
+ * `{items,total,truncated}` 是 `agent/trim.ts` 给模型的裁剪形状（>20 条的列表会被裁成这样）。
+ * 模型把裁剪后的方案原样回填时，这里按形状归一即可，不能因此整份方案被拒——
+ * 裁剪只作用于「给模型的返回」，落盘数据永不裁剪：本函数不做任何截断，只做形状归一。
+ */
 function stringArray(value: unknown, label: string): string[] {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+  const list = Array.isArray(value)
+    ? value
+    : isRecord(value) && Array.isArray(value.items)
+      ? value.items
+      : undefined;
+  if (!list || list.some((item) => typeof item !== 'string')) {
     throw new Error(`${label} 必须是字符串数组`);
   }
-  return value.map((item) => item.trim()).filter(Boolean);
+  return list.map((item) => item.trim()).filter(Boolean);
 }
 
 function uniqueStrings(values: readonly string[]): string[] {

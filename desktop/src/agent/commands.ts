@@ -19,6 +19,9 @@ import type { Issue, PlcGenConfig } from '../plcgen/types.ts';
 import { summarizeVerification, verifyGenerated, type VerifyOptions } from '../plcgen/verify.ts';
 import { generateProject } from '../plcgen/generate.ts';
 import { planPlcExportDirectory } from '../plcgen/export.ts';
+import { precheck } from '../plcgen/precheck.ts';
+import { planPlcGaps, repairPlcConfig } from '../plcgen/machine-gaps.ts';
+import { assertDesign, validateDesign } from '../machine/validate.ts';
 import {
   buildCostExport,
   CostExportError,
@@ -54,6 +57,7 @@ import {
   validateMachineDesign,
   writeActivePointer,
   writeBytes,
+  writeStoredMachineDesign,
   writeText,
   type MachineBomRow,
   type NormalizedMachineDesign,
@@ -1273,6 +1277,229 @@ function registerPlcGenerateCommand(bus: CommandBus): void {
   });
 }
 
+/**
+ * 机型方案自查（智能体工具 validate_machine_design）。
+ *
+ * 与 apply_machine_design / run_plc_generate 同一份判定源（machine/validate.ts），
+ * 因此「自查通过」= 落盘与预检也不会因结构/绑定被拒。区别：这里只做结构/绑定校验，
+ * 不做 PLC 轴/信号预检（后者是 run_plc_generate 的事）。
+ * 校验结论永远在返回值里，不抛错：方案有问题返回 ok:false + issues，而不是命令失败。
+ */
+function registerValidateMachineDesignCommand(bus: CommandBus): void {
+  bus.register({
+    name: 'validate_machine_design',
+    async run(args, ctx) {
+      for (const key of Object.keys(args)) {
+        if (key !== 'config') throw new CommandFailure('INVALID_ARGUMENT', `未知参数：${key}`);
+      }
+      let source: 'argument' | 'active' = 'argument';
+      let input: unknown = args.config;
+      if (input === undefined) {
+        if (!ctx.userDataRoot) {
+          throw new CommandFailure('NO_MACHINE', '用户数据目录未配置，无法读取当前机型方案');
+        }
+        const active = readActiveMachineDesign(ctx.userDataRoot);
+        if (!active) {
+          return {
+            ok: true,
+            data: {
+              ok: false,
+              code: 'NO_MACHINE',
+              message: '当前没有 active 机型方案：请先 apply_machine_design，或显式传入 config',
+              issues: [],
+              summary: { errors: 0, warnings: 0 }
+            }
+          };
+        }
+        source = 'active';
+        input = active.config;
+      } else if (isRecord(input) && !('stations' in input) && isRecord(input.config)) {
+        // 允许把 design_machine / 落盘方案整份传进来：只取其中的 config，校验规则不变。
+        input = input.config;
+      }
+
+      let result;
+      try {
+        result = validateDesign(input);
+      } catch (error) {
+        // validateDesign 只在非 DesignIssueError 的内部异常时抛出；仍然不向上抛，如实报告。
+        return {
+          ok: true,
+          data: {
+            ok: false,
+            code: 'VALIDATE_FAILED',
+            message: `校验过程异常：${error instanceof Error ? error.message : String(error)}`,
+            issues: [],
+            summary: { errors: 1, warnings: 0 }
+          }
+        };
+      }
+      const issues = result.issues.map((issue) => ({
+        code: issue.code,
+        path: issue.path,
+        message: issue.message,
+        ...(issue.hint ? { hint: issue.hint } : {})
+      }));
+      // warnings 恒为 0：validate.ts 只报阻断性问题；信号/轴预检的告警由 run_plc_generate 给。
+      return {
+        ok: true,
+        data: {
+          ok: result.ok,
+          issues,
+          summary: { errors: issues.length, warnings: 0 },
+          source
+        }
+      };
+    }
+  });
+}
+
+/**
+ * PLC 预检缺口补齐（智能体工具 repair_plc_config）。
+ *
+ * 输入只有 `dryRun`，配置来源固定为当前 active 机型方案（userData/machine/<id>.json）：
+ * 那是 apply_machine_design 落盘、联调面板 applyMachineConfig 加载的同一份 config。
+ * 默认 dryRun=true：只列出「要补什么」；dryRun=false 才写盘，写前必须过 assertDesign。
+ * 补齐只用 machine-gaps.ts 的最小改动（到位检测 + 安全回路），不改已有执行机构与点位。
+ */
+function registerRepairPlcConfigCommand(bus: CommandBus): void {
+  bus.register({
+    name: 'repair_plc_config',
+    async run(args, ctx) {
+      for (const key of Object.keys(args)) {
+        if (key !== 'dryRun') throw new CommandFailure('INVALID_ARGUMENT', `未知参数：${key}`);
+      }
+      const dryRun = optionalBoolean(args, 'dryRun', 'dryRun') ?? true;
+      if (!ctx.userDataRoot) {
+        throw new CommandFailure('WRITE_FAILED', '用户数据目录未配置，无法读取/写入机型方案');
+      }
+      const active = readActiveMachineDesign(ctx.userDataRoot);
+      if (!active) {
+        throw new CommandFailure(
+          'NO_MACHINE',
+          '当前没有 active 机型方案，没有可补齐的 PLC 配置',
+          '请先用 apply_machine_design 落一台机型，再补齐预检缺口'
+        );
+      }
+      const config = active.config as unknown as PlcGenConfig;
+      const plan = planPlcGaps(config);
+      const willAdd = plan.errors.flatMap((gap) =>
+        gap.fix
+          ? [{
+              // add-sensor 的点位在 sensor.point 里（执行机构的到位检测），安全回路才是 fix.point。
+              point: gap.fix.kind === 'add-sensor' ? String(gap.fix.sensor.point ?? '') : gap.fix.point,
+              kind: gap.fix.kind,
+              reason: gap.fix.detail
+            }]
+          : []
+      );
+      const issues = plan.errors.map((gap) => ({
+        code: gap.code,
+        message: gap.message,
+        fixable: gap.fix !== null,
+        ...(gap.fix ? { hint: gap.fix.detail } : {})
+      }));
+      const before = precheck(config);
+
+      if (dryRun) {
+        return {
+          ok: true,
+          data: {
+            dryRun: true,
+            machineId: sanitizeMachineId(active.config.id),
+            willAdd,
+            added: [],
+            remainingIssues: before.errors.map((error) => ({ code: error.code, message: error.message })),
+            issues
+          }
+        };
+      }
+
+      // 已经补齐：不写盘、不报错，如实返回空清单。
+      if (willAdd.length === 0) {
+        return {
+          ok: true,
+          data: {
+            dryRun: false,
+            machineId: sanitizeMachineId(active.config.id),
+            willAdd: [],
+            added: [],
+            remainingIssues: before.errors.map((error) => ({ code: error.code, message: error.message })),
+            issues
+          }
+        };
+      }
+
+      const repaired = repairPlcConfig(config, plan, { materializeSafety: true });
+      let repairedConfig;
+      try {
+        // 写盘前必须过结构/绑定校验：补齐不能引入一份落不了盘的方案。
+        repairedConfig = assertDesign(repaired.config);
+      } catch (error) {
+        throw new CommandFailure(
+          'DESIGN_INVALID',
+          `补齐后的机型方案未通过校验：${error instanceof Error ? error.message : String(error)}`,
+          '补齐只加到位检测与安全回路；若仍不合法，请回到方案层修正后再补齐'
+        );
+      }
+
+      const { points: _recomputed, ...rest } = active;
+      const nextDesign = validateMachineDesign({
+        ...rest,
+        config: repairedConfig,
+        assumptions: [
+          ...active.assumptions,
+          `PLC 预检缺口按最小改动补齐（${repaired.applied.join('；')}）：只加到位检测与安全回路，不改已有执行机构与点位。`
+        ]
+      });
+      const appliedAt = (ctx.now ? ctx.now() : new Date()).toISOString();
+      let machineFile: string;
+      try {
+        const stored = writeStoredMachineDesign(ctx.userDataRoot, nextDesign, appliedAt);
+        machineFile = machineDesignPath(ctx.userDataRoot, stored.id);
+      } catch (error) {
+        throw new CommandFailure('WRITE_FAILED', `补齐结果写入失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+
+      // 同步联调面板的当前配置：run_plc_generate 缺省读 getPlcGenConfig，不刷新就还是旧配置。
+      let sceneRefreshed = false;
+      try {
+        const refreshed = await ctx.bridge.call<{ ok?: boolean; message?: string }>('applyMachineConfig', machineScenePayload(
+          nextDesign.config,
+          {
+            machineId: sanitizeMachineId(nextDesign.config.id),
+            name: nextDesign.config.name,
+            layout: nextDesign.form?.geometry?.kind ?? null,
+            design: machineElecDesign(nextDesign)
+          }
+        ));
+        sceneRefreshed = refreshed?.ok !== false;
+      } catch (error) {
+        recordDiagnosticError('MACHINE_SCENE_REFRESH_FAILED', error, {
+          machineId: nextDesign.config.id,
+          phase: 'plc-repair'
+        });
+      }
+
+      const after = precheck(nextDesign.config as unknown as PlcGenConfig);
+      return {
+        ok: true,
+        data: {
+          dryRun: false,
+          machineId: sanitizeMachineId(nextDesign.config.id),
+          machineFile,
+          willAdd,
+          added: repaired.applied,
+          remainingIssues: after.errors.map((error) => ({ code: error.code, message: error.message })),
+          warnings: after.warnings.map((warning) => ({ code: warning.code, message: warning.message })),
+          sceneRefreshed,
+          issues
+        }
+      };
+    }
+  });
+}
+
 interface MachineApplyUndoToken {
   machineId: string;
   machineFile: string;
@@ -2263,6 +2490,8 @@ export function createAgentCommandBus(
   registerCostExportCommand(bus);
   registerPlcVerifyCommand(bus);
   registerPlcGenerateCommand(bus);
+  registerValidateMachineDesignCommand(bus);
+  registerRepairPlcConfigCommand(bus);
   registerBuildMachineModelCommand(bus);
   registerBuildCanvasAssemblyCommand(bus);
   registerSaveSceneAsProjectCommand(bus);

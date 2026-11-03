@@ -107,20 +107,63 @@ export interface PlcRepairResult {
   remainingWarnings: Array<{ code: string; message: string }>;
 }
 
+export interface PlcRepairOptions {
+  /**
+   * 把安全回路补成传感器，而不是只写 `safety.*` 引用。
+   *
+   * 机型方案落盘（`machine/store.ts`）与联调面板（`commission/ui.ts`）都会过
+   * `validateMachineConfig`→`assertDesign`，它只保留 id/name/stations/actuators/sensors
+   * 五个字段：`safety.emergencyStop` 会被静默丢掉，补了等于没补（重新预检还是 ESTOP_UNDEFINED）。
+   * 传感器的 `part` 写「急停」「安全门」能活到预检，走的是与 `synth.ts` 转向工位安全集
+   * 同一套识别规则（`isSafetyRole`），因此智能体链路必须用传感器形态落盘。
+   * CLI（`--plc-repair`）直接写整份 JSON，保留旧行为，默认 false。
+   */
+  materializeSafety?: boolean;
+}
+
 /** 按缺口清单做最小补齐；不引入新执行机构、不改已有点位 */
-export function repairPlcConfig(config: PlcGenConfig, plan: PlcGapPlan): PlcRepairResult {
+export function repairPlcConfig(
+  config: PlcGenConfig,
+  plan: PlcGapPlan,
+  options: PlcRepairOptions = {}
+): PlcRepairResult {
   const next = JSON.parse(JSON.stringify(config)) as PlcGenConfig & {
     sensors?: Array<Record<string, unknown>>;
     safety?: Record<string, unknown>;
   };
   next.sensors = [...(next.sensors ?? [])];
   const applied: string[] = [];
+  // 安全传感器仍要挂在已声明工位上（validate.ts 对 station 的必填判断对安全件同样生效）。
+  const safetyStation = String(config.stations?.[0] ?? '');
+  const usedPoints = new Set(
+    next.sensors.map((sensor) => String(sensor.point ?? '').trim().toUpperCase()).filter(Boolean)
+  );
+  const claimPoint = (base: string): string => {
+    let point = base;
+    let index = 2;
+    while (usedPoints.has(point.toUpperCase())) {
+      point = `${base}-${index}`;
+      index += 1;
+    }
+    usedPoints.add(point.toUpperCase());
+    return point;
+  };
+  const addSafetySensor = (point: string, part: string, detail: string): void => {
+    const claimed = claimPoint(point);
+    next.sensors.push({ point: claimed, station: safetyStation, part });
+    applied.push(claimed === point ? detail : `${detail}（点位 ${point} 已被占用，改用 ${claimed}）`);
+  };
 
   for (const gap of plan.errors) {
     if (!gap.fix) continue;
     if (gap.fix.kind === 'add-sensor') {
       next.sensors.push(gap.fix.sensor);
       applied.push(gap.fix.detail);
+      continue;
+    }
+    if (options.materializeSafety) {
+      if (gap.fix.kind === 'add-estop') addSafetySensor(gap.fix.point, '急停', gap.fix.detail);
+      if (gap.fix.kind === 'add-safety-door') addSafetySensor(gap.fix.point, '安全门', gap.fix.detail);
       continue;
     }
     next.safety = { ...(next.safety ?? {}) };

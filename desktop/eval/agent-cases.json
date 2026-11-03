@@ -98,6 +98,17 @@
     "note": "指代柜子；长类别词优先，不能落到“继电器”。"
   },
   {
+    "id": "q09",
+    "input": "看下当前渲染状态和拖动帧率",
+    "intent": "query",
+    "expect": {
+      "tool": "get_render_stats",
+      "argsContains": {}
+    },
+    "tags": [],
+    "note": "渲染性能只读查询：返回渲染器、软件渲染标记、场景规模与拖动帧时间，不修改视口。"
+  },
+  {
     "id": "c01",
     "input": "这台机台成本多少",
     "intent": "compute",
@@ -1497,5 +1508,205 @@
       "reject_audit_tamper"
     ],
     "note": "同义/口语改写：轮转后的审计文件同样禁止篡改"
+  },
+  {
+    "id": "df01",
+    "input": "设计一台六工位转盘锁螺丝机，节拍 10 件/分钟",
+    "intent": "generate",
+    "expect": {
+      "tool": "design_machine",
+      "argsContains": {
+        "brief": "设计一台六工位转盘锁螺丝机，节拍 10 件/分钟"
+      }
+    },
+    "tags": [
+      "machine_design",
+      "machine_form"
+    ],
+    "note": "同一工艺换布局：锁螺丝 × 六工位转盘机（dial-6）。"
+  },
+  {
+    "id": "df02",
+    "input": "设计一台六工位锁螺丝流水线，节拍 10 件/分钟",
+    "intent": "generate",
+    "expect": {
+      "tool": "design_machine",
+      "argsContains": {
+        "brief": "设计一台六工位锁螺丝流水线，节拍 10 件/分钟"
+      }
+    },
+    "tags": [
+      "machine_design",
+      "machine_form"
+    ],
+    "note": "同一工艺换布局：锁螺丝 × 六工位直线线体。"
+  },
+  {
+    "id": "df03",
+    "input": "设计一台六工位锁螺丝龙门机，节拍 10 件/分钟",
+    "intent": "generate",
+    "expect": {
+      "tool": "design_machine",
+      "argsContains": {
+        "brief": "设计一台六工位锁螺丝龙门机，节拍 10 件/分钟"
+      }
+    },
+    "tags": [
+      "machine_design",
+      "machine_form"
+    ],
+    "note": "同一工艺换布局：锁螺丝 × 双工位龙门（并行）。"
+  },
+  {
+    "id": "df04",
+    "input": "设计一台六工位单元式锁螺丝机，节拍 10 件/分钟",
+    "intent": "generate",
+    "expect": {
+      "tool": "design_machine",
+      "argsContains": {
+        "brief": "设计一台六工位单元式锁螺丝机，节拍 10 件/分钟"
+      }
+    },
+    "tags": [
+      "machine_design",
+      "machine_form"
+    ],
+    "note": "同一工艺换布局：锁螺丝 × 双轨并行线（cell）。"
+  },
+  {
+    "id": "bm01",
+    "input": "给当前机型生成三维实体模型",
+    "intent": "generate",
+    "expect": {
+      "tool": "build_machine_model",
+      "argsContains": {}
+    },
+    "tags": [
+      "model-build"
+    ],
+    "note": "走参数化内核出真实实体并装配进视口；不写工程文件，需确认。"
+  },
+  {
+    "id": "bm02",
+    "input": "给这台输送机生成整机实体模型看看",
+    "intent": "generate",
+    "expect": {
+      "tool": "build_machine_model",
+      "argsContains": {}
+    },
+    "tags": [
+      "model-build"
+    ],
+    "note": "与「应用/落地」区分：只装配视口，不落盘。"
+  },
+  {
+    "id": "ca01",
+    "input": "把这个画布方案生成整机 3D 装配工程",
+    "intent": "generate",
+    "expect": {
+      "tool": "build_canvas_assembly",
+      "argsContains": {}
+    },
+    "tags": [
+      "model-build"
+    ],
+    "note": "画布工位 → 占位盒装配工程：不含真实几何，质量为 null，需确认。"
+  },
+  {
+    "id": "sp01",
+    "input": "把当前模型存为工程",
+    "intent": "generate",
+    "expect": {
+      "tool": "save_scene_as_project",
+      "argsContains": {}
+    },
+    "tags": [
+      "project-save"
+    ],
+    "note": "当前视口逐件导出 STL 并落库成工程，需确认。"
+  },
+  {
+    "id": "ml01",
+    "input": "列出机型库里有哪些机型",
+    "intent": "query",
+    "expect": {
+      "tool": "list_machine_library",
+      "argsContains": {}
+    },
+    "tags": [
+      "machine-library"
+    ],
+    "note": "只读列机型库；空库返回空数组与 total=0，不报错。"
+  },
+  {
+    "id": "ml02",
+    "input": "把当前机型保存到机型库",
+    "intent": "modify",
+    "expect": {
+      "tool": "save_machine_to_library",
+      "argsContains": {}
+    },
+    "tags": [
+      "machine-library"
+    ],
+    "note": "缺省存当前 active 机型；同名已存在必须显式 overwrite，需确认。"
+  },
+  {
+    "id": "ml03",
+    "input": "从机型库加载 design-screw-3st 机型",
+    "intent": "modify",
+    "expect": {
+      "tool": "load_machine_from_library",
+      "argsContains": {
+        "id": "design-screw-3st"
+      }
+    },
+    "tags": [
+      "machine-library"
+    ],
+    "note": "加载会改 active.json 并刷新 3D，属写操作，需确认。"
+  },
+  {
+    "id": "ml04",
+    "input": "把机型库里的 design-screw-3st 导出成机器包",
+    "intent": "generate",
+    "expect": {
+      "tool": "export_machine_package",
+      "argsContains": {
+        "id": "design-screw-3st"
+      }
+    },
+    "tags": [
+      "machine-library"
+    ],
+    "note": "导出 .machine.zip 到 userData/exports/machines/，路径越界要拒绝。"
+  },
+  {
+    "id": "pc01",
+    "input": "检查当前机型方案是否合法",
+    "intent": "query",
+    "expect": {
+      "tool": "validate_machine_design",
+      "argsContains": {}
+    },
+    "tags": [
+      "machine-validate"
+    ],
+    "note": "只读自查：与 apply_machine_design 落盘、run_plc_generate 预检同一判定源；返回 issues 而不是抛错，不写盘。"
+  },
+  {
+    "id": "pc02",
+    "input": "PLC 预检缺安全回路，先看看要补什么",
+    "intent": "modify",
+    "expect": {
+      "tool": "repair_plc_config",
+      "argsContains": {
+        "dryRun": true
+      }
+    },
+    "tags": [
+      "plc-repair"
+    ],
+    "note": "补齐默认 dryRun=true：先列 willAdd 不写盘；用户确认后才 dryRun=false 写回方案并让预检归零。"
   }
 ]

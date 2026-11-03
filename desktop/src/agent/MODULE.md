@@ -5,7 +5,7 @@
 ## 两个入口，一份注册表
 
 ```
-tools.ts（AgentTools + 29 个 AgentTool；只读 13 / 写 16；含只读 `suggest_kinematics`、`get_render_stats`、`list_machine_library`；含只读 `design_machine` 与写工具 `apply_machine_design`；机型库 `save_machine_to_library` / `load_machine_from_library` / `export_machine_package`）
+tools.ts（AgentTools + 31 个 AgentTool；只读 14 / 写 17；含只读 `suggest_kinematics`、`get_render_stats`、`list_machine_library`、`validate_machine_design`；含只读 `design_machine` 与写工具 `apply_machine_design`、`repair_plc_config`；机型库 `save_machine_to_library` / `load_machine_from_library` / `export_machine_package`）
  ├─ kb/index.ts → 构建期分块 + kb.json（≤400 KB，标题 hash）
  ├─ kb/search.ts → 纯函数 BM25（中文 2-gram + 英文词，top 3 / ≤2 KB）
  ├─ rpc.ts        → HTTP JSON-RPC，127.0.0.1:7420，Bearer token
@@ -76,6 +76,8 @@ interface Bridge {
 | `save_machine_to_library` | `id? / name? / version? / overwrite?` | `save_machine_to_library` | ✅ 写：打包 `.machine.zip` 入库，缺省取当前 active 机型；同名返回 `LIBRARY_EXISTS` + `hint`，绝不自动覆盖 |
 | `load_machine_from_library` | `id` | `load_machine_from_library` | ✅ 写：写回 `machine/<id>.json` + `active.json`，`bom.csv` 回填 `bomDraft.items`，并 `applyMachineConfig` 刷 3D |
 | `export_machine_package` | `id / targetPath?` | `export_machine_package` | ✅ 写：默认 `userData/exports/machines/<id>.machine.zip`，返回 `{path,bytes,sha256}`；targetPath 必须在 exports 下 |
+| `validate_machine_design` | `config?` | `validate_machine_design` | ✅ 只读：`{ok,issues:[{code,path,message,hint}],summary:{errors,warnings}}`；缺省校验当前 active 机型，可传 config 或整份方案；与落盘/预检同一判定源，**不抛错**（方案有问题返回 `ok:false`） |
+| `repair_plc_config` | `dryRun?`（默认 true） | `repair_plc_config` | ✅ 写：按 `planPlcGaps` 补到位检测与急停/安全门回路；dryRun 只出 `willAdd` 不写盘，`dryRun=false` 写回 `machine/<id>.json` + `applyMachineConfig` 并让预检归零；写前 `assertDesign`；已补齐返回空清单不报错 |
 | `import_cad` | `path` | `import_cad` | ✅ 可用 |
 | `get_bom` | 无 | `get_bom` | ✅ 简化 BOM |
 | `get_project_context` | 无 | `get_project_context` | ✅ 只读：域/视图/选中/机型/底板/单位/最近操作，缺失为 null |
@@ -403,16 +405,16 @@ IPC 与 UI：
 
 - 独立 stdio MCP 启动时读取 `userData/agent-token`，调用 `POST http://127.0.0.1:7420/rpc` 的 `tools/call`，工具名和参数原样转发，默认 10 秒超时。
 - 桌面可达时所有已知工具都转发，写操作走主进程 CommandBus 与渲染桥。
-- 桌面不可达时：`list_components` / `search_components` 回退本地 registry；其余 27 个桌面工具（含 `place_component`、`update_component`、`run_plc_generate`、`export_files`、`load_machine_from_library`）返回 `{ok:false,code:'DESKTOP_NOT_RUNNING',message:'请先启动 AutomationCAD 桌面应用，再调用该工具'}`。
+- 桌面不可达时：`list_components` / `search_components` 回退本地 registry；其余 29 个桌面工具（含 `place_component`、`update_component`、`run_plc_generate`、`export_files`、`load_machine_from_library`）返回 `{ok:false,code:'DESKTOP_NOT_RUNNING',message:'请先启动 AutomationCAD 桌面应用，再调用该工具'}`。
 - 代理错误不包含 token；401 单独返回鉴权错误，不降级成“桌面未运行”。
 
 ## 应用内智能体对话
 
 - `agent-llm.json` 保存 `{baseUrl,apiKey,model,maxIterations}`，POSIX 权限 600。默认 `https://api.openai.com/v1`、`gpt-4o-mini`、6 轮。
 - UI 读取时 apiKey 只返回掩码（如 `sk-****abcd`）；保存时掩码/空值保留原密钥。
-- `llm.ts` 以 OpenAI 兼容格式发送 29 工具 JSON Schema，60 秒超时；非 2xx 返回含状态码的中文错误。
+- `llm.ts` 以 OpenAI 兼容格式发送 31 工具 JSON Schema，60 秒超时；非 2xx 返回含状态码的中文错误。
 - `session.ts` 注入 `{llm,bus,confirmWrite}`：工具结果以 `role:'tool'` 回灌，先经 `serializeToolResult` 裁剪、再由 `guard.ts` 包成不可信数据块，失败不中断；历史只保留最近 20 条；超轮返回「已达到最大工具调用轮数（N），请缩小任务范围」。
-- `import_cad`、`insert_component`、`place_component`、`update_component`、`remove_component`、`run_plc_generate`、`export_files`、`export_cost_report`、`save_machine_to_library`、`load_machine_from_library`、`export_machine_package`、`undo_last` 执行前由主进程弹出确认；拒绝时回灌 `USER_DENIED`。
+- `import_cad`、`insert_component`、`place_component`、`update_component`、`remove_component`、`run_plc_generate`、`repair_plc_config`、`export_files`、`export_cost_report`、`save_machine_to_library`、`load_machine_from_library`、`export_machine_package`、`undo_last` 执行前由主进程弹出确认；拒绝时回灌 `USER_DENIED`。
 - 面板包含对话消息流/工具卡片、模型设置（apiKey 为 password）与测试连接（ping，`max_tokens=8`）。
 
 ## JSON-RPC 协议
@@ -566,7 +568,7 @@ parseFallbackCandidates(text): string[]
 ## 进度
 
 - ✅ 注册表 + 22 工具（只读 12 / 写 10）+ 鉴权 + 结构化错误码 <!-- tool-count:ignore -->
-- ✅ MCP stdio（真实握手 `tools/list` 返回 29 个）
+- ✅ MCP stdio（真实握手 `tools/list` 返回 31 个）
 - ✅ 命令总线：注册/执行/历史/失败记录/撤销
 - ✅ 渲染桥：场景、选择、BOM、插入、移除、底板放置/撤销、干涉、导入
 - ✅ MCP 写工具本机 RPC 代理（转发/降级/超时）

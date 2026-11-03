@@ -1680,5 +1680,33 @@
       "machine-library"
     ],
     "note": "导出 .machine.zip 到 userData/exports/machines/，路径越界要拒绝。"
+  },
+  {
+    "id": "pc01",
+    "input": "检查当前机型方案是否合法",
+    "intent": "query",
+    "expect": {
+      "tool": "validate_machine_design",
+      "argsContains": {}
+    },
+    "tags": [
+      "machine-validate"
+    ],
+    "note": "只读自查：与 apply_machine_design 落盘、run_plc_generate 预检同一判定源；返回 issues 而不是抛错，不写盘。"
+  },
+  {
+    "id": "pc02",
+    "input": "PLC 预检缺安全回路，先看看要补什么",
+    "intent": "modify",
+    "expect": {
+      "tool": "repair_plc_config",
+      "argsContains": {
+        "dryRun": true
+      }
+    },
+    "tags": [
+      "plc-repair"
+    ],
+    "note": "补齐默认 dryRun=true：先列 willAdd 不写盘；用户确认后才 dryRun=false 写回方案并让预检归零。"
   }
 ]

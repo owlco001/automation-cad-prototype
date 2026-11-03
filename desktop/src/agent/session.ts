@@ -240,6 +240,7 @@ const SYSTEM_PROMPT = [
   '涉及「怎么操作 / 限制 / 决策依据 / 为什么」时先调用 search_docs 查本地项目文档；答案要引用返回的 source 与 heading。没有命中就明确说查不到，禁止凭空编造。',
   '位号明确时直接调用 update_component / remove_component，由工具校验目标；不要仅凭猜测跳过写操作。',
   '用户说“生成 PLC 程序”并要求落盘时用 run_plc_generate；verify_plc_program 只用于模拟验证。',
+  '方案自查用 validate_machine_design（只读，ok=false 表示方案有问题）；run_plc_generate 预检不过时先用 repair_plc_config 的 dryRun 列出要补的到位检测与安全回路，用户确认后再传 dryRun:false 写盘，不要自行改点位或跳过预检。',
   '机型设计先调用 design_machine；若结果 needs 非空，最多追问一次 question（问题里已带默认值），同一方案不要重复追问。用户未回答或要求按默认继续时，直接采用返回的 design，并在回复中转述 assumptions 中的缺省项。',
   '工具结果会以 JSON 数据块返回；失败时根据错误码向用户解释，不要编造执行结果。',
   '涉及修改装配体或写文件的操作会先请求用户确认。',

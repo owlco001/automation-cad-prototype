@@ -174,6 +174,30 @@ const PLC_GENERATE_SCHEMA = {
   additionalProperties: false
 };
 
+const VALIDATE_MACHINE_DESIGN_SCHEMA = {
+  type: 'object',
+  properties: {
+    config: {
+      type: 'object',
+      description: '待校验的机型 config；缺省校验当前 active 机型。可直接传 design_machine 返回的 config，或整份方案（取其中 config）',
+      additionalProperties: true
+    }
+  },
+  additionalProperties: false
+};
+
+const REPAIR_PLC_CONFIG_SCHEMA = {
+  type: 'object',
+  properties: {
+    dryRun: {
+      type: 'boolean',
+      description: '只预览要补什么、不写盘；默认 true。确认补齐才传 false',
+      default: true
+    }
+  },
+  additionalProperties: false
+};
+
 const EXPORT_FILES_SCHEMA = {
   type: 'object',
   properties: {
@@ -1352,6 +1376,35 @@ export class AgentTools {
           ...(target ? { target } : {}),
           ...(namePrefix ? { namePrefix } : {}),
           ...(sequenceTimeoutMs !== undefined ? { sequenceTimeoutMs } : {})
+        });
+        return result ? commandSuccess(result) : this.unavailable();
+      }
+    });
+
+    this.add({
+      name: 'validate_machine_design',
+      description:
+        '只读自查机型方案：结构/字段/点位唯一/工位引用/执行机构 id 唯一/传感器 part 绑定，与 apply_machine_design 落盘、run_plc_generate 预检同一份判定源（machine/validate.ts）。缺省校验当前 active 机型；也可传 design_machine 返回的 config。返回 {ok,issues:[{code,path,message,hint}],summary:{errors,warnings}}；方案有问题返回 ok=false 而不是工具失败。只做结构与绑定校验，PLC 轴/信号预检仍要看 run_plc_generate。',
+      inputSchema: VALIDATE_MACHINE_DESIGN_SCHEMA,
+      handler: async (args) => {
+        const result = await this.execute('validate_machine_design', {
+          ...(args.config !== undefined ? { config: args.config } : {})
+        });
+        return result ? commandSuccess(result) : this.unavailable();
+      }
+    });
+
+    this.add({
+      name: 'repair_plc_config',
+      description:
+        '补齐当前 active 机型的 PLC 预检缺口（执行机构缺到位检测、缺急停/安全门回路），只加检测点与安全回路，不改已有执行机构与点位。默认 dryRun=true 只列 willAdd，不写盘；dryRun=false 才写回 userData/machine/<id>.json 并刷新联调配置，写前过 assertDesign。已补齐时 willAdd/added/remainingIssues 都为空，不报错。需要用户确认。',
+      inputSchema: REPAIR_PLC_CONFIG_SCHEMA,
+      handler: async (args) => {
+        if (args.dryRun !== undefined && args.dryRun !== null && typeof args.dryRun !== 'boolean') {
+          return { ok: false, code: 'INVALID_ARGUMENT', message: 'dryRun 必须是布尔值' };
+        }
+        const result = await this.execute('repair_plc_config', {
+          ...(args.dryRun !== undefined && args.dryRun !== null ? { dryRun: args.dryRun === true } : {})
         });
         return result ? commandSuccess(result) : this.unavailable();
       }
