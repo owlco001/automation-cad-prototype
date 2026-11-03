@@ -302,7 +302,7 @@ export interface ToolPlan {
   resolvedLabel?: string;
 }
 
-/** 目前注册的 31 个工具里，只读 14 个、写操作 17 个。 */
+/** 目前注册的 32 个工具里，只读 15 个、写操作 17 个。 */
 export const READ_ONLY_TOOLS = new Set([
   'list_components',
   'search_components',
@@ -319,7 +319,9 @@ export const READ_ONLY_TOOLS = new Set([
   // 只读列机型库：不写库、不改 active
   'list_machine_library',
   // 只读自查方案：只返回 issues，不落盘、不改 active
-  'validate_machine_design'
+  'validate_machine_design',
+  // 只读截图：写 userData/agent-shots（证据文件），不改工程与机型
+  'capture_view'
 ]);
 
 export const WRITE_TOOLS = new Set([

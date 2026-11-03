@@ -70,6 +70,34 @@ const EMPTY_SCHEMA = {
   additionalProperties: false
 };
 
+const CAPTURE_VIEW_SCHEMA = {
+  type: 'object',
+  properties: {
+    view: {
+      type: 'string',
+      enum: ['3d', 'linkage', 'library', 'exports'],
+      description: '要截的界面：3d=3D 视口，linkage=联调抽屉（3D 联动），library=机型库抽屉，exports=导出菜单；默认 3d',
+      default: '3d'
+    },
+    width: { type: 'integer', minimum: 320, maximum: 3840, description: '截图宽度（像素），默认 1600', default: 1600 },
+    height: { type: 'integer', minimum: 240, maximum: 2160, description: '截图高度（像素），默认 1000', default: 1000 }
+  },
+  additionalProperties: false
+};
+
+const INTERFERENCE_CHECK_SCHEMA = {
+  type: 'object',
+  properties: {
+    states: {
+      type: 'array',
+      items: { type: 'string', enum: ['rest', 'lift', 'sweep'] },
+      description:
+        '要查的位姿：rest=静态位姿，lift=顶升到位，sweep=按 10 mm 逐步顶升到行程。不传=旧行为（只查当前场景静态位姿）'
+    }
+  },
+  additionalProperties: false
+};
+
 const SUGGEST_KINEMATICS_SCHEMA = {
   type: 'object',
   properties: {
@@ -1067,19 +1095,44 @@ export class AgentTools {
 
     this.add({
       name: 'run_interference_check',
-      description: '对当前装配体执行包围盒级干涉初筛，返回命中数与前 20 条。',
-      inputSchema: EMPTY_SCHEMA,
-      handler: async () => {
-        const result = await this.execute('run_interference');
+      description:
+        '对装配体执行包围盒级干涉初筛。不传 states 时只查当前场景静态位姿（返回命中数与前 20 条，旧行为）。' +
+        '传 states 时按当前 active 机型做位姿化检查：rest=静态、lift=顶升到位（可动件按 config 里真实行程平移）、sweep=按 10 mm 逐步顶升到行程；' +
+        '返回 {ok,states:{rest|lift|sweep:{pairs,hits,mm3}},lift:{actuatorId,strokeMm,direction,partIds}}。' +
+        '顶升行程读 active 机型 config 的执行机构 travelMm（turner-lift），读不到返回 STATE_UNAVAILABLE，绝不拿静态位姿冒充 lift。',
+      inputSchema: INTERFERENCE_CHECK_SCHEMA,
+      handler: async (args) => {
+        if (args.states !== undefined && args.states !== null && !Array.isArray(args.states)) {
+          return { ok: false, code: 'INVALID_ARGUMENT', message: 'states 必须是数组（rest / lift / sweep）' };
+        }
+        const result = await this.execute(
+          'run_interference',
+          Array.isArray(args.states) ? { states: args.states } : {}
+        );
         if (!result) return this.unavailable();
         if (!result.ok) return commandFailure(result);
         const data = isRecord(result.data) ? result.data : {};
+        // 状态化结果本身就是终形状（可能带 ok:false + STATE_UNAVAILABLE），原样返回
+        if (isRecord(data.states) || data.ok === false) return data;
         const items = Array.isArray(data.items) ? data.items.slice(0, 20) : [];
         return {
           ok: true,
           hits: Number(data.hits ?? items.length),
           items
         };
+      }
+    });
+
+    this.add({
+      name: 'capture_view',
+      description:
+        '截取当前真实界面并落盘到 userData/agent-shots/<timestamp>-<view>.png，返回 {path,bytes,sha256,width,height,view}。' +
+        '只读：不改工程。窗口未就绪或页面还停在首页时返回 VIEW_NOT_READY（不会返回首页截图冒充）；单张超过 5 MiB 会缩小重拍一次，仍超限返回 SHOT_TOO_LARGE。' +
+        '给用户看画面、或需要自证「界面真的是这样」时用，拿到 sha256 后可让人在磁盘上复核。',
+      inputSchema: CAPTURE_VIEW_SCHEMA,
+      handler: async (args) => {
+        const result = await this.execute('capture_view', args);
+        return result ? commandSuccess(result) : this.unavailable();
       }
     });
 

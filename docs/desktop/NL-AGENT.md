@@ -36,7 +36,7 @@
 
 关键约束：**工具层必须是唯一写入口**，UI 与 Agent 共用同一套 API，避免两套逻辑漂移。
 
-## 3. 工具清单（已实现 31 个工具：只读 14 + 写 17；另 3 个规划中）
+## 3. 工具清单（已实现 32 个工具：只读 15 + 写 17；另 3 个规划中）
 
 | 工具 | 类型 | 说明 |
 |---|---|---|
@@ -53,7 +53,8 @@
 | `repair_plc_config` | 写 | 补齐当前 active 机型的 PLC 预检缺口（执行机构缺到位检测、缺急停/安全门回路）：默认 `dryRun=true` 只返回 `willAdd`（不写盘）；`dryRun=false` 才写回 `machine/<id>.json`、同步联调配置并让预检归零，写前过 `assertDesign`。已补齐时 `willAdd`/`added`/`remainingIssues` 均为空且不报错（需确认） |
 | `get_bom` | 只读 | 当前装配体简化 BOM |
 | `get_project_context` | 只读 | 当前域 / 视图 / 选中对象 / 机型 / 底板 / 单位制 / 最近操作；缺失项返回 null |
-| `run_interference_check` | 只读 | 包围盒干涉初筛 |
+| `run_interference_check` | 只读 | 包围盒干涉初筛。不传 `states` 只查当前场景静态位姿（旧行为，前 20 条）；传 `states:['rest'/'lift'/'sweep']` 按 active 机型做位姿化检查：`lift` 把可动件按 config 里 `turner-lift.travelMm` 真实行程平移，`sweep` 按 10 mm 逐步顶升到行程；返回 `{ok,states:{rest/lift/sweep:{pairs,hits,mm3}},lift:{actuatorId,strokeMm,direction,partIds}}`；无顶升轴返回 `STATE_UNAVAILABLE`，不拿 static 冒充 lift |
+| `capture_view` | 只读 | 截当前真实界面并落盘 `userData/agent-shots/<timestamp>-<view>.png`（view=`3d`/`linkage`/`library`/`exports`），返回 `{path,bytes,sha256,width,height,view}`；窗口未就绪或仍在首页返回 `VIEW_NOT_READY`（**绝不返回首页截图冒充**），单张 >5 MiB 缩尺寸重拍一次，仍超限返回 `SHOT_TOO_LARGE` |
 | `suggest_kinematics` | 只读 | 对已导入 STEP 装配自动识别运动件：按零件名/型号、装配层级、几何推断轴向、行程/角度、置信度、中文理由与 IO 点位；只刷新运动标注抽屉的建议列表，**从不写入标注**，采纳由用户逐条确认 |
 | `run_electrical_check` | 只读 | 线号 / 功率 / 截面 / 断路器校验 |
 | `run_cost_report` | 只读 | 按 BOM 与价格簿计算成本 |
@@ -215,12 +216,12 @@ executePlan(plan, deps) → {
 通用多步补充：含「然后 / 接着 / 之后 / 最后 / 并且 / 同时 / 再 / 并」的指令会逐句调用 `planTool()`；任何一句落空都整单拒绝，避免做一半。单句仍回落到 `planTool()`。
 
 工具清单（以 `tools.ts` 注册表为准）：
-- 只读 12：`list_components`、`search_components`、`search_docs`、`design_machine`、`get_bom`、`get_render_stats`、`get_project_context`、`run_interference_check`、`suggest_kinematics`、`run_electrical_check`、`run_cost_report`、`verify_plc_program`
-- 写 13：`apply_machine_design`、`build_machine_model`、`build_canvas_assembly`、`save_scene_as_project`、`import_cad`、`insert_component`、`place_component`、`update_component`、`remove_component`、`run_plc_generate`、`export_files`、`export_cost_report`、`undo_last`
+- 只读 15：`list_components`、`search_components`、`search_docs`、`design_machine`、`get_bom`、`get_render_stats`、`get_project_context`、`run_interference_check`、`suggest_kinematics`、`run_electrical_check`、`run_cost_report`、`verify_plc_program`、`list_machine_library`、`validate_machine_design`、`capture_view`
+- 写 17：`apply_machine_design`、`save_machine_to_library`、`load_machine_from_library`、`export_machine_package`、`repair_plc_config`、`build_machine_model`、`build_canvas_assembly`、`save_scene_as_project`、`import_cad`、`insert_component`、`place_component`、`update_component`、`remove_component`、`run_plc_generate`、`export_files`、`export_cost_report`、`undo_last`
 - 规划中但未注册：`start_commission`、`diagnose_fault`、`sync_design_package`；未注册前不会进入可执行计划
 
 工具名与过滤：
-- 默认工具集合来自 `router.ts` 的 `READ_ONLY_TOOLS + WRITE_TOOLS`，与 `tools.ts` 当前 31 个注册工具一致；IPC/UI 调用时传入实时 `AgentTools.summaries()` 名称。
+- 默认工具集合来自 `router.ts` 的 `READ_ONLY_TOOLS + WRITE_TOOLS`，与 `tools.ts` 当前 32 个注册工具一致；IPC/UI 调用时传入实时 `AgentTools.summaries()` 名称。
 - 规划阶段逐条校验工具名；不存在的工具从步骤中移除并写入 `warnings`（例如 `忽略未注册工具 sync_design_package（第 1 步）`）。全部被过滤时 `refused:true`，不会执行空计划。
 - 不编造工具名；`sync_design_package` 注册后无需改规划规则即可自动纳入。
 

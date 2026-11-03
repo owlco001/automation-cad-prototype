@@ -953,12 +953,19 @@ export class AgentSession {
         }
       );
 
-      if (name === 'run_interference_check' && result.ok && isRecord(result.data) && Array.isArray(result.data.items)) {
-        return {
-          ok: true,
-          hits: Number(result.data.hits ?? result.data.items.length),
-          items: result.data.items.slice(0, 20)
-        };
+      if (name === 'capture_view' && result.ok && isRecord(result.data)) {
+        // 截图结果要原样给模型（path/bytes/sha256/尺寸），不能包成 {ok:true,data:…}
+        return result.data;
+      }
+      if (name === 'run_interference_check' && result.ok && isRecord(result.data)) {
+        if (isRecord(result.data.states) || result.data.ok === false) return result.data;
+        if (Array.isArray(result.data.items)) {
+          return {
+            ok: true,
+            hits: Number(result.data.hits ?? result.data.items.length),
+            items: result.data.items.slice(0, 20)
+          };
+        }
       }
       return result;
     } catch (error) {
@@ -1038,6 +1045,8 @@ export class AgentSession {
     const decisions = this.dedupe.plan(prepared.map((item) => ({
       tool: item.call.function.name,
       args: item.args,
+      // 截图每次都要新帧：同一轮里两次同参数 capture_view 不能复用上一次的图
+      ...(item.call.function.name === 'capture_view' ? { dedupe: false } : {}),
       ...(item.valid ? {} : { dedupe: false, key: item.key })
     }))).map((decision) => ({
       ...decision,

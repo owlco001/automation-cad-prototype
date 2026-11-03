@@ -32,6 +32,8 @@ import { createZip } from '../shared/zip.ts';
 import { recordDiagnosticError } from '../shared/diagnostics.ts';
 import { resolvePartReference } from './placement.ts';
 import { checkExportTargetPath } from './policy.ts';
+import { captureAgentView, type AgentViewCapture } from './self-evidence.ts';
+import { runInterferenceStates } from '../machine/interference-states.ts';
 import { parseMachineBrief } from '../machine/spec.ts';
 import { synthMachine } from '../machine/synth.ts';
 import { estimatePower } from '../machine/power.ts';
@@ -130,6 +132,8 @@ export interface CommandContext {
   buildSolids?: (doc: AssemblyDoc) => Promise<SolidBuildResult>;
   /** HTML → PDF 字节（A3 横向装配报告）；export_files 的 pdf 用。 */
   renderReportPdf?: (html: string) => Promise<Uint8Array>;
+  /** 主进程真实截图通道；未注入时 capture_view 返回 VIEW_NOT_READY（不伪造）。 */
+  captureView?: AgentViewCapture;
   /** 可注入的时钟；测试用，缺省当前时间。 */
   now?: () => Date;
 }
@@ -142,6 +146,7 @@ export interface CommandBusOptions {
   userDataRoot?: string;
   renderReportPdf?: (html: string) => Promise<Uint8Array>;
   buildSolids?: (doc: AssemblyDoc) => Promise<SolidBuildResult>;
+  captureView?: AgentViewCapture;
   now?: () => Date;
 }
 
@@ -726,7 +731,35 @@ function registerReadCommands(bus: CommandBus): void {
 
   bus.register({
     name: 'run_interference',
-    async run(_args, ctx) {
+    async run(args, ctx) {
+      // 状态化检查（rest/lift/sweep）：走 active 机型的参数化几何，行程从 config 读。
+      // 不传 states 时保持旧行为（渲染层当前场景的静态位姿），不能改形状。
+      if (args.states !== undefined && args.states !== null) {
+        if (!ctx.userDataRoot) {
+          return {
+            ok: true,
+            data: {
+              ok: false,
+              code: 'STATE_UNAVAILABLE',
+              message: '主进程没有提供 userData 目录，读不到 active 机型',
+              hint: '在桌面应用内调用，或先 apply_machine_design 选中机型'
+            }
+          };
+        }
+        const active = readActiveMachineDesign(ctx.userDataRoot);
+        if (!active) {
+          return {
+            ok: true,
+            data: {
+              ok: false,
+              code: 'STATE_UNAVAILABLE',
+              message: '当前没有 active 机型方案，无法按真实行程做 rest/lift/sweep',
+              hint: '先 apply_machine_design 或 load_machine_from_library 选中一台机型'
+            }
+          };
+        }
+        return { ok: true, data: runInterferenceStates({ states: args.states, config: active.config }) };
+      }
       const result = await ctx.bridge.call<InterferenceBridgeResult>('runInterference');
       if (!result || isBridgeFailure(result) || !Array.isArray(result.items)) {
         throw new CommandFailure('RENDERER_ERROR', bridgeFailureMessage(result, '干涉检查失败'));
@@ -738,6 +771,20 @@ function registerReadCommands(bus: CommandBus): void {
           items: result.items
         }
       };
+    }
+  });
+
+  bus.register({
+    name: 'capture_view',
+    async run(args, ctx) {
+      // 失败（未就绪/首页/超限）也是「工具正常返回 ok:false + 业务码」，不是抛错：
+      // 模型要能看到 VIEW_NOT_READY 并改变做法，而不是把它当异常重试。
+      const data = await captureAgentView(args, {
+        ...(ctx.userDataRoot ? { userDataRoot: ctx.userDataRoot } : {}),
+        ...(ctx.captureView ? { capture: ctx.captureView } : {}),
+        ...(ctx.now ? { now: ctx.now } : {})
+      });
+      return { ok: true, data };
     }
   });
 }
@@ -2476,6 +2523,7 @@ export function createAgentCommandBus(
   if (options.userDataRoot) context.userDataRoot = options.userDataRoot;
   if (options.renderReportPdf) context.renderReportPdf = options.renderReportPdf;
   if (options.buildSolids) context.buildSolids = options.buildSolids;
+  if (options.captureView) context.captureView = options.captureView;
   if (options.now) context.now = options.now;
   const bus = new CommandBus(context);
   registerInsertCommand(bus);

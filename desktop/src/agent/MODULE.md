@@ -5,7 +5,7 @@
 ## 两个入口，一份注册表
 
 ```
-tools.ts（AgentTools + 31 个 AgentTool；只读 14 / 写 17；含只读 `suggest_kinematics`、`get_render_stats`、`list_machine_library`、`validate_machine_design`；含只读 `design_machine` 与写工具 `apply_machine_design`、`repair_plc_config`；机型库 `save_machine_to_library` / `load_machine_from_library` / `export_machine_package`）
+tools.ts（AgentTools + 32 个 AgentTool；只读 15 / 写 17；含只读 `suggest_kinematics`、`get_render_stats`、`list_machine_library`、`validate_machine_design`、`capture_view`；含只读 `design_machine` 与写工具 `apply_machine_design`、`repair_plc_config`；机型库 `save_machine_to_library` / `load_machine_from_library` / `export_machine_package`）
  ├─ kb/index.ts → 构建期分块 + kb.json（≤400 KB，标题 hash）
  ├─ kb/search.ts → 纯函数 BM25（中文 2-gram + 英文词，top 3 / ≤2 KB）
  ├─ rpc.ts        → HTTP JSON-RPC，127.0.0.1:7420，Bearer token
@@ -81,7 +81,8 @@ interface Bridge {
 | `import_cad` | `path` | `import_cad` | ✅ 可用 |
 | `get_bom` | 无 | `get_bom` | ✅ 简化 BOM |
 | `get_project_context` | 无 | `get_project_context` | ✅ 只读：域/视图/选中/机型/底板/单位/最近操作，缺失为 null |
-| `run_interference_check` | 无 | `run_interference` | ✅ 前 20 条 |
+| `run_interference_check` | `states?`（`rest`/`lift`/`sweep`） | `run_interference` | ✅ 不传 states=旧行为（渲染层静态位姿，前 20 条）；传 states=按 active 机型位姿化检查（lift 按 `turner-lift.travelMm` 平移可动件，sweep 每 10 mm 一步），无顶升轴返回 `STATE_UNAVAILABLE` |
+| `capture_view` | `view?`（3d/linkage/library/exports）/ `width?` / `height?` | `capture_view` → 主进程 `electron/agent-capture.ts` | ✅ 只读：`capturePage` 落盘 `userData/agent-shots/<timestamp>-<view>.png`，返回 `{path,bytes,sha256,width,height,view}`；首页/未就绪 `VIEW_NOT_READY`，>5 MiB 缩尺寸重拍一次 |
 | `suggest_kinematics` | `includeLow? / limit?` | `suggest_kinematics` → 渲染桥 `suggestKinematics` | ✅ 只读：返回压缩后的高/低置信度建议，只刷新标注抽屉建议列表，`applied=false`，从不写标注 |
 | `insert_component` | `partId / name?` | `insert_component` | ✅ 可撤销 |
 | `place_component` | `partId / x / y / rotate? / railSnap?` | `place_component` | ✅ 底板放置，可撤销；越界/重叠只告警 |
@@ -96,6 +97,18 @@ interface Bridge {
 | `undo_last` | 无 | 直接 `CommandBus.undoLast()` | ✅ 可用 |
 
 `get_bom` 的 BOM 由「当前 CAD 零件 + 已插入占位件」生成：序号递增、名称/型号取零件名、数量 1、材料 `—`，并带 `note` 说明这是简化 BOM。没有模型时返回空数组。
+
+`capture_view` / 位姿化干涉的真机自检（本机 xvfb 实跑通过）：
+
+```
+xvfb-run -a -s "-screen 0 1920x1200x24" node_modules/.bin/electron . --no-sandbox --headless-capture-view
+# AGENT_CAPTURE_HOME_GATE_OK code=VIEW_NOT_READY hint=先点首页的「进入经典原型界面」…
+# AGENT_CAPTURE_OK view=3d bytes=433694 sha256=6e85ae94… size=1600x1000 path=…/agent-shots/…-3d.png
+# AGENT_CAPTURE_OK view=library bytes=418040 sha256=0f5937fa… size=1600x1000 path=…/agent-shots/…-library.png
+# AGENT_CAPTURE_SELF_CHECK_OK shots=2 home_gate=true
+```
+
+单测：`test/agent/self-evidence-tools.test.mjs` 7 条（首页拒绝、落盘 bytes/sha256 复算、>5 MiB 缩尺寸重拍、旧形状兼容、lift≠rest、STATE_UNAVAILABLE、sweep 步数）。
 
 机型落盘的校验、文件读写与 BOM 行转换在 `src/machine/store.ts`；机型库（`.machine.zip` 打包/校验/索引/导入导出）在 `src/machine/library.ts`，工具层四个命令统一用 `serializeMachineLibraryError` 折成 `{code,message,hint}`（`LIBRARY_EXISTS` 的 hint 固定为「同名机型已存在，确认覆盖请显式传 overwrite: true」）；`loadFromLibrary` 会把包内 `bom.csv` 解析回 `bomDraft.items`（CSV 没有物料号列，`partId` 无法复原，成本按缺物料号如实统计）。PLC 点位映射在 `src/machine/io-map.ts`，复用 `plcgen/io.ts` 与 `plcgen/tags.ts`，只输出 CSV、不复制完整 ST 生成逻辑。`apply_machine_design` 校验失败返回 `INVALID_ARGUMENT`，同名文件默认 `FILE_EXISTS`，写入失败返回 `WRITE_FAILED`；确认拒绝时不调用命令总线、不创建目录。
 
@@ -412,7 +425,7 @@ IPC 与 UI：
 
 - `agent-llm.json` 保存 `{baseUrl,apiKey,model,maxIterations}`，POSIX 权限 600。默认 `https://api.openai.com/v1`、`gpt-4o-mini`、6 轮。
 - UI 读取时 apiKey 只返回掩码（如 `sk-****abcd`）；保存时掩码/空值保留原密钥。
-- `llm.ts` 以 OpenAI 兼容格式发送 31 工具 JSON Schema，60 秒超时；非 2xx 返回含状态码的中文错误。
+- `llm.ts` 以 OpenAI 兼容格式发送 32 工具 JSON Schema，60 秒超时；非 2xx 返回含状态码的中文错误。
 - `session.ts` 注入 `{llm,bus,confirmWrite}`：工具结果以 `role:'tool'` 回灌，先经 `serializeToolResult` 裁剪、再由 `guard.ts` 包成不可信数据块，失败不中断；历史只保留最近 20 条；超轮返回「已达到最大工具调用轮数（N），请缩小任务范围」。
 - `import_cad`、`insert_component`、`place_component`、`update_component`、`remove_component`、`run_plc_generate`、`repair_plc_config`、`export_files`、`export_cost_report`、`save_machine_to_library`、`load_machine_from_library`、`export_machine_package`、`undo_last` 执行前由主进程弹出确认；拒绝时回灌 `USER_DENIED`。
 - 面板包含对话消息流/工具卡片、模型设置（apiKey 为 password）与测试连接（ping，`max_tokens=8`）。

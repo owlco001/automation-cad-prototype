@@ -1,4 +1,5 @@
 import { loadMachineLinkage } from './machine-linkage.ts';
+import { createAgentViewCapture } from './agent-capture.ts';
 import { killActiveQt, launchQt } from './qt-client.ts';
 import { app, BrowserWindow, dialog, ipcMain, Menu, type IpcMainInvokeEvent, type MenuItemConstructorOptions } from 'electron';
 import { autoUpdater } from 'electron-updater';
@@ -116,6 +117,7 @@ import {
   captureAgentScreenshots
 } from './machine-screenshots';
 import { captureLibraryScreenshot } from './library-screenshot.ts';
+import { checkAgentViewCapture } from './self-evidence-capture-check.ts';
 import { writeLastCrash } from './crash-report.ts';
 import { collectDiagnosis } from './diagnostics.ts';
 import {
@@ -138,12 +140,14 @@ const HEADLESS_LINKAGE_SHOTS = process.argv.includes('--headless-linkage-shots')
 const HEADLESS_AGENT_SHOTS = process.argv.includes('--headless-agent-shots');
 /** 机型库抽屉截图（24-machine-library.png）：主进程预置库 → 真实 preload/IPC 打开抽屉 */
 const HEADLESS_LIBRARY_SHOTS = process.argv.includes('--headless-library-shots');
+/** capture_view 真机自检：首页必须被拒、进入工作区后 3d/机型库各出一张真图 */
+const HEADLESS_CAPTURE_VIEW = process.argv.includes('--headless-capture-view');
 const HEADLESS_DESIGN_WEBGL_SMOKE = process.argv.includes('--headless-design-webgl-smoke');
 /** 只起服务、跑外部客户端 smoke（MCP/JSON-RPC 契约）：不跑 UI 断言、不自动退出，等外部脚本杀。 */
 const HEADLESS_SERVICE = process.argv.includes('--headless-service');
 const HEADLESS = HEADLESS_SMOKE || HEADLESS_SCREENSHOTS || HEADLESS_MACHINE_SCREENSHOTS ||
   HEADLESS_WIZARD_SHOTS || HEADLESS_LINKAGE_SHOTS || HEADLESS_AGENT_SHOTS ||
-  HEADLESS_LIBRARY_SHOTS ||
+  HEADLESS_LIBRARY_SHOTS || HEADLESS_CAPTURE_VIEW ||
   HEADLESS_DESIGN_WEBGL_SMOKE || HEADLESS_SERVICE;
 if (HEADLESS_SMOKE && HEADLESS_DESIGN_WEBGL_SMOKE) {
   console.error('SMOKE_MODE_CONFLICT --headless-smoke disables WebGL; use --headless-design-webgl-smoke alone for SwiftShader');
@@ -1390,6 +1394,19 @@ function createWindow(): BrowserWindow {
           setTimeout(() => app.exit(1), 100);
           return;
         }
+      }
+      if (HEADLESS_CAPTURE_VIEW) {
+        try {
+          const result = await checkAgentViewCapture(window, app.getPath('userData'));
+          console.log(`AGENT_CAPTURE_SELF_CHECK_OK shots=${result.shots.length} home_gate=${result.homeGateRejected}`);
+          if (parametric) await parametric.stop();
+          setTimeout(() => app.exit(0), 100);
+        } catch (error) {
+          console.error('AGENT_CAPTURE_SELF_CHECK_FAIL', error);
+          if (parametric) await parametric.stop();
+          setTimeout(() => app.exit(1), 100);
+        }
+        return;
       }
       if (HEADLESS_AGENT_SHOTS) {
         const outputDir = process.env.AUTOMATIONCAD_SCREENSHOT_DIR
@@ -5781,6 +5798,9 @@ async function bootstrap(): Promise<void> {
     renderReportPdf: renderAssemblyReportPdf,
     exportsRoot: join(app.getPath('userData'), 'exports'),
     userDataRoot: app.getPath('userData'),
+    // capture_view：真实截图通道（Window.capturePage + 视图切换 + 首页闸门），
+    // 窗口每次现取，重建后不会指向已销毁的实例。
+    captureView: createAgentViewCapture(() => mainWindow),
     // 机型几何实体化：只在内核已就绪时调用，不为此隐式拉起 400 MB 的 Python 进程。
     buildSolids: async (doc) => {
       if (!parametricImportModuleEnabled) {
