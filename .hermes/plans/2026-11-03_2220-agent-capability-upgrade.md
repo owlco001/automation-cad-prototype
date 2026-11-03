@@ -288,14 +288,17 @@ test('传感器绑不存在的执行机构 → SENSOR_UNBOUND', () => {
 
 **夜间队列（含智能体加强全部任务 + 上一轮遗留；状态随时更新）**
 
-- [~] A1 哨兵去硬编码（运行中）
-- [~] C1 单一校验源 `validate.ts`（运行中，与 A 并行）
-- [ ] B1 `list_machine_library`　B2 `save_machine_to_library`　B3 `load_machine_from_library`　B4 BOM 回填　B5 `export_machine_package`
-- [ ] C2 `validate_machine_design`　C3 `repair_plc_config`（默认 dryRun）　C4 错误码→hint
-- [ ] G1 assumptions 落盘不裁剪　G2 `ListResult` 统一　G3 导入即校验
-- [ ] F1 IPC 白名单　F2 机型库面板　F3 截图取证
-- [ ] D1 `capture_view`　D2 三态干涉自查
-- [ ] E1 12 条评测集　E2 `npm run agent:eval` + CI 门槛
+- [x] A1 哨兵去硬编码 —— `f2cf2b4`（注册表自校 + 文档逐行核对 + 三次破坏性自证）
+- [x] C1 单一校验源 `validate.ts` —— `9a3112f`（DesignIssue{code,path,hint}，14 条测试含三入口一致性）
+- [x] B1–B5 机型库四工具 + BOM 回填 —— `e34b7a6`（29 工具；LIBRARY_EXISTS 给 hint 不自动覆盖）
+- [x] C2 `validate_machine_design`　C3 `repair_plc_config`（默认 dryRun）　C4 hint 透传 —— `a5db56b`
+- [x] G1 assumptions 落盘不裁剪 —— `a5db56b`（写入侧接受 string[] 与 {items}，只做形状归一、不截断）
+- [x] F1 IPC 白名单　F2 面板　F3 截图 —— `bada8f7`（24-machine-library.png 427,985 B）
+- [x] D1 `capture_view`　D2 三态干涉 —— `32d8240`（首页阶段返回 VIEW_NOT_READY，不冒充）
+- [x] E1/E2 任务级评测 —— `e7acadc`（`npm run eval:tasks` 6/6，末态断言；变异自检会红）
+- [ ] G2 `ListResult` 统一（BOM 形状）——未做，卡在「改契约要动全部消费方」
+- [ ] G3 导入即跑 validateDesign 并把 issues 塞进 LIBRARY_INVALID_CONFIG ——未做
+- [ ] E 的第二层：把 eval:tasks 接进 CI 门禁 ——脚本已就绪，CI 步骤未加
 
 **夜间执行顺序**（总管派工，每阶段独立验收后再进下一阶段）：
 `A`（阻塞项，必须先） → `B ∥ C1`（文件基本不重叠） → `G`（依赖 C1） → `F`（UI，独立） → `D` → `E`
