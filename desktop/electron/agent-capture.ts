@@ -17,6 +17,8 @@ interface WorkspaceState {
   extensionReady: boolean;
   workspaceVisible: boolean;
   activeView: string;
+  /** 「CAD 查看」覆盖层是否打开（导出下拉住在它里面，层没开时菜单不可见） */
+  overlayOpen: boolean;
 }
 
 interface ViewProbe {
@@ -56,14 +58,23 @@ async function readWorkspace(window: BrowserWindow): Promise<WorkspaceState> {
       const home = document.querySelector('.home-root');
       const drawer = document.getElementById('machineLibraryDrawer');
       const commission = document.getElementById('commissionDrawer');
+      const overlay = document.getElementById('automationCadOverlay');
+      const overlayOpen = Boolean(overlay && !overlay.hidden);
       const menu = document.getElementById('cadExportMenu');
+      // 导出下拉住在「CAD 查看」覆盖层里：层没开时把 menu.hidden 当依据会把
+      // 建模工作区那一帧误判成 exports（实测：那张图和 3d 的 sha256 完全一样）。
+      // 所以还要求菜单真有布局尺寸（宽度 > 0），不是「hidden=false 但 display:none」。
+      const exportsOpen = Boolean(overlayOpen && menu && !menu.hidden && menu.getBoundingClientRect().width > 0);
       const activeView = !drawer || drawer.hidden
-        ? (!commission || commission.hidden ? (menu && !menu.hidden ? 'exports' : '3d') : 'linkage')
+        ? (!commission || commission.hidden
+            ? (exportsOpen ? 'exports' : overlayOpen ? 'overlay' : '3d')
+            : 'linkage')
         : 'library';
       return {
         extensionReady: window.__AUTOMATION_CAD_EXTENSION_READY__ === true,
         workspaceVisible: Boolean(app && app.getAttribute('aria-hidden') === null && (!home || home.hidden)),
-        activeView
+        activeView,
+        overlayOpen
       };
     })()`
   );
@@ -75,9 +86,6 @@ async function waitForView(window: BrowserWindow, view: AgentCaptureView, timeou
   let probe: ViewProbe = { ok: false, activeView: '3d', ready: false };
   do {
     const state = await readWorkspace(window);
-    if (view === '3d') {
-      return { ok: true, activeView: '3d', ready: state.activeView === '3d' };
-    }
     probe = {
       ok: true,
       activeView: state.activeView,
@@ -89,38 +97,78 @@ async function waitForView(window: BrowserWindow, view: AgentCaptureView, timeou
   return probe;
 }
 
-async function switchView(window: BrowserWindow, view: AgentCaptureView): Promise<AgentViewCaptureResult> {
-  if (view === '3d') {
-    // 截图前把会盖住视口的抽屉/菜单收掉，否则「3d」截到的是机型库或导出菜单
-    await evalJs(
-      window,
-      `(() => {
+/**
+ * 收起不属于目标视图的浮层（抽屉 / 导出下拉）。
+ *
+ * 为什么要先收：四个视图共用一块视口，`readWorkspace` 的 activeView 是按「抽屉 > 菜单 > 3d」
+ * 判定的。库抽屉开着的时候去截 exports，判定永远返回 library —— 不是画面不对，是判定被遮挡物
+ * 抢先了。收掉之后「判定的视图」和「截到的画面」才是同一个。
+ */
+async function closeOtherOverlays(window: BrowserWindow, keep: AgentCaptureView): Promise<void> {
+  await evalJs(
+    window,
+    `(() => {
+      const keep = ${JSON.stringify(keep)};
+      if (keep !== 'library' && keep !== 'linkage') {
         document.querySelectorAll('#machineLibraryDrawer [data-acp-close], #commissionDrawer [data-acp-close]')
           .forEach((button) => { if (!button.closest('[hidden]')) button.click(); });
+      }
+      if (keep !== 'exports') {
+        // 「CAD 查看」是整屏覆盖层，叠在所有抽屉和建模工作区之上：不关掉它，
+        // view=3d/library/linkage 截到的都是这层，导出菜单也会留在里面。
+        const overlay = document.getElementById('automationCadOverlay');
+        if (overlay && !overlay.hidden) {
+          const close = overlay.querySelector('[data-cad-action="close"]');
+          if (close instanceof HTMLElement) close.click();
+          else overlay.hidden = true;
+        }
         const menu = document.getElementById('cadExportMenu');
         if (menu) menu.hidden = true;
-        return true;
-      })()`
-    );
+      }
+      return true;
+    })()`
+  );
+}
+
+async function switchView(window: BrowserWindow, view: AgentCaptureView): Promise<AgentViewCaptureResult> {
+  // 四个视图共用同一块视口：抽屉/下拉没关时 `readWorkspace` 会把 activeView 判成
+  // 先命中的那个（抽屉优先于菜单），于是「库开着的时候截 exports」永远判不就绪。
+  // 切视图前先把不属于目标视图的浮层收掉，让判定和画面是同一个视图。
+  await closeOtherOverlays(window, view);
+  if (view === '3d') {
     const probe = await waitForView(window, '3d', ACTION_TIMEOUT_MS);
     if (!probe.ready) {
-      return notReady('先关闭机型库/联调抽屉或导出菜单，等 3D 视口露出来再截图', '3D 视图没有露出（仍被其他面板遮挡）');
+      return notReady('先关闭机型库/联调抽屉、「CAD 查看」覆盖层或导出菜单，等 3D 视口露出来再截图', '3D 视图没有露出（仍被其他面板遮挡）');
     }
     return { ok: true, png: new Uint8Array() };
   }
 
   if (view === 'library') {
-    await evalJs(
+    const opened = await evalJs<string>(
       window,
       `(() => {
         const drawer = document.getElementById('machineLibraryDrawer');
         if (drawer && !drawer.hidden) return 'already';
         const entry = document.querySelector('[data-machine-library-open]');
         if (!entry) return 'missing-entry';
+        // 入口在「工具」下拉里：菜单没展开时先点开它，走用户真实的两步路径，
+        // 而不是对着 hidden 的节点直接 click()（那样入口从菜单里掉了也测不出来）
+        if (entry.closest('[hidden]')) {
+          const toggle = document.getElementById('tbToolsButton');
+          if (!toggle) return 'missing-tools-menu';
+          toggle.click();
+          if (entry.closest('[hidden]')) return 'tools-menu-blocked';
+        }
         entry.click();
         return 'clicked';
       })()`
     );
+    if (opened === 'missing-entry') {
+      return notReady('顶栏「工具 → 模块 → 机型库」入口缺失', '机型库视图不可用');
+    }
+    if (opened === 'missing-tools-menu' || opened === 'tools-menu-blocked') {
+      return notReady('顶栏「工具」菜单没有展开，机型库入口不可达', '机型库视图不可用');
+    }
     const probe = await waitForView(window, 'library');
     if (!probe.ready) {
       return notReady('当前界面没有「机型库」入口，或抽屉没有打开', '机型库视图不可用');
@@ -129,17 +177,29 @@ async function switchView(window: BrowserWindow, view: AgentCaptureView): Promis
   }
 
   if (view === 'linkage') {
-    await evalJs(
+    const opened = await evalJs<string>(
       window,
       `(() => {
         const drawer = document.getElementById('commissionDrawer');
         if (drawer && !drawer.hidden) return 'already';
         const entry = document.getElementById('commissionEntryButton');
         if (!entry) return 'missing-entry';
+        if (entry.closest('[hidden]')) {
+          const toggle = document.getElementById('tbToolsButton');
+          if (!toggle) return 'missing-tools-menu';
+          toggle.click();
+          if (entry.closest('[hidden]')) return 'tools-menu-blocked';
+        }
         entry.click();
         return 'clicked';
       })()`
     );
+    if (opened === 'missing-entry') {
+      return notReady('顶栏「工具 → 模块 → 联调」入口缺失', '联动调试视图不可用');
+    }
+    if (opened === 'missing-tools-menu' || opened === 'tools-menu-blocked') {
+      return notReady('顶栏「工具」菜单没有展开，联调入口不可达', '联动调试视图不可用');
+    }
     const probe = await waitForView(window, 'linkage');
     if (!probe.ready) {
       return notReady('顶部「联调」入口缺失，或联调抽屉没有打开', '联动调试视图不可用');
@@ -147,18 +207,29 @@ async function switchView(window: BrowserWindow, view: AgentCaptureView): Promis
     return { ok: true, png: new Uint8Array() };
   }
 
-  // exports：顶部「导出」下拉菜单，菜单里有真实按钮才算就绪
+  // exports：先确保「CAD 查看」覆盖层打开（菜单住在里面），再点顶部「导出」下拉
   const clicked = await evalJs<string>(
     window,
     `(() => {
+      let overlay = document.getElementById('automationCadOverlay');
+      if (!overlay || overlay.hidden) {
+        const entry = document.getElementById('cadEntryButton');
+        if (!entry) return 'missing-overlay-entry';
+        entry.click();
+        overlay = document.getElementById('automationCadOverlay');
+        if (!overlay || overlay.hidden) return 'overlay-not-opened';
+      }
       const menu = document.getElementById('cadExportMenu');
-      if (menu && !menu.hidden && menu.querySelectorAll('[data-export]').length > 0) return 'already';
-      const trigger = document.querySelector('[data-cad-action="export-menu"]');
+      if (menu && !menu.hidden && menu.getBoundingClientRect().width > 0 && menu.querySelectorAll('[data-export]').length > 0) return 'already';
+      const trigger = overlay.querySelector('[data-cad-action="export-menu"]');
       if (!trigger) return 'missing-entry';
       trigger.click();
       return 'clicked';
     })()`
   );
+  if (clicked === 'missing-overlay-entry' || clicked === 'overlay-not-opened') {
+    return notReady('顶部「CAD 查看」入口缺失，导出菜单位于该覆盖层内', '导出视图不可用');
+  }
   if (clicked === 'missing-entry') {
     return notReady('顶部工具条没有「导出」按钮（可能还没打开 CAD 工作区）', '导出视图不可用');
   }

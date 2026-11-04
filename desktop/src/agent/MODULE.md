@@ -104,15 +104,27 @@ interface Bridge {
 
 `get_bom` 的 BOM 由「当前 CAD 零件 + 已插入占位件」生成：序号递增、名称/型号取零件名、数量 1、材料 `—`，并带 `note` 说明这是简化 BOM。没有模型时返回空数组。
 
-`capture_view` / 位姿化干涉的真机自检（本机 xvfb 实跑通过）：
+`capture_view` / 位姿化干涉的真机自检（本机 xvfb 实跑通过，四个视图全覆盖）：
 
 ```
 xvfb-run -a -s "-screen 0 1920x1200x24" node_modules/.bin/electron . --no-sandbox --headless-capture-view
-# AGENT_CAPTURE_HOME_GATE_OK code=VIEW_NOT_READY hint=先点首页的「进入经典原型界面」…
-# AGENT_CAPTURE_OK view=3d bytes=433694 sha256=6e85ae94… size=1600x1000 path=…/agent-shots/…-3d.png
-# AGENT_CAPTURE_OK view=library bytes=418040 sha256=0f5937fa… size=1600x1000 path=…/agent-shots/…-library.png
-# AGENT_CAPTURE_SELF_CHECK_OK shots=2 home_gate=true
+# AGENT_CAPTURE_HOME_GATE_OK view=3d|linkage|library|exports code=VIEW_NOT_READY   ← 首页四视图全拒拍，agent-shots 不新增文件
+# AGENT_CAPTURE_VIEW_PROBE view=exports pass=true rect=225x301@718,51 items=6 overlay=open
+# AGENT_CAPTURE_OK view=3d      bytes=433694 sha256=6e85ae94… size=1600x1000 colors=2377 luma_std=19.51 path=…/…-3d.png
+# AGENT_CAPTURE_OK view=linkage bytes=359967 sha256=5a1278a0… size=1600x1000 colors=3020 luma_std=19.39 path=…/…-linkage.png
+# AGENT_CAPTURE_OK view=library bytes=418040 sha256=0f5937fa… size=1600x1000 colors=2541 luma_std=19.10 path=…/…-library.png
+# AGENT_CAPTURE_OK view=exports bytes=161102 sha256=86285ee8… size=1600x1000 colors=2938 luma_std=16.37 path=…/…-exports.png
+# AGENT_CAPTURE_SELF_CHECK_OK shots=4 home_gate=true distinct=4
 ```
+
+自检不只比哈希，还做两件防「同帧冒充」的事：像素统计（颜色数 / 亮度标准差）判纯色底，命中就
+`VIEW_EMPTY view=<v> reason=flat-frame …` 且**不参与** distinct 校验；结构探针确认目标面板
+（`#stageAssembly` / `#commissionDrawer` / `#machineLibraryDrawer` / `#cadExportMenu`）真的打开、
+真有内容、真在视口里。任一视图空白则打 `AGENT_CAPTURE_SELF_CHECK_PARTIAL` 并退出码 1。
+
+视图入口约定：`linkage` / `library` / `exports` 都按用户真实路径点两下（`工具` 菜单展开后点入口；
+`exports` 先点「CAD 查看」打开覆盖层，菜单住在该层内），切下一个视图前会把上一个视图的抽屉 /
+覆盖层 / 导出菜单收掉 —— 否则 `activeView` 会被遮挡物抢先判成别的视图。
 
 单测：`test/agent/self-evidence-tools.test.mjs` 7 条（首页拒绝、落盘 bytes/sha256 复算、>5 MiB 缩尺寸重拍、旧形状兼容、lift≠rest、STATE_UNAVAILABLE、sweep 步数）。
 

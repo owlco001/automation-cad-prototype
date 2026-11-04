@@ -1,31 +1,70 @@
 /**
- * 真机自检：在一个真实 Electron 窗口里跑 `capture_view` 的两条关键路径。
+ * 真机自检：在一个真实 Electron 窗口里跑 `capture_view` 的全部四个视图
+ * （`3d / linkage / library / exports`）。
  *
  * 用法（headless，本机已用 xvfb 实跑）：
  *   xvfb-run -a -s "-screen 0 1920x1200x24" \
  *     node_modules/.bin/electron . --no-sandbox --headless-capture-view
  *
  * 断言：
- *   1. 还停在首页时调用 capture_view → `VIEW_NOT_READY`，且 `agent-shots/` 里**没有**新文件
+ *   1. 还停在首页时，四个视图**全部**返回 `VIEW_NOT_READY`，且 `agent-shots/` 里没有新文件
  *      （这一条是「不许拿首页截图冒充」的闸门，不能省）；
- *   2. 点「进入经典原型界面」后 3D 视图 → `ok:true`，落盘文件字节/尺寸真实、PNG 魔数正确、
- *      sha256 与磁盘一致；
- *   3. 机型库视图 → 抽屉真打开后截图，字节与 3D 图不同（不是同一帧复用）。
+ *   2. 点「进入经典原型界面」后，每个视图都真的点到入口、真的把面板/下拉打开、再截图：
+ *      落盘文件字节/尺寸真实、PNG 魔数正确、sha256 与磁盘一致；
+ *   3. 每张图做像素统计（颜色数 / 亮度标准差），纯色或近纯色的帧如实报
+ *      `VIEW_EMPTY view=<v> reason=<code>`，**不**参与 distinct 校验，也不靠「刚好不为空」蒙过去；
+ *   4. 四张非空图的 sha256 两两不同 —— 相同就是拿了同一帧（之前真的发生过）。
  */
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { BrowserWindow } from 'electron';
-import { captureAgentView } from '../src/agent/self-evidence.ts';
+import { AGENT_CAPTURE_VIEWS, captureAgentView, type AgentCaptureView } from '../src/agent/self-evidence.ts';
 import { createAgentViewCapture } from './agent-capture.ts';
 import { decodePng, VISION_MAX_BYTES, VISION_MAX_EDGE } from '../src/agent/vision-image.ts';
 import { loadShotImage } from '../src/agent/vision.ts';
 
+export interface SelfEvidenceShot {
+  view: string;
+  path: string;
+  bytes: number;
+  sha256: string;
+  width: number;
+  height: number;
+}
+
 export interface SelfEvidenceCheckResult {
   ok: boolean;
   homeGateRejected: boolean;
-  shots: Array<{ view: string; path: string; bytes: number; sha256: string; width: number; height: number }>;
+  /** 非空截图里 sha256 互不相同的张数（等于 shots.length 才算过） */
+  distinct: number;
+  /** 像素统计判定为空白/无内容的视图 */
+  empty: string[];
+  shots: SelfEvidenceShot[];
 }
+
+interface FrameStats {
+  width: number;
+  height: number;
+  /** 去重后的颜色数（超过 4096 就记 4096，说明画面足够丰富） */
+  colors: number;
+  /** 亮度标准差（0 = 纯色） */
+  lumaStd: number;
+}
+
+interface ViewProbe {
+  view: string;
+  /** 目标面板在视口里的位置（CSS px） */
+  rect: { x: number; y: number; w: number; h: number };
+  /** 面板里的真实内容量（点位数 / 导出项数 / 文本长度…） */
+  detail: string;
+  /** 结构上是否真的是「这个视图打开了且有内容」 */
+  pass: boolean;
+}
+
+/** 空白判定阈值：颜色数 ≤ 8 或亮度标准差 < 2 就是纯色/渐变底，不可能是真实界面。 */
+const EMPTY_MAX_COLORS = 8;
+const EMPTY_MIN_LUMA_STD = 2;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
@@ -48,6 +87,87 @@ async function waitFor(window: BrowserWindow, expression: string, label: string,
   if (!ok) throw new Error(`等待超时：${label}`);
 }
 
+/** 像素统计：用来判「这张图是不是纯色底」，比看字节数靠谱（压缩过的纯色图也可能几十 KB）。 */
+function frameStats(png: Uint8Array): FrameStats {
+  const image = decodePng(png);
+  const seen = new Set<number>();
+  let sum = 0;
+  let sumSq = 0;
+  let count = 0;
+  const step = 4; // 每 4 个像素取 1 个：1600×1000 也够统计，且不拖慢自检
+  for (let index = 0; index + 3 < image.data.length; index += 4 * step) {
+    const r = image.data[index] ?? 0;
+    const g = image.data[index + 1] ?? 0;
+    const b = image.data[index + 2] ?? 0;
+    if (seen.size < 4096) seen.add((r << 16) | (g << 8) | b);
+    const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    sum += luma;
+    sumSq += luma * luma;
+    count += 1;
+  }
+  const mean = count > 0 ? sum / count : 0;
+  const variance = count > 0 ? Math.max(0, sumSq / count - mean * mean) : 0;
+  return { width: image.width, height: image.height, colors: seen.size, lumaStd: Math.sqrt(variance) };
+}
+
+function isBlank(stats: FrameStats): boolean {
+  return stats.colors <= EMPTY_MAX_COLORS || stats.lumaStd < EMPTY_MIN_LUMA_STD;
+}
+
+/** 结构探针：不只是「截到了图」，还要确认目标面板真的打开、真的有内容、真的落在视口里。 */
+async function probeView(window: BrowserWindow, view: AgentCaptureView): Promise<ViewProbe> {
+  return await window.webContents.executeJavaScript(
+    `(() => {
+      const view = ${JSON.stringify(view)};
+      const empty = { x: 0, y: 0, w: 0, h: 0 };
+      const rectOf = (element) => {
+        if (!element) return empty;
+        const r = element.getBoundingClientRect();
+        return { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) };
+      };
+      const inViewport = (r) => r.w > 0 && r.h > 0 && r.x + r.w > 0 && r.y + r.h > 0
+        && r.x < window.innerWidth && r.y < window.innerHeight;
+      if (view === '3d') {
+        // 建模工作区的 3D 舞台是 #stageAssembly（#cadHost 属于「CAD 查看」覆盖层，
+        // 层没开时它是 0×0 —— 拿它做判据会把「真的 3D 工作区」误判成空视图）。
+        const stage = document.getElementById('stageAssembly');
+        const overlay = document.getElementById('automationCadOverlay');
+        const openDrawers = [...document.querySelectorAll('.acp-drawer')].filter((el) => !el.hidden).map((el) => el.id);
+        const menu = document.getElementById('cadExportMenu');
+        const menuOpen = Boolean(menu && !menu.hidden);
+        const overlayOpen = Boolean(overlay && !overlay.hidden);
+        const rect = rectOf(stage);
+        return {
+          view,
+          rect,
+          detail: 'openDrawers=' + openDrawers.length + ' menu=' + (menuOpen ? 'open' : 'closed') + ' overlay=' + (overlayOpen ? 'open' : 'closed'),
+          pass: inViewport(rect) && openDrawers.length === 0 && !menuOpen && !overlayOpen
+        };
+      }
+      if (view === 'library') {
+        const drawer = document.getElementById('machineLibraryDrawer');
+        const rect = rectOf(drawer);
+        const text = (drawer && drawer.innerText ? drawer.innerText : '').trim().length;
+        const buttons = drawer ? drawer.querySelectorAll('button').length : 0;
+        return { view, rect, detail: 'text=' + text + ' buttons=' + buttons, pass: inViewport(rect) && text > 40 && buttons > 0 };
+      }
+      if (view === 'linkage') {
+        const drawer = document.getElementById('commissionDrawer');
+        const rect = rectOf(drawer);
+        const points = document.querySelectorAll('#commissionPoints tr').length;
+        const steps = document.querySelectorAll('#commissionPowerSteps > *').length;
+        return { view, rect, detail: 'points=' + points + ' steps=' + steps, pass: inViewport(rect) && points > 0 && steps > 0 };
+      }
+      const menu = document.getElementById('cadExportMenu');
+      const rect = rectOf(menu);
+      const items = menu ? menu.querySelectorAll('[data-export]').length : 0;
+      const overlay = document.getElementById('automationCadOverlay');
+      const overlayOpen = Boolean(overlay && !overlay.hidden);
+      return { view, rect, detail: 'items=' + items + ' overlay=' + (overlayOpen ? 'open' : 'closed'), pass: inViewport(rect) && items > 0 && overlayOpen };
+    })()`
+  ) as ViewProbe;
+}
+
 export async function checkAgentViewCapture(window: BrowserWindow, userDataRoot: string): Promise<SelfEvidenceCheckResult> {
   const capture = createAgentViewCapture(() => window);
   const deps = { userDataRoot, capture };
@@ -58,17 +178,20 @@ export async function checkAgentViewCapture(window: BrowserWindow, userDataRoot:
   await waitFor(window, `window.__AUTOMATION_CAD_EXTENSION_READY__ === true`, '桌面扩展就绪', 25_000);
   await delay(300);
 
-  // 1) 首页闸门：此时 #app 仍 inert，工具必须拒绝，且不能留下任何截图
+  // 1) 首页闸门：四个视图此时都必须拒拍，且不能留下任何截图
   const before = existsSync(shotsDir) ? readdirSync(shotsDir).length : 0;
-  const rejected = await captureAgentView({ view: '3d' }, deps);
-  const after = existsSync(shotsDir) ? readdirSync(shotsDir).length : 0;
-  if (rejected.ok !== false || rejected.code !== 'VIEW_NOT_READY') {
-    throw new Error(`首页闸门失效：${JSON.stringify(rejected)}`);
+  for (const view of AGENT_CAPTURE_VIEWS) {
+    const rejected = await captureAgentView({ view }, deps);
+    if (rejected.ok !== false || rejected.code !== 'VIEW_NOT_READY') {
+      throw new Error(`首页闸门失效（view=${view}）：${JSON.stringify(rejected)}`);
+    }
+    console.log(`AGENT_CAPTURE_HOME_GATE_OK view=${view} code=${String(rejected.code)}`);
   }
+  const after = existsSync(shotsDir) ? readdirSync(shotsDir).length : 0;
   if (after !== before) {
     throw new Error(`首页闸门失效：拒绝时仍写了 ${after - before} 个截图`);
   }
-  console.log(`AGENT_CAPTURE_HOME_GATE_OK code=${String(rejected.code)} hint=${String(rejected.hint)}`);
+  console.log(`AGENT_CAPTURE_HOME_GATE_OK views=${AGENT_CAPTURE_VIEWS.length} files_before=${before} files_after=${after}`);
 
   // 2) 进入经典原型界面（与 library-screenshot 同一入口）
   const entered = await window.webContents.executeJavaScript(
@@ -91,9 +214,11 @@ export async function checkAgentViewCapture(window: BrowserWindow, userDataRoot:
   );
   await delay(400);
 
-  const shots: SelfEvidenceCheckResult['shots'] = [];
-  for (const view of ['3d', 'library'] as const) {
+  const shots: SelfEvidenceShot[] = [];
+  const empty: string[] = [];
+  for (const view of AGENT_CAPTURE_VIEWS) {
     const result = await captureAgentView({ view, width: 1600, height: 1000 }, deps);
+    // 拿不到图就是真失败：报错误码，绝不把上一次的帧当成这个视图的结果
     if (result.ok !== true) throw new Error(`${view} 截图失败：${JSON.stringify(result)}`);
     const path = String(result.path);
     const disk = readFileSync(path);
@@ -105,7 +230,32 @@ export async function checkAgentViewCapture(window: BrowserWindow, userDataRoot:
     }
     const sha256 = createHash('sha256').update(disk).digest('hex');
     if (sha256 !== result.sha256) throw new Error(`${view} 的 sha256 无法在磁盘上复算`);
-    if (disk.length < 20_000) throw new Error(`${view} 截图只有 ${disk.length} 字节，疑似空画面`);
+
+    const stats = frameStats(disk);
+    if (isBlank(stats)) {
+      empty.push(view);
+      console.log(
+        `VIEW_EMPTY view=${view} reason=flat-frame colors=${stats.colors} luma_std=${stats.lumaStd.toFixed(2)} bytes=${disk.length} size=${stats.width}x${stats.height} path=${path}`
+      );
+      continue;
+    }
+
+    // 结构探针：像素不空不等于「这个视图真的打开了」（比如 exports 只截到了 3D 底图）。
+    // 面板可能还在渲染，给最多 2.5 s 的收敛时间，仍不通过就按空视图如实报。
+    let probe = await probeView(window, view);
+    for (let attempt = 0; attempt < 10 && !probe.pass; attempt += 1) {
+      await delay(250);
+      probe = await probeView(window, view);
+    }
+    console.log(`AGENT_CAPTURE_VIEW_PROBE view=${view} pass=${probe.pass} rect=${probe.rect.w}x${probe.rect.h}@${probe.rect.x},${probe.rect.y} ${probe.detail}`);
+    if (!probe.pass) {
+      empty.push(view);
+      console.log(
+        `VIEW_EMPTY view=${view} reason=panel-not-visible rect=${probe.rect.w}x${probe.rect.h}@${probe.rect.x},${probe.rect.y} ${probe.detail} path=${path}`
+      );
+      continue;
+    }
+
     shots.push({
       view,
       path,
@@ -114,7 +264,9 @@ export async function checkAgentViewCapture(window: BrowserWindow, userDataRoot:
       width: Number(result.width),
       height: Number(result.height)
     });
-    console.log(`AGENT_CAPTURE_OK view=${view} bytes=${disk.length} sha256=${sha256} size=${result.width}x${result.height} path=${path}`);
+    console.log(
+      `AGENT_CAPTURE_OK view=${view} bytes=${disk.length} sha256=${sha256} size=${result.width}x${result.height} colors=${stats.colors} luma_std=${stats.lumaStd.toFixed(2)} path=${path}`
+    );
 
     // 视觉自检（P2）：真截图必须能被压到「长边 ≤1024、≤400 KB」并解回同一尺寸，
     // 否则模型这一侧拿到的是坏图或超限图，宁可在这里失败。
@@ -138,8 +290,16 @@ export async function checkAgentViewCapture(window: BrowserWindow, userDataRoot:
     );
   }
 
-  if (shots.length === 2 && shots[0]?.sha256 === shots[1]?.sha256) {
-    throw new Error('3d 与 library 截图字节完全相同：抓到的是同一帧');
+  const distinct = new Set(shots.map((shot) => shot.sha256)).size;
+  if (empty.length > 0) {
+    // 有视图是空白：如实报出来，不拿「截图刚好不为空」凑数，也不把它算进 distinct。
+    console.log(
+      `AGENT_CAPTURE_SELF_CHECK_PARTIAL shots=${shots.length} empty=${empty.join(',')} distinct=${distinct} home_gate=true`
+    );
+    return { ok: false, homeGateRejected: true, distinct, empty, shots };
   }
-  return { ok: true, homeGateRejected: true, shots };
+  if (distinct !== shots.length || shots.length !== AGENT_CAPTURE_VIEWS.length) {
+    throw new Error(`四个视图的截图有重复帧：distinct=${distinct} shots=${shots.length}（同一帧被复用）`);
+  }
+  return { ok: true, homeGateRejected: true, distinct, empty, shots };
 }

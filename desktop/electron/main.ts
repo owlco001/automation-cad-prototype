@@ -1398,7 +1398,14 @@ function createWindow(): BrowserWindow {
       if (HEADLESS_CAPTURE_VIEW) {
         try {
           const result = await checkAgentViewCapture(window, app.getPath('userData'));
-          console.log(`AGENT_CAPTURE_SELF_CHECK_OK shots=${result.shots.length} home_gate=${result.homeGateRejected}`);
+          // 有空白视图时 check 里已经打过 VIEW_EMPTY / PARTIAL 明细，这里按失败退出，
+          // 不用「截图刚好不为空」把缺口糊过去。
+          if (!result.ok) {
+            if (parametric) await parametric.stop();
+            setTimeout(() => app.exit(1), 100);
+            return;
+          }
+          console.log(`AGENT_CAPTURE_SELF_CHECK_OK shots=${result.shots.length} home_gate=${result.homeGateRejected} distinct=${result.distinct}`);
           if (parametric) await parametric.stop();
           setTimeout(() => app.exit(0), 100);
         } catch (error) {
