@@ -39,6 +39,12 @@
 
 `trim.ts` 原来在 >20 条时把数组裁成 `{items,total}`，消费方仍按数组读，成本流程因此把 25 行 BOM 当空 BOM 拦下。现在统一 `ListResult{items,total,truncated}`，**条目一条不删**，只截条目内长字符串；形状不认识直接抛错而不是静默变空。
 
+### Release
+
+未签名预览包 `AutomationCAD-Setup-0.6.4.exe`（154,345,807 B / 147.2 MB，sha256 `fd3cf2fc…`），
+构建自 `main@0978d81`（windows-build run 41743790161），以 **pre-release** 发布、只含 exe；
+`latest.yml` / `.blockmap` 故意不带，避免未签名包进入自动更新通道。
+
 ### Changed · 工具与测试口径
 
 - 工具 25 → 32（只读 15 / 写 17），工具数哨兵改为注册表自校，加工具不再需要改 8 个测试文件
