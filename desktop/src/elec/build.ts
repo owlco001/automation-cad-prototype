@@ -15,12 +15,19 @@ import { PIN } from './circuit.ts';
 import { normalizeElecDesign, type DesignIssue, type ElecDesign, type ElecInput, type ElecMotor, type ElecOutput } from './design.ts';
 import { breakerNameFor } from './machine-circuit.ts';
 import { selectMotorProtection } from './protection.ts';
+import { breakerFor, breakerRatingFromModel, selectCableForBreaker } from './selection.ts';
 
 export interface PowerBranch {
   kind: 'psu' | 'dol' | 'vfd' | 'servo';
   /** 单相支路取电的相 */
   phase?: 'L1' | 'L2' | 'L3';
   breaker: string;
+  /** 支路断路器额定电流（由型号读出；读不出按计算电流选标准档） */
+  breakerA: number;
+  /** 导线截面与载流量：按断路器额定选出，保证 ampacityA ≥ breakerA */
+  sectionMm2: number | null;
+  ampacityA: number | null;
+  currentA: number;
   poles: number;
   contactor?: string;
   thermal?: string;
@@ -69,6 +76,8 @@ export interface OutputColumn {
 
 export interface ElecPlan {
   mainBreaker: string;
+  /** 总进线断路器—导线配合（先定断路器，再按断路器额定选截面） */
+  mainFeed: { breakerA: number; sectionMm2: number | null; ampacityA: number | null; currentA: number };
   branches: PowerBranch[];
   fuse: string;
   /** -FU1 与安全母线 S 之间串联的元件（急停或安全继电器安全输出） */
@@ -142,6 +151,22 @@ export function buildElec(input: ElecDesign): ElecBuild {
     list.push(...pins);
     netPins.set(net, list);
   };
+  /**
+   * 断路器已定（型号 → 额定电流）后，按额定选导线截面。
+   * 选不出来 / 截面超过常用单根上限时只告警并提示分回路，不静默换一根超粗线。
+   */
+  const cableFor = (
+    currentA: number,
+    model: string,
+    label: string
+  ): { breakerA: number; sectionMm2: number | null; ampacityA: number | null } => {
+    const breakerA = breakerRatingFromModel(model) ?? breakerFor(currentA);
+    const cable = selectCableForBreaker(breakerA, { label });
+    for (const message of cable.warnings) {
+      issues.push({ severity: 'warning', code: 'CABLE_SELECTION', message });
+    }
+    return { breakerA, sectionMm2: cable.sectionMm2, ampacityA: cable.ampacityA };
+  };
   for (const label of ['L1', 'L2', 'L3', 'N', 'PE', '+24V', '0V']) {
     netLabel.set(label, label);
     netPins.set(label, []);
@@ -195,10 +220,14 @@ export function buildElec(input: ElecDesign): ElecBuild {
     const model = `iC65N 1P+N C${stepUp(BREAKER_STEPS_1P, currentA * 1.25)}`;
     const phase = nextPhase();
     const feed = singlePhaseFeed(branches.length, model, currentA, phase, psuTag, '24V 电源');
+    const cable = cableFor(currentA, model, `${psuTag} 24V 电源支路`);
     add(psuTag, 'psu', '24V 开关电源', design.psu.model, `DC 24V · ${psuWatts} W`, ['L', 'N', '+', '-']);
     join('+24V', PIN(psuTag, '+'));
     join('0V', PIN(psuTag, '-'));
-    branches.push({ kind: 'psu', phase, breaker: feed.breaker, poles: feed.poles, psu: psuTag, purpose: '24V 电源' });
+    branches.push({
+      kind: 'psu', phase, breaker: feed.breaker, poles: feed.poles, psu: psuTag, purpose: '24V 电源',
+      currentA, ...cable
+    });
   }
 
   const motorTag = new Map<string, string>();
@@ -220,13 +249,18 @@ export function buildElec(input: ElecDesign): ElecBuild {
       const model = motor.breakerModel ?? `iC65N 1P+N C${stepUp(BREAKER_STEPS_1P, currentA * 1.25)}`;
       const phase = nextPhase();
       const feed = singlePhaseFeed(index, model, currentA, phase, uTag, purpose);
+      const cable = cableFor(currentA, model, `${mTag} 伺服支路`);
       add(uTag, 'drive', '伺服驱动器', motor.driveModel ?? `伺服驱动器 ${motor.powerKw} kW`, `单相 AC 220V · ${motor.powerKw} kW`, ['L', 'N', 'U', 'V', 'W']);
       ['U', 'V', 'W'].forEach((pin) => join(`B${index}-${pin}`, PIN(uTag, pin), PIN(mTag, pin)));
-      branches.push({ kind: 'servo', phase, breaker: feed.breaker, poles: feed.poles, drive: uTag, motor: mTag, purpose });
+      branches.push({
+        kind: 'servo', phase, breaker: feed.breaker, poles: feed.poles, drive: uTag, motor: mTag, purpose,
+        currentA, ...cable
+      });
       continue;
     }
     const protection = selectMotorProtection(motor.powerKw);
     const breakerModel = motor.breakerModel ?? protection.breaker;
+    const cable = cableFor(protection.currentA, breakerModel, `${purpose} 主回路`);
     const qf = nextTag('QF');
     add(qf, 'breaker', breakerNameFor(breakerModel), breakerModel, `计算电流 ${protection.currentA} A`, ['1', '3', '5', '2', '4', '6'], { estimated: true });
     (['L1', 'L2', 'L3'] as const).forEach((phase, i) => {
@@ -239,7 +273,7 @@ export function buildElec(input: ElecDesign): ElecBuild {
       add(uTag, 'drive', '变频器', motor.driveModel ?? `变频器 ${motor.powerKw} kW 380V`, `三相 AC 380V · ${motor.powerKw} kW`, ['L1', 'L2', 'L3', 'U', 'V', 'W']);
       ['L1', 'L2', 'L3'].forEach((pin, i) => join(`B${index}-Q${i}`, PIN(qf, ['2', '4', '6'][i] as string), PIN(uTag, pin)));
       ['U', 'V', 'W'].forEach((pin) => join(`B${index}-${pin}`, PIN(uTag, pin), PIN(mTag, pin)));
-      branches.push({ kind: 'vfd', breaker: qf, poles: 3, drive: uTag, motor: mTag, purpose });
+      branches.push({ kind: 'vfd', breaker: qf, poles: 3, drive: uTag, motor: mTag, purpose, currentA: protection.currentA, ...cable });
       continue;
     }
     const km = nextTag('KM');
@@ -257,14 +291,17 @@ export function buildElec(input: ElecDesign): ElecBuild {
     add(`${km}K`, 'coil', '接触器线圈', protection.contactor, '24V DC · A1/A2', ['A1', 'A2'], { displayTag: km });
     join('0V', PIN(`${km}K`, 'A2'));
     join(`${km}-COIL`, PIN(`${fr}NC`, '96'), PIN(`${km}K`, 'A1'));
-    branches.push({ kind: 'dol', breaker: qf, poles: 3, contactor: km, thermal: fr, motor: mTag, purpose });
+    branches.push({ kind: 'dol', breaker: qf, poles: 3, contactor: km, thermal: fr, motor: mTag, purpose, currentA: protection.currentA, ...cable });
   }
 
   // 总进线断路器
+  let mainFeed: ElecPlan['mainFeed'] = { breakerA: 0, sectionMm2: null, ampacityA: null, currentA: 0 };
   {
     const maxA = Math.max(phaseLoadA.L1, phaseLoadA.L2, phaseLoadA.L3);
     const rating = stepUp(MAIN_STEPS, Math.max(1, maxA) * 1.25);
     const model = design.supply.mainBreakerModel ?? (rating <= 63 ? `iC65N 3P C${rating}` : `NSX160F 3P ${rating}A`);
+    const cable = cableFor(maxA, model, '总进线');
+    mainFeed = { breakerA: cable.breakerA, sectionMm2: cable.sectionMm2, ampacityA: cable.ampacityA, currentA: maxA };
     add(mainTag, 'breaker', breakerNameFor(model), model, `总进线 · 最大相 ${round1(maxA)} A`, ['1', '3', '5', '2', '4', '6'], { estimated: true });
     (['L1', 'L2', 'L3'] as const).forEach((phase, i) => {
       join(phase, PIN(mainTag, ['1', '3', '5'][i] as string));
@@ -534,6 +571,7 @@ export function buildElec(input: ElecDesign): ElecBuild {
     circuit: { devices, nets, supply: '3ph-380' },
     plan: {
       mainBreaker: mainTag,
+      mainFeed,
       branches,
       fuse,
       chain,

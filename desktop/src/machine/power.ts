@@ -3,6 +3,7 @@
 // 启动压降或保护配合计算。
 
 import type { ComponentPart } from '../shared/types.ts';
+import { selectCableProtection } from '../elec/selection.ts';
 import type { MachineActuatorKind, MachineSensorKind, MachineVoltage } from './spec.ts';
 
 export type MachinePowerRole =
@@ -67,6 +68,8 @@ export interface PowerResult {
   byGroup: PowerGroup[];
   currentA: number;
   breakerSuggestion: { rating: number; poles: 1 | 2 | 3; margin: number };
+  /** 总进线断路器—导线配合：先定断路器，再按断路器额定选截面（ampacityA ≥ breakerA）。 */
+  mainProtection: { breakerA: number; sectionMm2: number | null; ampacityA: number | null };
   assumptions: string[];
   warnings: string[];
   voltage: PowerVoltage;
@@ -128,12 +131,6 @@ function round(value: number, digits = 3): number {
 
 function positiveOr(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback;
-}
-
-function breakerRatingFor(currentA: number): number {
-  const target = currentA * 1.25;
-  const standard = BREAKER_STANDARD_A.find((rating) => rating >= target);
-  return standard ?? 63;
 }
 
 function polesFor(voltage: PowerVoltage): 1 | 2 | 3 {
@@ -451,7 +448,8 @@ function estimatePowerInput(input: PowerInput): PowerResult {
     `负载率 Kf=${loadFactor}：设备实际轴功率按额定功率的此比例估算。`,
     `效率 η=${efficiency}：由机械输出折算到电输入，P_in = ΣP_rated × Ks × Kf ÷ η。`,
     `功率因数 cosφ=${cosPhi}：视在功率 S = P_in ÷ cosφ，电流按此计算。`,
-    `断路器按计算电流 × 1.25 向上取标准值（${BREAKER_STANDARD_A.join('/')} A），极数按 ${input.voltage} 取 ${polesFor(input.voltage)}P。`
+    `断路器按计算电流 × 1.25 向上取标准壳架电流（6–630 A），极数按 ${input.voltage} 取 ${polesFor(input.voltage)}P。`,
+    '导线截面按断路器额定反选：取载流量 ≥ 断路器额定电流的最小常用截面；超过单根 6mm² 时提示分回路或并联，不静默选超粗线。'
   ];
   const defaultsUsed = new Map<MachinePowerRole, { count: number; missing: number }>();
   const groups = new Map<MachinePowerRole, { count: number; ratedW: number; effectiveW: number }>();
@@ -500,8 +498,10 @@ function estimatePowerInput(input: PowerInput): PowerResult {
   const totalVa = inputW / cosPhi;
   const totalKw = inputW / 1000;
   const currentA = currentForPower(totalKw, input.voltage, cosPhi);
-  const rating = breakerRatingFor(currentA);
+  const mainProtection = selectCableProtection(currentA, { label: '总进线' });
+  const rating = mainProtection.breakerA;
   const margin = currentA > 0 ? rating / currentA : 0;
+  warnings.push(...mainProtection.warnings);
   const byGroup: PowerGroup[] = [...groups.entries()].map(([role, group]) => ({
     name: POWER_ROLE_LABEL[role],
     count: group.count,
@@ -509,12 +509,6 @@ function estimatePowerInput(input: PowerInput): PowerResult {
     va: round((group.effectiveW / efficiency) / cosPhi, 3)
   }));
 
-  if (currentA * 1.25 > 63) {
-    warnings.push(
-      `计算电流 ${round(currentA)} A 需要 ${round(currentA * 1.25)} A 保护，超过最大标准断路器 63 A，` +
-      '需采用更大壳架或分回路。'
-    );
-  }
   if (defaultsUsed.size > 0) {
     const detail = [...defaultsUsed.entries()].map(([role, record]) => {
       const label = POWER_ROLE_LABEL[role];
@@ -574,6 +568,11 @@ function estimatePowerInput(input: PowerInput): PowerResult {
     byGroup,
     currentA: round(currentA, 3),
     breakerSuggestion: { rating, poles: polesFor(input.voltage), margin: round(margin, 3) },
+    mainProtection: {
+      breakerA: mainProtection.breakerA,
+      sectionMm2: mainProtection.sectionMm2,
+      ampacityA: mainProtection.ampacityA
+    },
     assumptions,
     warnings,
     voltage: input.voltage,

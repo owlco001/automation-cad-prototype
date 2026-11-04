@@ -8,7 +8,7 @@
 
 import { buildElec, type ElecBuild } from './build.ts';
 import { PageCanvas, PAGE_H, PAGE_W, FRAME, CONTENT, GRID_COLS, GRID_ROWS, columnOf, resolveLabels } from './canvas.ts';
-import { checkWireNumbers, type ElecDocument, type Load, type Wire as CheckWire } from './check.ts';
+import { checkWireNumbers, type CircuitCheck, type ElecDocument, type Load, type Wire as CheckWire } from './check.ts';
 import type { Circuit, CircuitDevice, ErcIssue } from './circuit.ts';
 import { ercSummary, PIN, runErc } from './circuit.ts';
 import type { ElecDesign } from './design.ts';
@@ -838,7 +838,24 @@ function buildDocument(
     loads.push({ tag: branch.motor, powerKw: kw, phase: branch.kind === 'servo' ? (branch.phase ?? 'L1') : '3P' });
   }
   if (design.psu.watts) loads.push({ tag: '-G1', powerKw: design.psu.watts / 1000, phase: 'L1' });
-  return { wires, loads, wireScheme, options: { ...(design.psu.watts ? { psuRatedA: Math.round((design.psu.watts / 24) * 10) / 10 } : {}) } };
+  /*
+   * 回路校验数据：只列「断路器 + 导线」已成对选出的回路。
+   * breakerA 与 sectionMm2 由 selection.ts 同一套关系给出，因此天然满足 ampacity ≥ breakerA；
+   * 校验器仍按原规则独立复核（BREAKER_OVERSIZE 不放软）。
+   */
+  const circuits: CircuitCheck[] = [];
+  const pushCircuit = (wireNet: string | undefined, breakerA: number, sectionMm2: number | null, currentA: number): void => {
+    if (!wireNet || sectionMm2 === null || !(currentA > 0)) return;
+    const wireNo = numbers[wireNet];
+    if (!wireNo) return;
+    circuits.push({ wireNo, currentA: Math.round(currentA * 10) / 10, sectionMm2, breakerA });
+  };
+  for (const branch of build.plan.branches) {
+    const outNet = circuit.nets.find((net) => net.pins.includes(`${branch.breaker}:2`));
+    pushCircuit(outNet?.id, branch.breakerA, branch.sectionMm2, branch.currentA);
+  }
+  pushCircuit('BUS-L1', build.plan.mainFeed.breakerA, build.plan.mainFeed.sectionMm2, build.plan.mainFeed.currentA);
+  return { wires, loads, circuits, wireScheme, options: { ...(design.psu.watts ? { psuRatedA: Math.round((design.psu.watts / 24) * 10) / 10 } : {}) } };
 }
 
 export { textWidth };
