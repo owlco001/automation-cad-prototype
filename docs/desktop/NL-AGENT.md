@@ -375,16 +375,17 @@ EVAL_AGENT_OK accuracy=1.00 tools=1.00 refused=1.00
 
 说明：联调/同步工具尚未注册，评估集把这两类记为 `tool: null`，规则层必须明确说“暂不支持”，不能误落到 `search_components`；歧义用例同样要求不调用工具并追问。未知位号 `QF99` 保留给 `update_component` 在工具层返回 `NOT_PLACED`，路由不得猜测或替换成相邻位号。
 
-**任务级评测（末态断言）**：上面这套只验「判得对不对」，判 100% 也可能把机器做错。`desktop/scripts/eval-tasks.mjs` 是新的一层——在 `mkdtemp` 出来的临时 userData 里，用**真实 CommandBus + AgentTools** 按固定工具序列执行（不调模型、不联网、不开 Electron），然后断言磁盘末态：机型 config 的执行机构、整机零件数、PLC 预检与 zip、机型库入库/加载/导出/导入往返、rest/lift/sweep 三态干涉数字、截图真伪。唯一的替身是渲染层桥（`applyMachineConfig` / `getPlcGenConfig` / BOM 追加 / PLC 标记），落盘、几何、预检、打包全部跑真代码。
+**任务级评测（末态断言）**：上面这套只验「判得对不对」，判 100% 也可能把机器做错。`desktop/scripts/eval-tasks.mjs` 是新的一层——在 `mkdtemp` 出来的临时 userData 里，用**真实 CommandBus + AgentTools** 按固定工具序列执行（不调模型、不联网、不开 Electron），然后断言磁盘末态：机型 config 的执行机构、整机零件数、PLC 预检与 zip、机型库入库/加载/导出/导入往返、rest/lift/sweep 三态干涉数字、截图真伪、大结果外置与分批回取、跨会话记忆与脱敏、计划预算与续跑、写后验证挂回执。唯一的替身是渲染层桥（`applyMachineConfig` / `getPlcGenConfig` / `getProjectContext` / BOM 追加 / PLC 标记），落盘、几何、预检、打包、分片、记忆、预算全部跑真代码；`t08`/`t10` 额外用真 `AgentSession` + 剧本固定的假 LLM（只发一条工具调用，不发网络请求），因为「写事实进记忆」和「挂验证结论」本来就发生在会话层。
 
 ```bash
 npm run eval:tasks
 # TASK_EVAL t01-conveyor-90 PASS axes=turner-lift,turner-rotary parts=85 geom_parts=47 plc_files=11 blocked=0 zip=8651B
 # ...
-# TASK_EVAL_SUMMARY pass=6/6 failed=0 turns_total=25
+# TASK_EVAL t07-tool-result-offload PASS full=18581B receipt=10110B resultId=1ba5c6c1f6b9da54 pages=5 files=1
+# TASK_EVAL_SUMMARY pass=10/10 failed=0 turns_total=56
 ```
 
-6 个用例：`t01` 光伏板 90° 转向输送机（转向两轴 + 参数化整机 ≥80 件 + PLC 预检 0 阻断）、`t02` 缺急停/安全门的方案（自查 ok、PLC 预检拦下 → `repair_plc_config` 写盘 → 再生成通过）、`t03` 机型库入库/切走/加载回来的 active 指针与 config 逐字段一致、`t04` 导出→删库→重新导入后 config 等价且二次导出 sha256 相同、`t05` 三态干涉 rest/lift/sweep 数字不能相同（证明可动件真按 `travelMm` 平移）、`t06` 无 GUI 时 `capture_view` 要么给出可复算 sha256 的真文件、要么明确拒绝且不落文件。任一 FAIL 打印「期望 vs 实际」并以退出码 1 结束。
+10 个用例：`t01` 光伏板 90° 转向输送机（转向两轴 + 参数化整机 ≥80 件 + PLC 预检 0 阻断）、`t02` 缺急停/安全门的方案（自查 ok、PLC 预检拦下 → `repair_plc_config` 写盘 → 再生成通过）、`t03` 机型库入库/切走/加载回来的 active 指针与 config 逐字段一致、`t04` 导出→删库→重新导入后 config 等价且二次导出 sha256 相同、`t05` 三态干涉 rest/lift/sweep 数字不能相同（证明可动件真按 `travelMm` 平移）、`t06` 无 GUI 时 `capture_view` 要么给出可复算 sha256 的真文件、要么明确拒绝且不落文件、`t07` 18 KB 真实结果按 10 KB 上限外置（`resultId` 16 位 hex、落盘字节数 == 回执 `bytes`、分批读完拼回去与原文逐字符相等、小结果不落盘）、`t08` 真会话应用机型后 `agent-memory.json` 该工程 1 条 `machine-apply`（summary 含机型名）、`get_agent_memory` 读回一致、`sk-` 形状的串被脱敏、`clear_agent_memory` 后为空、`t09` 13 步写计划预算 `effective=12` 跑到顶返回 `stopped='iteration_limit'` + `nextStepIndex`，`resumeRunPlan` 续跑不重跑前 12 步（逐步调用计数）、`t10` 真会话应用回执带 `verification.ok=true` / `source='auto'`，坏方案（传感器绑不存在的执行机构）被拦住且有中文原因。任一 FAIL 打印「期望 vs 实际」并以退出码 1 结束。
 
 ### 9.1 真实模型验证
 

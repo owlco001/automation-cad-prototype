@@ -7,15 +7,22 @@
  *   本脚本        验「做完之后机器是不是对的」——在 mkdtemp 出来的临时 userData 里，
  *                 用**真实 CommandBus + AgentTools** 按固定工具序列执行（不调模型），
  *                 再断言磁盘末态：机型 config、几何件数、PLC 预检与 zip、机型库往返、
- *                 三态干涉数字、截图真伪。
+ *                 三态干涉数字、截图真伪、大结果外置与分批回取、跨会话记忆、计划预算与
+ *                 续跑、写后验证挂回执。
  *
  * 不联网、不调 LLM、不启动 Electron。唯一的替身是「渲染层桥」（见 createHarness）：
- * 它就是主进程 ↔ 渲染层的那条边界，只保留 4 个方法，且行为与真实渲染层一致
- * （applyMachineConfig 把当前机型记进联调面板，getPlcGenConfig 再把它交回来）。
- * 机型落盘、几何生成、PLC 预检与打包、机型库打包含哈希，全部跑真代码。
+ * 它就是主进程 ↔ 渲染层的那条边界，只保留 6 个方法，且行为与真实渲染层一致
+ * （applyMachineConfig 把当前机型记进联调面板，getPlcGenConfig 再把它交回来，
+ * getProjectContext 交回一份固定工程上下文）。
+ * 机型落盘、几何生成、PLC 预检与打包、机型库打包含哈希、结果外置与分片、
+ * 记忆落盘与脱敏、预算与续跑、写后自查，全部跑真代码。
+ *
+ * t08 / t10 需要「会话层」的两件事（写事实进记忆、把验证结论挂到回执上）本来就发生在
+ * AgentSession 里，所以这两例用真 AgentSession + 固定剧本的假 LLM（只发一条工具调用，
+ * 不产生任何模型请求），其余部分仍是真 bus / 真工具 / 真磁盘。
  *
  * 用法：cd desktop && npm run eval:tasks
- * 输出：每例一行 `TASK_EVAL <id> PASS|FAIL <关键数字>`，末尾 `TASK_EVAL_SUMMARY pass=N/6 failed=M turns_total=T`；
+ * 输出：每例一行 `TASK_EVAL <id> PASS|FAIL <关键数字>`，末尾 `TASK_EVAL_SUMMARY pass=N/10 failed=M turns_total=T`；
  *      任一 FAIL 追加末态差异（期望 vs 实际），退出码 1。
  */
 
@@ -23,13 +30,21 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { AgentSession } from '../src/agent/session.ts';
 import { AgentTools } from '../src/agent/tools.ts';
 import { createAgentCommandBus } from '../src/agent/commands.ts';
+import { collectAgentContext } from '../src/agent/context.ts';
+import { parseToolResultData } from '../src/agent/guard.ts';
+import { FileProjectMemory, projectMemoryPath } from '../src/agent/project-memory.ts';
+import { AgentThread, resumeRunPlan, runPlan } from '../src/agent/thread.ts';
+import { ToolResultStore, resultStoreDir } from '../src/agent/tool-result-store.ts';
+import { TOOL_RESULT_BYTE_LIMIT, serializeToolResult, trimToolResult } from '../src/agent/trim.ts';
 import { buildConveyorParts } from '../src/machine/conveyor-assembly.ts';
 import { conveyorParamsFromBrief } from '../src/machine/conveyor-synth.ts';
 import { importPackage, listLibrary, readLibraryPackage, removeFromLibrary } from '../src/machine/library.ts';
 import { parseMachineBrief } from '../src/machine/spec.ts';
 import {
+  machineDesignPath,
   machineGeometryPaths,
   readActivePointer,
   readStoredMachineDesign
@@ -65,6 +80,17 @@ function createHarness() {
   const calls = [];
   /** 联调面板当前机型配置：真实应用里由 applyMachineConfig 写入、getPlcGenConfig 读出。 */
   let plcConfig = null;
+  /**
+   * 当前工程上下文：真实应用里由渲染层 getProjectContext 交回来，主进程再交给
+   * collectAgentContext 算指纹。t08 的记忆分桶、t09 的续跑指纹都按它算，固定一份
+   * 才能让「同一工程」在两次调用之间得到同一个指纹。
+   */
+  const projectContext = {
+    machine: { name: '光伏板转向输送机', id: 'design-conveyor-1st' },
+    plate: { placed: 0, width: 600, height: 400, recentActions: [] },
+    bomRows: 12,
+    hasCadModel: false
+  };
   const bridge = {
     async call(method, args = {}) {
       calls.push({ method, args });
@@ -74,6 +100,8 @@ function createHarness() {
           return { ok: true };
         case 'getPlcGenConfig':
           return plcConfig;
+        case 'getProjectContext':
+          return projectContext;
         case 'appendMachineBomRows':
           return { ok: true, added: Array.isArray(args?.rows) ? args.rows.length : 0 };
         case 'removeMachineBomRows':
@@ -91,7 +119,7 @@ function createHarness() {
     now: FIXED_NOW
   });
   const tools = new AgentTools(registry, bus, { userDataRoot: root });
-  return { root, calls, bus, tools };
+  return { root, projectContext, calls, bus, tools };
 }
 
 // ---------------------------------------------------------------------------
@@ -544,13 +572,481 @@ async function caseCapture() {
   };
 }
 
+// ---------------------------------------------------------------------------
+// t07–t10 用到的「会话层」与编排层替身（都是真实代码的薄调用面）
+// ---------------------------------------------------------------------------
+
+const bytesOf = (text) => Buffer.byteLength(text, 'utf8');
+
+/**
+ * 主进程里的会话执行器（`electron/ipc.ts:1458-1495` 的 agentExecutor）：
+ * 先走命令总线，`UNKNOWN_COMMAND` 才回落到工具层；`validateMachineDesign` 就是
+ * `bus.execute('validate_machine_design')`，写后自动验证用的就是这条通道。
+ * 这里加一个计数器，用来证明「验证结论来自真的跑了一次自查」，不是伪造的。
+ */
+function createExecutor(h) {
+  const validate = { calls: 0 };
+  return {
+    validate,
+    async execute(name, args = {}, signal) {
+      const result = await h.bus.execute(name, args, signal);
+      if (!result.ok && result.error?.code === 'UNKNOWN_COMMAND' && h.tools.has(name)) {
+        return await h.tools.call(name, args, signal);
+      }
+      return result;
+    },
+    undoLast(signal) {
+      return h.bus.undoLast(signal);
+    },
+    validateMachineDesign(signal) {
+      validate.calls += 1;
+      return h.bus.execute('validate_machine_design', {}, signal);
+    }
+  };
+}
+
+/** 剧本固定的假 LLM：只按顺序吐预设回复，不发任何网络请求。 */
+function scriptedLlm(responses) {
+  const calls = [];
+  let index = 0;
+  return {
+    calls,
+    async chat(messages) {
+      calls.push(messages);
+      const response = responses[Math.min(index, responses.length - 1)];
+      index += 1;
+      return response;
+    }
+  };
+}
+
+/**
+ * 用真 AgentSession 跑一次 `apply_machine_design`，返回**模型看到的工具回执**。
+ *
+ * 为什么非要走会话层：写事实进 `agent-memory.json`（`session.ts:895` recordProjectFact）
+ * 和把 `verification` 挂到回执上（`session.ts:1358-1360`）都发生在 AgentSession 内部，
+ * 直接 `tools.call` 会绕过它们。这里除了 LLM 是剧本，其余（命令总线、工具、磁盘、
+ * 项目记忆、验证通道）全是真的。
+ */
+async function applyViaSession(h, design, extra = {}) {
+  const executor = createExecutor(h);
+  const llm = scriptedLlm([
+    {
+      content: '',
+      toolCalls: [
+        {
+          id: 'call-apply-1',
+          type: 'function',
+          function: { name: 'apply_machine_design', arguments: JSON.stringify({ design, ...extra }) }
+        }
+      ]
+    },
+    { content: '已应用到工程。', toolCalls: [] }
+  ]);
+  const memory = new FileProjectMemory({ root: h.root, now: () => FIXED_NOW() });
+  const session = new AgentSession({
+    llm,
+    bus: executor,
+    confirmWrite: async () => true,
+    offlineFallback: false,
+    contextProvider: () => collectAgentContext({ projectContext: () => h.projectContext }),
+    projectMemory: memory
+  });
+  await session.run('把这台机型应用到工程');
+
+  const toolMessage = [...session.history()].reverse().find(
+    (message) => message.role === 'tool' && message.name === 'apply_machine_design'
+  );
+  const receipt = toolMessage ? parseToolResultData(toolMessage.content) : null;
+  return { receipt, executor, session, memory, history: session.history() };
+}
+
+/**
+ * t07：大结果外置 + 分批回取。
+ *
+ * 用 `design_machine` 的**真实返回**（本机型约 18 KB）按 10 KB 默认上限序列化——
+ * 这就是任何普通工具在生产里走过的那条路（`design_machine` 自己是 64 KB 上限，
+ * 所以这里显式传默认上限，才真的会超限）。断言：回执 id/bytes、落盘文件字节数与
+ * 回执一致、分批读完拼回去与落盘原文逐字符相等、小结果不落盘。
+ */
+async function caseToolResultOffload() {
+  const check = createChecker();
+  const h = createHarness();
+  let turns = 0;
+  let offloadCalls = 0;
+  const store = new ToolResultStore({ dir: resultStoreDir(h.root) });
+  const offload = (text) => {
+    offloadCalls += 1;
+    return store.save(text);
+  };
+
+  const design = await h.tools.call('design_machine', { brief: BRIEF_PV });
+  turns += 1;
+  if (!requireOk(check, 'design_machine 成功', design)) return { ok: false, checks: check.checks, turns };
+
+  // 原始 JSON = 生产里被外置的那份文本（trimToolResult 是序列化前的真实裁剪步骤）
+  const original = JSON.stringify(trimToolResult(design));
+  const originalBytes = bytesOf(original);
+  check.ok('真实结果超过 10 KB（否则这条用例没有验证力）', originalBytes > TOOL_RESULT_BYTE_LIMIT, `${originalBytes}B`);
+
+  const serialized = serializeToolResult(design, TOOL_RESULT_BYTE_LIMIT, offload);
+  const receipt = JSON.parse(serialized.text);
+  check.eq('回执 truncated', receipt.truncated, true);
+  check.ok('回执 resultId 是 16 位小写 hex', /^[a-f0-9]{16}$/.test(String(receipt.resultId ?? '')), receipt.resultId);
+  check.eq('offload 只被调用一次', offloadCalls, 1);
+  check.eq('回执 bytes = 完整结果字节数', receipt.bytes, originalBytes);
+  check.eq('serialize 的 fullBytes 与回执 bytes 一致', serialized.fullBytes, receipt.bytes);
+  check.ok('回执本身 ≤ 10 KB（没有把完整结果塞回去）', bytesOf(serialized.text) <= TOOL_RESULT_BYTE_LIMIT, `${bytesOf(serialized.text)}B`);
+  check.ok(
+    'hint 能照着直接调 get_tool_result',
+    new RegExp(`get_tool_result\\(resultId="${receipt.resultId}"`).test(String(receipt.hint ?? '')),
+    receipt.hint
+  );
+
+  const file = join(h.root, 'agent-results', `${receipt.resultId}.json`);
+  const fileExists = existsSync(file);
+  check.ok('落盘文件存在', fileExists, file);
+  const fileBytes = fileExists ? statSync(file).size : -1;
+  check.eq('落盘字节数 = 回执 bytes', fileBytes, receipt.bytes);
+  const onDisk = fileExists ? readFileSync(file, 'utf8') : '';
+  check.ok('落盘内容与原始 JSON 逐字符相等', onDisk === original, {
+    onDisk: onDisk.length,
+    original: original.length
+  });
+
+  // 分批读完（每片 4096 字节，约 5 片），拼回去必须逐字符相等
+  let offset = 0;
+  let assembled = '';
+  let pages = 0;
+  let eof = false;
+  while (!eof && pages < 64) {
+    const page = await h.tools.call('get_tool_result', {
+      resultId: receipt.resultId,
+      offset,
+      limit: 4096
+    });
+    turns += 1;
+    pages += 1;
+    if (!requireOk(check, `get_tool_result 第 ${pages} 片`, page)) break;
+    check.eq(`第 ${pages} 片 bytes 与文件一致`, page.bytes, receipt.bytes);
+    check.ok(
+      `第 ${pages} 片落在 UTF-8 字符边界上（无 U+FFFD）`,
+      typeof page.content === 'string' && !page.content.includes('\uFFFD'),
+      String(page.content ?? '').slice(0, 32)
+    );
+    assembled += page.content;
+    eof = page.eof === true;
+    if (!eof) {
+      const next = page.nextOffset;
+      check.ok(`第 ${pages} 片给出可续读的 nextOffset`, Number.isInteger(next) && next > offset, { next, offset });
+      if (!Number.isInteger(next) || next <= offset) break;
+      offset = next;
+    }
+  }
+  check.ge('确实分批读了（≥3 片）', pages, 3);
+  check.eq('读到末尾时 eof=true', eof, true);
+  check.ok('分批拼回去与原始 JSON 逐字符相等', assembled === original, {
+    assembled: assembled.length,
+    original: original.length
+  });
+
+  // 小结果不落盘：同一套 offload 回调，字节数没超限就不该碰磁盘
+  const filesBefore = store.stats().files;
+  const small = await h.tools.call('list_machine_library', {});
+  turns += 1;
+  if (!requireOk(check, 'list_machine_library 成功', small)) {
+    return { ok: false, checks: check.checks, turns };
+  }
+  const smallSerialized = serializeToolResult(small, TOOL_RESULT_BYTE_LIMIT, offload);
+  const smallReceipt = JSON.parse(smallSerialized.text);
+  // 未超限时 text 就是原样结果本身：既没有外置回执的 {resultId,hint,preview} 包装，
+  // 也保留工具自己的字段（这里是小列表的 {items,total,truncated}）。
+  check.ok('小结果回执没有 preview 包装', smallReceipt.preview === undefined, smallReceipt.preview);
+  check.ok('小结果回执没有 hint', smallReceipt.hint === undefined, smallReceipt.hint);
+  check.ok('小结果回执没有 resultId', smallReceipt.resultId === undefined, smallReceipt.resultId);
+  check.eq('小结果是原样工具结果（items/total 还在）', smallReceipt.total, small.total);
+  check.ok('小结果没超上限', bytesOf(smallSerialized.text) <= TOOL_RESULT_BYTE_LIMIT, `${bytesOf(smallSerialized.text)}B`);
+  check.eq('小结果没触发外置回调', offloadCalls, 1);
+  check.eq('小结果不落盘（文件数不变）', store.stats().files, filesBefore);
+
+  const metrics = [
+    `full=${originalBytes}B`,
+    `receipt=${bytesOf(serialized.text)}B`,
+    `resultId=${receipt.resultId}`,
+    `pages=${pages}`,
+    `files=${store.stats().files}`
+  ];
+  return { ok: check.checks.every((item) => item.ok), checks: check.checks, turns, metrics };
+}
+
+/**
+ * t08：跨会话项目记忆（写事实 → 读回 → 脱敏 → 清空）。
+ *
+ * 走真 AgentSession，所以 recordProjectFact 那条线是真的；断言磁盘上的
+ * `userData/agent-memory.json`：该工程 1 条、kind=machine-apply、summary 含机型名。
+ * 然后故意把 apiKey 形状的串塞进能进记忆的字段（应用时的 name），断言文件与读回
+ * 都不出现 `sk-` 原文；最后 clear 后该工程为空。
+ */
+async function caseProjectMemory() {
+  const check = createChecker();
+  const h = createHarness();
+  let turns = 0;
+
+  const design = await h.tools.call('design_machine', { brief: BRIEF_PV });
+  turns += 1;
+  if (!requireOk(check, 'design_machine 成功', design)) return { ok: false, checks: check.checks, turns };
+  const machineName = String(design.design?.config?.name ?? '');
+  check.ok('机型有名字（summary 要含它）', machineName.length > 0, machineName);
+
+  const applied = await applyViaSession(h, design.design);
+  turns += 1;
+  if (!requireOk(check, '真会话 apply_machine_design 成功', applied.receipt)) {
+    return { ok: false, checks: check.checks, turns };
+  }
+
+  const file = projectMemoryPath(h.root);
+  const fileExists = existsSync(file);
+  check.ok('agent-memory.json 已落盘', fileExists, file);
+  if (!fileExists) return { ok: false, checks: check.checks, turns };
+
+  const parsed = JSON.parse(readFileSync(file, 'utf8'));
+  const buckets = Object.entries(parsed.projects ?? {});
+  check.eq('只有一个工程桶', buckets.length, 1);
+  const [fingerprint, bucket] = buckets[0] ?? ['', { entries: [] }];
+  check.eq('该工程有 1 条事实', bucket?.entries?.length, 1);
+  check.eq('kind = machine-apply', bucket?.entries?.[0]?.kind, 'machine-apply');
+  check.ok(
+    'summary 含机型名',
+    String(bucket?.entries?.[0]?.summary ?? '').includes(machineName),
+    bucket?.entries?.[0]?.summary
+  );
+  const onlyFields = Object.keys(bucket?.entries?.[0] ?? {}).sort();
+  check.eq('只落 5 个白名单字段', onlyFields, ['kind', 'ok', 'ref', 'summary', 'ts']);
+
+  // 读回来：指纹必须与文件里的桶一致，否则「读记忆」和「写记忆」就是两套算法
+  const readBack = await h.tools.call('get_agent_memory', {});
+  turns += 1;
+  if (!requireOk(check, 'get_agent_memory 成功', readBack)) return { ok: false, checks: check.checks, turns };
+  check.eq('get_agent_memory 的指纹 = 文件里的桶', readBack.fingerprint, fingerprint);
+  check.eq('get_agent_memory count', readBack.count, 1);
+  check.eq('读回的 summary 与文件一致', readBack.entries?.[0]?.summary, bucket?.entries?.[0]?.summary);
+  check.eq('读回的 kind', readBack.entries?.[0]?.kind, 'machine-apply');
+
+  // 脱敏：把 apiKey 形状的串塞进「能进记忆」的字段（应用名会进 summary）
+  const secret = 'sk-live-evaltasks0a1b2c3d4e5f';
+  const taintedName = `${machineName} ${secret}`;
+  const tainted = await applyViaSession(h, design.design, { name: taintedName, overwrite: true });
+  turns += 1;
+  if (!requireOk(check, '带敏感串的应用成功（脱敏发生在写记忆时）', tainted.receipt)) {
+    return { ok: false, checks: check.checks, turns };
+  }
+  const rawAfter = readFileSync(file, 'utf8');
+  check.ok('记忆文件不含 sk- 原文', !rawAfter.includes('sk-live'), rawAfter.includes('sk-live') ? '文件里出现了 sk-live' : '干净');
+  check.ok('记忆文件含脱敏标记', rawAfter.includes('[已隐去]'), 'missing [已隐去]');
+  const readAfter = await h.tools.call('get_agent_memory', {});
+  turns += 1;
+  check.eq('第二台应用后共 2 条', readAfter.count, 2);
+  check.ok('读回也不含 sk- 原文', !JSON.stringify(readAfter.entries ?? []).includes('sk-live'), readAfter.entries?.at(-1)?.summary);
+  check.ok(
+    '最新一条的 summary 里密钥位置已被替换',
+    String(readAfter.entries?.at(-1)?.summary ?? '').includes('[已隐去]'),
+    readAfter.entries?.at(-1)?.summary
+  );
+
+  // 清空：只清当前工程，清完读回为空、文件里也不再有这个桶
+  const cleared = await h.tools.call('clear_agent_memory', {});
+  turns += 1;
+  if (!requireOk(check, 'clear_agent_memory 成功', cleared)) return { ok: false, checks: check.checks, turns };
+  check.eq('清掉的条数', cleared.cleared, 2);
+  const afterClear = await h.tools.call('get_agent_memory', {});
+  turns += 1;
+  check.eq('清空后 count=0', afterClear.count, 0);
+  check.eq('清空后文件里没有该工程桶', Object.keys(JSON.parse(readFileSync(file, 'utf8')).projects ?? {}).length, 0);
+
+  const metrics = [
+    `entries=1→2→0`,
+    `kind=machine-apply`,
+    `fingerprint=${fingerprint}`,
+    `scrubbed=${rawAfter.includes('[已隐去]')}`,
+    `cleared=${cleared.cleared}`
+  ];
+  return { ok: check.checks.every((item) => item.ok), checks: check.checks, turns, metrics };
+}
+
+/**
+ * t09：计划预算到顶 + 续跑不重跑。
+ *
+ * 真 `runPlan` + 13 步计划（第 1 步是真写：`apply_machine_design`），所以预算按
+ * 「含写步骤」上抬到 12；跑满 12 步后预算停下，返回 stopped/nextStepIndex。
+ * 再用 `resumeRunPlan` 从第 13 步接着跑，用**逐步调用计数**证明前 12 步没被重跑。
+ */
+async function casePlanBudgetResume() {
+  const check = createChecker();
+  const h = createHarness();
+  let turns = 0;
+
+  const design = await h.tools.call('design_machine', { brief: BRIEF_PV });
+  turns += 1;
+  if (!requireOk(check, 'design_machine 成功', design)) return { ok: false, checks: check.checks, turns };
+
+  const readTools = ['validate_machine_design', 'list_machine_library', 'get_agent_memory'];
+  const steps = [
+    { tool: 'apply_machine_design', args: { design: design.design }, why: '把方案应用到工程', readOnly: false },
+    ...Array.from({ length: 12 }, (_, index) => {
+      const tool = readTools[index % readTools.length];
+      return { tool, args: {}, why: `自查第 ${index + 1} 轮（${tool}）`, readOnly: true };
+    })
+  ];
+  const plan = { confidence: 0.9, steps };
+  check.eq('计划 13 步（> 预算 12，才停得下来）', steps.length, 13);
+
+  const counts = new Map();
+  const execute = async (step, index) => {
+    counts.set(index, (counts.get(index) ?? 0) + 1);
+    return await h.tools.call(step.tool, step.args ?? {});
+  };
+
+  const thread = new AgentThread();
+  const first = await runPlan(plan, {
+    execute,
+    confirmPlan: async () => true,
+    thread,
+    currentContext: h.projectContext,
+    userText: '把这台机器应用到工程并逐项自查'
+  });
+  turns += counts.size ? [...counts.values()].reduce((sum, value) => sum + value, 0) : 0;
+
+  check.eq('预算 effective=12', first.budget?.effective, 12);
+  check.eq('预算原因 = write（含写步骤）', first.budget?.reason, 'write');
+  check.eq('stopped = iteration_limit', first.stopped, 'iteration_limit');
+  check.eq('results.length = 已执行步数', first.results.length, 12);
+  check.eq('iterations = 已执行步数', first.iterations, 12);
+  check.eq('nextStepIndex 指向下一步', first.nextStepIndex, 12);
+  check.eq('12 步全成功', first.results.every((item) => item.ok === true), true);
+  check.eq('执行过的是第 0..11 步', [...counts.keys()].sort((a, b) => a - b), [...Array(12).keys()]);
+  check.ok('pendingHint 点名从第 13 步继续', /第 13 步/.test(String(first.pendingHint ?? '')), first.pendingHint);
+  check.ok('第 1 步真的把方案写进了磁盘', existsSync(machineDesignPath(h.root, 'design-conveyor-1st')), machineDesignPath(h.root, 'design-conveyor-1st'));
+
+  const beforeResume = new Map(counts);
+  // 续跑也带上确认回调：万一实现退化成「从头再跑」，写步骤会真的重放，
+  // 下面的调用计数立刻能抓到（不带确认回调的话它只会以「取消」收场，暴露得不够直接）。
+  const second = await resumeRunPlan(plan, {
+    execute,
+    confirmPlan: async () => true,
+    thread,
+    currentContext: h.projectContext
+  });
+  turns += 1;
+
+  check.eq('续跑起点 = 12', second.resumedFrom, 12);
+  check.eq('续跑 ok', second.ok, true);
+  check.eq('续跑没再停（stopped 不出现）', second.stopped, undefined);
+  check.eq('续跑只执行剩余 1 步', second.results.length, 1);
+  check.eq('续跑执行的是第 13 步', second.results[0]?.index, 12);
+  const rerun = [...beforeResume.entries()].filter(([index, count]) => (counts.get(index) ?? 0) !== count).map(([index]) => index);
+  check.eq('前 12 步一次都没被重跑', rerun, []);
+  check.eq('第 13 步只执行 1 次', counts.get(12), 1);
+  check.eq('续跑后线程状态不再残留续跑位置', thread.read()?.nextStepIndex, undefined);
+
+  const metrics = [
+    `budget=${first.budget?.effective}/${first.budget?.reason}`,
+    `stopped_at=${first.results.length}`,
+    `next=${first.nextStepIndex}`,
+    `resume=${second.resumedFrom}→${second.results.length}step`,
+    `rerun=${rerun.length}`
+  ];
+  return { ok: check.checks.every((item) => item.ok), checks: check.checks, turns, metrics };
+}
+
+/**
+ * t10：写后自动验证挂回执。
+ *
+ * ① 真会话跑 `apply_machine_design` → 回执必须带 `verification.ok=true` 且
+ *    `source='auto'`，并断言验证通道真的被调了一次（不是凭空写上去的字段）；
+ * ② 再跑一个坏方案（传感器绑到不存在的执行机构）→ 必须被拦住：要么操作 `ok:false`
+ *    且有中文原因，要么 `verification.ok=false` 且有中文下一步；两者必居其一。
+ */
+async function caseVerifyAttached() {
+  const check = createChecker();
+  const h = createHarness();
+  let turns = 0;
+
+  const design = await h.tools.call('design_machine', { brief: BRIEF_PV });
+  turns += 1;
+  if (!requireOk(check, 'design_machine 成功', design)) return { ok: false, checks: check.checks, turns };
+
+  const applied = await applyViaSession(h, design.design);
+  turns += 1;
+  if (!requireOk(check, '真会话 apply_machine_design 成功', applied.receipt)) {
+    return { ok: false, checks: check.checks, turns };
+  }
+  const goodId = readActivePointer(h.root)?.machineId;
+  check.ok('好方案已落盘', Boolean(goodId && existsSync(machineDesignPath(h.root, goodId))), goodId);
+
+  check.eq('回执带 verification.ok', applied.receipt?.verification?.ok, true);
+  check.eq('verification.source = auto', applied.receipt?.verification?.source, 'auto');
+  check.eq('验证 issues 为空', applied.receipt?.verification?.issues, []);
+  check.eq('验证通道真的跑了一次自查', applied.executor.validate.calls, 1);
+
+  // 坏方案：把一个非安全传感器的 part 指到不存在的执行机构
+  const broken = JSON.parse(JSON.stringify(design.design));
+  broken.config.id = 'design-broken-1st';
+  const sensors = Array.isArray(broken.config.sensors) ? broken.config.sensors : [];
+  const victim = sensors.find((item) => !/^ESTOP|SAFETY|DOOR|CURTAIN|LIGHT/i.test(String(item?.point ?? '')));
+  check.ok('找到可改绑的普通传感器（否则这条断言没有验证力）', Boolean(victim), short(sensors.slice(0, 3)));
+  if (!victim) return { ok: false, checks: check.checks, turns };
+  victim.part = 'ghost-actuator-9';
+
+  const bad = await applyViaSession(h, broken);
+  turns += 1;
+  const blockedByValidation = bad.receipt?.ok === false;
+  const failedSelfCheck = bad.receipt?.verification?.ok === false;
+  check.ok(
+    '坏方案被拦住：或操作失败、或自查未通过（二者必居其一）',
+    blockedByValidation || failedSelfCheck,
+    { ok: bad.receipt?.ok, verification: bad.receipt?.verification }
+  );
+  const reason = blockedByValidation
+    ? String(bad.receipt?.error?.message ?? '')
+    : String(bad.receipt?.verification?.nextAction ?? '');
+  check.ok('拦住时有中文原因', /[\u4e00-\u9fa5]{2,}/.test(reason), reason);
+  check.ok(
+    '原因点出坏在哪个绑定/引用',
+    /ghost-actuator-9/.test(reason) || /传感器/.test(reason) || /执行机构/.test(reason),
+    reason
+  );
+  if (blockedByValidation) {
+    check.eq('被结构校验拦住（INVALID_ARGUMENT）', bad.receipt?.error?.code, 'INVALID_ARGUMENT');
+  }
+  // 末态：坏方案不能落盘，active 也不能被挪走
+  check.ok(
+    '坏方案没有落盘',
+    !existsSync(machineDesignPath(h.root, 'design-broken-1st')),
+    machineDesignPath(h.root, 'design-broken-1st')
+  );
+  check.eq('active 仍是好方案', readActivePointer(h.root)?.machineId, goodId);
+
+  const metrics = [
+    `verified=${applied.receipt?.verification?.ok}`,
+    `source=${applied.receipt?.verification?.source}`,
+    `validate_calls=${applied.executor.validate.calls}`,
+    `bad=${blockedByValidation ? 'rejected' : 'verify_failed'}`,
+    `bad_code=${bad.receipt?.error?.code ?? bad.receipt?.verification?.ok}`
+  ];
+  return { ok: check.checks.every((item) => item.ok), checks: check.checks, turns, metrics };
+}
+
 const CASES = [
   ['t01-conveyor-90', caseConveyor90],
   ['t02-repair-safety', caseRepairSafety],
   ['t03-library-roundtrip', caseLibraryRoundtrip],
   ['t04-export-import', caseExportImport],
   ['t05-interference-states', caseInterferenceStates],
-  ['t06-capture', caseCapture]
+  ['t06-capture', caseCapture],
+  ['t07-tool-result-offload', caseToolResultOffload],
+  ['t08-project-memory', caseProjectMemory],
+  ['t09-plan-budget-resume', casePlanBudgetResume],
+  ['t10-verify-attached', caseVerifyAttached]
 ];
 
 function printFailure(caseId, result) {
