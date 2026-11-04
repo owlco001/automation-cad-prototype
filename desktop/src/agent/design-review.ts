@@ -9,7 +9,7 @@
  * 1. 任一条目 `fail` → `FAIL`；没有 fail 但有 `warn` 或 `na` → `WARN`；全 `pass` → `PASS`。
  * 2. 每条 `evidence` 必须带数字：
  *    - 结构：issues 条数 + 首个 code；
- *    - 干涉：rest/lift/sweep 各自的 hits 与 mm³；
+ *    - 干涉：rest/lift/sweep 各自的「确认 / 待复核」对数与 mm³；
  *    - 电气：过载（最大相电流）、压降（24V 余量）、断路器（额定/进线截面）三项实际值；
  *    - 成本：缺价条数与总价。
  *    没有数字就不算证据：该条降级为 `warn`（`fail` 保留，错误码本身已可定位），
@@ -19,6 +19,9 @@
  *
  * 口径说明（不猜数字）：
  * - 干涉 `STATE_UNAVAILABLE`（机型没有顶升轴）记为 `na`，不算失败；证据写「states 可用 0/3」。
+ * - 干涉判 FAIL 的唯一依据是 `confirmedHits`（工具用解析式精确求交确认的实体重叠）；
+ *   `screenHits`（只有 AABB 依据、或位姿不可达）只判 `warn` 并指名复核方式。
+ *   旧口径 payload（只有 `hits`、没有拆分）按「未确认」记 `warn`，不冒充 FAIL/PASS。
  * - 电气工具不计算线路压降，这里用 24V 母线余量（`psuMarginRatio`）作电压侧证据；
  *   没给 PSU 额定电流时该值为 null，条目降级 `warn` 并提示人工确认压降。
  * - 缺价（`counts.missing > 0`）只 `warn`：报价会偏，但结构/干涉/电气仍可出图。
@@ -228,21 +231,49 @@ function structureItem(outcome: ReviewStepOutcome | undefined, machineName: stri
 interface InterferenceStateLine {
   name: 'rest' | 'lift' | 'sweep';
   hits: number | null;
+  screen: number | null;
+  confirmed: number | null;
   mm3: number | null;
+  /** 旧口径（只有 hits，没有 screenHits/confirmedHits 拆分） */
+  legacy: boolean;
+  /** 位姿不可信（lift 按 config 方向覆盖了几何建模的伸出方向） */
+  poseOverridden: boolean;
 }
 
+/**
+ * 三态干涉条目。
+ *
+ * 判定口径（这是修过一次的实际故障）：`hits`（AABB 候选）**不能**直接判 FAIL。
+ * 只有 `confirmedHits`（解析式精确求交确认的实体重叠）才判 FAIL；`screenHits`
+ * （只有包围盒依据，或位姿不可达）判 WARN，并指名复核方式。
+ * 旧口径 payload（只有 hits、没有拆分）一律按「未确认」处理：WARN，不冒充 FAIL，
+ * 也不冒充 PASS —— 证据里写明「未拆分」。
+ */
 function interferenceItem(outcome: ReviewStepOutcome | undefined): DesignReviewItem {
   const title = '三态干涉（rest / lift / sweep）';
   const payload = record(outcome?.data);
   const states = record(payload.states);
   const names = ['rest', 'lift', 'sweep'] as const;
+  const lift = record(payload.lift);
+  const poseOverriddenAll = lift.directionOverridden === true;
   const lines: InterferenceStateLine[] = [];
   let available = 0;
   for (const name of names) {
     const entry = record(states[name]);
     const hits = num(entry.hits);
+    const screen = num(entry.screenHits);
+    const confirmed = num(entry.confirmedHits);
     const mm3 = num(entry.mm3);
-    lines.push({ name, hits, mm3 });
+    const legacy = screen === null && confirmed === null;
+    lines.push({
+      name,
+      hits,
+      screen,
+      confirmed,
+      mm3,
+      legacy,
+      poseOverridden: entry.poseValidity === 'direction-overridden' || (name !== 'rest' && poseOverriddenAll)
+    });
     if (hits !== null || mm3 !== null) available += 1;
   }
 
@@ -271,19 +302,52 @@ function interferenceItem(outcome: ReviewStepOutcome | undefined): DesignReviewI
     }, '干涉结果缺数字');
   }
 
+  // 证据里必须把「确认」与「待复核」分开写，不能合成一个 hits 数字糊过去。
   const evidence = lines
-    .map((line) => `${line.name} ${fmt(line.hits)} hits / ${fmt(line.mm3)} mm³`)
-    .join(' · ');
-  const totalHits = lines.reduce((sum, line) => sum + (line.hits ?? 0), 0);
-  // 最严重的那一态：mm³ 最大（缺数据按 -1 排在后面）
+    .map((line) => line.legacy
+      ? `${line.name} ${fmt(line.hits)} hits（未拆分确认/待复核） / ${fmt(line.mm3)} mm³`
+      : `${line.name} ${fmt(line.confirmed)} 确认 / ${fmt(line.screen)} 待复核 · ${fmt(line.mm3)} mm³`)
+    .join(' · ')
+    + (lines.some((line) => line.poseOverridden)
+      ? `；lift/sweep 位姿与几何建模的伸出方向相反（direction-overridden，位移是反向平移）`
+      : '');
+
+  const confirmedTotal = lines.reduce((sum, line) => sum + (line.confirmed ?? 0), 0);
+  const screenTotal = lines.reduce((sum, line) => sum + (line.screen ?? 0), 0);
+  const legacyHits = lines.reduce((sum, line) => sum + (line.legacy ? (line.hits ?? 0) : 0), 0);
   const worst = lines.reduce((best, line) => ((line.mm3 ?? -1) > (best.mm3 ?? -1) ? line : best), lines[0] as InterferenceStateLine);
-  if (totalHits > 0) {
+
+  if (confirmedTotal > 0) {
     return {
       area: '干涉',
       status: 'fail',
       title,
       evidence,
-      suggestion: `先处理 ${worst.name} 处干涉：用 place_component 或 update_component 调整干涉对的间距/型号，改完重跑 run_interference_check(states:['rest','lift','sweep'])`
+      suggestion: `先处理 ${confirmedTotal} 处确认干涉（解析式精确求交，非包围盒估计）：用 place_component 或 update_component 调整 ${worst.name} 处干涉对的间距/型号，改完重跑 run_interference_check(states:['rest','lift','sweep'])`
+    };
+  }
+  if (screenTotal > 0 || legacyHits > 0) {
+    const pending = screenTotal + legacyHits;
+    const firstPending = lines.find((line) => (line.screen ?? 0) > 0 || (line.legacy && (line.hits ?? 0) > 0));
+    return {
+      area: '干涉',
+      status: 'warn',
+      title,
+      evidence,
+      suggestion: `按 partId 复核 ${pending} 对待复核对（${firstPending?.name ?? 'rest'} 起）：看 run_interference_check 返回的 items[].kind / confirmation`
+        + `（mate=同轴嵌套配合，aabb=只有包围盒依据）；确属配合就在 joints 里声明，要判定实体是否真撞就对同一份 STEP 跑 brep_interference.py 做布尔`
+    };
+  }
+  // 位姿不可达（config 方向与几何建模相反）：即使这一态没算出命中，也是模型不自洽，
+  // 不能报 pass —— 不然「几何把转向台建成压机、config 说要向上顶升」就被静默吞掉了。
+  if (lines.some((line) => line.poseOverridden)) {
+    return {
+      area: '干涉',
+      status: 'warn',
+      title,
+      evidence,
+      suggestion: 'lift 位移方向与几何建模的伸出方向相反：先确认是几何生成器把该工位建成了朝下伸出的压机（缸体/压头/治具），还是 config 的 travelMm/position 写反；'
+        + '改完重跑 run_interference_check(states:[\'rest\',\'lift\',\'sweep\']) 确认 directionOverridden=false 再判 lift/sweep'
     };
   }
   return {
@@ -291,7 +355,7 @@ function interferenceItem(outcome: ReviewStepOutcome | undefined): DesignReviewI
     status: 'pass',
     title,
     evidence,
-    suggestion: '三态均无干涉：可继续看电气与成本，出图前跑 run_plc_generate 拿 PLC 预检'
+    suggestion: '三态均无确认干涉与待复核对：可继续看电气与成本，出图前跑 run_plc_generate 拿 PLC 预检'
   };
 }
 

@@ -53,7 +53,7 @@
 | `repair_plc_config` | 写 | 补齐当前 active 机型的 PLC 预检缺口（执行机构缺到位检测、缺急停/安全门回路）：默认 `dryRun=true` 只返回 `willAdd`（不写盘）；`dryRun=false` 才写回 `machine/<id>.json`、同步联调配置并让预检归零，写前过 `assertDesign`。已补齐时 `willAdd`/`added`/`remainingIssues` 均为空且不报错（需确认） |
 | `get_bom` | 只读 | 当前装配体简化 BOM，统一列表形状：`{items:[{partId,name,qty,remark,…}], total, truncated, rows, note}`（`rows` 为兼容镜像，已弃用） |
 | `get_project_context` | 只读 | 当前域 / 视图 / 选中对象 / 机型 / 底板 / 单位制 / 最近操作；缺失项返回 null |
-| `run_interference_check` | 只读 | 包围盒干涉初筛。不传 `states` 只查当前场景静态位姿（旧行为，前 20 条）；传 `states:['rest'/'lift'/'sweep']` 按 active 机型做位姿化检查：`lift` 把可动件按 config 里 `turner-lift.travelMm` 真实行程平移，`sweep` 按 10 mm 逐步顶升到行程；返回 `{ok,states:{rest/lift/sweep:{pairs,hits,mm3}},lift:{actuatorId,strokeMm,direction,partIds}}`；无顶升轴返回 `STATE_UNAVAILABLE`，不拿 static 冒充 lift |
+| `run_interference_check` | 只读 | 干涉检查（AABB 初筛 + 解析式确认）。不传 `states` 只查当前场景静态位姿（旧行为，前 20 条）；传 `states:['rest'/'lift'/'sweep']` 按 active 机型做位姿化检查：`lift` 把可动件按 config 里 `turner-lift.travelMm` 真实行程平移，`sweep` 按 10 mm 逐步顶升到行程；返回 `{ok,reviewStatus,states:{rest/lift/sweep:{pairs,hits,screenHits,confirmedHits,mates,mm3,mm3Confirmed,mm3Screen,poseValidity,items}},lift:{actuatorId,strokeMm,direction,geometryDirection,directionOverridden,partIds},precision}`。口径：`confirmedHits`=解析式精确求交确认的实体重叠（唯一能否决出图）；`screenHits`=只有包围盒依据或位姿不可达（只能当待复核）；`mates`=同轴嵌套配合（缸体×活塞杆，实体布尔必然重叠但不是干涉）；`mm3` 含 declared/mate，只作量级参考；`directionOverridden=true` 表示 config 方向与几何建模伸出方向相反（反向平移、位姿不可达）。无顶升轴返回 `STATE_UNAVAILABLE`，不拿 static 冒充 lift |
 | `capture_view` | 只读 | 截当前真实界面并落盘 `userData/agent-shots/<timestamp>-<view>.png`（view=`3d`/`linkage`/`library`/`exports`），返回 `{path,bytes,sha256,width,height,view}`；窗口未就绪或仍在首页返回 `VIEW_NOT_READY`（**绝不返回首页截图冒充**），单张 >5 MiB 缩尺寸重拍一次，仍超限返回 `SHOT_TOO_LARGE`。字读不清时传 `region:{x,y,w,h}`（**原图像素坐标、原点在图像左上**，`0<=x,y`、`w,h>=32`）+ `scale`（0.5–3，默认 1）只截这一块：上界是**本次截图的真实图像像素尺寸**（高 DPI 屏上大于 1600×1000，实际可用范围以返回的 `sourceSize` 为准），**先裁后缩**，越界按真实尺寸夹紧并返回 `{region,clamped,scale,sourceSize}`（`clamped:true`），`w/h<32` 返回 `INVALID_ARGUMENT`，回灌仍压到长边 ≤1024 / ≤400 KB；不传 region 且 scale=1 时落盘字节与旧版一致 |
 | `get_agent_memory` | 只读 | 当前工程的跨会话事实记录：`{fingerprint,count,limit,entries:[{ts,kind,summary,ref,ok}],note}`，最多 20 条；只读 `userData/agent-memory.json`，不写不删 |
 | `get_tool_result` | 只读 | 回取被截断的完整工具结果：入参 `{resultId, offset?, limit?}`（默认 offset=0 / limit=10240，limit 上限 16384），返回 `{resultId,bytes,offset,limit,content,eof,nextOffset?}`。`content` 按 UTF-8 字符边界切（不会切坏中文），`eof=true` 时没有 `nextOffset`；各片按顺序拼接即原文。只读 `userData/agent-results/<sha16>.json`，不重跑原工具、不改工程；id 非法或已清理返回 `RESULT_NOT_FOUND`，offset 越界 `RESULT_RANGE` |
@@ -329,7 +329,8 @@ UI 与 IPC：
 判定规则（写死在 `verdictOf()`，不模糊）：
 
 - 任一项 `fail` → `FAIL`；没有 fail 但有 `warn` 或 `na` → `WARN`；全 `pass` → `PASS`。
-- **`evidence` 必须带数字**：结构写 issues 条数 + 首个 code；干涉写 rest/lift/sweep 各自的 hits 与 mm³；电气写过载（最大相电流）、压降（24V 余量）、断路器（额定/进线截面）三项实际值；成本写缺价条数与总价。没有数字就不算证据，该条降级为 `warn` 并在 `suggestion` 末尾写「需人工确认」（`fail` 保留，错误码本身已可定位）。
+- **`evidence` 必须带数字**：结构写 issues 条数 + 首个 code；干涉写 rest/lift/sweep 各自的「确认 / 待复核」对数与 mm³；电气写过载（最大相电流）、压降（24V 余量）、断路器（额定/进线截面）三项实际值；成本写缺价条数与总价。没有数字就不算证据，该条降级为 `warn` 并在 `suggestion` 末尾写「需人工确认」（`fail` 保留，错误码本身已可定位）。
+- **干涉判 FAIL 的唯一依据是 `confirmedHits`**（解析式精确求交确认的实体重叠）。`screenHits`（只有 AABB 依据，或位姿不可达）只判 `warn`，`suggestion` 必须写复核方式（按 partId 看 `items[].kind`/`confirmation`、声明 joints、或对同一份 STEP 跑 `brep_interference.py`）。旧口径 payload（只有 `hits`、没有拆分）按「未确认」记 `warn`，不冒充 FAIL，也不冒充 PASS。
 - **`suggestion` 必须指名动作**：例如「先调 `repair_plc_config(dryRun)` 补齐急停/安全门」「先按 issues[0] 的 DUP_POINT 改 `stations[0].sensors[0].point`」。`findHollowPhrase()` 拦「进一步检查 / 建议排查 / 酌情处理」这类空话，单测与 `t11` 都会断言。
 - 干涉 `STATE_UNAVAILABLE`（机型没有顶升轴）记为 `na`，不算失败；证据写「states 可用 0/3 项」。
 - 电气只 `warn` 不 `fail` 的情形：findings 里只有 warning；缺价同理（报价会偏，结构/干涉/电气仍可出图）。

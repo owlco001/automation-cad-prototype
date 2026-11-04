@@ -1188,10 +1188,13 @@ export class AgentTools {
     this.add({
       name: 'run_interference_check',
       description:
-        '对装配体执行包围盒级干涉初筛。不传 states 时只查当前场景静态位姿（返回命中数与前 20 条，旧行为）。' +
+        '对装配体执行干涉检查。不传 states 时只查当前场景静态位姿（包围盒初筛，返回命中数与前 20 条，旧行为）。' +
         '传 states 时按当前 active 机型做位姿化检查：rest=静态、lift=顶升到位（可动件按 config 里真实行程平移）、sweep=按 10 mm 逐步顶升到行程；' +
-        '返回 {ok,states:{rest|lift|sweep:{pairs,hits,mm3}},lift:{actuatorId,strokeMm,direction,partIds}}。' +
-        '顶升行程读 active 机型 config 的执行机构 travelMm（turner-lift），读不到返回 STATE_UNAVAILABLE，绝不拿静态位姿冒充 lift。',
+        '返回 {ok,reviewStatus,states:{rest|lift|sweep:{pairs,hits,screenHits,confirmedHits,mates,mm3,mm3Confirmed,mm3Screen,poseValidity,items}},lift:{actuatorId,strokeMm,direction,geometryDirection,directionOverridden,partIds},precision}。' +
+        '口径必须按字段读：confirmedHits=解析式精确求交确认的实体重叠（唯一能否决出图的数字）；screenHits=只有包围盒依据或位姿不可达，只能当待复核；' +
+        'mates=同轴嵌套配合（缸体×活塞杆这类，实体布尔必然重叠但不是干涉，不是缺陷）；mm3 含 declared/mate，只作量级参考。' +
+        '顶升行程读 active 机型 config 的执行机构 travelMm（turner-lift），读不到返回 STATE_UNAVAILABLE，绝不拿静态位姿冒充 lift；' +
+        'directionOverridden=true 表示 config 方向与几何建模的伸出方向相反，该态是反向平移、位姿不可达。',
       inputSchema: INTERFERENCE_CHECK_SCHEMA,
       handler: async (args) => {
         if (args.states !== undefined && args.states !== null && !Array.isArray(args.states)) {

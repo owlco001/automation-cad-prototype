@@ -46,9 +46,23 @@ function structureStep(issues = []) {
 }
 
 const STATES_OK = {
-  rest: { pairs: 0, hits: 0, mm3: 0 },
-  lift: { pairs: 2, hits: 2, mm3: 1560 },
-  sweep: { pairs: 2, hits: 2, mm3: 3120 }
+  rest: { pairs: 0, hits: 0, screenHits: 0, confirmedHits: 0, mm3: 0 },
+  lift: { pairs: 0, hits: 0, screenHits: 0, confirmedHits: 0, mm3: 0 },
+  sweep: { pairs: 0, hits: 0, screenHits: 0, confirmedHits: 0, mm3: 0 }
+};
+
+/** 确认干涉（解析式精确求交）——这一档才允许判 FAIL。 */
+const STATES_CONFIRMED = {
+  rest: { pairs: 0, hits: 0, screenHits: 0, confirmedHits: 0, mm3: 0 },
+  lift: { pairs: 2, hits: 2, screenHits: 0, confirmedHits: 2, mm3: 1560 },
+  sweep: { pairs: 2, hits: 2, screenHits: 0, confirmedHits: 2, mm3: 3120 }
+};
+
+/** screen hit（只有包围盒依据 / 位姿不可达）——只判 WARN，不判 FAIL。 */
+const STATES_SCREEN = {
+  rest: { pairs: 1, hits: 1, screenHits: 1, confirmedHits: 0, mm3: 27580, poseValidity: 'valid' },
+  lift: { pairs: 2, hits: 2, screenHits: 2, confirmedHits: 0, mm3: 45516, poseValidity: 'direction-overridden' },
+  sweep: { pairs: 2, hits: 11, screenHits: 11, confirmedHits: 0, mm3: 259908, poseValidity: 'direction-overridden' }
 };
 
 function interferenceStep(states = { rest: { pairs: 0, hits: 0, mm3: 0 }, lift: { pairs: 0, hits: 0, mm3: 0 }, sweep: { pairs: 0, hits: 0, mm3: 0 } }) {
@@ -182,16 +196,62 @@ test('任一项 fail → FAIL（结构 issues 非空）', () => {
   assert.match(review.summary, /阻断项 1 个/);
 });
 
-test('干涉有 hits → FAIL；成本缺价只 warn 不拦出图', () => {
-  const hits = summarizeDesignReview({ ...allPassInput(), interference: interferenceStep(STATES_OK) });
-  assert.equal(hits.verdict, 'FAIL');
-  assert.equal(hits.items.find((item) => item.area === '干涉').status, 'fail');
-  assert.match(hits.items.find((item) => item.area === '干涉').suggestion, /place_component/);
+test('干涉 confirmedHits → FAIL；成本缺价只 warn 不拦出图', () => {
+  const confirmed = summarizeDesignReview({ ...allPassInput(), interference: interferenceStep(STATES_CONFIRMED) });
+  assert.equal(confirmed.verdict, 'FAIL');
+  assert.equal(confirmed.items.find((item) => item.area === '干涉').status, 'fail');
+  assert.match(confirmed.items.find((item) => item.area === '干涉').suggestion, /place_component/);
 
   const missing = summarizeDesignReview({ ...allPassInput(), cost: costStep({ missing: 3 }) });
   assert.equal(missing.verdict, 'WARN');
   assert.equal(missing.items.find((item) => item.area === '成本').status, 'warn');
   assert.match(missing.items.find((item) => item.area === '成本').evidence, /缺价 3 条/);
+});
+
+test('screen hit（只有 AABB 依据）不得判 FAIL：WARN + 指名复核方式', () => {
+  const review = summarizeDesignReview({ ...allPassInput(), interference: interferenceStep(STATES_SCREEN) });
+  const item = review.items.find((row) => row.area === '干涉');
+  assert.equal(item.status, 'warn', 'screen hit 只能是待复核');
+  assert.equal(review.verdict, 'WARN');
+  assert.doesNotMatch(review.summary, /不可出图/);
+  // 证据必须把确认与待复核分开，并带数字
+  assert.match(item.evidence, /rest 0 确认 \/ 1 待复核 · 27580 mm³/);
+  assert.match(item.evidence, /sweep 0 确认 \/ 11 待复核 · 259908 mm³/);
+  // 位姿不可信必须写进证据，不能静默
+  assert.match(item.evidence, /direction-overridden/);
+  // 复核方式要指名（不能写「建议进一步检查」）
+  assert.match(item.suggestion, /partId/);
+  assert.match(item.suggestion, /confirmation/);
+  assert.match(item.suggestion, /brep_interference\.py/);
+  assert.equal(findHollowPhrase(item.suggestion), null);
+});
+
+test('旧口径（只有 hits、无确认/待复核拆分）→ WARN，不冒充 FAIL 也不冒充 PASS', () => {
+  const legacy = {
+    rest: { pairs: 0, hits: 0, mm3: 0 },
+    lift: { pairs: 2, hits: 2, mm3: 1560 },
+    sweep: { pairs: 2, hits: 2, mm3: 3120 }
+  };
+  const review = summarizeDesignReview({ ...allPassInput(), interference: interferenceStep(legacy) });
+  const item = review.items.find((row) => row.area === '干涉');
+  assert.equal(item.status, 'warn');
+  assert.equal(review.verdict, 'WARN');
+  assert.match(item.evidence, /未拆分确认\/待复核/);
+  assert.match(item.evidence, /2 hits/);
+});
+
+test('位姿不可达（direction-overridden）即使 0 命中也是 WARN，不得静默报 pass', () => {
+  const states = {
+    rest: { pairs: 1, hits: 0, screenHits: 0, confirmedHits: 0, mates: 1, mm3: 27580, poseValidity: 'valid', reviewStatus: 'pass' },
+    lift: { pairs: 2, hits: 0, screenHits: 0, confirmedHits: 0, mates: 2, mm3: 45516, poseValidity: 'direction-overridden', reviewStatus: 'warn' },
+    sweep: { pairs: 2, hits: 0, screenHits: 0, confirmedHits: 0, mates: 11, mm3: 259908, poseValidity: 'direction-overridden', reviewStatus: 'warn' }
+  };
+  const review = summarizeDesignReview({ ...allPassInput(), interference: interferenceStep(states) });
+  const item = review.items.find((row) => row.area === '干涉');
+  assert.equal(item.status, 'warn');
+  assert.equal(review.verdict, 'WARN');
+  assert.doesNotMatch(review.summary, /不可出图/);
+  assert.match(item.suggestion, /directionOverridden/);
 });
 
 test('只有 warn / na 时 → WARN（电气 warning 与成本缺价都算待确认）', () => {
@@ -220,11 +280,11 @@ test('干涉 STATE_UNAVAILABLE → na，且单独出现时不致 FAIL', () => {
 // 2) 证据：必须是数字（快照）
 // ---------------------------------------------------------------------------
 
-test('evidence 是带数字的快照：结构 issues 条数 / 干涉三态 hits 与 mm³ / 电气三项值 / 成本缺价与总价', () => {
-  const review = summarizeDesignReview({ ...allPassInput(), interference: interferenceStep(STATES_OK) });
+test('evidence 是带数字的快照：结构 issues 条数 / 干涉三态「确认/待复核」与 mm³ / 电气三项值 / 成本缺价与总价', () => {
+  const review = summarizeDesignReview({ ...allPassInput(), interference: interferenceStep(STATES_CONFIRMED) });
   const byArea = Object.fromEntries(review.items.map((item) => [item.area, item.evidence]));
   assert.equal(byArea['结构'], `issues 0 条（errors 0 / warnings 0）· 首个 code 无 · 机型 ${MACHINE_NAME}`);
-  assert.equal(byArea['干涉'], 'rest 0 hits / 0 mm³ · lift 2 hits / 1560 mm³ · sweep 2 hits / 3120 mm³');
+  assert.equal(byArea['干涉'], 'rest 0 确认 / 0 待复核 · 0 mm³ · lift 2 确认 / 0 待复核 · 1560 mm³ · sweep 2 确认 / 0 待复核 · 3120 mm³');
   assert.equal(
     byArea['电气'],
     '错误 0 条 / 警告 0 条 / 提示 1 条；过载 最大相电流 12.4A；压降 24V 余量 38%（需 6.2A）；断路器 16A / 进线 2.5mm²'

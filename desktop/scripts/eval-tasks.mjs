@@ -510,6 +510,12 @@ async function caseInterferenceStates() {
   for (const name of ['rest', 'lift', 'sweep']) {
     const entry = states[name];
     check.ok(`状态 ${name} 有结果`, Boolean(entry) && typeof entry.mm3 === 'number', short(entry));
+    // 新口径：必须把「确认干涉」和「待复核」分开给，评审只按 confirmedHits 判 FAIL
+    check.ok(
+      `状态 ${name} 带 confirmedHits / screenHits 拆分`,
+      typeof entry?.confirmedHits === 'number' && typeof entry?.screenHits === 'number',
+      short(entry)
+    );
   }
   const rest = states.rest ?? {};
   const lift = states.lift ?? {};
@@ -1150,14 +1156,23 @@ async function caseDesignReview() {
     : statuses.some((status) => status === 'warn' || status === 'na') ? 'WARN' : 'PASS';
   check.eq('verdict 符合规则（任一 fail → FAIL）', review.verdict, expectedVerdict);
   check.eq('电气这一项判 fail', review.items.find((item) => item.area === '电气')?.status, 'fail');
-  // 干涉判定必须与三态真实 hits 对齐：无状态数据 → na；任一态 hits>0 → fail；否则 pass
-  const stateHits = ['rest', 'lift', 'sweep']
-    .map((name) => interference?.data?.states?.[name]?.hits)
-    .filter((value) => typeof value === 'number');
-  const expectedInterference = stateHits.length === 0
+  // 干涉判定必须与三态数字对齐（新口径）：
+  //   无状态数据 → na；任一态 confirmedHits>0 → fail；
+  //   任一态 screenHits>0 或位姿 direction-overridden → warn；否则 pass。
+  // 这里不能用 hits 判 fail：hits 含 AABB 候选，正是这次误判「不可出图」的来源。
+  const stateEntries = ['rest', 'lift', 'sweep']
+    .map((name) => interference?.data?.[name] ?? interference?.data?.states?.[name])
+    .filter((entry) => entry && typeof entry === 'object');
+  const confirmedHits = stateEntries.map((entry) => entry.confirmedHits).filter((value) => typeof value === 'number');
+  const screenHits = stateEntries.map((entry) => entry.screenHits).filter((value) => typeof value === 'number');
+  const poseOverridden = stateEntries.some((entry) => entry.poseValidity === 'direction-overridden')
+    || interference?.data?.lift?.directionOverridden === true;
+  const expectedInterference = stateEntries.length === 0
     ? 'na'
-    : (stateHits.some((value) => value > 0) ? 'fail' : 'pass');
-  check.eq('干涉判定与三态 hits 一致', review.items.find((item) => item.area === '干涉')?.status, expectedInterference);
+    : confirmedHits.some((value) => value > 0)
+      ? 'fail'
+      : screenHits.some((value) => value > 0) || poseOverridden ? 'warn' : 'pass';
+  check.eq('干涉判定与 confirmedHits/screenHits 一致', review.items.find((item) => item.area === '干涉')?.status, expectedInterference);
 
   for (const item of review.items) {
     check.ok(`${item.area} 的证据带数字`, evidenceHasNumber(item.evidence), item.evidence);
