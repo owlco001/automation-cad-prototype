@@ -41,13 +41,8 @@ jobs:
       # 明确「本 job 未验证 STEP」，而不是静默绿。要让本步真跑：在 安装依赖 之后加一步
       #   python3 -m pip install build123d
       # 并设 AUTOMATIONCAD_PYTHON 指向该解释器（或直接用 actions/setup-python + pip）。
-      - name: STEP 真实性门禁（真内核出 STEP，无内核则显式 SKIP）
-        timeout-minutes: 12
-        run: |
-          set -o pipefail
-          npm run verify:step -- --skip-if-no-kernel --json 2>&1 | tee /tmp/verify-step.log
-          # 判定不自弃：日志里必须出现结论行（PASS 或 SKIP），两者都没有说明脚本没跑起来
-          grep -Eq '^STEP_VERIFY (PASS verify-step|SKIP )' /tmp/verify-step.log
+      # STEP 真实性门禁不放在本 job：这里没有 build123d，跑了也只会 SKIP（等于没验）。
+      # 真门禁在 FeatureTree real geometry job（那个 job 有 b123d venv），见下方同名步骤。
       - name: 数据包校验
         run: npm run packs:validate
       # FeatureTree 契约服务（自起服务、FT_PORT=0，跑完自动关）
@@ -838,6 +833,13 @@ jobs:
         run: |
           . .venv-ft/bin/activate
           FT_PYTHON="$PWD/.venv-ft/bin/python" node featuretree-service/build-tests.mjs
+      # STEP 真实性门禁：本 job 有 build123d，必须真出 STEP 并数实体/校包络（SKIP 视为失败）
+      - name: STEP 真实性门禁（真内核出 STEP）
+        timeout-minutes: 12
+        run: |
+          . .venv-ft/bin/activate
+          cd desktop
+          AUTOMATIONCAD_PYTHON="$PWD/../.venv-ft/bin/python" npm run verify:step
       # AABB 初筛 vs 真实布尔：量出「把圆柱当方块」与「看不见孔」两种误差方向
       - name: AABB 初筛与真实布尔的误差
         timeout-minutes: 10
