@@ -45,6 +45,7 @@ import {
   type AgentContext
 } from './context.ts';
 import { AgentMemory, resultCode, summarizeToolCall } from './memory.ts';
+import { describeToolFact, type ProjectMemoryStore } from './project-memory.ts';
 import { readListResult, serializeToolResult, toolResultByteLimit } from './trim.ts';
 import {
   addTokenUsage,
@@ -149,6 +150,13 @@ export interface AgentSessionOptions {
    * 不传即 `auto`，但没有 `userDataDir` 时读不到图，会走「未看到图像」的文本降级。
    */
   vision?: AgentSessionVisionOptions;
+  /**
+   * 跨会话项目记忆（P3）。传 `FileProjectMemory` 时：
+   * - 5 个事实工具成功后各记一条（按工程指纹分桶）；
+   * - 会话首轮 system 提示追加最近 3 条（≤600 字）；
+   * - 不传即不落盘、不注入（测试与无 userData 环境保持原行为）。
+   */
+  projectMemory?: ProjectMemoryStore | null;
 }
 
 export interface AgentSessionVisionOptions {
@@ -460,6 +468,10 @@ export class AgentSession {
   private readonly parallelConcurrency: number;
   private readonly toolCallLimit: number;
   private readonly memory = new AgentMemory();
+  /** 跨会话项目记忆：null 表示不落盘也不注入。 */
+  private readonly projectMemory: ProjectMemoryStore | null;
+  /** 首轮已尝试注入：本会话后续轮次不再重复贴历史。 */
+  private projectMemoryInjected = false;
   private parallelBatches = 0;
   private maxParallelConcurrency = 0;
   private cacheHits = 0;
@@ -539,6 +551,7 @@ export class AgentSession {
           ...(visionOptions.maxBytes !== undefined ? { maxBytes: visionOptions.maxBytes } : {})
         }))
     };
+    this.projectMemory = options.projectMemory ?? null;
   }
 
   /** 按本轮已知信息（写工具 / 计划步骤 / 意图）算当前预算。 */
@@ -857,6 +870,7 @@ export class AgentSession {
     this.bypassIntent = null;
     this.deniedWriteTools.clear();
     this.memory.clear();
+    this.projectMemoryInjected = false;
     this.dedupe.clear();
     this.cache.clear();
     this.parallelBatches = 0;
@@ -897,7 +911,7 @@ export class AgentSession {
 
   private systemPrompt(): LlmMessage {
     const packed = serializeAgentContext(this.turnContext);
-    const memory = this.memory.prompt();
+    const memory = [this.memory.prompt(), this.projectMemoryBlock()].filter(Boolean).join('\n\n');
     const thread = formatThreadContext(this.threadPrevious, this.turnContextReady ? this.turnContext : null);
     const budgeted = pack({
       system: SYSTEM_PROMPT,
@@ -906,6 +920,54 @@ export class AgentSession {
     }, this.budget);
     this.lastBudget = budgeted;
     return { role: 'system', content: budgeted.text };
+  }
+
+  /**
+   * 新会话首轮的「本项目最近操作」：只注入一次（首轮），最多 3 条 / 600 字。
+   * 读盘失败按空处理——记忆不能挡住对话。
+   */
+  private projectMemoryBlock(): string {
+    if (!this.projectMemory || this.projectMemoryInjected) return '';
+    this.projectMemoryInjected = true;
+    const fingerprint = projectFingerprint(this.turnContextReady ? this.turnContext : null);
+    try {
+      return this.projectMemory.prompt(fingerprint);
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * 事实落盘：只记这 5 个工具的成功事实（`describeToolFact` 判定），
+   * 指纹用「写后」上下文重算一次——`apply_machine_design` 会改 BOM 行数，
+   * 用写前指纹记，下一轮就查不到了。
+   */
+  private async recordProjectFact(
+    tool: string,
+    args: Record<string, unknown>,
+    result: unknown
+  ): Promise<void> {
+    if (!this.projectMemory) return;
+    const fact = describeToolFact(tool, args, result);
+    if (!fact) return;
+    if (this.contextProvider) {
+      try {
+        this.turnContext = await this.contextProvider() ?? emptyAgentContext();
+        this.turnContextReady = true;
+      } catch {
+        // 取不到写后上下文就沿用写前快照，不阻断工具结果。
+      }
+    }
+    try {
+      this.projectMemory.record(projectFingerprint(this.turnContextReady ? this.turnContext : null), {
+        kind: fact.kind,
+        summary: fact.summary,
+        ...(fact.ref ? { ref: fact.ref } : {}),
+        ok: true
+      });
+    } catch {
+      // 记忆写失败不影响工具结果。
+    }
   }
 
   private messageTokenText(message: LlmMessage): string {
@@ -1347,6 +1409,7 @@ export class AgentSession {
       if (verification) this.lastWriteVerification = verification;
       const result = verification ? withVerification(rawResult, verification) : rawResult;
       this.memory.record(summarizeToolCall(name, args, result));
+      await this.recordProjectFact(name, args, result);
       const code = result.ok ? 'OK' : (result.error?.code ?? 'COMMAND_FAILED');
       const policyDenial = !result.ok && (code === 'TARGET_PATH_UNSUPPORTED' || code === 'POLICY_DENIED')
         ? this.recordDenial('policy', name, denialKey)

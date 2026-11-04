@@ -1504,6 +1504,28 @@ export class AgentTools {
     });
 
     this.add({
+      name: 'get_agent_memory',
+      description:
+        '读取当前工程的跨会话项目记忆：最近 20 条**事实**（机型应用到工程 / 存入库 / 从库加载 / PLC 生成 / 补齐配置），每条含时间、类型、摘要与关联 id。只读，用于回答「你记得我上次做什么」「上次改的哪台机型」。记录里不含密钥与路径；不同工程分开存，互不串台。',
+      inputSchema: EMPTY_SCHEMA,
+      handler: async () => {
+        const result = await this.execute('get_agent_memory');
+        return result ? commandSuccess(result) : this.unavailable();
+      }
+    });
+
+    this.add({
+      name: 'clear_agent_memory',
+      description:
+        '清空**当前工程**的跨会话项目记忆（返回 cleared 条数）；其他工程不受影响，也不动机型库、工程文件与审计。这是写操作，需要用户确认。用户说「忘掉这个项目的记录」时用。',
+      inputSchema: EMPTY_SCHEMA,
+      handler: async () => {
+        const result = await this.execute('clear_agent_memory');
+        return result ? commandSuccess(result) : this.unavailable();
+      }
+    });
+
+    this.add({
       name: 'undo_last',
       description: '撤销最近一次可撤销的写操作（占位件插入、底板放置、元器件修改/移除），返回被撤销的命令与 id。',
       inputSchema: EMPTY_SCHEMA,

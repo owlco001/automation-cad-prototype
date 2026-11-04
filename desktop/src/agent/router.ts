@@ -239,6 +239,13 @@ export function routeIntent(text: string): IntentMatch {
   if (isOffDomainTopic(normalized)) {
     return { intent: 'out_of_scope', confidence: 'high', score: 0, hits: [], reason: '非工程话题，按超纲处理' };
   }
+  // 跨会话项目记忆：先于通用打分，否则「忘掉这个项目的记忆」落 out_of_scope。
+  if (isProjectMemoryClearRequest(normalized)) {
+    return { intent: 'modify', confidence: 'high', score: 4, hits: ['项目记忆'], reason: '清空当前工程的跨会话记忆（写操作，需确认）' };
+  }
+  if (isProjectMemoryRecallRequest(normalized)) {
+    return { intent: 'query', confidence: 'high', score: 3, hits: ['项目记忆'], reason: '读取当前工程的跨会话事实记录（只读）' };
+  }
   if (isDocQuestion(normalized)) {
     return { intent: 'query', confidence: 'high', score: 3, hits: ['本地文档'], reason: '文档类问题，查本地知识库' };
   }
@@ -318,7 +325,7 @@ export interface ToolPlan {
   resolvedLabel?: string;
 }
 
-/** 目前注册的 32 个工具里，只读 15 个、写操作 17 个。 */
+/** 目前注册的 34 个工具里，只读 16 个、写操作 18 个。 */
 export const READ_ONLY_TOOLS = new Set([
   'list_components',
   'search_components',
@@ -337,7 +344,9 @@ export const READ_ONLY_TOOLS = new Set([
   // 只读自查方案：只返回 issues，不落盘、不改 active
   'validate_machine_design',
   // 只读截图：写 userData/agent-shots（证据文件），不改工程与机型
-  'capture_view'
+  'capture_view',
+  // 只读跨会话项目记忆：只读 agent-memory.json，不写不删
+  'get_agent_memory'
 ]);
 
 export const WRITE_TOOLS = new Set([
@@ -364,7 +373,9 @@ export const WRITE_TOOLS = new Set([
   // 导出写 userData/exports
   'export_machine_package',
   // 补齐会写回 machine/<id>.json 并刷新联调配置（默认 dryRun 只读预览，但工具本身是写）
-  'repair_plc_config'
+  'repair_plc_config',
+  // 清空 agent-memory.json 里当前工程的桶（删记录，等同文件写）
+  'clear_agent_memory'
 ]);
 
 /**
@@ -748,12 +759,51 @@ function planMachineLibraryRequest(value: string): ToolPlan | null {
 }
 
 /**
+ * 跨会话项目记忆：清空（写）/ 回忆（只读）。
+ *
+ * 清空必须点明「记忆」二字，避免把「删除审计里的失败记录」这类（越权/审计篡改）
+ * 抢成清记忆。回忆只认「你记得…做了什么 / 上次改了什么 / 项目记忆」这类问句。
+ */
+export function isProjectMemoryClearRequest(text: string): boolean {
+  const value = (text ?? '').trim();
+  if (!value) return false;
+  return /(?:忘掉|清除|清空|删除|删掉|重置)[^。；;\n]{0,12}记忆|记忆[^。；;\n]{0,8}(?:清空|清除|忘掉|删掉|重置)/.test(value);
+}
+
+export function isProjectMemoryRecallRequest(text: string): boolean {
+  const value = (text ?? '').trim();
+  if (!value) return false;
+  return /(?:项目记忆|跨会话记忆|操作记忆)/.test(value)
+    || /你(?:还)?记得[^。；;\n]{0,12}(?:上次|之前|做过|改过|哪台|什么|哪些)/.test(value)
+    || /(?:上次|之前)[^。；;\n]{0,8}(?:做了什么|改了什么|干了什么|动过什么|用过哪台|哪台机型)/.test(value);
+}
+
+/**
  * 把中文指令映射成一个工具计划。
  * 返回 null 表示「没有任何工具能接住」，调用方应如实说做不了。
  */
 function planToolBase(text: string): ToolPlan | null {
   const value = (text ?? '').trim();
   if (!value) return null;
+  // 跨会话项目记忆：读/清都在意图分类之前判，避免「忘掉这个项目的记忆」被当成 out_of_scope。
+  if (isProjectMemoryClearRequest(value)) {
+    return {
+      tool: 'clear_agent_memory',
+      args: {},
+      readOnly: false,
+      missing: [],
+      why: '清空本工程的跨会话记忆（只清当前工程，需确认；不动其他工程与工程文件）'
+    };
+  }
+  if (isProjectMemoryRecallRequest(value)) {
+    return {
+      tool: 'get_agent_memory',
+      args: {},
+      readOnly: true,
+      missing: [],
+      why: '读取本工程最近的成功操作事实（跨会话，只读；最多 20 条）'
+    };
+  }
   const libraryPlan = planMachineLibraryRequest(value);
   if (libraryPlan) return libraryPlan;
   // PLC 预检缺口补齐 / 机型方案自查：必须在 apply/design/verify 之前判断。

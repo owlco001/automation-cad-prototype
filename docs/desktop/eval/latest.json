@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-04T02:54:08.895Z",
+  "generatedAt": "2026-11-04T03:21:28.138Z",
   "version": "0.6.4",
   "mode": "offline-rules",
   "dataset": {
     "path": "docs/desktop/eval/cases.json",
-    "count": 120,
+    "count": 122,
     "references": 17,
     "ambiguous": 7,
     "multiStep": 5,
@@ -14,10 +14,12 @@
       "build_canvas_assembly",
       "build_machine_model",
       "capture_view",
+      "clear_agent_memory",
       "design_machine",
       "export_cost_report",
       "export_files",
       "export_machine_package",
+      "get_agent_memory",
       "get_bom",
       "get_project_context",
       "get_render_stats",
@@ -62,13 +64,13 @@
   "passed": true,
   "metrics": {
     "intent": {
-      "correct": 120,
-      "total": 120,
+      "correct": 122,
+      "total": 122,
       "rate": 1
     },
     "tools": {
-      "correct": 120,
-      "total": 120,
+      "correct": 122,
+      "total": 122,
       "rate": 1
     },
     "params": {
@@ -3625,6 +3627,66 @@
         }
       ],
       "passed": false
+    },
+    {
+      "id": "am01",
+      "input": "你记得我上次对这个工程做了什么吗",
+      "tags": [
+        "memory"
+      ],
+      "note": "跨会话项目记忆只读：返回本工程最近 20 条事实（机型应用/入库/PLC 生成/补齐），不写盘；只读工具可离线执行",
+      "expectedIntent": "query",
+      "actualIntent": "query",
+      "intentOk": true,
+      "expectedTools": [
+        "get_agent_memory"
+      ],
+      "actualTools": [
+        "get_agent_memory"
+      ],
+      "toolOk": true,
+      "paramsApplicable": false,
+      "paramsOk": null,
+      "refusedOk": true,
+      "actualPlans": [
+        {
+          "tool": "get_agent_memory",
+          "args": {},
+          "readOnly": true,
+          "missing": []
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "am02",
+      "input": "把这个项目的记忆清空",
+      "tags": [
+        "memory"
+      ],
+      "note": "清记忆是写操作：只清当前工程桶、需确认；与「删除审计记录」这类越权请求严格区分",
+      "expectedIntent": "modify",
+      "actualIntent": "modify",
+      "intentOk": true,
+      "expectedTools": [
+        "clear_agent_memory"
+      ],
+      "actualTools": [
+        "clear_agent_memory"
+      ],
+      "toolOk": true,
+      "paramsApplicable": false,
+      "paramsOk": null,
+      "refusedOk": true,
+      "actualPlans": [
+        {
+          "tool": "clear_agent_memory",
+          "args": {},
+          "readOnly": false,
+          "missing": []
+        }
+      ],
+      "passed": true
     }
   ]
 }

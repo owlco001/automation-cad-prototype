@@ -1754,5 +1754,31 @@
       "doc"
     ],
     "note": "负向：求助/文档句式（怎么用）走知识库，不触发截图"
+  },
+  {
+    "id": "am01",
+    "input": "你记得我上次对这个工程做了什么吗",
+    "intent": "query",
+    "expect": {
+      "tool": "get_agent_memory",
+      "argsContains": {}
+    },
+    "tags": [
+      "memory"
+    ],
+    "note": "跨会话项目记忆只读：返回本工程最近 20 条事实（机型应用/入库/PLC 生成/补齐），不写盘；只读工具可离线执行"
+  },
+  {
+    "id": "am02",
+    "input": "把这个项目的记忆清空",
+    "intent": "modify",
+    "expect": {
+      "tool": "clear_agent_memory",
+      "argsContains": {}
+    },
+    "tags": [
+      "memory"
+    ],
+    "note": "清记忆是写操作：只清当前工程桶、需确认；与「删除审计记录」这类越权请求严格区分"
   }
 ]

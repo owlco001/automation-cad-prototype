@@ -53,6 +53,7 @@ import { AgentCancelledError, AgentSession, emptyAgentUsage } from '../src/agent
 import { BYPASS_CONFIRMATION_NOTICE } from '../src/agent/policy.ts';
 import { requestWriteConfirmation } from './write-confirm.ts';
 import { collectAgentContext } from '../src/agent/context.ts';
+import { FileProjectMemory } from '../src/agent/project-memory.ts';
 import { readListResult } from '../src/agent/trim.ts';
 import type { AgentPlan, PlanStep } from '../src/agent/planner.ts';
 import { READ_ONLY_TOOLS } from '../src/agent/router.ts';
@@ -1503,6 +1504,8 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
       audit: (record) => audit.record(record),
       // 视觉自检：capture_view 成功后把压缩截图回灌；开关来自 agent-llm.json 的 vision。
       vision: { mode: config.vision, userDataDir: context.userDataDir },
+      // 跨会话项目记忆：userData/agent-memory.json（每工程 ≤20 条、≤64 KB）
+      projectMemory: new FileProjectMemory({ root: context.userDataDir }),
       contextProvider: async () => {
         try {
           const result = await bus.execute('get_project_context');

@@ -5,7 +5,7 @@
 ## 两个入口，一份注册表
 
 ```
-tools.ts（AgentTools + 32 个 AgentTool；只读 15 / 写 17；含只读 `suggest_kinematics`、`get_render_stats`、`list_machine_library`、`validate_machine_design`、`capture_view`；含只读 `design_machine` 与写工具 `apply_machine_design`、`repair_plc_config`；机型库 `save_machine_to_library` / `load_machine_from_library` / `export_machine_package`）
+tools.ts（AgentTools + 34 个 AgentTool；只读 16 / 写 18；含只读 `suggest_kinematics`、`get_render_stats`、`list_machine_library`、`validate_machine_design`、`capture_view`、`get_agent_memory`；含只读 `design_machine` 与写工具 `apply_machine_design`、`repair_plc_config`、`clear_agent_memory`；机型库 `save_machine_to_library` / `load_machine_from_library` / `export_machine_package`）
  ├─ kb/index.ts → 构建期分块 + kb.json（≤400 KB，标题 hash）
  ├─ kb/search.ts → 纯函数 BM25（中文 2-gram + 英文词，top 3 / ≤2 KB）
  ├─ rpc.ts        → HTTP JSON-RPC，127.0.0.1:7420，Bearer token
@@ -34,6 +34,7 @@ tools.ts（AgentTools + 32 个 AgentTool；只读 15 / 写 17；含只读 `sugge
  │    ├─ context.ts → 结构化上下文快照（≤1.5 KB）+ 历史工具清单文本块
  │    ├─ reference.ts → 选中/最近操作/几何三级指代消解（<0.6 不猜）
  │    ├─ memory.ts  → 最近 5 次工具调用摘要（仅内存）
+ │    ├─ project-memory.ts → 跨会话项目记忆（userData/agent-memory.json，每工程 ≤20 条 / ≤64 KB、首轮注入 ≤3 条 600 字、字段白名单 + 胞化）
  │    ├─ trim.ts    → 列表 20 条 / 文本 2 KB / 单结果 10 KB 裁剪
  │    ├─ audit.ts   → 每次工具调用一行 NDJSON（凭据脱敏 + 耗时）
  │    ├─ audit-store.ts → 审计落盘：按大小轮转 agent-audit.N.jsonl + 保留期清理 + 跨份读取（仅主进程）
@@ -96,6 +97,8 @@ interface Bridge {
 | `export_files` | `kind / fileName? / overwrite?` | `export_files` | ✅ 写：pdf/dxf/glb/bom(CSV)，与成本导出一套命名净化/冲突规则 |
 | `export_cost_report` | `format / fileName? / overwrite?` + 同上成本参数 | `export_cost_report` | ✅ 写工具：PDF/CSV 落盘到 `userData/exports/`，需确认 |
 | `verify_plc_program` | `config? / timeScale? / safetyTripAtStep? / sensorConflictAtStep?` | `verify_plc_program` | ✅ 只读：预检 + 生成 + 内置模拟器，返回步骤/报警/失败原因 |
+| `get_agent_memory` | 无 | `get_agent_memory` | ✅ 只读：返回当前工程 `{fingerprint,count,limit,entries:[{ts,kind,summary,ref,ok}],note}`（≤20 条事实），不写盘 |
+| `clear_agent_memory` | 无 | `clear_agent_memory` | ✅ 写：只清当前工程桶，返回 `{fingerprint,cleared}`；需确认，不动其他工程 |
 | `undo_last` | 无 | 直接 `CommandBus.undoLast()` | ✅ 可用 |
 
 `get_bom` 的 BOM 由「当前 CAD 零件 + 已插入占位件」生成：序号递增、名称/型号取零件名、数量 1、材料 `—`，并带 `note` 说明这是简化 BOM。没有模型时返回空数组。
@@ -487,7 +490,7 @@ IPC 与 UI：
 
 - `agent-llm.json` 保存 `{baseUrl,apiKey,model,maxIterations}`，POSIX 权限 600。默认 `https://api.openai.com/v1`、`gpt-4o-mini`、6 轮。
 - UI 读取时 apiKey 只返回掩码（如 `sk-****abcd`）；保存时掩码/空值保留原密钥。
-- `llm.ts` 以 OpenAI 兼容格式发送 32 工具 JSON Schema，60 秒超时；非 2xx 返回含状态码的中文错误。
+- `llm.ts` 以 OpenAI 兼容格式发送 34 工具 JSON Schema，60 秒超时；非 2xx 返回含状态码的中文错误。
 - `session.ts` 注入 `{llm,bus,confirmWrite}`：工具结果以 `role:'tool'` 回灌，先经 `serializeToolResult` 裁剪、再由 `guard.ts` 包成不可信数据块，失败不中断；历史只保留最近 20 条；超轮返回「已达到最大工具调用轮数（N），请缩小任务范围」。
 - `import_cad`、`insert_component`、`place_component`、`update_component`、`remove_component`、`run_plc_generate`、`repair_plc_config`、`export_files`、`export_cost_report`、`save_machine_to_library`、`load_machine_from_library`、`export_machine_package`、`undo_last` 执行前由主进程弹出确认；拒绝时回灌 `USER_DENIED`。
 - 面板包含对话消息流/工具卡片、模型设置（apiKey 为 password）与测试连接（ping，`max_tokens=8`）。
