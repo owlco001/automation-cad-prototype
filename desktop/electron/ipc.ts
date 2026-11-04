@@ -1501,6 +1501,8 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
       pricing: DEFAULT_PRICING,
       toolSchemas: (name) => tools.summaries().find((tool) => tool.name === name)?.inputSchema,
       audit: (record) => audit.record(record),
+      // 视觉自检：capture_view 成功后把压缩截图回灌；开关来自 agent-llm.json 的 vision。
+      vision: { mode: config.vision, userDataDir: context.userDataDir },
       contextProvider: async () => {
         try {
           const result = await bus.execute('get_project_context');

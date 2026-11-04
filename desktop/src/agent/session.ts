@@ -1,6 +1,28 @@
 import type { CommandResult } from './commands.ts';
 import type { AgentCommandExecutor } from './tools.ts';
-import type { LlmChatResponse, LlmClient, LlmMessage, LlmToolCall } from './llm.ts';
+import {
+  hasImagePart,
+  isContentParts,
+  messageText,
+  stripImageParts,
+  type LlmChatResponse,
+  type LlmClient,
+  type LlmMessage,
+  type LlmToolCall
+} from './llm.ts';
+import {
+  DEFAULT_VISION_MODE,
+  buildVisionParts,
+  isVisionRejection,
+  loadShotImage,
+  visionSkippedText,
+  VISION_DEGRADED_REPLY_NOTICE,
+  VISION_NOT_SEEN_MARK,
+  type VisionAttachment,
+  type VisionFailure,
+  type VisionMode,
+  type VisionShotMeta
+} from './vision.ts';
 import type { AgentAuditRecord } from './audit.ts';
 import {
   describePlan,
@@ -122,6 +144,23 @@ export interface AgentSessionOptions {
   cacheTtlMs?: number;
   /** 可注入时钟，供缓存 TTL 测试。 */
   now?: () => number;
+  /**
+   * 视觉自检：`capture_view` 成功后把压缩截图以 OpenAI 兼容 `image_url` 回灌。
+   * 不传即 `auto`，但没有 `userDataDir` 时读不到图，会走「未看到图像」的文本降级。
+   */
+  vision?: AgentSessionVisionOptions;
+}
+
+export interface AgentSessionVisionOptions {
+  /** 来自 `agent-llm.json` 的 `vision`；默认 `auto`。 */
+  mode?: VisionMode;
+  /** userData 根目录：只允许读 `<userData>/agent-shots/**` 下的 png/jpg。 */
+  userDataDir?: string;
+  /** 压缩上限覆盖（测试用），默认长边 1024、400 KB。 */
+  maxEdge?: number;
+  maxBytes?: number;
+  /** 注入读图实现（测试/无 fs 环境）；默认走 vision.ts 的真实 PNG 压缩。 */
+  loadImage?: (shot: VisionShotMeta) => VisionAttachment | VisionFailure;
 }
 
 export type ConfirmWrite = AgentSessionOptions['confirmWrite'];
@@ -269,6 +308,12 @@ const SYSTEM_PROMPT = [
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
+
+/**
+ * 一张 1024 px 截图按 OpenAI 视觉计价约 700~1100 tokens；用固定估算值参与
+ * 上下文预算与成本展示（端点回传 usage 时以真实值为准）。
+ */
+const IMAGE_PART_TOKEN_ESTIMATE = 850;
 
 function parseArguments(raw: string): Record<string, unknown> {
   if (!raw.trim()) return {};
@@ -442,6 +487,15 @@ export class AgentSession {
   /** 最近一次写操作后的自动验证结论，用于截断时给「继续」提示。 */
   private lastWriteVerification: ToolVerification | null = null;
   private lastOutcome: AgentTurnOutcome;
+  /** 视觉自检：开关 + 读图通道（只读 agent-shots）。 */
+  private readonly vision: {
+    mode: VisionMode;
+    loadImage: (shot: VisionShotMeta) => VisionAttachment | VisionFailure;
+  };
+  /** 服务端拒收过图片：本会话永久降级，后续不再发图。 */
+  private visionDegraded = false;
+  /** 本轮降级时要在回复末尾补的说明；null 表示本轮没有降级。 */
+  private visionNotice: string | null = null;
 
   constructor(options: AgentSessionOptions) {
     this.llm = options.llm;
@@ -474,6 +528,16 @@ export class AgentSession {
     this.lastOutcome = {
       iterations: 0,
       budget: resolveIterationBudget({ base: this.baseIterations, planSteps: this.planSteps })
+    };
+    const visionOptions = options.vision ?? {};
+    const userDataDir = visionOptions.userDataDir;
+    this.vision = {
+      mode: visionOptions.mode ?? DEFAULT_VISION_MODE,
+      loadImage: visionOptions.loadImage
+        ?? ((shot) => loadShotImage(userDataDir, shot.path, {
+          ...(visionOptions.maxEdge !== undefined ? { maxEdge: visionOptions.maxEdge } : {}),
+          ...(visionOptions.maxBytes !== undefined ? { maxBytes: visionOptions.maxBytes } : {})
+        }))
     };
   }
 
@@ -596,9 +660,13 @@ export class AgentSession {
   }
 
   private estimatePromptTokens(messages: LlmMessage[]): number {
+    let images = 0;
     const history = messages.map((message) => {
+      if (isContentParts(message.content)) {
+        images += message.content.filter((part) => part.type === 'image_url').length;
+      }
       const calls = message.tool_calls ? JSON.stringify(message.tool_calls) : '';
-      return `${message.role}\n${message.content ?? ''}\n${calls}`;
+      return `${message.role}\n${messageText(message.content)}\n${calls}`;
     }).join('\n');
     let schemaText = '';
     if (this.toolSchemas) {
@@ -612,7 +680,7 @@ export class AgentSession {
         }
       }
     }
-    return estimateTokens(history) + estimateTokens(schemaText);
+    return estimateTokens(history) + estimateTokens(schemaText) + images * IMAGE_PART_TOKEN_ESTIMATE;
   }
 
   private recordLlmUsage(messages: LlmMessage[], response: LlmChatResponse): void {
@@ -639,9 +707,145 @@ export class AgentSession {
     return response;
   }
 
+  /** 请求里是否带了图（决定「服务端拒图」是否要降级重试）。 */
+  private messagesHaveImage(messages: readonly LlmMessage[]): boolean {
+    return messages.some((message) => hasImagePart(message.content));
+  }
+
+  /**
+   * 带图的请求：服务端拒收 image 时**本会话永久降级**，并立刻用同一条请求去掉图重发一次
+   * —— 用户这一轮对话不能因为端点不支持视觉而直接失败。
+   */
+  private async callLlmWithVision(messages: LlmMessage[], signal?: AbortSignal): Promise<LlmChatResponse> {
+    try {
+      return await this.callLlm(messages, signal);
+    } catch (error) {
+      if (!this.messagesHaveImage(messages) || !isVisionRejection(error)) throw error;
+      this.degradeVision(error);
+      const stripped = messages.map((message) => (hasImagePart(message.content)
+        ? { ...message, content: stripImageParts(message.content) }
+        : message));
+      return await this.callLlm(stripped, signal);
+    }
+  }
+
+  /** 降级：记审计 VISION_UNSUPPORTED、摘掉历史里的图、本轮回复末尾补说明。 */
+  private degradeVision(error: unknown): void {
+    if (!this.visionDegraded) {
+      this.visionDegraded = true;
+      this.recordAudit({
+        tool: 'capture_view',
+        ok: false,
+        code: 'VISION_UNSUPPORTED',
+        source: 'llm',
+        message: `模型服务拒收图片，本会话已降级为纯文本：${error instanceof Error ? error.message : String(error)}`
+      });
+    }
+    this.visionNotice = VISION_DEGRADED_REPLY_NOTICE;
+    this.dropImageHistory(`本会话不再发送截图：模型${VISION_NOT_SEEN_MARK}，只能按尺寸与哈希判断`);
+  }
+
+  /** 把历史里的 image_url 段换成文字说明（不原地改数组，已发出的请求体不受影响）。 */
+  private dropImageHistory(note: string): void {
+    if (!this.messages.some((message) => hasImagePart(message.content))) return;
+    this.messages = this.messages.map((message) => {
+      if (!hasImagePart(message.content)) return message;
+      const text = stripImageParts(message.content);
+      const body = typeof text === 'string' ? text : '';
+      return {
+        ...message,
+        content: `${body}\n（${note}）`.trim()
+      };
+    });
+  }
+
+  /** 回复末尾补降级说明；模型自己已经点明「不支持图片」就不重复。 */
+  private withVisionNotice(reply: string): string {
+    if (!this.visionNotice || /不支持图片/.test(reply)) return reply;
+    const trimmed = reply.trim();
+    return trimmed ? `${trimmed}\n\n（${this.visionNotice}）` : this.visionNotice;
+  }
+
+  /**
+   * `capture_view` 成功后追加一条 user 消息：
+   * - 能读到图 → `[{type:'text'},{type:'image_url'}]`（只有这一种形态能让模型真正看到）；
+   * - 关图/降级/读图失败 → 纯文本，明确写「未看到图像」，不允许编视觉结论。
+   */
+  private appendCaptureViewFeedback(calls: readonly LlmToolCall[], results: readonly unknown[]): void {
+    const shots: VisionShotMeta[] = [];
+    for (const [index, call] of calls.entries()) {
+      if (call.function.name !== 'capture_view') continue;
+      const result = results[index];
+      if (!isRecord(result) || result.ok === false) continue;
+      const data = isRecord(result.data) ? result.data : result;
+      const path = typeof data.path === 'string' ? data.path : '';
+      if (!path) continue;
+      shots.push({
+        path,
+        view: typeof data.view === 'string' ? data.view : '3d',
+        width: Number(data.width) || 0,
+        height: Number(data.height) || 0,
+        ...(typeof data.sha256 === 'string' ? { sha256: data.sha256 } : {})
+      });
+    }
+    const first = shots[0];
+    if (!first) return;
+    const rest = shots.slice(1);
+
+    if (this.vision.mode === 'off') {
+      this.recordVisionSkip(first, 'VISION_DISABLED', 'vision=off（配置为不发图）', true);
+      this.push({ role: 'user', content: this.captureText(first, rest, 'agent-llm.json 的 vision 配置为 off，按配置不发图') });
+      return;
+    }
+    if (this.visionDegraded) {
+      this.recordVisionSkip(first, 'VISION_UNSUPPORTED', '本会话已降级为纯文本', true);
+      this.push({ role: 'user', content: this.captureText(first, rest, 'VISION_UNSUPPORTED：当前模型不支持图片，本会话已降级为纯文本') });
+      return;
+    }
+    const loaded = this.vision.loadImage(first);
+    if (!loaded.ok) {
+      this.recordVisionSkip(first, loaded.code, loaded.message, false);
+      this.push({ role: 'user', content: this.captureText(first, rest, `${loaded.code}：${loaded.message}`) });
+      return;
+    }
+    this.recordAudit({
+      tool: 'capture_view',
+      ok: true,
+      code: 'VISION_ATTACHED',
+      source: 'llm',
+      message: `已回灌视图截图（${first.view}，${loaded.width}x${loaded.height}，${Math.round(loaded.bytes / 1024)} KB）`
+    });
+    const parts = buildVisionParts(first, loaded);
+    if (rest.length > 0) parts.push({ type: 'text', text: this.restShotsNote(rest) });
+    this.push({ role: 'user', content: parts });
+  }
+
+  private restShotsNote(rest: readonly VisionShotMeta[]): string {
+    return `本轮另有 ${rest.length} 张截图（${rest.map((shot) => shot.view).join('、')}）没有回灌，避免单请求体积过大；这些图同样${VISION_NOT_SEEN_MARK}，不要描述其画面。`;
+  }
+
+  /** 没发图时的文本回执：纯字符串（不装成带图的分段数组，读起来就是一句人话）。 */
+  private captureText(shot: VisionShotMeta, rest: readonly VisionShotMeta[], reason: string): string {
+    const text = visionSkippedText(shot, reason);
+    return rest.length > 0 ? `${text}\n${this.restShotsNote(rest)}` : text;
+  }
+
+  /** 记「这次没回灌」：配置关闭/已降级算正常路径（ok:true），读图失败才算失败。 */
+  private recordVisionSkip(shot: VisionShotMeta, code: string, message: string, ok: boolean): void {
+    this.recordAudit({
+      tool: 'capture_view',
+      ok,
+      code,
+      source: 'llm',
+      message: `未回灌截图（${shot.view}）：${message}`
+    });
+  }
+
   history(): LlmMessage[] {
     return this.messages.map((message) => ({
       ...message,
+      // 图片段不往渲染层搬（base64 太大）：历史只回文字，图仅在内存里拼请求。
+      ...(hasImagePart(message.content) ? { content: messageText(message.content) } : {}),
       ...(message.tool_calls ? { tool_calls: message.tool_calls.map((call) => ({ ...call, function: { ...call.function } })) } : {})
     }));
   }
@@ -669,6 +873,9 @@ export class AgentSession {
     this.sessionUsage = emptyTokenUsage();
     this.lastRequestUsage = null;
     this.lastBudget = null;
+    // 降级是「本会话」级别：新会话重新尝试发图。
+    this.visionDegraded = false;
+    this.visionNotice = null;
   }
 
   /** 供 UI / IPC / 测试读取的上一轮状态快照；只读拷贝。 */
@@ -703,7 +910,7 @@ export class AgentSession {
 
   private messageTokenText(message: LlmMessage): string {
     const calls = message.tool_calls ? JSON.stringify(message.tool_calls) : '';
-    return `${message.role}\n${message.content ?? ''}\n${calls}`;
+    return `${message.role}\n${messageText(message.content)}\n${calls}`;
   }
 
   /** 历史按「用户轮次」成组丢弃，避免拆散 assistant/tool 协议对。 */
@@ -1597,16 +1804,20 @@ export class AgentSession {
     }
     this.turnContext = augmentContextWithThreadReference(text, this.turnContext, this.threadPrevious);
     this.turnContextReady = true;
+    this.visionNotice = null;
     this.push({ role: 'user', content: text });
 
     try {
-      const reply = await this.runLoop(text, options, completed, runId);
+      const reply = this.withVisionNotice(await this.runLoop(text, options, completed, runId));
       this.commitThreadTurn(text, completed, reply);
       return reply;
     } catch (error) {
       const steps = error instanceof AgentCancelledError ? error.completedSteps : completed;
       this.commitThreadTurn(text, steps, error instanceof Error ? error.message : String(error));
       throw error;
+    } finally {
+      // 图只在本轮有效：回合结束就摘掉，避免每轮把同一张 base64 重复上传（也不让它留在历史里冒充现状）。
+      this.dropImageHistory('视图截图只在本轮有效，已从上下文移除；要重新核对请再调用 capture_view');
     }
   }
 
@@ -1679,7 +1890,7 @@ export class AgentSession {
       if (options.signal?.aborted) throw new AgentCancelledError(completed);
       let response;
       try {
-        response = await this.callLlm(this.context(), options.signal);
+        response = await this.callLlmWithVision(this.context(), options.signal);
       } catch (error) {
         if (error instanceof AgentAborted || options.signal?.aborted) throw new AgentCancelledError(completed);
         const offline = await this.runOffline(text, { ...options, runId }, completed);
@@ -1728,7 +1939,7 @@ export class AgentSession {
         retryUsed = true;
         let retryResponse;
         try {
-          retryResponse = await this.callLlm(this.retryContext(reason, originalCalls), options.signal);
+          retryResponse = await this.callLlmWithVision(this.retryContext(reason, originalCalls), options.signal);
         } catch (error) {
           if (error instanceof AgentAborted || options.signal?.aborted) throw new AgentCancelledError(completed);
           const offline = await this.runOffline(text, { ...options, runId }, completed);
@@ -1834,6 +2045,8 @@ export class AgentSession {
           ).text
         });
       }
+      // tool 角色只能放字符串，图必须另起一条 user 消息；只在 capture_view 成功时触发。
+      this.appendCaptureViewFeedback(calls, results);
       if (options.signal?.aborted) throw new AgentCancelledError(completed);
       iteration += 1;
       if (!this.turnHasWrite && calls.some((call) => !READ_ONLY_TOOLS.has(call.function.name))) {

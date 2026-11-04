@@ -12,6 +12,31 @@ export interface AgentLlmConfig {
    * 原来硬编码 12 会在关键步骤前把额度用光，模型只能交半成品。
    */
   maxToolCalls: number;
+  /**
+   * 截图回灌策略（`capture_view` 之后是否把压缩图发给模型）：
+   * - `off`：永不发图，截图只回文本；
+   * - `auto`：首次尝试带图，服务端拒收图片后本会话永久降级；
+   * - `on`：强制带图，但被拒仍走降级重试，不把请求弄挂。
+   */
+  vision: VisionMode;
+}
+
+/** 视觉自检开关；字段落在 `agent-llm.json`，默认 `auto`。 */
+export type VisionMode = 'auto' | 'on' | 'off';
+
+export const VISION_MODES: readonly VisionMode[] = ['auto', 'on', 'off'];
+export const DEFAULT_VISION_MODE: VisionMode = 'auto';
+
+export function isVisionMode(value: unknown): value is VisionMode {
+  return typeof value === 'string' && (VISION_MODES as readonly string[]).includes(value);
+}
+
+export function parseVisionMode(value: unknown): VisionMode {
+  if (value === undefined) return DEFAULT_VISION_MODE;
+  if (!isVisionMode(value)) {
+    throw new Error(`vision 必须是 ${VISION_MODES.join(' / ')} 之一`);
+  }
+  return value;
 }
 
 export interface AgentLlmPublicConfig {
@@ -20,6 +45,7 @@ export interface AgentLlmPublicConfig {
   model: string;
   maxIterations: number;
   maxToolCalls: number;
+  vision: VisionMode;
   hasApiKey: boolean;
 }
 
@@ -34,7 +60,8 @@ export const DEFAULT_LLM_CONFIG: AgentLlmConfig = {
    * （光伏缓存堆叠机：30+ 次工具调用、2 次建模写操作）；默认给到上限。
    */
   maxIterations: 50,
-  maxToolCalls: 200
+  maxToolCalls: 200,
+  vision: DEFAULT_VISION_MODE
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -103,7 +130,8 @@ export function normalizeLlmConfig(value: unknown): AgentLlmConfig {
     apiKey,
     model,
     maxIterations: parseMaxIterations(source.maxIterations, DEFAULT_LLM_CONFIG.maxIterations),
-    maxToolCalls: parseMaxToolCalls(source.maxToolCalls, DEFAULT_LLM_CONFIG.maxToolCalls)
+    maxToolCalls: parseMaxToolCalls(source.maxToolCalls, DEFAULT_LLM_CONFIG.maxToolCalls),
+    vision: parseVisionMode(source.vision)
   };
 }
 
@@ -114,6 +142,7 @@ export function publicLlmConfig(config: AgentLlmConfig): AgentLlmPublicConfig {
     model: config.model,
     maxIterations: config.maxIterations,
     maxToolCalls: config.maxToolCalls,
+    vision: config.vision,
     hasApiKey: Boolean(config.apiKey)
   };
 }
@@ -127,7 +156,9 @@ export function mergeLlmConfig(existing: AgentLlmConfig, patch: unknown): AgentL
     baseUrl: typeof source.baseUrl === 'string' ? source.baseUrl : existing.baseUrl,
     apiKey: keepKey ? existing.apiKey : incomingKey,
     model: typeof source.model === 'string' ? source.model : existing.model,
-    maxIterations: source.maxIterations === undefined ? existing.maxIterations : source.maxIterations
+    maxIterations: source.maxIterations === undefined ? existing.maxIterations : source.maxIterations,
+    // 没传 vision 就沿用已保存的值：设置面板不会因为少一个字段把用户的开关重置回 auto。
+    vision: source.vision === undefined ? existing.vision : source.vision
   });
 }
 

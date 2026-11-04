@@ -18,6 +18,8 @@ import { join } from 'node:path';
 import type { BrowserWindow } from 'electron';
 import { captureAgentView } from '../src/agent/self-evidence.ts';
 import { createAgentViewCapture } from './agent-capture.ts';
+import { decodePng, VISION_MAX_BYTES, VISION_MAX_EDGE } from '../src/agent/vision-image.ts';
+import { loadShotImage } from '../src/agent/vision.ts';
 
 export interface SelfEvidenceCheckResult {
   ok: boolean;
@@ -113,6 +115,27 @@ export async function checkAgentViewCapture(window: BrowserWindow, userDataRoot:
       height: Number(result.height)
     });
     console.log(`AGENT_CAPTURE_OK view=${view} bytes=${disk.length} sha256=${sha256} size=${result.width}x${result.height} path=${path}`);
+
+    // 视觉自检（P2）：真截图必须能被压到「长边 ≤1024、≤400 KB」并解回同一尺寸，
+    // 否则模型这一侧拿到的是坏图或超限图，宁可在这里失败。
+    const attached = loadShotImage(userDataRoot, path);
+    if (!attached.ok) throw new Error(`${view} 截图无法回灌：${attached.code} ${attached.message}`);
+    if (attached.bytes > VISION_MAX_BYTES) {
+      throw new Error(`${view} 压缩后仍 ${attached.bytes} 字节，超过 ${VISION_MAX_BYTES}`);
+    }
+    if (Math.max(attached.width, attached.height) > VISION_MAX_EDGE) {
+      throw new Error(`${view} 压缩后长边 ${Math.max(attached.width, attached.height)} px，超过 ${VISION_MAX_EDGE}`);
+    }
+    if (!attached.dataUrl.startsWith('data:image/png;base64,')) {
+      throw new Error(`${view} 的 data URL 前缀不对：${attached.dataUrl.slice(0, 24)}`);
+    }
+    const reread = decodePng(new Uint8Array(Buffer.from(attached.dataUrl.split(',')[1] ?? '', 'base64')));
+    if (reread.width !== attached.width || reread.height !== attached.height) {
+      throw new Error(`${view} 压缩图解码尺寸对不上：${reread.width}x${reread.height} vs ${attached.width}x${attached.height}`);
+    }
+    console.log(
+      `AGENT_CAPTURE_VISION_OK view=${view} src=${disk.length} out=${attached.bytes} size=${attached.width}x${attached.height} base64=${attached.dataUrl.length}`
+    );
   }
 
   if (shots.length === 2 && shots[0]?.sha256 === shots[1]?.sha256) {

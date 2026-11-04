@@ -5,6 +5,18 @@ import { assertSafeApiKeyUrl } from '../shared/api-key-transport.ts';
 
 export type LlmRole = 'system' | 'user' | 'assistant' | 'tool';
 
+/**
+ * OpenAI 兼容的多模态 content 分段。
+ *
+ * 为什么需要它：`capture_view` 的截图只有让模型真正看到才算「自检」，
+ * 而 tool 角色的 content 只能是字符串 —— 图必须走一条独立的 user 消息。
+ */
+export type LlmContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string; detail?: 'auto' | 'low' | 'high' } };
+
+export type LlmContent = string | LlmContentPart[] | null;
+
 export interface LlmToolCall {
   id: string;
   type: 'function';
@@ -16,10 +28,38 @@ export interface LlmToolCall {
 
 export interface LlmMessage {
   role: LlmRole;
-  content: string | null;
+  content: LlmContent;
   tool_calls?: LlmToolCall[];
   tool_call_id?: string;
   name?: string;
+}
+
+/** 图片段在文本化时的占位符：进 token 估算与裁剪，但不带 base64。 */
+export const LLM_IMAGE_PLACEHOLDER = '［截图］';
+
+export function isContentParts(content: LlmContent): content is LlmContentPart[] {
+  return Array.isArray(content);
+}
+
+/** 把 content（字符串或分段数组）摊平成纯文本；图片段只留占位符。 */
+export function messageText(content: LlmContent): string {
+  if (typeof content === 'string') return content;
+  if (!content) return '';
+  return content
+    .map((part) => (part.type === 'text' ? part.text : LLM_IMAGE_PLACEHOLDER))
+    .join('\n');
+}
+
+export function hasImagePart(content: LlmContent): boolean {
+  return isContentParts(content) && content.some((part) => part.type === 'image_url');
+}
+
+/** 去掉所有图片段，保留文字（服务端拒图后重试同一个请求时用）。 */
+export function stripImageParts(content: LlmContent): LlmContent {
+  if (!isContentParts(content)) return content;
+  const kept = content.filter((part) => part.type !== 'image_url');
+  const text = kept.map((part) => (part.type === 'text' ? part.text : '')).join('\n');
+  return text || null;
 }
 
 export interface LlmUsage {

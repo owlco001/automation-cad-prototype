@@ -30,7 +30,8 @@ test('模型配置缺失时返回约定的默认值', () => {
     apiKey: '',
     model: 'gpt-4o-mini',
     maxIterations: 50,
-    maxToolCalls: 200
+    maxToolCalls: 200,
+    vision: 'auto'
   });
   assert.deepEqual(readLlmConfig(sandbox), DEFAULT_LLM_CONFIG);
 });
@@ -61,12 +62,13 @@ test('agent-llm.json 写入权限为 600 且只保存四个配置字段', { skip
   assert.deepEqual(readLlmConfig(sandbox), {
     ...config,
     baseUrl: 'http://127.0.0.1:9999/v1',
-    maxToolCalls: 200
+    maxToolCalls: 200,
+    vision: 'auto'
   });
   const file = join(sandbox, 'agent-llm.json');
   assert.equal(statSync(file).mode & 0o777, 0o600);
   const raw = JSON.parse(readFileSync(file, 'utf8'));
-  assert.deepEqual(Object.keys(raw).sort(), ['apiKey', 'baseUrl', 'maxIterations', 'maxToolCalls', 'model']);
+  assert.deepEqual(Object.keys(raw).sort(), ['apiKey', 'baseUrl', 'maxIterations', 'maxToolCalls', 'model', 'vision']);
 });
 
 test('旧的远程 HTTP 模型配置仍可读取以便修正，但新写入会被拒绝', () => {
@@ -78,7 +80,8 @@ test('旧的远程 HTTP 模型配置仍可读取以便修正，但新写入会�
     maxToolCalls: 24
   };
   writeFileSync(join(sandbox, 'agent-llm.json'), JSON.stringify(legacy));
-  assert.deepEqual(readLlmConfig(sandbox), legacy);
+  // 老配置没有 vision 字段：读出来补默认 auto（不发图能力仍然可以后续被服务端拒掉）。
+  assert.deepEqual(readLlmConfig(sandbox), { ...legacy, vision: 'auto' });
   assert.throws(() => writeLlmConfig(sandbox, legacy), /明文传输 API Key/);
   assert.doesNotThrow(() => writeLlmConfig(sandbox, { ...legacy, baseUrl: 'http://127.0.0.1:8000/v1' }));
 });

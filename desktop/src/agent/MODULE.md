@@ -17,8 +17,10 @@ tools.ts（AgentTools + 32 个 AgentTool；只读 15 / 写 17；含只读 `sugge
 
 应用内对话
  ├─ llm-config.ts  → userData/agent-llm.json（600，UI 只读掩码）
- ├─ llm.ts         → OpenAI 兼容 /chat/completions + tools
+ ├─ llm.ts         → OpenAI 兼容 /chat/completions + tools（content 支持 text/image_url 分段）
  ├─ session.ts     → 工具调用循环（自适应预算：只读 6 / 含写工具或计划≥4 步 12；历史 20 条）+ 写后自动验证 + 多轮状态注入
+ ├─ vision.ts      → 视觉自检策略：agent-shots 白名单读图、降级判定、image_url 提示词（P2）
+ ├─ vision-image.ts → 纯 node:zlib 的 PNG 解码/面积缩放/重编码（长边 ≤1024、单图 ≤400 KB）
  ├─ dedupe.ts      → 同轮 (tool, canonicalArgs) 去重 / 写不合并 / 单轮 12 次上限
  ├─ parallel.ts    → 只读批并发（默认 3）/ 依赖降级串行 / 写屏障 / 保序结果
  ├─ cache.ts       → 会话内 30 s 结果缓存（BOM / 上下文 / 元件列表）
@@ -109,6 +111,38 @@ xvfb-run -a -s "-screen 0 1920x1200x24" node_modules/.bin/electron . --no-sandbo
 ```
 
 单测：`test/agent/self-evidence-tools.test.mjs` 7 条（首页拒绝、落盘 bytes/sha256 复算、>5 MiB 缩尺寸重拍、旧形状兼容、lift≠rest、STATE_UNAVAILABLE、sweep 步数）。
+
+## 视觉自检：截图回灌（P2）
+
+`capture_view` 只回 `{path,bytes,sha256,width,height}` 时，模型只能证明「有产物」，不能证明「产物对」。
+所以工具成功后由 `session.appendCaptureViewFeedback` 追加一条 **user** 消息（tool 角色只能放字符串，图必须单独走 user）：
+
+```json
+{"role":"user","content":[
+  {"type":"text","text":"这是刚才请求的视图截图（3d，1024x640）。请描述你看到的内容并判断是否与目标一致；看不到就说看不到。…"},
+  {"type":"image_url","image_url":{"url":"data:image/png;base64,…"}}
+]}
+```
+
+配置（`userData/agent-llm.json`，默认 `auto`，600 权限）：
+
+| 值 | 行为 |
+|---|---|
+| `off` | 永不发图；截图只回文本，文本明确要求模型声明「未看到图像」 |
+| `auto` | 首次尝试发图；服务端拒收图片后**本会话永久降级**（`clear()` 才恢复） |
+| `on` | 强制发图；被拒仍走同一条降级重试，不把请求弄挂 |
+
+体积与安全（`vision.ts` + `vision-image.ts`）：
+- 图在内存里压到**长边 ≤1024 px、单图 ≤400 KB**后转 base64；只支持 8 位非隔行 PNG，解码/面积平均缩放/重编码全用 `node:zlib`（不引新依赖，`node --test` 里也能真跑）。体积与长边冲突时优先 400 KB，继续往下缩；缩到 256 px 仍超限返回 `VISION_TOO_LARGE`。
+- 只读 `<userData>/agent-shots/**` 下的 png/jpg：先 `realpath` 再比前缀，`../` 与指向外部的符号链接都返回 `VISION_PATH_DENIED`。
+- 图**不进审计、不进工具结果文本**，只在内存里拼请求；审计只留 `VISION_ATTACHED`（view/尺寸/KB）或 `VISION_SKIPPED` 的原因码。回合结束（`run()` 的 finally）把历史里的 `image_url` 段摘成文字说明，避免每轮重复上传同一张 base64。
+
+降级（硬要求，宁可没有结论也不给假结论）：
+- 服务端 400/404/413/415/422 且报文提到 image/vision/多模态（或 content 类型错误）→ 判为拒图：记审计 `VISION_UNSUPPORTED`、摘掉历史里的图、**同一条请求去图重发一次**，并在回复末尾补「当前模型不支持图片，本次只能根据尺寸/哈希判断。」
+- 读图失败/超限 → 不发图，文本里带原因码（`VISION_PATH_DENIED` / `VISION_UNREADABLE` / `VISION_UNSUPPORTED_FORMAT` / `VISION_TOO_LARGE`）。
+- 没发图时的提示词固定包含「你未看到图像：不要猜测画面内容，不要给「看起来没问题」这类结论」；带图的提示词也留了「如果你实际没有收到图像，必须直接写「未看到图像」」的兜底。
+
+单测：`test/agent/vision.test.mjs` 13 条（off 不发图、auto 首发 data URL 前缀与尺寸、400 拒图自动去图重试+审计、降级后第二轮不再发图、>400 KB 真压缩到 ≤400 KB 且像素均值对得上、越界与符号链接拒读、未见图提示词快照、带图兜底、on 模式被拒仍降级、PNG 编解码逐像素无损、普通 400 不误降级、vision 配置字段默认/校验/merge）。
 
 机型落盘的校验、文件读写与 BOM 行转换在 `src/machine/store.ts`；机型库（`.machine.zip` 打包/校验/索引/导入导出）在 `src/machine/library.ts`，工具层四个命令统一用 `serializeMachineLibraryError` 折成 `{code,message,hint}`（`LIBRARY_EXISTS` 的 hint 固定为「同名机型已存在，确认覆盖请显式传 overwrite: true」）；`loadFromLibrary` 会把包内 `bom.csv` 解析回 `bomDraft.items`（CSV 没有物料号列，`partId` 无法复原，成本按缺物料号如实统计）。PLC 点位映射在 `src/machine/io-map.ts`，复用 `plcgen/io.ts` 与 `plcgen/tags.ts`，只输出 CSV、不复制完整 ST 生成逻辑。`apply_machine_design` 校验失败返回 `INVALID_ARGUMENT`，同名文件默认 `FILE_EXISTS`，写入失败返回 `WRITE_FAILED`；确认拒绝时不调用命令总线、不创建目录。
 
