@@ -749,7 +749,23 @@ export class AgentSession {
         view: typeof data.view === 'string' ? data.view : '3d',
         width: Number(data.width) || 0,
         height: Number(data.height) || 0,
-        ...(typeof data.sha256 === 'string' ? { sha256: data.sha256 } : {})
+        ...(typeof data.sha256 === 'string' ? { sha256: data.sha256 } : {}),
+        // 区域截图：把取景框一起带上，提示词里要写清「这是局部，不是全景」。
+        ...(isRecord(data.region) && Number.isFinite(Number(data.region.w)) && Number.isFinite(Number(data.region.h))
+          ? {
+              region: {
+                x: Number(data.region.x) || 0,
+                y: Number(data.region.y) || 0,
+                w: Number(data.region.w) || 0,
+                h: Number(data.region.h) || 0
+              },
+              ...(typeof data.clamped === 'boolean' ? { clamped: data.clamped } : {}),
+              ...(Number.isFinite(Number(data.scale)) ? { scale: Number(data.scale) } : {}),
+              ...(isRecord(data.sourceSize)
+                ? { sourceSize: { w: Number(data.sourceSize.w) || 0, h: Number(data.sourceSize.h) || 0 } }
+                : {})
+            }
+          : {})
       });
     }
     const first = shots[0];

@@ -15,6 +15,8 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { applyRegion, parseRegionArgs, type CaptureRegion } from './capture-region.ts';
+import { fitPng, VisionImageError } from './vision-image.ts';
 
 export const AGENT_CAPTURE_VIEWS = ['3d', 'linkage', 'library', 'exports'] as const;
 export type AgentCaptureView = (typeof AGENT_CAPTURE_VIEWS)[number];
@@ -104,6 +106,12 @@ export async function captureAgentView(
   const height = dimension(args.height, DEFAULT_SHOT_HEIGHT, MIN_SHOT_HEIGHT, MAX_SHOT_HEIGHT, 'height');
   if (typeof height === 'string') return invalid(height);
 
+  // 区域截图：参数校验放在开窗之前 —— w/h 太小这类错误不该先截一张整窗再报错。
+  const parsed = parseRegionArgs(args);
+  if (!parsed.ok) return invalid(parsed.message);
+  const plan = parsed.plan;
+  const wantsRegion = plan.requested || plan.scale !== 1;
+
   if (!deps.capture) {
     return notReady('当前进程没有接入截图通道；请在 AutomationCAD 桌面应用内调用，MCP 需经桌面 RPC 转发');
   }
@@ -165,9 +173,46 @@ export async function captureAgentView(
     return notReady('截图通道返回了空图（窗口可能被最小化或合成器未出帧）');
   }
 
+  // 区域截图：**先裁后缩** —— 从原像素里裁出取景框，再按 scale 放大。
+  // 不传 region 且 scale=1 时整段跳过，落盘字节与旧行为完全一致。
+  let shotRegion: { region: CaptureRegion; clamped: boolean; scale: number; sourceSize: { w: number; h: number } } | null = null;
+  if (wantsRegion) {
+    try {
+      let applied = applyRegion(png, plan.region, plan.scale, plan.clamped);
+      // 放大后可能撑破单张 5 MiB：仍按字节上限兜底压一档，不写一张超大图到磁盘。
+      if (applied.png.byteLength > MAX_SHOT_BYTES) {
+        const capped = fitPng(applied.png, {
+          maxEdge: Math.max(applied.width, applied.height),
+          maxBytes: MAX_SHOT_BYTES
+        });
+        applied = { ...applied, png: capped.data, width: capped.width, height: capped.height };
+      }
+      png = applied.png;
+      shotWidth = applied.width;
+      shotHeight = applied.height;
+      shotRegion = {
+        region: applied.region,
+        clamped: applied.clamped,
+        // 实际生效倍数（大区域封顶 / 5 MiB 兜底后可能小于请求值），与落盘 width 对得上
+        scale: Number((applied.width / Math.max(1, applied.region.w)).toFixed(3)),
+        sourceSize: applied.sourceSize
+      };
+    } catch (error) {
+      const code = error instanceof VisionImageError ? error.code : 'SHOT_CROP_FAILED';
+      return {
+        ok: false,
+        code,
+        message: `区域截图失败：${error instanceof Error ? error.message : String(error)}`,
+        hint: '截图通道返回的可能不是 8 位非隔行 PNG；去掉 region 参数按整窗重试'
+      };
+    }
+  }
+
   const dir = join(deps.userDataRoot, 'agent-shots');
   mkdirSync(dir, { recursive: true });
-  const path = uniquePath(dir, fileStamp((deps.now ?? (() => new Date()))()), view);
+  // 区域截图单独加 `-region` 后缀：agent-shots 里整窗图和局部图混在一起时能一眼分开。
+  const label = shotRegion ? `${view}-region` : view;
+  const path = uniquePath(dir, fileStamp((deps.now ?? (() => new Date()))()), label);
   writeFileSync(path, png);
 
   // 字节数取落盘后的真实大小：写入失败或截断时这里会立刻对不上。
@@ -190,7 +235,18 @@ export async function captureAgentView(
     sha256,
     width: shotWidth,
     height: shotHeight,
+    // 区域截图的取证信息：模型必须知道「这是局部」，否则会把局部当全景下结论。
+    ...(shotRegion
+      ? {
+          region: shotRegion.region,
+          clamped: shotRegion.clamped,
+          scale: shotRegion.scale,
+          sourceSize: shotRegion.sourceSize
+        }
+      : {}),
     // 给模型一句能直接复述的话，避免它把「我截了图」说成「我看过模型了」
-    note: '这张图是主进程真实截取的当前界面；sha256 可用 sha256sum 在磁盘上复核。'
+    note: shotRegion
+      ? `这张图是 ${view} 视图的局部（原图像素 x=${shotRegion.region.x}, y=${shotRegion.region.y}, ${shotRegion.region.w}×${shotRegion.region.h}${shotRegion.clamped ? '，请求越界已夹紧到此区域' : ''}），不是整屏；sha256 可用 sha256sum 在磁盘上复核。`
+      : '这张图是主进程真实截取的当前界面；sha256 可用 sha256sum 在磁盘上复核。'
   };
 }

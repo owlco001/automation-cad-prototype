@@ -2,6 +2,29 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织，版本号遵循语义化版本。
 
+## [未发布]
+
+### Added · 智能体能力（v0.6.4 之后）
+
+- **自适应迭代预算**：只读 6 轮；出现写工具或计划 ≥4 步 / 联调意图 → 12 轮；到顶返回 `iteration_limit` + `pendingHint` + `nextStepIndex`，可断点续跑（`runPlan` / `runRecipe` 同一实现）
+- **写后自动验证**：`apply_machine_design` / `repair_plc_config` / `run_plc_generate` 成功后自动校验，回执附 `verification{ok,issues,nextAction}`；验证失败不误判主操作
+- **视觉自检**：`capture_view` 结果以 OpenAI 兼容 `image_url` 回灌；模型不支持时自动去图重试并**明说未看到图像**；区域截图 `region + scale`（先裁后缩，越界夹紧）
+- **跨会话项目记忆**：`agent-memory.json` 按工程指纹存事实（≤20 条/≤64KB），首轮注入 3 条；`get_agent_memory` / `clear_agent_memory`
+- **大结果外置**：超 10 KB 落 `agent-results/<sha16>.json`，回执给 `resultId` + 提示；`get_tool_result` 按字符边界分批回取
+- **失败自查**：`get_recent_audit` 读最近审计（按工具/失败/时间过滤，args 仅白名单字段并脱敏）
+- **收尾可继续**：`turnOutcome` 接到 IPC/UI，两种停止原因分开表述并可一键【继续】
+
+### Fixed · 本轮修掉的真实缺陷
+
+- 方案卡从裁剪后的列表里读 warnings/statistics（CI 机型截图红过两次）
+- `exports` 视图截图长期是 `3d` 那一帧（sha256 完全相同）；视图切换不清理浮层；入口对隐藏节点直接 `click()` 绕过真实路径
+- `runPlan` / `runRecipe` 不经过 `AgentSession`，预算与自动验证在那两条路径上未生效
+
+### Changed · 质量口径
+
+- 测试 2935 → 3041；工具 25 → 36（只读 18 / 写 18）
+- `eval:tasks` 6 → 10 条末态断言（含结果外置、记忆、计划续跑、写后验证），已进 CI 门禁
+
 ## [0.6.4] - 2026-11-04
 
 ### Added · 转向工位改为顶升旋转单元（真机做法）
@@ -28,8 +51,9 @@
 - 机型库四工具：`list_machine_library` / `save_machine_to_library` / `load_machine_from_library` / `export_machine_package`
 - `validate_machine_design`（只读自查，返回 code/path/hint）、`repair_plc_config`（默认 dryRun）
 - `capture_view`：真截图落盘并返回 sha256；停在首页时返回 `VIEW_NOT_READY`，不拿首页冒充
+- `capture_view` 区域截图：`region:{x,y,w,h}`（原图像素，`w,h>=32`）+ `scale`（0.5–3）。**先裁后缩**（裁在原像素上做，再放大），越界只夹紧并在返回里给 `{region,clamped:true,scale,sourceSize}`，`w/h<32` 返回 `INVALID_ARGUMENT`；回灌仍压到长边 ≤1024 / ≤400 KB，提示词写明「这是 <view> 的局部（x,y,w×h）」。不传 region 且 scale=1 时落盘字节与旧版逐字节相同
 - `run_interference_check` 支持 `rest / lift / sweep` 多态，行程从机型 config 读
-- `npm run eval:tasks`：6 个任务级末态断言（轴/零件数/PLC 预检/库往返/三态/截图真伪），变异自检会红；已接进 CI 门禁
+- `npm run eval:tasks`：10 个任务级末态断言（轴/零件数/PLC 预检/库往返/三态/截图真伪），变异自检会红；已接进 CI 门禁
 
 ### Fixed · 三处校验器收敛为单一源
 

@@ -52,6 +52,14 @@ export interface VisionShotMeta {
   width: number;
   height: number;
   sha256?: string;
+  /** 区域截图：取景框（原图像素），缺省表示整窗 */
+  region?: { x: number; y: number; w: number; h: number };
+  /** 请求的取景框是否被夹紧过 */
+  clamped?: boolean;
+  /** 裁剪后应用的放大倍数 */
+  scale?: number;
+  /** 裁剪前的原图尺寸 */
+  sourceSize?: { w: number; h: number };
 }
 
 export interface VisionAttachment {
@@ -155,6 +163,19 @@ function kb(bytes: number): string {
   return `${Math.round(bytes / 1024)} KB`;
 }
 
+/**
+ * 区域截图的定位说明：模型很容易把局部当全景，把「这块里没有」说成「整个界面没有」。
+ * 所以取景框坐标、原图尺寸、是否夹紧、放大倍数都写进提示词，让它按局部作答。
+ */
+function regionNote(shot: VisionShotMeta): string {
+  if (!shot.region) return '';
+  const { x, y, w, h } = shot.region;
+  const source = shot.sourceSize ? `${shot.sourceSize.w}x${shot.sourceSize.h}` : `${shot.width}x${shot.height}`;
+  const scale = typeof shot.scale === 'number' && shot.scale !== 1 ? `，放大 ${shot.scale}x` : '';
+  const clamp = shot.clamped ? '；请求的取景框越界，已夹紧到这块区域' : '';
+  return `这是 ${shot.view} 视图的**局部**（原图 ${source} 像素坐标 x=${x}, y=${y}, ${w}x${h}${scale}${clamp}），不是整屏：只就这块区域内可见的内容作答，不要把它当成全景，也不要由局部推断区域外的情况。`;
+}
+
 /** 带图时给模型的第一段文字（OpenAI 兼容：与 image_url 同处一个 user content 数组）。 */
 export function visionPromptText(shot: VisionShotMeta, image: VisionAttachment): string {
   const head = `这是刚才请求的视图截图（${shot.view}，${image.width}x${image.height}）。请描述你看到的内容并判断是否与目标一致；看不到就说看不到。`;
@@ -162,16 +183,17 @@ export function visionPromptText(shot: VisionShotMeta, image: VisionAttachment):
     ? `（截图已压缩：原图 ${shot.width}x${shot.height} / ${kb(image.sourceBytes)} → ${image.width}x${image.height} / ${kb(image.bytes)}）`
     : '';
   const guard = `如果你实际没有收到图像（工具报错、模型不支持图片等），必须直接写「${VISION_NOT_SEEN_MARK}」，只根据尺寸与哈希说明，不要描述画面、不要下「看起来没问题」的结论。`;
-  return [head, compact, guard].filter(Boolean).join('\n');
+  return [head, regionNote(shot), compact, guard].filter(Boolean).join('\n');
 }
 
 /** 没发图（配置关闭/降级/读图失败）时的文字：必须包含「未看到图像」。 */
 export function visionSkippedText(shot: VisionShotMeta, reason: string): string {
   return [
     `这是刚才请求的视图截图（${shot.view}，${shot.width}x${shot.height}），但本次没有把图像发给你：${reason}。`,
+    regionNote(shot),
     `你${VISION_NOT_SEEN_MARK}：不要猜测画面内容，不要给「看起来没问题」这类结论。`,
     `只能根据 path/bytes/sha256 与尺寸说明这张图存在且未被校验过画面，并在回复里明确写出「${VISION_NOT_SEEN_MARK}」。`
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 export function buildVisionParts(shot: VisionShotMeta, image: VisionAttachment): LlmContentPart[] {

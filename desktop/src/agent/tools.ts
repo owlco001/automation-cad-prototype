@@ -89,7 +89,27 @@ const CAPTURE_VIEW_SCHEMA = {
       default: '3d'
     },
     width: { type: 'integer', minimum: 320, maximum: 3840, description: '截图宽度（像素），默认 1600', default: 1600 },
-    height: { type: 'integer', minimum: 240, maximum: 2160, description: '截图高度（像素），默认 1000', default: 1000 }
+    height: { type: 'integer', minimum: 240, maximum: 2160, description: '截图高度（像素），默认 1000', default: 1000 },
+    region: {
+      type: 'object',
+      description:
+        '只截一块局部（原图像素坐标，默认整窗 1600x1000）。方案卡小字、表格数值、状态标签读不清时用它放大：裁剪先于缩放，越界自动夹紧并在返回里给 clamped/region',
+      properties: {
+        x: { type: 'integer', description: '左上角 x（原图像素，>=0），默认 0' },
+        y: { type: 'integer', description: '左上角 y（原图像素，>=0），默认 0' },
+        w: { type: 'integer', minimum: 32, maximum: 1600, description: '宽度，至少 32' },
+        h: { type: 'integer', minimum: 32, maximum: 1000, description: '高度，至少 32' }
+      },
+      required: ['w', 'h'],
+      additionalProperties: false
+    },
+    scale: {
+      type: 'number',
+      minimum: 0.5,
+      maximum: 3,
+      description: '裁出局部后的放大倍数（0.5–3，默认 1；返回里的 scale 是实际生效倍数，放大后最多 400 万像素）；最终仍按长边 <=1024 / <=400 KB 回灌',
+      default: 1
+    }
   },
   additionalProperties: false
 };
@@ -1200,6 +1220,7 @@ export class AgentTools {
       description:
         '截取当前真实界面并落盘到 userData/agent-shots/<timestamp>-<view>.png，返回 {path,bytes,sha256,width,height,view}。' +
         '只读：不改工程。窗口未就绪或页面还停在首页时返回 VIEW_NOT_READY（不会返回首页截图冒充）；单张超过 5 MiB 会缩小重拍一次，仍超限返回 SHOT_TOO_LARGE。' +
+        '字太小读不清时传 region:{x,y,w,h}（原图像素，w/h>=32）只截这一块，裁剪先于缩放，再按 scale(0.5-3) 放大；返回额外带 {region,clamped,scale,sourceSize}，越界会夹紧并标 clamped=true。' +
         '给用户看画面、或需要自证「界面真的是这样」时用，拿到 sha256 后可让人在磁盘上复核。',
       inputSchema: CAPTURE_VIEW_SCHEMA,
       handler: async (args) => {

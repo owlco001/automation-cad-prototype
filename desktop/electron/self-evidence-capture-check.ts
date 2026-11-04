@@ -21,7 +21,8 @@ import { join } from 'node:path';
 import type { BrowserWindow } from 'electron';
 import { AGENT_CAPTURE_VIEWS, captureAgentView, type AgentCaptureView } from '../src/agent/self-evidence.ts';
 import { createAgentViewCapture } from './agent-capture.ts';
-import { decodePng, VISION_MAX_BYTES, VISION_MAX_EDGE } from '../src/agent/vision-image.ts';
+import { decodePng, resizeRgba, VISION_MAX_BYTES, VISION_MAX_EDGE } from '../src/agent/vision-image.ts';
+import { cropImage } from '../src/agent/capture-region.ts';
 import { loadShotImage } from '../src/agent/vision.ts';
 
 export interface SelfEvidenceShot {
@@ -291,6 +292,90 @@ export async function checkAgentViewCapture(window: BrowserWindow, userDataRoot:
   }
 
   const distinct = new Set(shots.map((shot) => shot.sha256)).size;
+
+  // 3) 区域截图（region + scale）：真机验证「先裁后缩」比「先缩后裁」清楚，
+  //    并确认取景框、clamped、最终尺寸与 1024/400 KB 上限都是真的。
+  const REGION = { x: 0, y: 0, w: 480, h: 300 };
+  const regionShot = await captureAgentView({ view: '3d', region: REGION, scale: 2 }, deps);
+  if (regionShot.ok !== true) throw new Error(`区域截图失败：${JSON.stringify(regionShot)}`);
+  if (regionShot.clamped !== false) throw new Error(`合法取景框不该被夹紧：${JSON.stringify(regionShot.region)}`);
+  if (JSON.stringify(regionShot.region) !== JSON.stringify(REGION)) {
+    throw new Error(`区域截图回传的取景框不对：${JSON.stringify(regionShot.region)} vs ${JSON.stringify(REGION)}`);
+  }
+  const expectedW = REGION.w * 2;
+  const expectedH = REGION.h * 2;
+  if (Number(regionShot.width) !== expectedW || Number(regionShot.height) !== expectedH) {
+    throw new Error(`区域截图尺寸应为 ${expectedW}x${expectedH}，实际 ${regionShot.width}x${regionShot.height}`);
+  }
+  const regionDisk = readFileSync(String(regionShot.path));
+  const regionSha = createHash('sha256').update(regionDisk).digest('hex');
+  if (regionSha !== regionShot.sha256) throw new Error('区域截图的 sha256 无法在磁盘上复算');
+  if (regionDisk.length !== Number(regionShot.bytes)) throw new Error('区域截图的 bytes 与磁盘不一致');
+  const regionImage = decodePng(new Uint8Array(regionDisk));
+  if (regionImage.width !== expectedW || regionImage.height !== expectedH) {
+    throw new Error(`区域截图解码尺寸不对：${regionImage.width}x${regionImage.height}`);
+  }
+  const regionAttached = loadShotImage(userDataRoot, String(regionShot.path));
+  if (!regionAttached.ok) throw new Error(`区域截图无法回灌：${regionAttached.code} ${regionAttached.message}`);
+  if (regionAttached.bytes > VISION_MAX_BYTES || Math.max(regionAttached.width, regionAttached.height) > VISION_MAX_EDGE) {
+    throw new Error(`区域截图压缩后仍超限：${regionAttached.width}x${regionAttached.height} / ${regionAttached.bytes} B`);
+  }
+
+  // 越界：夹紧 + 如实标 clamped，最终区域与图上像素一致
+  const clampedShot = await captureAgentView({ view: '3d', region: { x: 1400, y: 900, w: 400, h: 300 } }, deps);
+  if (clampedShot.ok !== true) throw new Error(`越界区域截图失败：${JSON.stringify(clampedShot)}`);
+  if (clampedShot.clamped !== true) throw new Error('越界取景框必须标 clamped=true');
+  const clampedRegion = JSON.stringify(clampedShot.region);
+  if (clampedRegion !== JSON.stringify({ x: 1200, y: 700, w: 400, h: 300 })) {
+    throw new Error(`越界取景框夹紧结果不对：${clampedRegion}`);
+  }
+  const finalRegion = clampedShot.region as { x: number; y: number; w: number; h: number };
+
+  // 清晰度对比：同一块区域，「先裁后放」vs「先整图缩到 1024 再裁再放」的边缘能量
+  const full3d = shots.find((shot) => shot.view === '3d');
+  let sharpness = 'skipped(no-full-3d)';
+  if (full3d) {
+    const full = decodePng(new Uint8Array(readFileSync(full3d.path)));
+    const ratio = Math.min(1, VISION_MAX_EDGE / Math.max(full.width, full.height));
+    const shrunk = resizeRgba(full, Math.round(full.width * ratio), Math.round(full.height * ratio));
+    const mapped = {
+      x: Math.round(REGION.x * ratio),
+      y: Math.round(REGION.y * ratio),
+      w: Math.round(REGION.w * ratio),
+      h: Math.round(REGION.h * ratio)
+    };
+    const blurry = resizeRgba(cropImage(shrunk, mapped).image, expectedW, expectedH);
+    const energy = (image: { width: number; height: number; data: Uint8Array }): number => {
+      let sum = 0;
+      let count = 0;
+      for (let y = 0; y < image.height; y += 1) {
+        for (let x = 0; x + 1 < image.width; x += 1) {
+          const a = (y * image.width + x) * 4;
+          const b = a + 4;
+          const lumaA = 0.2126 * (image.data[a] ?? 0) + 0.7152 * (image.data[a + 1] ?? 0) + 0.0722 * (image.data[a + 2] ?? 0);
+          const lumaB = 0.2126 * (image.data[b] ?? 0) + 0.7152 * (image.data[b + 1] ?? 0) + 0.0722 * (image.data[b + 2] ?? 0);
+          sum += Math.abs(lumaA - lumaB);
+          count += 1;
+        }
+      }
+      return count > 0 ? sum / count : 0;
+    };
+    const energyCropFirst = energy(regionImage);
+    const energyShrinkFirst = energy(blurry);
+    sharpness = `crop_first=${energyCropFirst.toFixed(2)} shrink_first=${energyShrinkFirst.toFixed(2)}`;
+    if (energyCropFirst <= energyShrinkFirst) {
+      throw new Error(`先裁后缩没有更清楚：${sharpness}`);
+    }
+  }
+
+  console.log(
+    `AGENT_CAPTURE_REGION_OK view=3d region=${REGION.x},${REGION.y},${REGION.w}x${REGION.h} scale=${regionShot.scale} size=${regionShot.width}x${regionShot.height} bytes=${regionDisk.length} sha256=${regionSha} vision=${regionAttached.width}x${regionAttached.height}/${regionAttached.bytes}B path=${regionShot.path}`
+  );
+  console.log(
+    `AGENT_CAPTURE_REGION_CLAMP_OK requested=1400,900,400x300 final=${finalRegion.x},${finalRegion.y},${finalRegion.w}x${finalRegion.h} clamped=${clampedShot.clamped} size=${clampedShot.width}x${clampedShot.height}`
+  );
+  console.log(`AGENT_CAPTURE_REGION_SHARPNESS ${sharpness}`);
+
   if (empty.length > 0) {
     // 有视图是空白：如实报出来，不拿「截图刚好不为空」凑数，也不把它算进 distinct。
     console.log(
