@@ -30,6 +30,7 @@ import {
   downloadMachine,
   fetchMachineCatalog,
   listMachineSources,
+  nodeRemoteTransport,
   parseMachineCatalog,
   readMachineSources,
   writeMachineSources
@@ -37,10 +38,113 @@ import {
 
 const BRIEF = '三工位锁螺丝机，节拍 18 件/分钟';
 const roots = [];
+const recordingClocks = [];
 
 after(() => {
+  for (const clock of recordingClocks) clock.release();
   for (const root of roots) rmSync(root, { recursive: true, force: true });
 });
+
+/**
+ * 假时钟：`setTimeout` 只登记，必须显式 `advanceBy()` 才会触发。
+ *
+ * 为什么必须这样：超时/重试用例原来用 `totalTimeoutMs: 30` 这类真实小超时，在 CI 上既可能
+ * 「断言先跑到、定时器还没到」也可能「事件循环先空、定时器永远不到」——后者会让被测 Promise
+ * 永远 pending，node:test 报 "Promise resolution is still pending but the event loop has
+ * already resolved"，整个文件剩下的用例一起 cancelledByParent。时间由测试推进，就没有这个窗口。
+ */
+function createFakeClock(start = Date.UTC(2026, 0, 1, 0, 0, 0)) {
+  let current = start;
+  let seq = 0;
+  const timers = new Map();
+  const due = () =>
+    [...timers.values()].filter((timer) => timer.at <= current).sort((a, b) => a.at - b.at || a.seq - b.seq)[0];
+  return {
+    now: () => current,
+    setTimeout(callback, ms) {
+      seq += 1;
+      timers.set(seq, { at: current + ms, callback, seq });
+      return seq;
+    },
+    clearTimeout(handle) {
+      timers.delete(handle);
+    },
+    /** 还挂着几个定时器；正常路径结算后必须是 0 */
+    pending: () => timers.size,
+    /** 推进时间并触发所有到点的定时器，返回触发次数 */
+    advanceBy(ms) {
+      current += ms;
+      let fired = 0;
+      for (;;) {
+        const next = due();
+        if (!next) return fired;
+        timers.delete(next.seq);
+        next.callback();
+        fired += 1;
+      }
+    }
+  };
+}
+
+/** 真实时钟的记账版：统计「借出未归还」的定时器，并能在不 sleep 的情况下让它们「到点」。 */
+function createRecordingClock() {
+  const borrowed = new Map();
+  const clock = {
+    now: () => Date.now(),
+    setTimeout(callback, ms) {
+      const handle = setTimeout(() => {
+        borrowed.delete(handle);
+        callback();
+      }, ms);
+      borrowed.set(handle, callback);
+      return handle;
+    },
+    clearTimeout(handle) {
+      if (handle === undefined) return;
+      clearTimeout(handle);
+      borrowed.delete(handle);
+    },
+    /** 还挂着几个（借出未归还） */
+    outstanding: () => borrowed.size,
+    /** 其中几个是 **ref 着** 的：unref 的定时器撑不住事件循环 */
+    refed: () => [...borrowed.keys()].filter((handle) => handle.hasRef?.() ?? true).length,
+    /** 手动「到点」：不推进真实时间，直接把回调放出来 */
+    fireAll() {
+      for (const [handle, callback] of [...borrowed]) {
+        clearTimeout(handle);
+        borrowed.delete(handle);
+        callback();
+      }
+    },
+    release() {
+      for (const handle of borrowed.keys()) clearTimeout(handle);
+      borrowed.clear();
+    }
+  };
+  recordingClocks.push(clock);
+  return clock;
+}
+
+/** 只让事件循环转过若干轮宏任务，不推进任何时间。 */
+async function flushTurns(rounds = 20) {
+  for (let index = 0; index < rounds; index += 1) await new Promise((resolve) => setImmediate(resolve));
+}
+
+/** 轮询等待某个条件成立（不用真实时间，只转宏任务），超轮次即失败。 */
+async function waitFor(label, predicate, rounds = 200) {
+  for (let index = 0; index < rounds; index += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(`等待超时：${label}`);
+}
+
+/** 一个永不产出数据、也永不结束的流：只能靠总时长兜底。 */
+function hangingStream() {
+  const stream = new PassThrough();
+  stream.on('error', () => {});
+  return stream;
+}
 
 function freshRoot() {
   const root = mkdtempSync(join(tmpdir(), 'machine-library-remote-'));
@@ -368,20 +472,92 @@ test('超时：只重试一次，第二次仍超时后报 LIBRARY_TIMEOUT（tran
     { id: 'dev', name: '本地开发源', url: staged.catalogUrl, enabled: true, allowFile: true }
   ]);
 
-  let opens = 0;
-  const hangingTransport = {
-    open() {
-      opens += 1;
-      // 永不产出数据、也永不结束：只能靠总时长兜底
-      return Promise.resolve(new PassThrough());
+  // 目录走真实 file 流（立刻读完）；只有包的那一次 open 会挂住。
+  // 旧写法对**所有** URL 都返回挂住的流，结果超时发生在拉目录那一步，`opens === 2` 数的是
+  // 目录的两次尝试，下载路径一次都没被超时到——用例只是看起来在测下载超时。
+  const clock = createFakeClock();
+  let catalogOpens = 0;
+  let packageOpens = 0;
+  const transport = {
+    open(url, request) {
+      if (!String(url).endsWith('.machine.zip')) {
+        catalogOpens += 1;
+        return nodeRemoteTransport.open(url, request);
+      }
+      packageOpens += 1;
+      return Promise.resolve(hangingStream());
     }
   };
-  const error = await assertCodeAsync('LIBRARY_TIMEOUT', () =>
-    downloadMachine(root, 'dev', id, { transport: hangingTransport, totalTimeoutMs: 30 })
+
+  const settled = assertCodeAsync('LIBRARY_TIMEOUT', () =>
+    downloadMachine(root, 'dev', id, { transport, clock, totalTimeoutMs: 5000 })
   );
+
+  // 时间一格都没走：只等它把定时器挂上，不该有任何结果。
+  await waitFor('第一次下载尝试发出', () => packageOpens === 1);
+  await waitFor('第一次尝试挂上总时长定时器', () => clock.pending() === 1);
+  assert.equal(catalogOpens, 1, '目录只该拉一次（下载重试不该重复拉目录）');
+
+  // 第一次超时：必须在这个时刻结算，而不是留一个永远 pending 的链
+  assert.equal(clock.advanceBy(5000), 1, '应当有且只有一个总时长定时器到点');
+  await waitFor('第二次下载尝试发出', () => packageOpens === 2);
+  assert.equal(clock.pending(), 1, '重试后应当重新挂上总时长定时器');
+
+  assert.equal(clock.advanceBy(5000), 1);
+  const error = await settled;
   assert.match(error.message, /超时/);
-  assert.equal(opens, 2, `网络错误应只重试 1 次（共 2 次尝试），实际 ${opens} 次`);
+  assert.equal(packageOpens, 2, `网络错误应只重试 1 次（共 2 次尝试），实际 ${packageOpens} 次`);
+  assert.equal(catalogOpens, 1);
+  // 结算即清账：不留定时器，也不留 pending 的链
+  assert.equal(clock.pending(), 0, '超时结算后不该残留任何定时器');
   assert.equal(existsSync(join(machineLibraryDirectory(root), id)), false);
+});
+
+test('超时守卫：时间不推进就绝不出结果，推进后必须立刻结算且不留定时器', async () => {
+  const root = freshRoot();
+  const staged = stageFileSource([]);
+  const id = 'remote-guard-slow';
+  writeFileSync(
+    staged.catalogPath,
+    JSON.stringify({ schemaVersion: 1, machines: [machineEntry(staged.dir, { id })] }),
+    'utf8'
+  );
+  writeMachineSources(root, [
+    { id: 'dev', name: '本地开发源', url: staged.catalogUrl, enabled: true, allowFile: true }
+  ]);
+
+  const clock = createFakeClock();
+  let packageOpens = 0;
+  const transport = {
+    open(url, request) {
+      if (!String(url).endsWith('.machine.zip')) return nodeRemoteTransport.open(url, request);
+      packageOpens += 1;
+      return Promise.resolve(hangingStream());
+    }
+  };
+
+  let state = 'pending';
+  const task = downloadMachine(root, 'dev', id, { transport, clock, totalTimeoutMs: 5000 }).then(
+    () => {
+      state = 'resolved';
+    },
+    (error) => {
+      state = `rejected:${error.code}`;
+    }
+  );
+  await waitFor('第一次下载尝试发出', () => packageOpens === 1);
+  await flushTurns();
+  assert.equal(state, 'pending', '时间没推进就不该出结果——否则说明还有真实定时器在偷偷兜底');
+  assert.equal(clock.pending(), 1);
+
+  for (let round = 0; round < 4 && state === 'pending'; round += 1) {
+    clock.advanceBy(5000);
+    await flushTurns();
+  }
+  await task;
+  assert.equal(state, 'rejected:LIBRARY_TIMEOUT');
+  assert.equal(packageOpens, 2, '两次尝试都必须由假时钟的超时结算');
+  assert.equal(clock.pending(), 0, '假时钟里还剩定时器 = 泄漏；测试结束时会把事件循环一起卡住');
 });
 
 test('网络错误重试一次后成功：第二次尝试拿到的包正常入库', async () => {
@@ -394,6 +570,8 @@ test('网络错误重试一次后成功：第二次尝试拿到的包正常入�
     { id: 'dev', name: '本地开发源', url: staged.catalogUrl, enabled: true, allowFile: true }
   ]);
   // 目录用真实 file 通道；包第一次返回网络错误，第二次走真实 file 流
+  const clock = createRecordingClock();
+  let catalogOpens = 0;
   let packageOpens = 0;
   const flakyTransport = {
     async open(url, request) {
@@ -402,16 +580,21 @@ test('网络错误重试一次后成功：第二次尝试拿到的包正常入�
         if (packageOpens === 1) {
           throw new MachineLibraryError('LIBRARY_NETWORK_FAILED', '模拟抖动：连接被重置');
         }
+      } else {
+        catalogOpens += 1;
       }
-      const { nodeRemoteTransport } = await import('../../src/machine/library-remote.ts');
       return nodeRemoteTransport.open(url, request);
     }
   };
-  const result = await downloadMachine(root, 'dev', design.config.id, { transport: flakyTransport });
-  assert.equal(packageOpens, 2);
+  const result = await downloadMachine(root, 'dev', design.config.id, { transport: flakyTransport, clock });
+  assert.equal(packageOpens, 2, '网络错误必须重试一次');
+  assert.equal(catalogOpens, 1, '重试只重试包，不重复拉目录');
+  assert.equal(result.attempts, 2);
   assert.equal(result.bytes, bytes.byteLength);
   assert.equal(result.sha256, sha256(bytes));
   assert.equal(result.entry.id, design.config.id);
+  // 重试路径同样不许把总时长定时器留在事件循环里
+  assert.equal(clock.outstanding(), 0, '下载结算后不该残留总时长定时器');
 });
 
 /* ------------------------------------------------------------------ */
@@ -428,10 +611,13 @@ test('下载成功入库：config 逐字段相等、来源标 remote、目录哈
     { id: 'dev', name: '本地开发源', url: staged.catalogUrl, enabled: true, allowFile: true }
   ]);
 
-  const result = await downloadMachine(root, 'dev', design.config.id);
+  const clock = createRecordingClock();
+  const result = await downloadMachine(root, 'dev', design.config.id, { clock });
   assert.equal(result.source.id, 'dev');
   assert.equal(result.stale, false);
   assert.equal(result.overwritten, false);
+  assert.equal(result.attempts, 1, '目录命中 + 一次下载成功：只该有一次下载尝试');
+  assert.equal(clock.outstanding(), 0, '成功路径同样必须归还总时长定时器');
   assert.equal(result.entry.version, '1.1.0');
   assert.equal(result.entry.source, 'remote');
   assert.ok(result.entry.sizeBytes > 0);
@@ -455,7 +641,7 @@ test('下载成功入库：config 逐字段相等、来源标 remote、目录哈
 /* 5) 缓存：10 分钟命中 + 失败回退 stale                               */
 /* ------------------------------------------------------------------ */
 
-test('目录缓存：10 分钟内不重复拉取；网络失败回退旧缓存并标 stale:true', async () => {
+test('目录缓存：10 分钟内不重复拉取；过期后重拉；网络失败回退旧缓存并标 stale:true', async () => {
   const root = freshRoot();
   const { design, bytes } = samplePackage('remote-cache-1');
   const staged = stageFileSource([]);
@@ -465,25 +651,39 @@ test('目录缓存：10 分钟内不重复拉取；网络失败回退旧缓存�
     { id: 'dev', name: '本地开发源', url: staged.catalogUrl, enabled: true, allowFile: true }
   ]);
 
+  // 缓存新鲜度由假时钟决定：TTL 边界不靠 sleep，也不会因为机器慢就误判「过期」
+  const clock = createFakeClock();
   let opens = 0;
   const countingTransport = {
     async open(url, request) {
       opens += 1;
-      const { nodeRemoteTransport } = await import('../../src/machine/library-remote.ts');
       return nodeRemoteTransport.open(url, request);
     }
   };
   const source = readMachineSources(root)[0];
-  const first = await fetchMachineCatalog(root, source, { transport: countingTransport });
+  const first = await fetchMachineCatalog(root, source, { transport: countingTransport, clock });
   assert.equal(first.fromCache, false);
   assert.equal(first.stale, false);
   assert.equal(opens, 1);
+  assert.equal(first.attempts, 1);
+  assert.equal(first.fetchedAt, new Date(clock.now()).toISOString(), '缓存时间戳必须取自注入的时钟');
 
-  // 第二次：走缓存，不再打开任何流
-  const second = await fetchMachineCatalog(root, source, { transport: countingTransport });
+  // 9 分钟后：仍在 10 分钟 TTL 内，走缓存，不再打开任何流
+  clock.advanceBy(9 * 60 * 1000);
+  const second = await fetchMachineCatalog(root, source, { transport: countingTransport, clock });
   assert.equal(second.fromCache, true);
   assert.equal(second.stale, false);
+  assert.equal(second.attempts, 0, '命中缓存不该有任何网络尝试');
   assert.equal(opens, 1, '10 分钟内应当命中缓存');
+  assert.equal(second.fetchedAt, first.fetchedAt);
+
+  // 11 分钟后：过期，必须重新拉（旧写法换个空目录冒充「过期」，其实没验到 TTL）
+  clock.advanceBy(2 * 60 * 1000);
+  const third = await fetchMachineCatalog(root, source, { transport: countingTransport, clock });
+  assert.equal(third.fromCache, false);
+  assert.equal(third.stale, false);
+  assert.equal(opens, 2, '超过 TTL 必须重新拉目录');
+  assert.equal(third.fetchedAt, new Date(clock.now()).toISOString());
 
   // 强制走网络 + 运输层失败：必须回退到缓存并标 stale
   const failingTransport = {
@@ -491,12 +691,13 @@ test('目录缓存：10 分钟内不重复拉取；网络失败回退旧缓存�
       throw new MachineLibraryError('LIBRARY_NETWORK_FAILED', '模拟断网');
     }
   };
-  const fallback = await fetchMachineCatalog(root, source, { transport: failingTransport, useCache: false });
+  const fallback = await fetchMachineCatalog(root, source, { transport: failingTransport, clock, useCache: false });
   assert.equal(fallback.stale, true);
   assert.equal(fallback.fromCache, true);
   assert.equal(fallback.catalog.machines.length, 1);
   assert.equal(fallback.catalog.machines[0].id, design.config.id);
-  assert.equal(fallback.fetchedAt, first.fetchedAt);
+  assert.equal(fallback.fetchedAt, third.fetchedAt, 'stale 回退必须给出旧缓存的抓取时间');
+  assert.equal(fallback.attempts, 2, '网络错误重试 1 次：回退前恰好 2 次尝试');
 
   // 缓存过期（超过 10 分钟）且网络失败、又没有旧缓存可用时：如实报错而不是空目录
   const expiredRoot = freshRoot();
@@ -504,8 +705,9 @@ test('目录缓存：10 分钟内不重复拉取；网络失败回退旧缓存�
     { id: 'dev', name: '本地开发源', url: staged.catalogUrl, enabled: true, allowFile: true }
   ]);
   await assertCodeAsync('LIBRARY_NETWORK_FAILED', () =>
-    fetchMachineCatalog(expiredRoot, readMachineSources(expiredRoot)[0], { transport: failingTransport })
+    fetchMachineCatalog(expiredRoot, readMachineSources(expiredRoot)[0], { transport: failingTransport, clock })
   );
+  assert.equal(clock.pending(), 0, '目录/下载路径都跑完后假时钟里不该还挂着定时器');
 });
 
 /* ------------------------------------------------------------------ */
@@ -530,12 +732,18 @@ test('listMachineSources：一个源坏（目录缺失）只标该源 offline，
     { id: 'dev', name: '本地开发源', url: staged.catalogUrl, enabled: true, allowFile: true, priority: 2 }
   ]);
 
-  const listed = await listMachineSources(root);
+  const clock = createRecordingClock();
+  const listed = await listMachineSources(root, { clock });
   assert.deepEqual(listed.sources.map((source) => source.id), ['broken', 'dev']);
   const broken = listed.sources[0];
   assert.equal(broken.online, false);
   assert.equal(broken.machineCount, 0);
   assert.ok(broken.errorCode, '坏源必须带上错误码，便于界面显示原因');
+  assert.ok(
+    ['LIBRARY_NETWORK_FAILED', 'LIBRARY_IO_FAILED'].includes(broken.errorCode),
+    `坏源应当是读取/网络类错误，实际 ${broken.errorCode}`
+  );
+  assert.equal(broken.fetchedAt, null, '坏源不该有抓取时间');
   const good = listed.sources[1];
   assert.equal(good.online, true);
   assert.equal(good.machineCount, 1);
@@ -543,6 +751,7 @@ test('listMachineSources：一个源坏（目录缺失）只标该源 offline，
   assert.equal(listed.machines[0].sourceId, 'dev');
   assert.equal(listed.machines[0].installed, false);
   assert.equal(listed.stale, false);
+  assert.equal(clock.outstanding(), 0, '坏源的重试路径也不许把总时长定时器留在事件循环里');
 });
 
 /* ------------------------------------------------------------------ */
@@ -557,4 +766,112 @@ test('没有 sources.json：默认空清单（不预置任何外网地址），�
   assert.deepEqual(listed.sources, []);
   assert.deepEqual(listed.machines, []);
   assert.equal(listed.stale, false);
+});
+
+/* ------------------------------------------------------------------ */
+/* 8) 守卫：不许把定时器/事件循环留在测试里                             */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 这条守的是**测试自身**不出漏定时器。
+ *
+ * 背景：`readCapped` 的总时长定时器一度是 `unref()` 的，事件循环只靠它撑着时就会先空掉，
+ * 超时回调永不到来、被测 Promise 永远 pending；Windows 上表现为 2226「超时」，随后同文件
+ * 2227–2230 全部 `cancelledByParent`。这里从两个方向钉住：
+ *   1. 假时钟：跑完必须 `pending() === 0`（上面几条用例已逐条断言，这里再做一次收口）；
+ *   2. 真实时钟：借出的 `setTimeout` 必须全部归还，且进程的活动 Timeout 资源数不得增加。
+ *
+ * 注意 Node ≥11 的 `process._getActiveHandles()` 不再列定时器（实测返回 []），
+ * 要查定时器得用 `process.getActiveResourcesInfo()`。
+ */
+test('守卫：跑完不残留真实定时器，进程能自然退出', async () => {
+  const activeTimeouts = () => process.getActiveResourcesInfo().filter((name) => name === 'Timeout').length;
+  const before = activeTimeouts();
+
+  // 1) 真实时钟 + 成功下载：借出的定时器必须归还
+  const root = freshRoot();
+  const { design, bytes } = samplePackage('remote-guard-clean');
+  const staged = stageFileSource([]);
+  const entry = machineEntry(staged.dir, { id: design.config.id, bytes });
+  writeFileSync(staged.catalogPath, JSON.stringify({ schemaVersion: 1, machines: [entry] }), 'utf8');
+  writeMachineSources(root, [
+    { id: 'dev', name: '本地开发源', url: staged.catalogUrl, enabled: true, allowFile: true }
+  ]);
+
+  const recording = createRecordingClock();
+  const result = await downloadMachine(root, 'dev', design.config.id, { clock: recording });
+  assert.equal(result.entry.id, design.config.id);
+  assert.equal(recording.outstanding(), 0, '成功的下载必须把总时长定时器还回来');
+
+  // 2) 假时钟 + 挂住的下载：整条链跑完后假时钟里不能还剩定时器
+  const hangRoot = freshRoot();
+  const hangStaged = stageFileSource([]);
+  const hangId = 'remote-guard-hang';
+  writeFileSync(
+    hangStaged.catalogPath,
+    JSON.stringify({ schemaVersion: 1, machines: [machineEntry(hangStaged.dir, { id: hangId })] }),
+    'utf8'
+  );
+  writeMachineSources(hangRoot, [
+    { id: 'dev', name: '本地开发源', url: hangStaged.catalogUrl, enabled: true, allowFile: true }
+  ]);
+  const fakeClock = createFakeClock();
+  const transport = {
+    open(url, request) {
+      if (!String(url).endsWith('.machine.zip')) return nodeRemoteTransport.open(url, request);
+      return Promise.resolve(hangingStream());
+    }
+  };
+  const settled = assertCodeAsync('LIBRARY_TIMEOUT', () =>
+    downloadMachine(hangRoot, 'dev', hangId, { transport, clock: fakeClock, totalTimeoutMs: 5000 })
+  );
+  await waitFor('第一次尝试挂上定时器', () => fakeClock.pending() > 0);
+  for (let round = 0; round < 4; round += 1) {
+    fakeClock.advanceBy(5000);
+    await flushTurns();
+  }
+  await settled;
+  assert.equal(fakeClock.pending(), 0, '假时钟里还剩定时器 = 测试自己漏了定时器');
+
+  // 3) 真实时钟 + 挂住的下载：总时长定时器必须**ref 着**。
+  //    这条直接钉住本次 Windows 红的根因：`readCapped` 的定时器一旦 unref，事件循环只靠它
+  //    撑着时就会先空掉，超时永远不到、Promise 永远 pending。用记账时钟手动「到点」，
+  //    既不 sleep，也不留 pending 链。
+  const refRoot = freshRoot();
+  const refStaged = stageFileSource([]);
+  const refId = 'remote-guard-ref';
+  writeFileSync(
+    refStaged.catalogPath,
+    JSON.stringify({ schemaVersion: 1, machines: [machineEntry(refStaged.dir, { id: refId })] }),
+    'utf8'
+  );
+  writeMachineSources(refRoot, [
+    { id: 'dev', name: '本地开发源', url: refStaged.catalogUrl, enabled: true, allowFile: true }
+  ]);
+  const realClock = createRecordingClock();
+  const hangTransport = {
+    open(url, request) {
+      if (!String(url).endsWith('.machine.zip')) return nodeRemoteTransport.open(url, request);
+      return Promise.resolve(hangingStream());
+    }
+  };
+  const refSettled = assertCodeAsync('LIBRARY_TIMEOUT', () =>
+    downloadMachine(refRoot, 'dev', refId, { transport: hangTransport, clock: realClock, totalTimeoutMs: 120000 })
+  );
+  await waitFor('真实定时器挂上', () => realClock.outstanding() === 1);
+  assert.equal(realClock.refed(), 1, '总时长定时器必须是 ref 的；unref 的定时器撑不住事件循环，超时永远不会到');
+  for (let round = 0; round < 4; round += 1) {
+    realClock.fireAll();
+    await flushTurns();
+  }
+  assert.match((await refSettled).message, /超时/);
+  assert.equal(realClock.outstanding(), 0, '手动到点后也不该有借出未还的定时器');
+
+  // 4) 进程层面：活动 Timeout 数量不能因为跑完这些路径而增加
+  await flushTurns(5);
+  assert.equal(
+    activeTimeouts(),
+    before,
+    `事件循环里多出 ${activeTimeouts() - before} 个真实定时器，会让进程/后续用例被挂住`
+  );
 });

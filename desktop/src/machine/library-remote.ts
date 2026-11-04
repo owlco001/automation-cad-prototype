@@ -489,11 +489,30 @@ export function parseMachineCatalog(value: unknown, options: { catalogUrl: strin
 /* 传输（默认 https / file；测试注入）                                  */
 /* ------------------------------------------------------------------ */
 
+/**
+ * 远程路径用到的时钟。全部取时间/定时器的地方都从这里拿，测试才能不靠真实时钟推进：
+ * 真实 30 ms 超时在 CI 上既可能来不及（断言先跑到）也可能永不到（事件循环先空），
+ * 两者都会让用例变成薛定谔的。
+ */
+export interface RemoteClock {
+  now(): number;
+  setTimeout(callback: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
+export const systemRemoteClock: RemoteClock = {
+  now: () => Date.now(),
+  setTimeout: (callback, ms) => setTimeout(callback, ms),
+  clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout)
+};
+
 export interface RemoteTransportRequest {
   connectTimeoutMs: number;
   totalTimeoutMs: number;
   maxBytes: number;
   accept: string;
+  /** 读取侧超时/中止时触发：传输层应据此拆掉 socket（默认 https 实现已接） */
+  signal?: AbortSignal;
 }
 
 /** 打开一个字节流。实现必须自己处理建连超时；读取侧由 `readCapped` 兜总时长与大小。 */
@@ -506,6 +525,9 @@ export const nodeRemoteTransport: RemoteTransport = {
     if (url.protocol === 'file:') {
       // 开发用：直接读本地文件，交给下游同一套上限/哈希校验。
       return createReadStream(fileURLToPath(url));
+    }
+    if (request.signal?.aborted) {
+      throw new MachineLibraryError('LIBRARY_TIMEOUT', `请求已中止（${url.origin}）`);
     }
     return await new Promise<Readable>((resolve, reject) => {
       const req = httpsGet(
@@ -535,6 +557,8 @@ export const nodeRemoteTransport: RemoteTransport = {
           resolve(response);
         }
       );
+      // 读取侧超时/超限时把它拆掉：不指望调用方 destroy 一个自己已经不再监听的流。
+      request.signal?.addEventListener('abort', () => req.destroy(), { once: true });
       req.on('timeout', () => {
         req.destroy(new MachineLibraryError('LIBRARY_TIMEOUT', `连接超时（${request.connectTimeoutMs} ms）`));
       });
@@ -552,23 +576,41 @@ export const nodeRemoteTransport: RemoteTransport = {
   }
 };
 
-/** 边读边计数：超限立刻 destroy（不把大包收完再判），超时也 destroy。 */
-function readCapped(stream: Readable, options: { maxBytes: number; timeoutMs: number; label: string }): Promise<Buffer> {
+/**
+ * 边读边计数：超限立刻 destroy（不把大包收完再判），超时也 destroy。
+ *
+ * 这里的定时器**不能 unref**：它是「这一包最多读多久」的唯一保证。一旦 unref，事件循环
+ * 只靠定时器撑着时就会先空掉——超时回调永远不来，返回的 Promise 永远 pending
+ * （node:test 里表现为 "Promise resolution is still pending but the event loop has
+ * already resolved"，随后整个文件剩下的用例被 cancelledByParent 连坐）。
+ * 定时器在 settle 时一定会被 clear，所以 ref 着不会让进程多活。
+ */
+function readCapped(
+  stream: Readable,
+  options: { maxBytes: number; timeoutMs: number; label: string; clock?: RemoteClock; onCancel?: () => void }
+): Promise<Buffer> {
+  const clock = options.clock ?? systemRemoteClock;
   return new Promise<Buffer>((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     let settled = false;
-    let timer: NodeJS.Timeout | undefined;
+    let timer: unknown;
 
     const settle = (error: MachineLibraryError | null, value?: Buffer): void => {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
+      if (timer !== undefined) {
+        clock.clearTimeout(timer);
+        timer = undefined;
+      }
       stream.removeListener('data', onData);
       stream.removeListener('end', onEnd);
       stream.removeListener('error', onError);
       if (error) {
+        // 先让传输层拆 socket，再 destroy 流；abort 之后迟到的 ECONNRESET 不该变成未捕获异常。
+        options.onCancel?.();
         stream.destroy();
+        stream.on('error', () => {});
         reject(error);
         return;
       }
@@ -601,10 +643,9 @@ function readCapped(stream: Readable, options: { maxBytes: number; timeoutMs: nu
       );
     };
 
-    timer = setTimeout(() => {
+    timer = clock.setTimeout(() => {
       settle(new MachineLibraryError('LIBRARY_TIMEOUT', `${options.label}超时（${options.timeoutMs} ms），下载已中止`));
     }, options.timeoutMs);
-    timer.unref?.();
 
     stream.on('data', onData);
     stream.on('end', onEnd);
@@ -702,6 +743,8 @@ function writeCatalogCache(userDataRoot: string, source: MachineSource, catalog:
 export interface CatalogFetchOptions {
   transport?: RemoteTransport;
   now?: () => number;
+  /** 取时间与定时器的来源（缺省真实时钟）；测试注入假时钟，不靠 wall clock 推进 */
+  clock?: RemoteClock;
   cacheTtlMs?: number;
   connectTimeoutMs?: number;
   totalTimeoutMs?: number;
@@ -739,7 +782,8 @@ export async function fetchMachineCatalog(
   if (!source.enabled) {
     throw new MachineLibraryError('LIBRARY_SOURCE_DISABLED', `来源「${source.name}」（${source.id}）未启用`);
   }
-  const now = options.now ?? (() => Date.now());
+  const clock = options.clock ?? systemRemoteClock;
+  const now = options.now ?? (() => clock.now());
   const cacheTtlMs = options.cacheTtlMs ?? MACHINE_REMOTE_LIMITS.catalogCacheMs;
   // 缓存始终读出来：`useCache:false` 只是**跳过新鲜度短路**（强制走一次网络），
   // 网络失败时仍然要能回退到它并标 stale —— 否则「强制刷新」会把兜底路径也一起关掉。
@@ -760,13 +804,27 @@ export async function fetchMachineCatalog(
   try {
     const bytes = await withNetworkRetry(async () => {
       attempts += 1;
-      const stream = await transport.open(catalogUrl, {
-        connectTimeoutMs,
-        totalTimeoutMs,
+      const controller = new AbortController();
+      let stream: Readable;
+      try {
+        stream = await transport.open(catalogUrl, {
+          connectTimeoutMs,
+          totalTimeoutMs,
+          maxBytes: MACHINE_REMOTE_LIMITS.maxCatalogBytes,
+          accept: 'application/json',
+          signal: controller.signal
+        });
+      } catch (error) {
+        controller.abort();
+        throw error;
+      }
+      return await readCapped(stream, {
         maxBytes: MACHINE_REMOTE_LIMITS.maxCatalogBytes,
-        accept: 'application/json'
+        timeoutMs: totalTimeoutMs,
+        label: '目录',
+        clock,
+        onCancel: () => controller.abort()
       });
-      return await readCapped(stream, { maxBytes: MACHINE_REMOTE_LIMITS.maxCatalogBytes, timeoutMs: totalTimeoutMs, label: '目录' });
     }, MACHINE_REMOTE_LIMITS.retries);
     let parsed: unknown;
     try {
@@ -994,21 +1052,32 @@ export async function downloadMachine(
   );
 
   const transport = options.transport ?? nodeRemoteTransport;
+  const clock = options.clock ?? systemRemoteClock;
   const connectTimeoutMs = options.connectTimeoutMs ?? MACHINE_REMOTE_LIMITS.connectTimeoutMs;
   const totalTimeoutMs = options.totalTimeoutMs ?? MACHINE_REMOTE_LIMITS.totalTimeoutMs;
   let attempts = 0;
   const bytes = await withNetworkRetry(async () => {
     attempts += 1;
-    const stream = await transport.open(downloadUrl, {
-      connectTimeoutMs,
-      totalTimeoutMs,
-      maxBytes: MACHINE_REMOTE_LIMITS.maxDownloadBytes,
-      accept: 'application/zip'
-    });
+    const controller = new AbortController();
+    let stream: Readable;
+    try {
+      stream = await transport.open(downloadUrl, {
+        connectTimeoutMs,
+        totalTimeoutMs,
+        maxBytes: MACHINE_REMOTE_LIMITS.maxDownloadBytes,
+        accept: 'application/zip',
+        signal: controller.signal
+      });
+    } catch (error) {
+      controller.abort();
+      throw error;
+    }
     return await readCapped(stream, {
       maxBytes: MACHINE_REMOTE_LIMITS.maxDownloadBytes,
       timeoutMs: totalTimeoutMs,
-      label: `机型 ${machine.id} 下载`
+      label: `机型 ${machine.id} 下载`,
+      clock,
+      onCancel: () => controller.abort()
     });
   }, MACHINE_REMOTE_LIMITS.retries);
 
