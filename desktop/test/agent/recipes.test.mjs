@@ -68,14 +68,15 @@ function recorder(options = {}) {
   };
 }
 
-test('内置 5 个流程模板且标题固定', () => {
-  assert.equal(RECIPES.length, 5);
+test('内置 6 个流程模板且标题固定', () => {
+  assert.equal(RECIPES.length, 6);
   assert.deepEqual(RECIPES.map((recipe) => recipe.title), [
     '新机台快速起步',
     '底板布置交付',
     '电气交付',
     '成本核对',
-    '整包交付'
+    '整包交付',
+    '设计评审'
   ]);
 });
 

@@ -521,6 +521,21 @@ interface DesktopAgentRecipeStepResult {
   suggestion?: string;
 }
 
+interface DesktopAgentDesignReviewItem {
+  area: '结构' | '干涉' | '电气' | '成本';
+  status: 'pass' | 'warn' | 'fail' | 'na';
+  title: string;
+  evidence: string;
+  suggestion: string;
+}
+
+/** 汇总器结论：`review-design` 配方为设计评审（条款见 src/agent/design-review.ts）。 */
+interface DesktopAgentDesignReview {
+  verdict: 'PASS' | 'WARN' | 'FAIL';
+  items: DesktopAgentDesignReviewItem[];
+  summary: string;
+}
+
 interface DesktopAgentRecipeRunResult {
   ok: boolean;
   code: string;
@@ -543,6 +558,10 @@ interface DesktopAgentRecipeRunResult {
   summary: string;
   report: string;
   confirmations?: number;
+  /** `onError:'collect'` 时收集到的失败步骤（流程没中断，结论看 aggregate）。 */
+  stepFailures?: DesktopAgentRecipeStepResult[];
+  /** 汇总器输出；设计评审为 DesktopAgentDesignReview。 */
+  aggregate?: DesktopAgentDesignReview | unknown;
   error?: { code: string; message: string; missing?: string[]; suggestions?: string[] };
 }
 

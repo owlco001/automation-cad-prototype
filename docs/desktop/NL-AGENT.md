@@ -304,7 +304,7 @@ UI 与 IPC：
 
 ## 7. 已实现——流程模板
 
-`desktop/src/agent/recipes.ts` 内置 5 个纯数据模板（不含 LLM），每个模板都有 `id / title / steps[] / preconditions[] / estimatedSeconds`。步骤引用 `tools.ts` 注册表中的真实工具名，参数模板支持 `{ from: 'context.machine.name' }` 这类点路径占位符（可带 `default` / `optional`）。
+`desktop/src/agent/recipes.ts` 内置 6 个纯数据模板（不含 LLM），每个模板都有 `id / title / steps[] / preconditions[] / estimatedSeconds`（可选 `onError` / `aggregate`）。步骤引用 `tools.ts` 注册表中的真实工具名，参数模板支持 `{ from: 'context.machine.name' }` 这类点路径占位符（可带 `default` / `optional`）。
 
 | id | 模板 | 步骤（有序工具） | 预计 |
 |---|---|---|---|
@@ -313,6 +313,35 @@ UI 与 IPC：
 | `electrical-delivery` | 电气交付 | `run_electrical_check` → 修正提示（`get_project_context`）→ PLC 预检（`verify_plc_program`）→ 生成落盘（`run_plc_generate`）→ 交付 PDF（`export_files`） | 90s |
 | `cost-review` | 成本核对 | `get_bom` → `run_cost_report` → `export_cost_report(format=csv)` → 缺价件标注（`run_cost_report`） | 30s |
 | `full-package` | 整包交付 | 导入 CAD、BOM、干涉、电气、成本 → 导出 BOM / PDF → `run_plc_generate` | 180s |
+| `review-design` | 设计评审 | `get_project_context`（critical）→ `validate_machine_design` → `run_interference_check(states:['rest','lift','sweep'])` → `run_electrical_check` → `run_cost_report` → 汇总（纯函数，不调工具） | 45s |
+
+#### 设计评审（第 6 个模板，`onError: 'collect'` + 纯函数汇总）
+
+回答的是「这台机器能不能出图」，而不是「帮我跑某个工具」。5 个只读工具按固定顺序跑，第 6 步是 `design-review.ts#summarizeDesignReview` 的纯函数汇总，输出：
+
+```
+{ verdict: 'PASS'|'WARN'|'FAIL',
+  items: [{ area:'结构'|'干涉'|'电气'|'成本', status:'pass'|'warn'|'fail'|'na',
+            title, evidence, suggestion }],
+  summary }
+```
+
+判定规则（写死在 `verdictOf()`，不模糊）：
+
+- 任一项 `fail` → `FAIL`；没有 fail 但有 `warn` 或 `na` → `WARN`；全 `pass` → `PASS`。
+- **`evidence` 必须带数字**：结构写 issues 条数 + 首个 code；干涉写 rest/lift/sweep 各自的 hits 与 mm³；电气写过载（最大相电流）、压降（24V 余量）、断路器（额定/进线截面）三项实际值；成本写缺价条数与总价。没有数字就不算证据，该条降级为 `warn` 并在 `suggestion` 末尾写「需人工确认」（`fail` 保留，错误码本身已可定位）。
+- **`suggestion` 必须指名动作**：例如「先调 `repair_plc_config(dryRun)` 补齐急停/安全门」「先按 issues[0] 的 DUP_POINT 改 `stations[0].sensors[0].point`」。`findHollowPhrase()` 拦「进一步检查 / 建议排查 / 酌情处理」这类空话，单测与 `t11` 都会断言。
+- 干涉 `STATE_UNAVAILABLE`（机型没有顶升轴）记为 `na`，不算失败；证据写「states 可用 0/3 项」。
+- 电气只 `warn` 不 `fail` 的情形：findings 里只有 warning；缺价同理（报价会偏，结构/干涉/电气仍可出图）。
+
+失败策略（评审的价值在「一次看完」）：
+
+- `Recipe.onError: 'collect'`：某步失败只记 `ok:false` + 错误码 + 中文原因 + 下一步建议，**继续跑后续步骤**；run 结束时 `ok:true`、`code:'COLLECTED_WITH_ERRORS'`，失败步骤进 `stepFailures[]`，结论由 `run.aggregate` 给。
+- `get_project_context` 是 `critical: true`：拿不到机型就直接停（`ok:false` + `failedStep`），后面全无意义，也不产出汇总。
+- 确认被拒（`USER_DENIED`）仍立即停——不替用户放行。
+- 现有 5 个模板不带 `onError`，行为仍是失败即停（`'stop'`）。
+
+意图：`router.ts#matchRecipeIntent()` 把「帮我把这台机器评审一遍 / 这台机能不能出图 / 这台机器有没有问题」指到 `review-design`，侧栏输入时自动切到该模板并启动（5 步全只读，不弹确认）；「机型方案有没有问题 / 校验机型方案」仍归 `validate_machine_design` 单工具。
 
 ### 7.1 执行器
 
@@ -322,8 +351,10 @@ UI 与 IPC：
 - **可跳过**：`skipSteps`（步骤 id / 工具名）、`skipIndexes`（0 基）或 `isSkipped(step,index)`；跳过的步骤不执行，结果标记 `skipped:true`、`code='SKIPPED'`。
 - **逐次确认**：写工具默认每一步都调用 `executor.confirm()`；只有显式 `rememberSameKind:true`（UI 勾选「本流程内同类操作不再询问」）才会在同类写操作后停止询问。默认关闭，拒绝返回 `USER_DENIED` 并停止。
 - **失败停止**：工具返回 `ok:false`、业务错误码或抛异常都会停止，保留此前成功步骤于 `completed/kept`，并给出中文 `summary/report`：失败步骤、错误码、建议、已完成清单。
+- **失败收集**（`onError:'collect'`，仅 `review-design`）：失败只记录 `ok:false` + 错误码 + 中文原因 + 下一步建议，继续跑后续步骤；结束时 `ok:true`、`code:'COLLECTED_WITH_ERRORS'`，失败步骤进 `stepFailures[]`。`step.critical:true` 的步骤失败仍立即停。
+- **汇总**（`aggregate`）：全部步骤跑完后调用注册在 `design-review.ts#RECIPE_AGGREGATORS` 的纯函数，结论写进 `run.aggregate`，并把结论摘要拼进 `run.summary`、把逐条证据拼进 `run.report` / Markdown 记录的「评审结论」段。
 - **耗时**：`totalMs` 与每步 `elapsedMs` 均记录；`onProgress` 逐步骤发出 `source='recipe'` 的开始 / 结束 / 跳过事件。
-- **记录导出**：`recipeRunToMarkdown(result)` 输出 Markdown（模板、状态、总耗时、步骤表、失败详情、已完成 / 已跳过、参数摘要）。
+- **记录导出**：`recipeRunToMarkdown(result)` 输出 Markdown（模板、状态、总耗时、步骤表、失败详情、评审结论表、已完成 / 已跳过、参数摘要）。
 
 ### 7.2 模型接入
 
@@ -335,7 +366,7 @@ UI 与 IPC：
 
 UI：侧栏「流程」下拉选择模板 → 预览前置条件与步骤（可取消勾选）→ 开始 → 步骤进度与结果 → 「导出本次执行记录」（Markdown）。IPC 为 `agent:recipe:execute` / `agent:recipe:cancel`，写操作仍弹主进程确认。
 
-测试与冒烟：`test/agent/recipes.test.mjs` 29 条；`SMOKE_AGENT_RECIPE_OK recipes=5 steps=5 failed=1 kept=2`，并校验流程下拉 UI。
+测试与冒烟：`test/agent/recipes.test.mjs` 29 条 + `test/agent/design-review.test.mjs` 16 条（PASS/WARN/FAIL 判定、数字证据快照、指名工具的建议、collect 续跑、critical 立即停、现有 5 个模板仍 stop、router 意图命中/不抢边界）；`SMOKE_AGENT_RECIPE_OK recipes=6 steps=5 failed=1 kept=2 review_steps=5`，并校验流程下拉 UI。
 
 ## 8. 交互形态（摘要）
 
@@ -376,7 +407,7 @@ EVAL_AGENT_OK accuracy=1.00 tools=1.00 refused=1.00
 
 说明：联调/同步工具尚未注册，评估集把这两类记为 `tool: null`，规则层必须明确说“暂不支持”，不能误落到 `search_components`；歧义用例同样要求不调用工具并追问。未知位号 `QF99` 保留给 `update_component` 在工具层返回 `NOT_PLACED`，路由不得猜测或替换成相邻位号。
 
-**任务级评测（末态断言）**：上面这套只验「判得对不对」，判 100% 也可能把机器做错。`desktop/scripts/eval-tasks.mjs` 是新的一层——在 `mkdtemp` 出来的临时 userData 里，用**真实 CommandBus + AgentTools** 按固定工具序列执行（不调模型、不联网、不开 Electron），然后断言磁盘末态：机型 config 的执行机构、整机零件数、PLC 预检与 zip、机型库入库/加载/导出/导入往返、rest/lift/sweep 三态干涉数字、截图真伪、大结果外置与分批回取、跨会话记忆与脱敏、计划预算与续跑、写后验证挂回执。唯一的替身是渲染层桥（`applyMachineConfig` / `getPlcGenConfig` / `getProjectContext` / BOM 追加 / PLC 标记），落盘、几何、预检、打包、分片、记忆、预算全部跑真代码；`t08`/`t10` 额外用真 `AgentSession` + 剧本固定的假 LLM（只发一条工具调用，不发网络请求），因为「写事实进记忆」和「挂验证结论」本来就发生在会话层。
+**任务级评测（末态断言）**：上面这套只验「判得对不对」，判 100% 也可能把机器做错。`desktop/scripts/eval-tasks.mjs` 是新的一层——在 `mkdtemp` 出来的临时 userData 里，用**真实 CommandBus + AgentTools** 按固定工具序列执行（不调模型、不联网、不开 Electron），然后断言磁盘末态：机型 config 的执行机构、整机零件数、PLC 预检与 zip、机型库入库/加载/导出/导入往返、rest/lift/sweep 三态干涉数字、截图真伪、大结果外置与分批回取、跨会话记忆与脱敏、计划预算与续跑、写后验证挂回执、设计评审结论（`t11`：真跑 5 步 + 汇总 `verdict` / `items`，并断言证据带数字、建议指名工具、无空话）。唯一的替身是渲染层桥（`applyMachineConfig` / `getPlcGenConfig` / `getProjectContext` / BOM 追加 / PLC 标记；`t11` 额外给 `getBom` 与 `getElecDocument` 喂真数据、挂内置价格簿），落盘、几何、预检、打包、分片、记忆、预算全部跑真代码；`t08`/`t10` 额外用真 `AgentSession` + 剧本固定的假 LLM（只发一条工具调用，不发网络请求），因为「写事实进记忆」和「挂验证结论」本来就发生在会话层。
 
 ```bash
 npm run eval:tasks

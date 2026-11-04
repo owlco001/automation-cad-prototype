@@ -8,6 +8,9 @@
  * - 纯函数，无 IO、无 DOM、无 Electron 依赖，可直接单测；
  * - 只做「意图分类 + 工具选择」，不执行工具；
  * - 写工具一律标 `readOnly: false`，离线通道只执行 `readOnly: true` 的计划。
+ * - 多工具一次跑完的「流程配方」不进 `ToolPlan`：`matchRecipeIntent()` 把
+ *   「帮我把这台机器评审一遍 / 这台机能不能出图 / 这台机器有没有问题」指到
+ *   `review-design` 配方（`recipes.ts` + 汇总器 `design-review.ts`），由侧栏流程面板执行。
  */
 
 import { extractPlacementSpec, isPlacementInstruction } from './placement.ts';
@@ -228,6 +231,48 @@ export function isMachineRepairRequest(text: string): boolean {
   if (repairVerb && gapAnchor) return true;
   const missing = /(?:缺|少)[^。；;\n]{0,8}(?:点位|传感器|到位检测|急停|安全回路|安全门|光栅)/.test(value);
   return missing && /(?:plc|预检|回路|方案)/i.test(value);
+}
+
+/** 设计评审配方 id（`recipes.ts` 第 6 个模板）。 */
+export const DESIGN_REVIEW_RECIPE_ID = 'review-design';
+
+/** 「评审」动作词：一次看完整机，而不是查单个工具。 */
+const REVIEW_VERB = /(?:评审|评估|体检|审一遍|过一遍|把把关|全面检查|整机检查|整体检查)/;
+/** 评审对象词：机器/整机/方案/这台… */
+const REVIEW_TARGET = /(?:机器|机台|整机|设备|图纸|设计|方案|这台|这机)/;
+/** 机器类锚点：单独出现「有没有问题 / 能不能出图」时必须有它，否则不抢别的意图。 */
+const MACHINE_ANCHOR = /(?:机器|机台|整机|设备|这台|这机)/;
+/** 出图/交付可行性质问：「这台机能不能出图」。 */
+const DELIVERY_QUESTION =
+  /(?:(?:能不能|能否|可不可以|是否可以|是否).{0,8}(?:出图|出图纸|交付|下单|发图|投产))|(?:(?:出图|交付).{0,4}(?:吗|没|没有))/;
+/** 有没有毛病：「这台机器有没有问题」。 */
+const PROBLEM_QUESTION = /(?:有没有(?:问题|毛病|风险|坑)|有什么(?:问题|风险|毛病))/;
+
+/**
+ * 设计评审请求：用户要的是「帮我把这台机器评审一遍」，不是逐个工具问答。
+ *
+ * 边界（刻意与相邻意图区分，避免抢单工具计划）：
+ * - 「机型方案有没有问题 / 校验机型方案」→ 仍归 `isMachineValidateRequest`（只查结构与绑定，单工具）；
+ *   这里只在出现「机器/整机/这台」这类整机锚点、或明确的评审动作词时才命中。
+ * - 「成本评估 / 电气评估」这类单域说法不命中（没有整机对象词）。
+ */
+export function isDesignReviewRequest(text: string): boolean {
+  const value = (text ?? '').trim();
+  if (!value) return false;
+  if (isOffDomainTopic(value)) return false;
+  if (REVIEW_VERB.test(value) && REVIEW_TARGET.test(value)) return true;
+  if (DELIVERY_QUESTION.test(value) && MACHINE_ANCHOR.test(value)) return true;
+  if (PROBLEM_QUESTION.test(value) && MACHINE_ANCHOR.test(value)) return true;
+  return false;
+}
+
+/**
+ * 意图 → 流程配方。目前只有「设计评审」一条：它要串 5 个只读工具 + 1 个纯函数汇总，
+ * 落在 `ToolPlan`（单工具）之外，所以由调用方（侧栏输入）按本函数切到流程面板并启动。
+ * 未命中返回 null，调用方继续走 `planTool` 的单工具通道。
+ */
+export function matchRecipeIntent(text: string): string | null {
+  return isDesignReviewRequest(text) ? DESIGN_REVIEW_RECIPE_ID : null;
 }
 
 /** 规则分类：取分最高者，同分按写操作优先，全 0 判为超纲。 */

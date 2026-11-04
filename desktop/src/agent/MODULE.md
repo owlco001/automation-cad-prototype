@@ -29,7 +29,8 @@ tools.ts（AgentTools + 36 个 AgentTool；只读 18 / 写 18；含只读 `sugge
  ├─ thread.ts      → ThreadState / 工程指纹 / completedSteps / pendingConfirm / runPlan 续跑
  │    ├─ router.ts  → 离线规则意图路由（7 类 + 只读工具计划）
  │    ├─ planner.ts → 多步规划 plan() + 顺序执行 executePlan()（P7-C）
- │    ├─ recipes.ts → 5 个流程模板 + runRecipe 前置条件/跳过/逐次确认/失败报告（P7-I）
+ │    ├─ recipes.ts → 6 个流程模板 + runRecipe 前置条件/跳过/逐次确认/失败报告/collect 收集（P7-I）
+ │    ├─ design-review.ts → 设计评审汇总器（纯函数）：5 步结果 → PASS/WARN/FAIL + 4 条带数字证据的条目
  │    ├─ repair.ts  → 模型脏输出纠错（围栏/解释/单引号/尾逗号/注释/类型转换/截断）（P7-J）
  │    ├─ retry.ts   → 失败重试提示与两条候选回落（P7-J）
  │    ├─ policy.ts  → 绕过确认意图识别 / 回复话术过滤 / 导出目标路径判定
@@ -200,9 +201,9 @@ xvfb-run -a -s "-screen 0 1920x1200x24" node_modules/.bin/electron . --no-sandbo
 `recipes.ts` 与 `planner.ts` 一样是无 IO 的共享模块，渲染层用它做预览，主进程用它执行，单测用注入执行器验证。
 
 ```ts
-RECIPES: Recipe[]  // 5 个：new-machine / plate-delivery / electrical-delivery / cost-review / full-package
-// Recipe = { id, title, summary, steps[], preconditions[], estimatedSeconds }
-// Step   = { id, title, tool, args, why }
+RECIPES: Recipe[]  // 6 个：new-machine / plate-delivery / electrical-delivery / cost-review / full-package / review-design
+// Recipe = { id, title, summary, steps[], preconditions[], estimatedSeconds, onError?, aggregate? }
+// Step   = { id, title, tool, args, why, critical? }
 // Precondition = { id, label, from, action, nonEmpty?, min? }
 
 runRecipe(recipeId, ctx, executor): Promise<RecipeRunResult>
@@ -221,18 +222,46 @@ runRecipe(recipeId, ctx, executor): Promise<RecipeRunResult>
 | `electrical-delivery` | 电气交付 | `run_electrical_check` → `get_project_context` → `verify_plc_program` → `run_plc_generate` → `export_files(pdf)` |
 | `cost-review` | 成本核对 | `get_bom` → `run_cost_report` → `export_cost_report(csv)` → `run_cost_report`（缺价件标注） |
 | `full-package` | 整包交付 | 导入 CAD、BOM、干涉、电气、成本 → `export_files(bom)` → `export_files(pdf)` → `run_plc_generate` |
+| `review-design` | 设计评审 | `get_project_context`（critical）→ `validate_machine_design` → `run_interference_check(states)` → `run_electrical_check` → `run_cost_report` → 汇总（`design-review.ts`，纯函数） |
 
 - **schema**：`validateRecipe` / `validateRecipes` 校验 id、标题、步骤 id/标题/工具/args/why、前置条件字段与 `estimatedSeconds`；工具名必须存在于 `DEFAULT_RECIPE_TOOL_NAMES`（或调用方传入的实时注册表名称）。
 - **占位符**：`resolveRecipeArgs(args, ctx)` 递归解析 `{from:'context.machine.name'}`、`{from:'context.bom.0.partId'}`，支持 `default` / `optional`；缺失返回点路径数组，执行时转为 `MISSING_CONTEXT` 并停止。
 - **前置条件**：`checkRecipePreconditions(recipe, ctx)` 支持字符串非空、数组非空与 `min`；失败返回 `code='PRECONDITION_FAILED'`，`missing` 是中文标签、`suggestions` 是建议动作，`results=[]` 且零工具调用。
 - **跳过与确认**：`skipSteps` 接受步骤 id / 工具名 / 1 基序号，`skipIndexes` 是 0 基；跳过的步骤标 `skipped:true`。写工具默认每步调用 `confirm()`；`rememberSameKind:true` 才在首个同类写操作后免问（UI 默认关）。没有确认回调时返回 `CONFIRMATION_REQUIRED`，绝不静默执行。
-- **失败与记录**：任一步 `ok:false` / 业务码 / 异常都会停止，`completed/kept` 保留成功步骤；`suggest` 生成中文建议，`report` 写明失败步骤、错误码、建议与已完成清单。每步 `elapsedMs`、总计 `totalMs` 由注入时钟记录。
+- **失败与记录**：`onError:'stop'`（缺省，5 个老模板）任一步 `ok:false` / 业务码 / 异常都会停止，`completed/kept` 保留成功步骤；`suggest` 生成中文建议，`report` 写明失败步骤、错误码、建议与已完成清单。`onError:'collect'`（`review-design`）失败只记录并继续，结束时 `ok:true` / `code:'COLLECTED_WITH_ERRORS'` / `stepFailures[]`；`step.critical:true` 的步骤（`get_project_context`）失败仍立即停。确认被拒一律立即停。
+- **汇总**：`aggregate:'design-review'` 时全部步骤跑完后调用 `runRecipeAggregator()`，结论写 `run.aggregate`，摘要拼进 `run.summary`，逐条证据拼进 `run.report` 与 Markdown 的「评审结论」段。每步 `elapsedMs`、总计 `totalMs` 由注入时钟记录。
 - **Markdown**：`recipeRunToMarkdown(result)` 输出模板、状态、耗时、步骤表、失败详情、已完成 / 已跳过与参数摘要，侧栏「导出本次执行记录」直接写 `.md`。
 
 IPC / UI：
 - `agent:recipe:execute` 接收 `{recipeId, context?, skipSteps?, rememberSameKind?}`，主进程再次走 `runRecipe`，写步骤弹「流程写操作确认」，审计 `source='recipe'`，进度事件 `source='recipe'` 复用 `agent:progress`；`agent:recipe:cancel` 中断当前流程。
-- 侧栏「流程」区：下拉 5 个模板、前置条件红/绿、步骤复选框、`开始` / `取消流程` / `导出本次执行记录`；执行中步骤 `…`，完成 `✓`，失败 `×`，跳过 `—`。
-- 冒烟：`SMOKE_AGENT_RECIPE_OK recipes=5 steps=5 failed=1 kept=2`；`SMOKE_AGENT_RECIPE_UI_OK recipes=5 steps=5`。
+- 侧栏「流程」区：下拉 6 个模板、前置条件红/绿、步骤复选框、`开始` / `取消流程` / `导出本次执行记录`；执行中步骤 `…`，完成 `✓`，失败 `×`，跳过 `—`。输入「帮我把这台机器评审一遍 / 这台机能不能出图 / 这台机器有没有问题」时 `router.ts#matchRecipeIntent()` 命中 `review-design`，面板自动切过去并开跑（5 步全只读，不弹确认）。
+- 冒烟：`SMOKE_AGENT_RECIPE_OK recipes=6 steps=5 failed=1 kept=2 review_steps=5`（额外断言评审模板 5 步 / `onError:'collect'` / `aggregate:'design-review'`）；`SMOKE_AGENT_RECIPE_UI_OK recipes=6 steps=5`。
+
+## 设计评审汇总器（`design-review.ts`，纯函数）
+
+`review-design` 配方的第 6 步。输入 5 份步骤结果，输出一份可交付结论；不调工具、不读文件、不看 DOM，渲染层 / 主进程 / 单测共用同一份实现。
+
+```ts
+summarizeDesignReview({ context?, structure?, interference?, electrical?, cost? }): DesignReview
+aggregateDesignReview(results: RecipeStepResult[]): DesignReview   // 按步骤 id 取数（工具名兜底）
+// → { verdict: 'PASS'|'WARN'|'FAIL',
+//     items: [{ area:'结构'|'干涉'|'电气'|'成本', status:'pass'|'warn'|'fail'|'na',
+//               title, evidence, suggestion }],
+//     summary }
+```
+
+判定与证据规则：
+
+- **verdict**：任一项 `fail` → `FAIL`；否则有 `warn` / `na` → `WARN`；全 `pass` → `PASS`（`verdictOf()`，无例外分支）。
+- **evidence 必须带数字**：结构 `issues N 条 / errors / warnings / 首个 code`；干涉 `rest|lift|sweep 各 hits 与 mm³`；电气 `过载（最大相电流）/ 压降（24V 余量，缺 PSU 额定则为 null）/ 断路器（额定 + 进线截面）`；成本 `缺价条数 / 明细行数 / 总价`。`evidenceHasNumber()` 判数字；没有数字的条目降级 `pass→warn`（`fail` 保留），`suggestion` 末尾加「需人工确认」。
+- **suggestion 必须指名动作**：`findHollowPhrase()` 拦「进一步检查 / 建议排查 / 酌情处理 / 注意观察」等空话；单测与 `t11` 都断言建议里出现真实工具名。
+- **干涉 `STATE_UNAVAILABLE`**（机型无顶升轴）→ `na`，证据写「states 可用 0/3 项」，`suggestion` 指出去 config 加 `turner-lift` 或只按 rest 放行。
+- **电气口径**：`run_electrical_check` 不计算线路压降，用 24V 母线余量作电压侧证据；`counts.error > 0` → fail，只有 warning → warn。
+- **成本口径**：缺价只 `warn`（报价会偏，但仍可出图）；`missing > 0` 时建议先补价格簿再 `export_cost_report`。
+- **失败步骤**：工具失败 → `fail`（错误码即证据，写「0 项数据（CODE：原因）」）；被跳过 → `na`；整项缺失（`undefined`）→ `warn`，不伪造 pass。
+
+单测：`test/agent/design-review.test.mjs` 16 条（PASS/FAIL/WARN、na 不致 FAIL、证据快照、数字缺失降级、建议指名工具且无空话、collect 续跑、critical 立即停、5 个老模板仍 stop、Markdown 记录、router 意图命中与不抢边界）。
+末态评测：`npm run eval:tasks` 的 `t11-design-review`（真跑 5 步 + 断言 `verdict` / `items` / 证据数字 / 建议工具名 / 无空话）。
 
 ## 离线路由 / 上下文 / 审计（P7-A）
 

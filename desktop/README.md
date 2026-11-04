@@ -83,7 +83,7 @@ stdio 本身是受信任的本机通道；MCP 进程只在代理写工具时读�
 - Windows：`%APPDATA%/AutomationCAD/agent-token`
 - Linux：`~/.config/AutomationCAD/agent-token`
 
-顶栏「智能体」面板提供对话、工具调用卡片、5 个可复用流程模板和模型设置（OpenAI 兼容 `baseUrl` / `model` / `apiKey` / 最大轮数），并显示服务地址、工具数与最近命令；不显示 token。模型配置保存在 `%APPDATA%/AutomationCAD/agent-llm.json`（权限 600），apiKey 在 UI 只回显掩码。写工具执行前会请求确认。
+顶栏「智能体」面板提供对话、工具调用卡片、6 个可复用流程模板和模型设置（OpenAI 兼容 `baseUrl` / `model` / `apiKey` / 最大轮数），并显示服务地址、工具数与最近命令；不显示 token。流程模板里的「设计评审」一次跑完结构/三态干涉/电气/成本，给出 `PASS` / `WARN` / `FAIL` 与带数字证据的结论（说「帮我把这台机器评审一遍」会自动切到它）。模型配置保存在 `%APPDATA%/AutomationCAD/agent-llm.json`（权限 600），apiKey 在 UI 只回显掩码。写工具执行前会请求确认。
 
 请求必须带 `Authorization: Bearer <token>`。示例：
 

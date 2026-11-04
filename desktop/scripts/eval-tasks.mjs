@@ -34,6 +34,8 @@ import { AgentSession } from '../src/agent/session.ts';
 import { AgentTools } from '../src/agent/tools.ts';
 import { createAgentCommandBus } from '../src/agent/commands.ts';
 import { collectAgentContext } from '../src/agent/context.ts';
+import { getRecipe, runRecipe } from '../src/agent/recipes.ts';
+import { evidenceHasNumber, findHollowPhrase, isDesignReview } from '../src/agent/design-review.ts';
 import { parseToolResultData } from '../src/agent/guard.ts';
 import { FileProjectMemory, projectMemoryPath } from '../src/agent/project-memory.ts';
 import { AgentThread, resumeRunPlan, runPlan } from '../src/agent/thread.ts';
@@ -74,12 +76,18 @@ const registry = { listParts: () => [] };
  *   markPlcGenerated       → PLC 建议区状态
  * 其它方法一律 ok:false，避免「以为调到了渲染层」的假通过。
  */
-function createHarness() {
+function createHarness(options = {}) {
   const root = mkdtempSync(join(tmpdir(), 'cad-task-eval-'));
   roots.push(root);
   const calls = [];
   /** 联调面板当前机型配置：真实应用里由 applyMachineConfig 写入、getPlcGenConfig 读出。 */
   let plcConfig = null;
+  /**
+   * t11 需要「成本/电气拿得到数据」：默认不提供（保持原有行为，getBom / getElecDocument
+   * 走 default 分支如实报错），只有显式传进来的用例才拿到真数据。
+   */
+  const bomRows = Array.isArray(options.bomRows) ? options.bomRows : null;
+  const elecDocument = options.elecDocument && typeof options.elecDocument === 'object' ? options.elecDocument : null;
   /**
    * 当前工程上下文：真实应用里由渲染层 getProjectContext 交回来，主进程再交给
    * collectAgentContext 算指纹。t08 的记忆分桶、t09 的续跑指纹都按它算，固定一份
@@ -108,6 +116,12 @@ function createHarness() {
           return { ok: true, removed: Array.isArray(args?.rows) ? args.rows.length : 0 };
         case 'markPlcGenerated':
           return { ok: true };
+        case 'getBom':
+          if (bomRows) return bomRows;
+          return { ok: false, message: '任务级评测未提供 BOM' };
+        case 'getElecDocument':
+          if (elecDocument) return elecDocument;
+          return { ok: false, message: '任务级评测未提供电气图纸' };
         default:
           return { ok: false, message: `任务级评测未接的渲染层方法：${method}` };
       }
@@ -116,7 +130,15 @@ function createHarness() {
   const bus = createAgentCommandBus(registry, bridge, {
     userDataRoot: root,
     exportsRoot: join(root, 'exports'),
-    now: FIXED_NOW
+    now: FIXED_NOW,
+    // 成本工具在主进程里靠这个读取器拿内置价格簿；只有显式开启的用例才挂（与真实 app 同源）。
+    ...(options.withPricebook === true
+      ? {
+        loadBuiltinPricebook: () => JSON.parse(
+          readFileSync(new URL('../../packs/builtin/pricebook-cn/pricebook.json', import.meta.url), 'utf8')
+        )
+      }
+      : {})
   });
   const tools = new AgentTools(registry, bus, { userDataRoot: root });
   return { root, projectContext, calls, bus, tools };
@@ -1036,6 +1058,131 @@ async function caseVerifyAttached() {
   return { ok: check.checks.every((item) => item.ok), checks: check.checks, turns, metrics };
 }
 
+/**
+ * t11：设计评审（第 6 个配方）——真实跑一次，末态断言汇总结论。
+ *
+ * 输入是真实落盘机型的 review-design 全链路：get_project_context → validate_machine_design
+ * → run_interference_check(states) → run_electrical_check → run_cost_report，5 步全真跑，
+ * 汇总器是纯函数。电气图纸故意带两处真缺陷（线号 101 重复、1.5mm² 配 16A 断路器），
+ * 用来证明三件事：
+ *   1) 评审能给 FAIL，且 FAIL 的理由是数字（error 条数），不是空话；
+ *   2) collect 策略：电气失败后成本照样跑完（后面的步骤结果真的存在）；
+ *   3) 汇总出的 4 条都带数字证据、建议都指名工具。
+ */
+async function caseDesignReview() {
+  const check = createChecker();
+  const h = createHarness({
+    withPricebook: true,
+    // 真实价格簿里的型号，让成本这一项能算出总价（缺价 0 条）
+    bomRows: [
+      { partId: 'D-M9B', name: '磁性开关', qty: 4, unit: '件' },
+      { partId: 'MHZ2-20D', name: '气爪', qty: 2, unit: '件' }
+    ],
+    elecDocument: {
+      ok: true,
+      source: { kind: 'sheet', name: 't11-评审图纸' },
+      document: {
+        // 同网络重复线号 → WIRE_NO_DUPLICATE（真实 error）
+        wires: [
+          { no: '101', net: 'N1', potential: '24V', from: 'QF1', to: 'KA1', sectionMm2: 1.5 },
+          { no: '101', net: 'N1', potential: '24V', from: 'QF1', to: 'KA2', sectionMm2: 1.5 }
+        ],
+        loads: [
+          { tag: 'M1', powerKw: 0.75, phase: '3P' },
+          { tag: 'M2', powerKw: 0.4, phase: 'L1' }
+        ],
+        // 16A 断路器配 1.5mm²（载流量 14A）→ WIRE_SECTION_UNDER / 断路器大于载流量
+        circuits: [{ wireNo: '101', currentA: 8, sectionMm2: 1.5, breakerA: 16 }],
+        options: { psuRatedA: 10 }
+      }
+    }
+  });
+  let turns = 0;
+
+  const design = await h.tools.call('design_machine', { brief: BRIEF_PV });
+  turns += 1;
+  if (!requireOk(check, 'design_machine 成功', design)) return { ok: false, checks: check.checks, turns };
+  const applied = await h.tools.call('apply_machine_design', { design: design.design });
+  turns += 1;
+  if (!requireOk(check, 'apply_machine_design 成功', applied)) return { ok: false, checks: check.checks, turns };
+
+  const recipe = getRecipe('review-design');
+  check.ok('配方存在且为 collect 策略', recipe?.onError === 'collect', {
+    id: recipe?.id,
+    onError: recipe?.onError,
+    aggregate: recipe?.aggregate
+  });
+
+  const run = await runRecipe('review-design', {}, {
+    execute: async (step) => {
+      const outcome = await h.tools.call(step.tool, step.args);
+      turns += 1;
+      return outcome;
+    },
+    now: () => Date.now()
+  });
+
+  // —— 末态 1：5 步都执行过（collect 不中断）——
+  const stepIds = run.results.map((item) => item.stepId);
+  check.eq('步骤顺序固定', stepIds, ['context', 'structure', 'interference', 'electrical', 'cost']);
+  check.eq('跑完整条流程（ok）', run.ok, true);
+  const structure = run.results.find((item) => item.stepId === 'structure');
+  const interference = run.results.find((item) => item.stepId === 'interference');
+  const electrical = run.results.find((item) => item.stepId === 'electrical');
+  const cost = run.results.find((item) => item.stepId === 'cost');
+  check.eq('结构校验 0 error', structure?.data?.summary?.errors, 0);
+  // run_electrical_check 的「有 error」是 findings 里的 error，不是工具失败（工具本身 ok:true）
+  check.eq('电气工具跑成功', electrical?.ok, true);
+  check.ge('电气 findings 抓到真缺陷（error ≥ 1）', electrical?.data?.counts?.error, 1);
+  check.eq('成本步骤成功（电气有 error 也不影响后面跑）', cost?.ok, true);
+  check.ge('成本总价是数字', cost?.data?.totals?.grand, 1);
+
+  // —— 末态 2：汇总结论 ——
+  const review = run.aggregate;
+  check.ok('run.aggregate 是评审结论', isDesignReview(review), short(review));
+  if (!isDesignReview(review)) return { ok: false, checks: check.checks, turns };
+
+  check.eq('items 数量 = 4', review.items.length, 4);
+  check.eq('四条区域固定', review.items.map((item) => item.area), ['结构', '干涉', '电气', '成本']);
+  const statuses = review.items.map((item) => item.status);
+  const expectedVerdict = statuses.includes('fail')
+    ? 'FAIL'
+    : statuses.some((status) => status === 'warn' || status === 'na') ? 'WARN' : 'PASS';
+  check.eq('verdict 符合规则（任一 fail → FAIL）', review.verdict, expectedVerdict);
+  check.eq('电气这一项判 fail', review.items.find((item) => item.area === '电气')?.status, 'fail');
+  // 干涉判定必须与三态真实 hits 对齐：无状态数据 → na；任一态 hits>0 → fail；否则 pass
+  const stateHits = ['rest', 'lift', 'sweep']
+    .map((name) => interference?.data?.states?.[name]?.hits)
+    .filter((value) => typeof value === 'number');
+  const expectedInterference = stateHits.length === 0
+    ? 'na'
+    : (stateHits.some((value) => value > 0) ? 'fail' : 'pass');
+  check.eq('干涉判定与三态 hits 一致', review.items.find((item) => item.area === '干涉')?.status, expectedInterference);
+
+  for (const item of review.items) {
+    check.ok(`${item.area} 的证据带数字`, evidenceHasNumber(item.evidence), item.evidence);
+    const toolHit = ['get_project_context', 'validate_machine_design', 'run_interference_check',
+      'run_electrical_check', 'run_cost_report', 'export_cost_report', 'run_plc_generate',
+      'place_component', 'update_component', 'apply_machine_design']
+      .some((name) => item.suggestion.includes(name));
+    check.ok(`${item.area} 的建议指名工具`, toolHit, item.suggestion);
+    check.eq(`${item.area} 的建议不含空话`, findHollowPhrase(item.suggestion), null);
+  }
+  check.eq('摘要不含「进一步检查」这类空话', findHollowPhrase(review.summary), null);
+  check.ok('摘要带结论与数字', /设计评审 (PASS|WARN|FAIL)/.test(review.summary) && /\d/.test(review.summary), review.summary);
+  check.ok('流程摘要带评审结论', /设计评审 (PASS|WARN|FAIL)/.test(run.summary), run.summary);
+
+  const metrics = [
+    `verdict=${review.verdict}`,
+    `items=${review.items.length}`,
+    `status=${review.items.map((item) => item.status).join(',')}`,
+    `elec_errors=${electrical?.data?.counts?.error ?? '?'}`,
+    `cost_grand=${cost?.data?.totals?.grand ?? '?'}`,
+    `steps=${run.results.length}`
+  ];
+  return { ok: check.checks.every((item) => item.ok), checks: check.checks, turns, metrics };
+}
+
 const CASES = [
   ['t01-conveyor-90', caseConveyor90],
   ['t02-repair-safety', caseRepairSafety],
@@ -1046,7 +1193,8 @@ const CASES = [
   ['t07-tool-result-offload', caseToolResultOffload],
   ['t08-project-memory', caseProjectMemory],
   ['t09-plan-budget-resume', casePlanBudgetResume],
-  ['t10-verify-attached', caseVerifyAttached]
+  ['t10-verify-attached', caseVerifyAttached],
+  ['t11-design-review', caseDesignReview]
 ];
 
 function printFailure(caseId, result) {

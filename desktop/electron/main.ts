@@ -3448,7 +3448,7 @@ function createWindow(): BrowserWindow {
           remember: boolean;
         };
         if (
-          recipeUi.error || recipeUi.options !== 5 || recipeUi.before !== 5 ||
+          recipeUi.error || recipeUi.options !== 6 || recipeUi.before !== 5 ||
           recipeUi.after !== 4 || !recipeUi.start || !recipeUi.exportButton ||
           recipeUi.preconditions !== 1 || !recipeUi.remember
         ) {
@@ -3678,7 +3678,7 @@ function createWindow(): BrowserWindow {
         }
         console.log(`SMOKE_AGENT_PLAN_OK steps=${planned.steps.length} confirm=${planConfirms}`);
 
-        // P7-I：流程模板执行——5 个模板、5 步流程、第 3 步注入失败、保留前 2 步。
+        // P7-I：流程模板执行——6 个模板、5 步流程、第 3 步注入失败、保留前 2 步。
         const recipeSmoke = await runRecipe('new-machine', {
           machine: { name: 'SF-2026-01' },
           cadPath: 'D:\\models\\smoke.step'
@@ -3692,9 +3692,15 @@ function createWindow(): BrowserWindow {
           }
         });
         const recipeFailed = recipeSmoke.results.filter((item) => !item.ok && !item.skipped).length;
+        // 第 6 个模板「设计评审」：5 步只读 + collect 策略 + 纯函数汇总器。
+        const reviewRecipe = RECIPES.find((recipe) => recipe.id === 'review-design');
         if (
-          RECIPES.length !== 5 ||
+          RECIPES.length !== 6 ||
           (RECIPES.find((recipe) => recipe.id === 'new-machine')?.steps.length ?? 0) !== 5 ||
+          !reviewRecipe ||
+          reviewRecipe.steps.length !== 5 ||
+          reviewRecipe.onError !== 'collect' ||
+          reviewRecipe.aggregate !== 'design-review' ||
           recipeSmoke.ok ||
           recipeFailed !== 1 ||
           recipeSmoke.kept.length !== 2
@@ -3702,6 +3708,8 @@ function createWindow(): BrowserWindow {
           console.error('SMOKE_FAIL agent_recipe', JSON.stringify({
             recipes: RECIPES.length,
             steps: (RECIPES.find((recipe) => recipe.id === 'new-machine')?.steps.length ?? 0),
+            reviewSteps: reviewRecipe?.steps.length ?? null,
+            reviewOnError: reviewRecipe?.onError ?? null,
             failed: recipeFailed,
             kept: recipeSmoke.kept.length,
             summary: recipeSmoke.summary
@@ -3709,7 +3717,7 @@ function createWindow(): BrowserWindow {
           setTimeout(() => app.exit(1), 100);
           return;
         }
-        console.log(`SMOKE_AGENT_RECIPE_OK recipes=${RECIPES.length} steps=${(RECIPES.find((recipe) => recipe.id === 'new-machine')?.steps.length ?? 0)} failed=${recipeFailed} kept=${recipeSmoke.kept.length}`);
+        console.log(`SMOKE_AGENT_RECIPE_OK recipes=${RECIPES.length} steps=${(RECIPES.find((recipe) => recipe.id === 'new-machine')?.steps.length ?? 0)} failed=${recipeFailed} kept=${recipeSmoke.kept.length} review_steps=${reviewRecipe.steps.length}`);
 
         // P7-A：离线规则路由 + 上下文裁剪 + 审计脱敏（无网络也必须是真实覆盖）
         const nlSamples = [

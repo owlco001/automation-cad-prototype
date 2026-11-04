@@ -47,7 +47,8 @@ import {
   type AdvisorProjectState,
   type AdvisorSuggestion
 } from './advisor.ts';
-import { READ_ONLY_TOOLS } from './router.ts';
+import { READ_ONLY_TOOLS, matchRecipeIntent } from './router.ts';
+import { isDesignReview } from './design-review.ts';
 import {
   AGENT_CONTINUE_ACTION,
   renderAgentTurnOutcome,
@@ -1345,8 +1346,10 @@ async function startRecipe(): Promise<void> {
     });
     recipeUi.result = result;
     recipeUi.feedback = result.summary;
-    recipeUi.tone = result.ok ? 'ok' : 'error';
-    if (!result.ok) chatFeedback(result.summary, true);
+    // collect 策略下「流程跑完」= ok，但评审结论可能是 FAIL：按结论上色，避免把 FAIL 显示成绿灯。
+    const reviewFailed = isDesignReview(result.aggregate) && result.aggregate.verdict === 'FAIL';
+    recipeUi.tone = result.ok && !reviewFailed ? 'ok' : 'error';
+    if (!result.ok || reviewFailed) chatFeedback(result.summary, true);
   } catch (error) {
     recipeUi.feedback = `流程执行失败：${errorMessage(error)}`;
     recipeUi.tone = 'error';
@@ -2134,6 +2137,15 @@ async function sendMessage(): Promise<void> {
   const text = input?.value.trim() ?? '';
   if (!text) return;
   if (input) input.value = '';
+  // 「帮我把这台机器评审一遍 / 这台机能不能出图 / 这台机器有没有问题」不是单个工具能答的：
+  // 切到 review-design 配方并直接开跑（5 步全只读，不弹确认），结果留在流程面板。
+  const recipeId = matchRecipeIntent(text);
+  if (recipeId && getRecipe(recipeId)) {
+    recipeUi.selectedId = recipeId;
+    renderRecipe();
+    await startRecipe();
+    return;
+  }
   await sendText(text);
 }
 

@@ -13,6 +13,7 @@ import { formatDuration, summarizeArguments } from './feedback.ts';
 import { suggestFailure } from './suggest.ts';
 import { resolveIterationBudget, type IterationBudget } from './iteration-budget.ts';
 import { autoVerifyTool, type ToolVerification, type VerificationChannel } from './verify.ts';
+import { describeDesignReview, isDesignReview, runRecipeAggregator, type DesignReview } from './design-review.ts';
 
 export interface RecipePlaceholder {
   from: string;
@@ -26,6 +27,11 @@ export interface RecipeStep {
   tool: string;
   args: Record<string, unknown>;
   why: string;
+  /**
+   * 关键步骤：失败时即使配方是 `onError:'collect'` 也立即停止。
+   * 用于「后面全无意义」的那一步（设计评审的 `get_project_context`：拿不到机型就没得评）。
+   */
+  critical?: boolean;
 }
 
 export interface RecipePrecondition {
@@ -48,6 +54,15 @@ export interface Recipe {
   steps: RecipeStep[];
   preconditions: RecipePrecondition[];
   estimatedSeconds: number;
+  /**
+   * 失败策略：
+   * - `'stop'`（缺省，现有 5 个配方）：某步失败即停，保留已完成步骤；
+   * - `'collect'`（设计评审）：某步失败只记录 `status/错误码/中文原因`，继续跑后续步骤，
+   *   一次看完。关键步骤（`step.critical`）失败仍立即停。
+   */
+  onError?: 'stop' | 'collect';
+  /** 汇总器 id（见 `design-review.ts#RECIPE_AGGREGATORS`）：全部步骤结束后调用，结果写 `run.aggregate`。 */
+  aggregate?: string;
 }
 
 export interface RecipeContext extends Record<string, unknown> {
@@ -207,6 +222,10 @@ export interface RecipeRunResult {
   pendingHint?: string;
   /** 预算停下时的 0 基续跑位置（= 第一个未执行步骤）。 */
   nextStepIndex?: number;
+  /** `onError:'collect'` 时收集到的失败步骤（按执行顺序，可能多条）；`'stop'` 配方为空数组/不出现。 */
+  stepFailures?: RecipeStepResult[];
+  /** 汇总器结论（`review-design` 为 `DesignReview`）；只有带 `aggregate` 的配方才有。 */
+  aggregate?: DesignReview | unknown;
 }
 
 export const DEFAULT_RECIPE_TOOL_NAMES: ReadonlySet<string> = new Set([
@@ -635,6 +654,57 @@ const RECIPES: Recipe[] = [
         why: '生成 11 个 PLC 文件并写入 exports/plc/（需确认；预检失败不落盘）。'
       }
     ]
+  },
+  {
+    id: 'review-design',
+    title: '设计评审',
+    // 一句话回答「这台机器能不能出图」：一次跑完 4 项检查，由 design-review.ts 汇总成 PASS/WARN/FAIL。
+    summary: '把当前机型从头到尾评一遍：结构校验、三态干涉、电气合规、成本缺价，一次看完并给出带数字证据的结论。',
+    // 评审的第一步就是取上下文，所以这里不再重复声明「机型」前置条件：
+    // 拿不到机型由第 1 步（critical）直接停下，避免同一个原因报两遍。
+    preconditions: [],
+    estimatedSeconds: 45,
+    // 评审的价值在「一次看完」：中间某步失败只记录，继续跑后续步骤。
+    onError: 'collect',
+    aggregate: 'design-review',
+    steps: [
+      {
+        id: 'context',
+        title: '取工程上下文',
+        tool: 'get_project_context',
+        args: {},
+        why: '拿当前机型、工位与 BOM 行数，作为后面 4 项检查的定位锚点；拿不到机型就没得评，直接停。',
+        critical: true
+      },
+      {
+        id: 'structure',
+        title: '结构校验',
+        tool: 'validate_machine_design',
+        args: {},
+        why: '与 apply_machine_design / run_plc_generate 同一份判定源，先看结构、点位唯一性、工位引用与传感器绑定。'
+      },
+      {
+        id: 'interference',
+        title: '三态干涉',
+        tool: 'run_interference_check',
+        args: { states: ['rest', 'lift', 'sweep'] },
+        why: '静态 / 顶升到位 / 逐步顶升三态各查一遍，避免「静态没事、动起来撞」；无顶升轴时记为 N/A，不算失败。'
+      },
+      {
+        id: 'electrical',
+        title: '电气合规',
+        tool: 'run_electrical_check',
+        args: {},
+        why: '校验线号、载流量、断路器配合与 24V 余量，取过载/压降/断路器三项实际值。'
+      },
+      {
+        id: 'cost',
+        title: '成本缺价',
+        tool: 'run_cost_report',
+        args: {},
+        why: '只取缺价条数与总价，不导出报表：报价能不能给，看这一项。'
+      }
+    ]
   }
 ];
 
@@ -647,7 +717,9 @@ const RECIPE_ALIASES: Record<string, string> = {
   'plate-layout-delivery': 'plate-delivery',
   'electrical': 'electrical-delivery',
   'cost': 'cost-review',
-  'full-delivery': 'full-package'
+  'full-delivery': 'full-package',
+  'review': 'review-design',
+  'design-review': 'review-design'
 };
 
 export function listRecipes(): Recipe[] {
@@ -903,6 +975,82 @@ function failedRun(
   };
 }
 
+/**
+ * `onError:'collect'` 的收尾：所有步骤都跑过了（含失败的那些）。
+ *
+ * 语义：`ok:true` 表示「流程跑完了」，不等于「每步都成功」——失败步骤留在
+ * `results` / `stepFailures` 里，最终结论由汇总器（`aggregate`）给出。
+ * 这与 `'stop'` 配方的 `failedRun` 刻意区分：那里 `ok:false` + `failedStep` 是「流程中断」。
+ */
+function collectRun(
+  recipe: Recipe,
+  runId: string,
+  totalMs: number,
+  results: RecipeStepResult[],
+  completed: RecipeStepResult[],
+  skipped: RecipeStepResult[],
+  failures: RecipeStepResult[]
+): RecipeRunResult {
+  for (const failure of failures) {
+    if (!failure.suggestion) {
+      const advice = suggestFailure({
+        code: failure.code,
+        ...(failure.message ? { message: failure.message } : {}),
+        tool: failure.tool,
+        args: failure.args ?? {}
+      });
+      failure.suggestion = advice.advice;
+    }
+  }
+  const failedText = failures.length > 0
+    ? failures.map((item) => `第 ${item.step} 步「${item.title}」（${item.tool}）${item.code}`
+      + `${item.code === 'STATE_UNAVAILABLE' ? '，评审记 N/A' : ''}`).join('、')
+    : '';
+  const summary = failures.length > 0
+    ? `流程「${recipe.title}」已跑完 ${results.length}/${recipe.steps.length} 步（一次看完）：${failures.length} 步失败——${failedText}；其余 ${completed.length} 步结果已保留。`
+    : `流程「${recipe.title}」已完成 ${completed.length}/${recipe.steps.length} 步；总耗时 ${formatDuration(totalMs)}。`;
+  const report = [
+    `流程「${recipe.title}」执行完毕（collect 策略：单步失败不中断）。`,
+    `步骤：${results.map((item) => `第 ${item.step} 步「${item.title}」（${item.tool}，${item.ok ? '成功' : `失败 ${item.code}`}${item.skipped ? '，跳过' : ''}）`).join('、') || '无'}`,
+    failedText ? `失败（未中断）：${failedText}` : '失败：无',
+    skipped.length > 0 ? `跳过：${skipped.map((item) => `第 ${item.step} 步「${item.title}」`).join('、')}` : '',
+    `总耗时：${formatDuration(totalMs)}`
+  ].filter(Boolean).join('\n');
+  return {
+    ok: true,
+    code: failures.length > 0 ? 'COLLECTED_WITH_ERRORS' : 'OK',
+    recipeId: recipe.id,
+    recipeTitle: recipe.title,
+    runId,
+    results,
+    completed,
+    kept: completed,
+    skipped,
+    stepFailures: failures,
+    totalMs,
+    summary,
+    report
+  };
+}
+
+/**
+ * 汇总接线：全部步骤跑完后调用配方声明的汇总器（纯函数，不调工具）。
+ * 结论同时写进 `aggregate` 字段与 `summary` / `report`，UI 与导出的 Markdown 都不用改渲染逻辑。
+ */
+function attachAggregate(recipe: Recipe, output: RecipeRunResult): RecipeRunResult {
+  if (!recipe.aggregate || output.ok !== true) return output;
+  const aggregate = runRecipeAggregator(recipe.aggregate, output.results);
+  if (aggregate === undefined) return output;
+  if (!isDesignReview(aggregate)) return { ...output, aggregate };
+  const review: DesignReview = aggregate;
+  return {
+    ...output,
+    aggregate: review,
+    summary: `${review.summary}｜${output.summary}`,
+    report: `${output.report}\n\n## 评审结论\n\n${describeDesignReview(review)}`
+  };
+}
+
 function successRun(
   recipe: Recipe,
   runId: string,
@@ -1051,6 +1199,7 @@ export async function runRecipe(
   const results: RecipeStepResult[] = [];
   const completed: RecipeStepResult[] = [];
   const skipped: RecipeStepResult[] = [];
+  const failures: RecipeStepResult[] = [];
   const suppressed = new Set<string>();
   const emit = (event: RecipeProgressEvent): void => {
     try {
@@ -1156,6 +1305,10 @@ export async function runRecipe(
         code: 'MISSING_CONTEXT',
         ...(failed.message ? { message: failed.message } : {})
       });
+      if (recipe.onError === 'collect' && step.critical !== true) {
+        failures.push(failed);
+        continue;
+      }
       return fail(failed, 'MISSING_CONTEXT');
     }
 
@@ -1291,12 +1444,24 @@ export async function runRecipe(
       ...(result.message ? { message: result.message } : {})
     });
     if (!outcome.ok) {
+      // collect 策略：非关键步骤失败只记录（错误码 + 中文原因），继续跑后续步骤——评审要一次看完。
+      // 关键步骤（如 get_project_context：拿不到机型后面全无意义）与 'stop' 配方仍立即停。
+      if (recipe.onError === 'collect' && step.critical !== true) {
+        failures.push(result);
+        continue;
+      }
       return fail(result, outcome.code);
     }
     completed.push(result);
   }
 
-  return withRunMeta(successRun(recipe, runId, elapsedNow(), results, completed, skipped));
+  const totalMs = elapsedNow();
+  return withRunMeta(attachAggregate(
+    recipe,
+    failures.length > 0
+      ? collectRun(recipe, runId, totalMs, results, completed, skipped, failures)
+      : successRun(recipe, runId, totalMs, results, completed, skipped)
+  ));
 }
 
 function statusText(result: RecipeStepResult): string {
@@ -1334,6 +1499,16 @@ export function recipeRunToMarkdown(result: RecipeRunResult): string {
     lines.push(`- 错误码：${result.errorCode ?? result.failedStep.code}`);
     if (result.failedStep.message) lines.push(`- 错误信息：${result.failedStep.message}`);
     if (result.suggestion) lines.push(`- 建议：${result.suggestion}`);
+    lines.push('');
+  }
+  if (isDesignReview(result.aggregate)) {
+    lines.push('## 评审结论', '');
+    lines.push(`- 结论：**${result.aggregate.verdict}**`);
+    lines.push(`- 摘要：${result.aggregate.summary}`);
+    lines.push('', '| 区域 | 状态 | 证据 | 下一步 |', '|---|---|---|---|');
+    for (const item of result.aggregate.items) {
+      lines.push(`| ${item.area} | ${item.status} | ${item.evidence} | ${item.suggestion} |`);
+    }
     lines.push('');
   }
   lines.push('## 已完成清单', '');
