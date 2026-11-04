@@ -14,11 +14,12 @@
 - 评估：`npm run eval:agent` **127/127** + `npm run eval:tasks` **12/12**（任务级末态断言，含 STEP 真实性，已进 CI 门禁）；工具注册表 **38 个（只读 19 / 写 19）**。
 - 数据包：`npm run packs:validate` → **10 包 / 617 条 / 612 唯一型号 / 0 错误 0 警告**。
 - 离线知识索引：`npm run kb:build` → `docs=13 chunks=361`，约 378 KB（≈94.5%，余量约 22 KB，未截断；实测 385,723 B）——字节数会随文档重建变动，这里只给近似值，精确值由 `npm run kb:build` 输出。
-- 最近发布：**v0.6.4 未签名预览包** `AutomationCAD-Setup-0.6.4.exe`（154,345,807 B / 147.2 MB，
-  sha256 `fd3cf2fc69453ce2345e5a8dbda22a05eb62f3d3cb1c56662e247998a6cd2b74`），来自 `main@0978d81`
-  的 windows-build run 41743790161；以 **pre-release** 发布，只含 exe（不含 `latest.yml` / `.blockmap`），
-  匿名下载已验 200 / 206。打包自证：`ASSERT_1_QT_OK files=76`、`ASSERT_3_VERSION_OK version=0.6.4`、
-  `ASSERT_4_SIZE_OK bytes=154345807`。更新通道未做真实签名与跨版本升级验收。
+- 最近发布：**v0.6.5 未签名预览包** `AutomationCAD-Setup-0.6.5.exe`（154,246,911 B / 147.1 MB，
+  sha256 `c4f1031fda23e6829d60fb8f1102d9c730d084b656e4b05217cf87336b558c90`），来自 `main@227e4a0`
+  的 windows-build run 41858479958；以 **pre-release** 发布，只含 exe（不含 `latest.yml` / `.blockmap`），
+  匿名下载已验 200 / 206。打包自证：`ASSERT_1_QT_OK files=76`、`ASSERT_2_PIPELINE_OK bytes=454444`、
+  `ASSERT_3_VERSION_OK version=0.6.5`、`ASSERT_4_SIZE_OK bytes=154246911`、`DUAL_PACKAGE_OK qt_files=76`。
+  更新通道未做真实签名与跨版本升级验收。
 
 
 ## 夜间迭代（2026-10-28 夜）
