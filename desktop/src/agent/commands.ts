@@ -86,6 +86,7 @@ import {
   saveToLibrary,
   serializeMachineLibraryError
 } from '../machine/library.ts';
+import { downloadMachine, listMachineSources } from '../machine/library-remote.ts';
 import { AGENT_COMMAND_MODULES, moduleDisabledResult, moduleIsEnabled, type ModuleEnabledReader } from '../modules/tool-gates.ts';
 import { COST_ESTIMATION_MODULE_ID } from '../modules/cost-estimation-gate.ts';
 import { PARAMETRIC_IMPORT_MODULE_ID, PARAMETRIC_MODULE_DISABLED_MESSAGE } from '../modules/parametric-gate.ts';
@@ -2337,11 +2338,17 @@ function registerCostExportCommand(bus: CommandBus): void {
 }
 
 /**
- * 机型库四个命令（list / save / load / export）。
+ * 机型库六个命令（list / save / load / export / 远程来源 / 远程下载）。
  *
  * 统一出口：任何 `MachineLibraryError` 都折成 `{code, message, hint}`，
  * 由 `serializeMachineLibraryError` 提供 hint；`LIBRARY_EXISTS` 只说「要覆盖得显式传
  * overwrite: true」，命令层绝不替用户决定覆盖。
+ *
+ * 远程下载的两条硬约束也在这里守：
+ * - `download_machine_from_source` **不接受** overwrite（工具层根本没有这个参数），
+ *   同名一律 LIBRARY_EXISTS，覆盖只能由人在界面里先删再下；
+ * - 下载的字节只走 `downloadMachine`（限协议/限大小/比 SHA-256），再交给 importPackage，
+ *   命令层不自己解包，也不把下载内容当成可执行入口。
  */
 function registerMachineLibraryCommands(bus: CommandBus): void {
   const userDataRoot = (ctx: CommandContext, action: string): string => {
@@ -2528,6 +2535,90 @@ function registerMachineLibraryCommands(bus: CommandBus): void {
             path,
             bytes: bytes.byteLength,
             sha256: createHash('sha256').update(bytes).digest('hex')
+          }
+        };
+      } catch (error) {
+        return asFailure(error);
+      }
+    }
+  });
+
+  // 远程来源：只读。没配置 sources.json 时返回空清单（不报错、不预置任何外网地址）。
+  bus.register({
+    name: 'list_machine_sources',
+    async run(args, ctx) {
+      rejectUnknown(args, []);
+      const root = userDataRoot(ctx, '读取机型库来源');
+      try {
+        const result = await listMachineSources(root);
+        return {
+          ok: true,
+          data: {
+            ...listResult(result.machines.map((machine) => ({
+              sourceId: machine.sourceId,
+              sourceName: machine.sourceName,
+              id: machine.id,
+              name: machine.name,
+              version: machine.version,
+              sizeBytes: machine.sizeBytes,
+              sha256: machine.sha256,
+              ...(machine.minAppVersion ? { minAppVersion: machine.minAppVersion } : {}),
+              ...(machine.tags ? { tags: machine.tags } : {}),
+              stale: machine.stale,
+              installed: machine.installed
+            }))),
+            sources: result.sources.map((source) => ({
+              id: source.id,
+              name: source.name,
+              url: source.url,
+              enabled: source.enabled,
+              allowFile: source.allowFile,
+              online: source.online,
+              stale: source.stale,
+              machineCount: source.machineCount,
+              fetchedAt: source.fetchedAt,
+              ...(source.errorCode ? { errorCode: source.errorCode } : {}),
+              ...(source.errorMessage ? { errorMessage: source.errorMessage } : {})
+            })),
+            stale: result.stale
+          }
+        };
+      } catch (error) {
+        return asFailure(error);
+      }
+    }
+  });
+
+  // 远程下载：写工具（需确认）。不接受 overwrite —— 同名只能由人先删再下。
+  bus.register({
+    name: 'download_machine_from_source',
+    async run(args, ctx) {
+      rejectUnknown(args, ['sourceId', 'machineId']);
+      const root = userDataRoot(ctx, '下载远程机型');
+      const sourceId = optionalString(args, 'sourceId');
+      if (!sourceId) throw new CommandFailure('INVALID_ARGUMENT', '缺少必填参数：sourceId');
+      const machineId = optionalString(args, 'machineId');
+      if (!machineId) throw new CommandFailure('INVALID_ARGUMENT', '缺少必填参数：machineId');
+      try {
+        const clock = ctx.now;
+        const result = await downloadMachine(root, sourceId, machineId, {
+          ...(clock ? { now: () => clock().getTime() } : {})
+        });
+        return {
+          ok: true,
+          data: {
+            id: result.entry.id,
+            name: result.entry.name,
+            version: result.entry.version,
+            sizeBytes: result.entry.sizeBytes,
+            source: result.entry.source,
+            sourceId: result.source.id,
+            sourceName: result.source.name,
+            bytes: result.bytes,
+            sha256: result.sha256,
+            stale: result.stale,
+            attempts: result.attempts,
+            overwritten: result.overwritten
           }
         };
       } catch (error) {

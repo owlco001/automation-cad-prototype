@@ -5,7 +5,7 @@
 ## 两个入口，一份注册表
 
 ```
-tools.ts（AgentTools + 36 个 AgentTool；只读 18 / 写 18；含只读 `suggest_kinematics`、`get_render_stats`、`list_machine_library`、`validate_machine_design`、`capture_view`、`get_agent_memory`、`get_tool_result`、`get_recent_audit`；含只读 `design_machine` 与写工具 `apply_machine_design`、`repair_plc_config`、`clear_agent_memory`；机型库 `save_machine_to_library` / `load_machine_from_library` / `export_machine_package`）
+tools.ts（AgentTools + 38 个 AgentTool；只读 19 / 写 19；含只读 `suggest_kinematics`、`get_render_stats`、`list_machine_library`、`list_machine_sources`、`validate_machine_design`、`capture_view`、`get_agent_memory`、`get_tool_result`、`get_recent_audit`；含只读 `design_machine` 与写工具 `apply_machine_design`、`repair_plc_config`、`clear_agent_memory`；机型库 `save_machine_to_library` / `load_machine_from_library` / `export_machine_package`；远程机型库 `download_machine_from_source`（写，需确认，无 overwrite 参数））
  ├─ kb/index.ts → 构建期分块 + kb.json（≤400 KB，标题 hash）
  ├─ kb/search.ts → 纯函数 BM25（中文 2-gram + 英文词，top 3 / ≤2 KB）
  ├─ rpc.ts        → HTTP JSON-RPC，127.0.0.1:7420，Bearer token
@@ -84,6 +84,8 @@ interface Bridge {
 | `save_machine_to_library` | `id? / name? / version? / overwrite?` | `save_machine_to_library` | ✅ 写：打包 `.machine.zip` 入库，缺省取当前 active 机型；同名返回 `LIBRARY_EXISTS` + `hint`，绝不自动覆盖 |
 | `load_machine_from_library` | `id` | `load_machine_from_library` | ✅ 写：写回 `machine/<id>.json` + `active.json`，`bom.csv` 回填 `bomDraft.items`，并 `applyMachineConfig` 刷 3D |
 | `export_machine_package` | `id / targetPath?` | `export_machine_package` | ✅ 写：默认 `userData/exports/machines/<id>.machine.zip`，返回 `{path,bytes,sha256}`；targetPath 必须在 exports 下 |
+| `list_machine_sources` | 无 | `list_machine_sources` | ✅ 只读：`{items:[{sourceId,sourceName,id,name,version,sizeBytes,sha256,stale,installed}],total,sources:[…],stale}`；`sources.json` 默认空；只认公网 https（file 需 `allowFile:true`）；目录 10 分钟缓存，失败回退旧缓存标 `stale:true` |
+| `download_machine_from_source` | `sourceId / machineId` | `download_machine_from_source` | ✅ 写：流式下载 >50 MiB 立即中止，SHA-256 比对后交给 `importPackage`；连接 5 s / 总时长 60 s、网络错误重试 1 次；**无 overwrite 参数**，同名 `LIBRARY_EXISTS` |
 | `validate_machine_design` | `config?` | `validate_machine_design` | ✅ 只读：`{ok,issues:[{code,path,message,hint}],summary:{errors,warnings}}`；缺省校验当前 active 机型，可传 config 或整份方案；与落盘/预检同一判定源，**不抛错**（方案有问题返回 `ok:false`） |
 | `repair_plc_config` | `dryRun?`（默认 true） | `repair_plc_config` | ✅ 写：按 `planPlcGaps` 补到位检测与急停/安全门回路；dryRun 只出 `willAdd` 不写盘，`dryRun=false` 写回 `machine/<id>.json` + `applyMachineConfig` 并让预检归零；写前 `assertDesign`；已补齐返回空清单不报错 |
 | `import_cad` | `path` | `import_cad` | ✅ 可用 |
@@ -591,7 +593,7 @@ IPC 与 UI：
 
 - `agent-llm.json` 保存 `{baseUrl,apiKey,model,maxIterations}`，POSIX 权限 600。默认 `https://api.openai.com/v1`、`gpt-4o-mini`、6 轮。
 - UI 读取时 apiKey 只返回掩码（如 `sk-****abcd`）；保存时掩码/空值保留原密钥。
-- `llm.ts` 以 OpenAI 兼容格式发送 36 工具 JSON Schema，60 秒超时；非 2xx 返回含状态码的中文错误。
+- `llm.ts` 以 OpenAI 兼容格式发送 38 工具 JSON Schema，60 秒超时；非 2xx 返回含状态码的中文错误。
 - `session.ts` 注入 `{llm,bus,confirmWrite}`：工具结果以 `role:'tool'` 回灌，先经 `serializeToolResult` 裁剪、再由 `guard.ts` 包成不可信数据块，失败不中断；历史只保留最近 20 条；超轮返回「已达到最大工具调用轮数（N），请缩小任务范围」。
 - `import_cad`、`insert_component`、`place_component`、`update_component`、`remove_component`、`run_plc_generate`、`repair_plc_config`、`export_files`、`export_cost_report`、`save_machine_to_library`、`load_machine_from_library`、`export_machine_package`、`undo_last` 执行前由主进程弹出确认；拒绝时回灌 `USER_DENIED`。
 - 面板包含对话消息流/工具卡片、模型设置（apiKey 为 password）与测试连接（ping，`max_tokens=8`）。

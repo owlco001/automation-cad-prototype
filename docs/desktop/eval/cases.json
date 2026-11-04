@@ -1682,6 +1682,37 @@
     "note": "导出 .machine.zip 到 userData/exports/machines/，路径越界要拒绝。"
   },
   {
+    "id": "ml05",
+    "input": "看看机型库有哪些远程来源、目录里能下载什么",
+    "intent": "query",
+    "expect": {
+      "tool": "list_machine_sources",
+      "argsContains": {}
+    },
+    "tags": [
+      "machine-library",
+      "machine-library-remote"
+    ],
+    "note": "只读列远程来源与目录：未配置 sources.json 时空清单、不报错；来源连通性逐条给 online/errorCode。"
+  },
+  {
+    "id": "ml06",
+    "input": "从机型库的远程来源 corp 下载机型 design-screw-3st 装进本机库",
+    "intent": "modify",
+    "expect": {
+      "tool": "download_machine_from_source",
+      "argsContains": {
+        "sourceId": "corp",
+        "machineId": "design-screw-3st"
+      }
+    },
+    "tags": [
+      "machine-library",
+      "machine-library-remote"
+    ],
+    "note": "远程下载：限 https/50 MiB、比对 SHA-256 后走同一套严格导入；同名 LIBRARY_EXISTS 且工具没有 overwrite 参数。"
+  },
+  {
     "id": "pc01",
     "input": "检查当前机型方案是否合法",
     "intent": "query",

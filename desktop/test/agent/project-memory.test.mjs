@@ -327,14 +327,20 @@ test('会话把成功的机型入库记成事实，失败不记', async () => {
   assert.deepEqual(memory.entries(fingerprintOf({ machine: { name: '别的机型' }, plate: { placed: 0 }, bomRows: 0 })), []);
 });
 
-test('工具注册表：36 个工具，get_agent_memory 只读 / clear_agent_memory 需确认', () => {
+test('工具注册表：38 个工具，get_agent_memory 只读 / clear_agent_memory 需确认', () => {
   const names = new AgentTools({ listParts: () => [] }).list().map((tool) => tool.name);
-  assert.equal(names.length, 36);
+  assert.equal(names.length, 38);
   assert.ok(names.includes('get_agent_memory'));
   assert.ok(names.includes('clear_agent_memory'));
+  assert.ok(names.includes('list_machine_sources'));
+  assert.ok(names.includes('download_machine_from_source'));
   assert.ok(READ_ONLY_TOOLS.has('get_agent_memory'));
   assert.ok(!READ_ONLY_TOOLS.has('clear_agent_memory'));
   assert.ok(WRITE_TOOLS.has('clear_agent_memory'));
-  assert.equal(READ_ONLY_TOOLS.size, 18);
-  assert.equal(WRITE_TOOLS.size, 18);
+  // 远程来源只读、远程下载必须确认（写工具没有 overwrite 参数）
+  assert.ok(READ_ONLY_TOOLS.has('list_machine_sources'));
+  assert.ok(WRITE_TOOLS.has('download_machine_from_source'));
+  assert.ok(!READ_ONLY_TOOLS.has('download_machine_from_source'));
+  assert.equal(READ_ONLY_TOOLS.size, 19);
+  assert.equal(WRITE_TOOLS.size, 19);
 });

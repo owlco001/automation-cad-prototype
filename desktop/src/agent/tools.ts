@@ -375,6 +375,22 @@ const EXPORT_MACHINE_PACKAGE_SCHEMA = {
   additionalProperties: false
 };
 
+const LIST_MACHINE_SOURCES_SCHEMA = {
+  type: 'object',
+  properties: {},
+  additionalProperties: false
+};
+
+const DOWNLOAD_MACHINE_FROM_SOURCE_SCHEMA = {
+  type: 'object',
+  properties: {
+    sourceId: { type: 'string', description: '来源 id（userData/machine-library/sources.json 里的 sources[].id，先用 list_machine_sources 查）' },
+    machineId: { type: 'string', description: '目录里的机型 id（与来源一起唯一确定一台机器，必须先 list_machine_sources 查）' }
+  },
+  required: ['sourceId', 'machineId'],
+  additionalProperties: false
+};
+
 const SEARCH_DOCS_SCHEMA = {
   type: 'object',
   properties: {
@@ -1051,6 +1067,32 @@ export class AgentTools {
           id,
           ...(getString(args.targetPath) ? { targetPath: getString(args.targetPath) } : {})
         });
+        return result ? commandSuccess(result) : this.unavailable();
+      }
+    });
+
+    this.add({
+      name: 'list_machine_sources',
+      description:
+        '只读列机型库的远程来源（userData/machine-library/sources.json）与各自目录里的可下载机型：来源的在线状态（online/stale/errorCode）、机型 id/名称/版本/字节数/SHA-256/是否已在本机库（installed）。未配置来源时返回 sources=[]、items=[]，不报错；下载前先用它查 sourceId 与 machineId。只放行 https 目录源（本机开发可用 file + allowFile），目录缓存 10 分钟，拉不到时回退旧缓存并标 stale:true。',
+      inputSchema: LIST_MACHINE_SOURCES_SCHEMA,
+      handler: async () => {
+        const result = await this.execute('list_machine_sources', {});
+        return result ? commandSuccess(result) : this.unavailable();
+      }
+    });
+
+    this.add({
+      name: 'download_machine_from_source',
+      description:
+        '从远程来源下载一台机型并入库：流式下载（>50 MiB 立即中止）、边下边算 SHA-256 并与目录声明比对，通过后再走与本地导入同一套严格校验（条目白名单/路径穿越/原子落盘）。同名机型已存在时返回 LIBRARY_EXISTS 且**没有 overwrite 参数**（绝不自动覆盖，需先删除旧机型）。网络错误只重试 1 次（连接 5s / 总时长 60s），校验错误不重试。需要用户确认。',
+      inputSchema: DOWNLOAD_MACHINE_FROM_SOURCE_SCHEMA,
+      handler: async (args) => {
+        const sourceId = getString(args.sourceId);
+        if (!sourceId) return { ok: false, code: 'INVALID_ARGUMENT', message: '缺少必填参数：sourceId' };
+        const machineId = getString(args.machineId);
+        if (!machineId) return { ok: false, code: 'INVALID_ARGUMENT', message: '缺少必填参数：machineId' };
+        const result = await this.execute('download_machine_from_source', { sourceId, machineId });
         return result ? commandSuccess(result) : this.unavailable();
       }
     });

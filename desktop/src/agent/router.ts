@@ -318,6 +318,10 @@ export function routeIntent(text: string): IntentMatch {
   // 机型库的存取/列举/导出：以「机型库」为锚点直接给意图，别让「保存/列出」这类
   // 词被通用规则判成超纲（planTool 侧另有 planMachineLibraryRequest 负责选工具）。
   if (MACHINE_LIBRARY_NOUN.test(normalized) && !/(成本|报价|价格|干涉|电气校验|载流量)/.test(normalized)) {
+    // 远程下载先于列举/导出：句子常同时带「有哪些」（问目录里有什么），但落点是下载。
+    if (/(?:下载|拉取|拉下来|装下来|同步下来)/.test(normalized) && /(?:远程|来源|目录|机型)/.test(normalized)) {
+      return { intent: 'modify', confidence: 'high', score: 4, hits: ['机型库远程下载'], reason: '从远程目录下载机型入库（写操作，需确认）' };
+    }
     if (/(?:有哪些|有什么|列出|列举|列一下|清单|列表|看看|查看|查一下|几台)/.test(normalized)) {
       return { intent: 'query', confidence: 'high', score: 3, hits: ['机型库'], reason: '列举机型库（只读）' };
     }
@@ -378,7 +382,7 @@ export interface ToolPlan {
   resolvedLabel?: string;
 }
 
-/** 目前注册的 36 个工具里，只读 18 个、写操作 18 个。 */
+/** 目前注册的 38 个工具里，只读 19 个、写操作 19 个。 */
 export const READ_ONLY_TOOLS = new Set([
   'list_components',
   'search_components',
@@ -394,6 +398,8 @@ export const READ_ONLY_TOOLS = new Set([
   'verify_plc_program',
   // 只读列机型库：不写库、不改 active
   'list_machine_library',
+  // 只读列远程来源与目录里可下载的机型（只写 sources-cache 缓存，不动库与 active）
+  'list_machine_sources',
   // 只读自查方案：只返回 issues，不落盘、不改 active
   'validate_machine_design',
   // 只读截图：写 userData/agent-shots（证据文件），不改工程与机型
@@ -429,6 +435,8 @@ export const WRITE_TOOLS = new Set([
   'load_machine_from_library',
   // 导出写 userData/exports
   'export_machine_package',
+  // 远程下载：写 userData/machine-library（联网 + 落盘），且没有 overwrite 参数
+  'download_machine_from_source',
   // 补齐会写回 machine/<id>.json 并刷新联调配置（默认 dryRun 只读预览，但工具本身是写）
   'repair_plc_config',
   // 清空 agent-memory.json 里当前工程的桶（删记录，等同文件写）
@@ -776,6 +784,41 @@ function planMachineLibraryRequest(value: string): ToolPlan | null {
   // 显式「id: xxx」优先；否则取句子里唯一的连字符 token（design-screw-3st 这类机型 id）
   const id = value.match(/(?:机型|机器|模板)?\s*(?:id|ID|编号)\s*[:：=]?\s*([A-Za-z0-9][A-Za-z0-9._-]*)/)?.[1]
     ?? value.match(/([A-Za-z][A-Za-z0-9._]*(?:-[A-Za-z0-9._]+)+)/)?.[1];
+
+  // 远程来源：先判下载，再判「列出」。
+  // 顺序上的坑：「看看远程目录里能下载什么」既有下载动词又有机型字样，但它要的是**列目录**
+  // （没有具体机型 id）；只有句子里点出了机型 id，才算「下载这一台」。
+  const remote = /(?:远程|在线|来源|目录)/.test(value);
+  if (remote && /(?:下载|拉取|拉下来|装下来|同步下来)/.test(value)) {
+    const listWords = /(?:有哪些|有什么|什么可|看看|查看|列出|列举|清单|列表|目录里)/.test(value);
+    if (id || (!listWords && /(?:机型|机器|模板)/.test(value))) {
+      const sourceId = value.match(/(?:来源|source)\s*[:：=]?\s*([A-Za-z0-9][A-Za-z0-9._-]*)/i)?.[1];
+      const machineId = id;
+      return {
+        tool: 'download_machine_from_source',
+        args: {
+          ...(sourceId ? { sourceId } : {}),
+          ...(machineId ? { machineId } : {})
+        },
+        readOnly: false,
+        missing: [
+          ...(sourceId ? [] : ['sourceId']),
+          ...(machineId ? [] : ['machineId'])
+        ],
+        why: '从远程目录下载机型：限 https/50 MiB、比对 SHA-256 后走同一套严格导入（需确认，同名不覆盖）'
+      };
+    }
+  }
+  if (remote && /(?:来源|目录|在线|可下载|远端|catalog)/i.test(value)) {
+    return {
+      tool: 'list_machine_sources',
+      args: {},
+      readOnly: true,
+      missing: [],
+      why: '只读列出远程来源、连通性与目录里可下载的机型'
+    };
+  }
+
   if (/(?:导出|打包|分享|发给|拷贝|复制出)/.test(value)) {
     return {
       tool: 'export_machine_package',

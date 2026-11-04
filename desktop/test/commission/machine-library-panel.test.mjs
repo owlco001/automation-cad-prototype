@@ -13,7 +13,8 @@ import {
   libraryErrorText,
   librarySourceLabel,
   planImportFailure,
-  renderMachineLibraryPanelHtml
+  renderMachineLibraryPanelHtml,
+  renderMachineLibraryRemoteHtml
 } from '../../src/commission/machine-library-panel.ts';
 
 const entry = (overrides = {}) => ({
@@ -185,4 +186,93 @@ test('机型库面板：id 合法性判定与主进程口径一致（渲染层�
   ]) {
     assert.equal(isSafeLibraryId(bad), false, `${String(bad)} 应被拒`);
   }
+});
+
+const remoteSource = (overrides = {}) => ({
+  id: 'corp',
+  name: '公司目录',
+  url: 'https://machines.example.com/catalog.json',
+  enabled: true,
+  online: true,
+  stale: false,
+  machineCount: 1,
+  fetchedAt: '2026-11-04T02:00:00.000Z',
+  ...overrides
+});
+
+const remoteMachine = (overrides = {}) => ({
+  sourceId: 'corp',
+  sourceName: '公司目录',
+  id: 'design-screw-3st',
+  name: '三工位锁螺丝机',
+  version: '1.1.0',
+  sizeBytes: 3 * 1024 * 1024,
+  sha256: 'a'.repeat(64),
+  stale: false,
+  installed: false,
+  ...overrides
+});
+
+test('远程来源区：列出可下载机型，每行一个「下载」按钮（带 sourceId/machineId 锚点）', () => {
+  const html = renderMachineLibraryRemoteHtml({ sources: [remoteSource()], machines: [remoteMachine()] }, false);
+  assert.match(html, /data-machine-library-remote/);
+  assert.match(html, /公司目录/);
+  assert.match(html, /在线/);
+  assert.match(html, /三工位锁螺丝机/);
+  assert.match(html, /data-ml-download-source="corp"/);
+  assert.match(html, /data-ml-download-id="design-screw-3st"/);
+  assert.match(html, />下载</);
+  assert.doesNotMatch(html, /disabled>已安装/);
+});
+
+test('远程来源区：已安装的机型按钮 disabled 且写「已安装」（同名不覆盖）', () => {
+  const html = renderMachineLibraryRemoteHtml(
+    { sources: [remoteSource()], machines: [remoteMachine({ installed: true })] },
+    false
+  );
+  assert.match(html, /<button type="button" class="acp-btn" data-ml-download-source="corp" data-ml-download-id="design-screw-3st" disabled>已安装<\/button>/);
+});
+
+test('远程来源区：未配置来源给引导文案，不渲染空表格', () => {
+  const html = renderMachineLibraryRemoteHtml({ sources: [], machines: [] }, false);
+  assert.match(html, /未配置远程来源/);
+  assert.match(html, /sources\.json/);
+  assert.doesNotMatch(html, /data-ml-remote-list/);
+});
+
+test('远程来源区：离线来源显示错误码中文，缓存来源标「缓存」', () => {
+  const offline = renderMachineLibraryRemoteHtml(
+    { sources: [remoteSource({ online: false, machineCount: 0, errorCode: 'LIBRARY_NETWORK_FAILED' })], machines: [] },
+    false
+  );
+  assert.match(offline, /离线/);
+  assert.match(offline, /远程来源连接失败/);
+  assert.match(offline, /来源里没有可下载的机型/);
+
+  const stale = renderMachineLibraryRemoteHtml(
+    { sources: [remoteSource({ stale: true })], machines: [remoteMachine({ stale: true })], stale: true },
+    false
+  );
+  assert.match(stale, /缓存/);
+  assert.match(stale, /缓存（未刷新）/);
+});
+
+test('远程来源区：忙/加载中时所有下载按钮 disabled，且名称做 HTML 转义', () => {
+  const busy = renderMachineLibraryRemoteHtml(
+    { sources: [remoteSource()], machines: [remoteMachine({ name: '<img src=x onerror=alert(1)>' })] },
+    true
+  );
+  assert.match(busy, /onerror=alert\(1\)/);
+  assert.doesNotMatch(busy, /<img/, '名称必须转义，不能变成标签');
+  assert.match(busy, /data-ml-download-id="design-screw-3st" disabled>下载/);
+
+  const loading = renderMachineLibraryRemoteHtml({ sources: [], machines: [], loading: true }, false);
+  assert.match(loading, /读取目录…/);
+});
+
+test('远程来源区：没拿到数据（null）时不渲染该区块', () => {
+  assert.equal(renderMachineLibraryRemoteHtml(null, false), '');
+  assert.equal(renderMachineLibraryRemoteHtml(undefined, false), '');
+  // 面板整体渲染时 remote 缺省也不该出现区块
+  assert.doesNotMatch(renderMachineLibraryPanelHtml({ entries: [entry()] }), /data-machine-library-remote/);
 });

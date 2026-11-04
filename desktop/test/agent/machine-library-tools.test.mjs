@@ -6,20 +6,24 @@
 // - LIBRARY_EXISTS 的 hint 是硬约束：不带 overwrite 绝不覆盖，且必须告诉调用方「显式传 overwrite」。
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { after, test } from 'node:test';
 import { AgentTools } from '../../src/agent/tools.ts';
 import { createAgentCommandBus } from '../../src/agent/commands.ts';
 import { READ_ONLY_TOOLS, WRITE_TOOLS } from '../../src/agent/router.ts';
+import { buildMachinePackage, readLibraryPackage } from '../../src/machine/library.ts';
+import { writeMachineSources } from '../../src/machine/library-remote.ts';
 import { parseMachineBrief } from '../../src/machine/spec.ts';
 import { synthMachine } from '../../src/machine/synth.ts';
 import {
   machineBomDraftPath,
   parseMachineBomCsv,
   readActivePointer,
-  readStoredMachineDesign
+  readStoredMachineDesign,
+  validateMachineDesign
 } from '../../src/machine/store.ts';
 
 const BRIEF_A = '设计一台三工位锁螺丝机，节拍 20 件/分钟，用 750W 伺服';
@@ -256,4 +260,79 @@ test('入参校验：缺 id / 类型不对一律 INVALID_ARGUMENT，不触库', 
   const badOverwrite = await tools.call('save_machine_to_library', { overwrite: 'yes' });
   assert.equal(badOverwrite.code, 'INVALID_ARGUMENT');
   assert.equal((await tools.call('list_machine_library', {})).total, 0);
+});
+
+test('远程来源：list_machine_sources 空配置返回空数组（不报错、不预置外网地址）', async () => {
+  const { tools } = setup();
+  const result = await tools.call('list_machine_sources', {});
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.items, []);
+  assert.equal(result.total, 0);
+  assert.deepEqual(result.sources, []);
+  assert.equal(result.stale, false);
+});
+
+test('远程下载工具：从 file 源下载入库，config 逐字段相等；同名再下一次返回 LIBRARY_EXISTS', async () => {
+  const { tools, root } = setup();
+  const design = synthMachine(parseMachineBrief(BRIEF_A));
+  const pkg = buildMachinePackage(validateMachineDesign(design), { appVersion: '0.6.4', version: '1.2.0' });
+  const id = design.config.id;
+  const sourceDir = mkdtempSync(join(tmpdir(), 'cad-agent-remote-source-'));
+  roots.push(sourceDir);
+  const packagePath = join(sourceDir, `${id}.machine.zip`);
+  writeFileSync(packagePath, pkg);
+  const catalogPath = join(sourceDir, 'catalog.json');
+  writeFileSync(catalogPath, JSON.stringify({
+    schemaVersion: 1,
+    machines: [{
+      id,
+      name: design.config.name,
+      version: '1.2.0',
+      sizeBytes: pkg.byteLength,
+      sha256: createHash('sha256').update(pkg).digest('hex'),
+      downloadUrl: pathToFileURL(packagePath).toString()
+    }]
+  }), 'utf8');
+  writeMachineSources(root, [
+    { id: 'dev', name: '本地开发源', url: pathToFileURL(catalogPath).toString(), enabled: true, allowFile: true }
+  ]);
+
+  // 目录先可见，且标出「本机还没有」
+  const listed = await tools.call('list_machine_sources', {});
+  assert.equal(listed.ok, true);
+  assert.equal(listed.total, 1);
+  assert.equal(listed.items[0].sourceId, 'dev');
+  assert.equal(listed.items[0].installed, false);
+
+  const downloaded = await tools.call('download_machine_from_source', { sourceId: 'dev', machineId: id });
+  assert.equal(downloaded.ok, true, `下载失败：${JSON.stringify(downloaded)}`);
+  assert.equal(downloaded.id, id);
+  assert.equal(downloaded.source, 'remote');
+  assert.equal(downloaded.version, '1.2.0');
+  assert.match(downloaded.sha256, /^[0-9a-f]{64}$/);
+
+  // 库里能读到同一份 config（下载只入库，不自动切换当前工程）
+  const inLibrary = await tools.call('list_machine_library', {});
+  assert.equal(inLibrary.total, 1);
+  assert.equal(inLibrary.items[0].source, 'remote');
+  assert.deepEqual(
+    readLibraryPackage(root, id).pkg.config,
+    validateMachineDesign(design).config,
+    '入库的 config 必须逐字段相等'
+  );
+  assert.equal(existsSync(join(root, 'machine', `${id}.json`)), false, '下载不该改当前工程');
+
+  // 同名再下一次：LIBRARY_EXISTS + hint，工具没有 overwrite 参数
+  const again = await tools.call('download_machine_from_source', { sourceId: 'dev', machineId: id });
+  assert.equal(again.ok, false);
+  assert.equal(again.code, 'LIBRARY_EXISTS');
+  assert.ok(again.hint, 'LIBRARY_EXISTS 必须带 hint');
+});
+
+test('远程下载入参校验：缺 sourceId / machineId 一律 INVALID_ARGUMENT', async () => {
+  const { tools } = setup();
+  const missingSource = await tools.call('download_machine_from_source', { machineId: 'design-x' });
+  assert.equal(missingSource.code, 'INVALID_ARGUMENT');
+  const missingMachine = await tools.call('download_machine_from_source', { sourceId: 'dev' });
+  assert.equal(missingMachine.code, 'INVALID_ARGUMENT');
 });

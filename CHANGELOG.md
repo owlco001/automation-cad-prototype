@@ -4,6 +4,17 @@
 
 ## [未发布]
 
+### Added · 机型库远程目录与下载（用户自选加载/下载）
+
+- `sources.json`（`userData/machine-library/sources.json`，**默认空、不预置任何外网地址**）：`{schemaVersion:1, sources:[{id,name,url,enabled,priority?,allowFile?}]}`；坏配置报 `LIBRARY_SOURCE_INVALID`，不静默当「没有来源」
+- 目录协议 `{schemaVersion:1, machines:[{id,name,version,sizeBytes,sha256,downloadUrl,minAppVersion?,tags?,allowCrossOrigin?}]}`：`schemaVersion≠1` 拒（`LIBRARY_UNSUPPORTED_SCHEMA`）；每条 64 位 hex SHA-256、尺寸 ≤50 MiB、`downloadUrl` 与目录同源（或该条显式 `allowCrossOrigin:true`）；总数 ≤500
+- 安全线：只认公网 `https`（`file` 仅开发，需该来源 `allowFile:true`）；`http`、回环、`10./172.16-31./192.168./169.254.`、IPv6 ULA/链路本地、IP 直写一律 `LIBRARY_URL_REJECTED`；带账号密码的 URL 也拒
+- 下载：流式累计、>50 MiB 立刻 destroy；边下边算 SHA-256 与目录比对（不符 `LIBRARY_HASH_MISMATCH`，**不重试**）；通过后交给现有 `importPackage`（唯一一套严格解包 + 原子落盘），失败不留半包
+- 超时 5 s 建连 / 60 s 总时长，网络错误只重试 1 次；同名机型默认 `LIBRARY_EXISTS` + hint，**没有 overwrite 通道**
+- 目录缓存 10 分钟，拉不到回退旧缓存并标 `stale:true`
+- 工具 36 → 38（只读 19 / 写 19）：`list_machine_sources`（只读）、`download_machine_from_source`（写，需确认）
+- 机型库抽屉新增「远程来源」区：来源状态（在线/离线/停用/缓存）+ 可下载机型 + 每行「下载」（二次确认）；不改现有视觉风格
+
 ### Added · 智能体能力（v0.6.4 之后）
 
 - **自适应迭代预算**：只读 6 轮；出现写工具或计划 ≥4 步 / 联调意图 → 12 轮；到顶返回 `iteration_limit` + `pendingHint` + `nextStepIndex`，可断点续跑（`runPlan` / `runRecipe` 同一实现）

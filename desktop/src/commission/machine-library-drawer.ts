@@ -36,7 +36,9 @@ function resolveClient(): MachineLibraryClient {
       apply: async () => UNAVAILABLE,
       importPackage: async () => UNAVAILABLE,
       exportPackage: async () => UNAVAILABLE,
-      remove: async () => UNAVAILABLE
+      remove: async () => UNAVAILABLE,
+      sources: async () => UNAVAILABLE,
+      download: async () => UNAVAILABLE
     };
   }
   return {
@@ -44,7 +46,10 @@ function resolveClient(): MachineLibraryClient {
     apply: (id) => api.apply(id),
     importPackage: (options) => api.importPackage(options ?? {}),
     exportPackage: (id) => api.exportPackage(id),
-    remove: (id) => api.remove(id)
+    remove: (id) => api.remove(id),
+    // 远程来源/下载：只传 id；URL 与字节都在主进程，渲染层没有下载通道
+    ...(api.sources ? { sources: () => api.sources!() } : {}),
+    ...(api.download ? { download: (sourceId, machineId) => api.download!(sourceId, machineId) } : {})
   };
 }
 
@@ -92,7 +97,7 @@ export function initMachineLibraryPanel(options: MachineLibraryPanelOptions): Ma
   // 截图脚本与外部自检的稳定锚点（入口可能被 «工具» 菜单收走，无法按位置点）
   entry.dataset.machineLibraryOpen = '';
 
-  const drawer = createDrawer(DRAWER_ID, '机型库', '本机机型模板 · 导入 / 导出 .machine.zip · 加载即替换当前方案');
+  const drawer = createDrawer(DRAWER_ID, '机型库', '本机机型模板 · 导入 / 导出 .machine.zip · 远程来源按需下载 · 加载即替换当前方案');
   drawerHandle = drawer;
   drawer.root.classList.add('machine-library-drawer');
   drawer.body.innerHTML = '';

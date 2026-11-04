@@ -302,7 +302,10 @@ const machineLibraryApi = {
   apply: (id: string) => ipcRenderer.invoke('library:apply', id),
   importPackage: (options?: { overwrite?: boolean }) => ipcRenderer.invoke('library:import', options ?? {}),
   exportPackage: (id: string) => ipcRenderer.invoke('library:export', id),
-  remove: (id: string) => ipcRenderer.invoke('library:remove', id)
+  remove: (id: string) => ipcRenderer.invoke('library:remove', id),
+  // 远程来源/下载：只传 id，URL 与字节都在主进程里定（渲染层永远拿不到下载通道）
+  sources: () => ipcRenderer.invoke('library:sources'),
+  download: (sourceId: string, machineId: string) => ipcRenderer.invoke('library:download', { sourceId, machineId })
 };
 
 contextBridge.exposeInMainWorld('__machineLibrary', machineLibraryApi);

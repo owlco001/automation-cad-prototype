@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-04T09:46:54.752Z",
+  "generatedAt": "2026-11-04T14:12:52.007Z",
   "version": "0.6.4",
   "mode": "offline-rules",
   "dataset": {
     "path": "docs/desktop/eval/cases.json",
-    "count": 125,
+    "count": 127,
     "references": 18,
     "ambiguous": 8,
     "multiStep": 5,
@@ -16,6 +16,7 @@
       "capture_view",
       "clear_agent_memory",
       "design_machine",
+      "download_machine_from_source",
       "export_cost_report",
       "export_files",
       "export_machine_package",
@@ -29,6 +30,7 @@
       "insert_component",
       "list_components",
       "list_machine_library",
+      "list_machine_sources",
       "load_machine_from_library",
       "place_component",
       "remove_component",
@@ -66,19 +68,19 @@
   "passed": true,
   "metrics": {
     "intent": {
-      "correct": 125,
-      "total": 125,
+      "correct": 127,
+      "total": 127,
       "rate": 1
     },
     "tools": {
-      "correct": 125,
-      "total": 125,
+      "correct": 127,
+      "total": 127,
       "rate": 1
     },
     "params": {
-      "correct": 63,
-      "total": 64,
-      "rate": 0.984375
+      "correct": 64,
+      "total": 65,
+      "rate": 0.9846153846153847
     },
     "refused": {
       "correct": 7,
@@ -3464,6 +3466,71 @@
           "tool": "export_machine_package",
           "args": {
             "id": "design-screw-3st"
+          },
+          "readOnly": false,
+          "missing": []
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "ml05",
+      "input": "看看机型库有哪些远程来源、目录里能下载什么",
+      "tags": [
+        "machine-library",
+        "machine-library-remote"
+      ],
+      "note": "只读列远程来源与目录：未配置 sources.json 时空清单、不报错；来源连通性逐条给 online/errorCode。",
+      "expectedIntent": "query",
+      "actualIntent": "query",
+      "intentOk": true,
+      "expectedTools": [
+        "list_machine_sources"
+      ],
+      "actualTools": [
+        "list_machine_sources"
+      ],
+      "toolOk": true,
+      "paramsApplicable": false,
+      "paramsOk": null,
+      "refusedOk": true,
+      "actualPlans": [
+        {
+          "tool": "list_machine_sources",
+          "args": {},
+          "readOnly": true,
+          "missing": []
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "ml06",
+      "input": "从机型库的远程来源 corp 下载机型 design-screw-3st 装进本机库",
+      "tags": [
+        "machine-library",
+        "machine-library-remote"
+      ],
+      "note": "远程下载：限 https/50 MiB、比对 SHA-256 后走同一套严格导入；同名 LIBRARY_EXISTS 且工具没有 overwrite 参数。",
+      "expectedIntent": "modify",
+      "actualIntent": "modify",
+      "intentOk": true,
+      "expectedTools": [
+        "download_machine_from_source"
+      ],
+      "actualTools": [
+        "download_machine_from_source"
+      ],
+      "toolOk": true,
+      "paramsApplicable": true,
+      "paramsOk": true,
+      "refusedOk": true,
+      "actualPlans": [
+        {
+          "tool": "download_machine_from_source",
+          "args": {
+            "sourceId": "corp",
+            "machineId": "design-screw-3st"
           },
           "readOnly": false,
           "missing": []

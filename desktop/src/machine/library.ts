@@ -96,13 +96,20 @@ export const MACHINE_PACKAGE_FILE_KINDS: readonly MachinePackageFileKind[] = [
 export type MachineLibraryErrorCode =
   | 'LIBRARY_BAD_PATH'
   | 'LIBRARY_BAD_ZIP'
+  | 'LIBRARY_CATALOG_INVALID'
   | 'LIBRARY_EXISTS'
   | 'LIBRARY_HASH_MISMATCH'
   | 'LIBRARY_INVALID_CONFIG'
   | 'LIBRARY_IO_FAILED'
+  | 'LIBRARY_MACHINE_NOT_IN_CATALOG'
+  | 'LIBRARY_NETWORK_FAILED'
   | 'LIBRARY_NOT_FOUND'
+  | 'LIBRARY_SOURCE_DISABLED'
+  | 'LIBRARY_SOURCE_INVALID'
+  | 'LIBRARY_TIMEOUT'
   | 'LIBRARY_TOO_LARGE'
-  | 'LIBRARY_UNSUPPORTED_SCHEMA';
+  | 'LIBRARY_UNSUPPORTED_SCHEMA'
+  | 'LIBRARY_URL_REJECTED';
 
 export class MachineLibraryError extends Error {
   readonly code: MachineLibraryErrorCode;
@@ -1191,7 +1198,14 @@ export const MACHINE_LIBRARY_HINTS: Partial<Record<MachineLibraryErrorCode, stri
   LIBRARY_BAD_PATH: '导出目标只能落在 userData/exports 下，不要用 ../ 或盘符跳出目录',
   LIBRARY_BAD_ZIP: '机型包不是合法 .machine.zip，请重新导出或重新导入',
   LIBRARY_HASH_MISMATCH: '机型包内容与 manifest 不符，可能被手工改过，请重新导出',
-  LIBRARY_UNSUPPORTED_SCHEMA: '机型包格式版本不受支持，请用当前版本重新导出'
+  LIBRARY_UNSUPPORTED_SCHEMA: '机型包格式版本不受支持，请用当前版本重新导出',
+  LIBRARY_SOURCE_INVALID: '检查 userData/machine-library/sources.json 里的 id / url / enabled 字段',
+  LIBRARY_SOURCE_DISABLED: '先在 sources.json 里把该来源的 enabled 改成 true',
+  LIBRARY_URL_REJECTED: '目录源与下载地址只允许公网 https；本机开发用 file: 并显式 allowFile: true',
+  LIBRARY_CATALOG_INVALID: '目录 JSON 不符合 schemaVersion 1 的约定，请联系目录发布方重新生成',
+  LIBRARY_MACHINE_NOT_IN_CATALOG: '先用 list_machine_sources 按 id 精确找机型，别猜 id',
+  LIBRARY_NETWORK_FAILED: '检查网络与目录地址；重试一次仍失败时先用 list_machine_sources 看来源连通性',
+  LIBRARY_TIMEOUT: '下载超时：换更快的网络或在来源里提供体积更小的包'
 };
 
 export function serializeMachineLibraryError(error: unknown): {

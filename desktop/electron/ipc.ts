@@ -91,6 +91,7 @@ import {
 import { planPlcExportDirectory } from '../src/plcgen/export.ts';
 import { readActiveMachineDesign } from '../src/machine/store.ts';
 import { exportPackage, importPackage, listLibrary, loadFromLibrary, removeFromLibrary, MACHINE_LIBRARY_LIMITS } from '../src/machine/library.ts';
+import { downloadMachine, listMachineSources } from '../src/machine/library-remote.ts';
 import { machineLibraryFailure, validateLibraryId } from '../src/machine/library-ipc.ts';
 import { deleteProject, listProjects, openProject, saveProject, saveProjectLayout } from './projects.ts';
 import { clearDesignDraft, readDesignDraft, writeDesignDraft } from '../src/design/draft-store.ts';
@@ -1742,6 +1743,57 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
       const entry = removeFromLibrary(context.userDataDir, checked.id);
       if (lastRejectedImport) lastRejectedImport = null;
       return { ok: true as const, entry };
+    } catch (error) {
+      return machineLibraryFailure(error);
+    }
+  });
+
+  /**
+   * 远程来源（`library:sources`）：只读列出 sources.json 里的来源与目录里可下载的机型。
+   * 渲染层只拿到「已校验过的机型行」——URL 在这里再校验一次（来源清单可能被手工改过），
+   * 且界面没有通道能把任意 URL 递回主进程。
+   */
+  handle('library:sources', async () => {
+    try {
+      const result = await listMachineSources(context.userDataDir);
+      return {
+        ok: true as const,
+        sources: result.sources,
+        machines: result.machines,
+        stale: result.stale
+      };
+    } catch (error) {
+      return machineLibraryFailure(error);
+    }
+  });
+
+  /**
+   * 远程下载（`library:download`）：入参只有 `{sourceId, machineId}`。
+   *
+   * 渲染层给不了 URL、给不了字节、也给不了 overwrite：
+   * - URL 只来自主进程读 sources.json / 目录（并过 https/内网白名单）；
+   * - 字节只走 downloadMachine（50 MiB 上限 + SHA-256 比对）；
+   * - 同名一律 LIBRARY_EXISTS，界面必须走「先删除再下载」。
+   */
+  handle('library:download', async (_event, payload: unknown) => {
+    const record = payload && typeof payload === 'object' ? payload as Record<string, unknown> : {};
+    const sourceId = typeof record.sourceId === 'string' ? record.sourceId.trim() : '';
+    if (!sourceId) {
+      return { ok: false as const, code: 'INVALID_ARGUMENT', message: '缺少来源 id', hint: '先在机型库抽屉的「远程来源」里选一个来源' };
+    }
+    const checked = validateLibraryId(record.machineId);
+    if (!checked.ok) return checked;
+    try {
+      const result = await downloadMachine(context.userDataDir, sourceId, checked.id);
+      return {
+        ok: true as const,
+        entry: result.entry,
+        bytes: result.bytes,
+        sha256: result.sha256,
+        stale: result.stale,
+        sourceId: result.source.id,
+        sourceName: result.source.name
+      };
     } catch (error) {
       return machineLibraryFailure(error);
     }

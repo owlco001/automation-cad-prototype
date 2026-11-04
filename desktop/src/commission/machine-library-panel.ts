@@ -35,6 +35,49 @@ export interface LibraryImportOk {
 export interface LibraryExportOk { ok: true; cancelled?: boolean; path?: string }
 export interface LibraryRemoveOk { ok: true; entry?: MachineLibraryEntryView }
 
+/** 远程来源行（主进程已校验过 URL，这里只负责显示）。 */
+export interface RemoteSourceView {
+  id: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+  online: boolean;
+  stale: boolean;
+  machineCount: number;
+  fetchedAt?: string | null;
+  errorCode?: string;
+}
+
+/** 目录里的一台可下载机型。 */
+export interface RemoteMachineView {
+  sourceId: string;
+  sourceName: string;
+  id: string;
+  name: string;
+  version: string;
+  sizeBytes: number;
+  sha256: string;
+  stale: boolean;
+  installed: boolean;
+}
+
+export interface LibrarySourcesOk {
+  ok: true;
+  sources: RemoteSourceView[];
+  machines: RemoteMachineView[];
+  stale: boolean;
+}
+
+export interface LibraryDownloadOk {
+  ok: true;
+  entry: MachineLibraryEntryView;
+  bytes: number;
+  sha256: string;
+  stale: boolean;
+  sourceId: string;
+  sourceName: string;
+}
+
 /** preload 暴露的 `window.__machineLibrary` 形状（文件选择/读写全在主进程）。 */
 export interface MachineLibraryClient {
   list(): Promise<LibraryListOk | LibraryFailure>;
@@ -42,6 +85,18 @@ export interface MachineLibraryClient {
   importPackage(options?: { overwrite?: boolean }): Promise<LibraryImportOk | LibraryFailure>;
   exportPackage(id: string): Promise<LibraryExportOk | LibraryFailure>;
   remove(id: string): Promise<LibraryRemoveOk | LibraryFailure>;
+  /** 远程来源（可选：老 preload 没有这两个动作时界面显示「不可用」而不是报错） */
+  sources?(): Promise<LibrarySourcesOk | LibraryFailure>;
+  download?(sourceId: string, machineId: string): Promise<LibraryDownloadOk | LibraryFailure>;
+}
+
+/** 远程来源区的状态：来源 + 目录机型 + 是否来自过期缓存。 */
+export interface MachineLibraryRemoteState {
+  sources: readonly RemoteSourceView[];
+  machines: readonly RemoteMachineView[];
+  stale?: boolean;
+  loading?: boolean;
+  error?: string | null;
 }
 
 export interface MachineLibraryPanelState {
@@ -52,6 +107,8 @@ export interface MachineLibraryPanelState {
   busy?: boolean;
   /** 上一次操作的失败文案（已转中文），渲染在表格下方 */
   error?: string | null;
+  /** 远程来源区；null/缺省 = 还没加载（不渲染该区块） */
+  remote?: MachineLibraryRemoteState | null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -71,7 +128,14 @@ export const MACHINE_LIBRARY_ERROR_TEXT: Readonly<Record<string, string>> = Obje
   LIBRARY_INVALID_CONFIG: '机型包里的 config.json 不是合法机型配置，已拒绝导入',
   LIBRARY_UNSUPPORTED_SCHEMA: '机型包格式版本高于当前软件，请升级软件或改用新版本导出的包',
   LIBRARY_NOT_FOUND: '机型库里找不到这台机型（可能已被删除）',
-  LIBRARY_IO_FAILED: '机型库读写失败。请确认磁盘可写、空间充足后重试'
+  LIBRARY_IO_FAILED: '机型库读写失败。请确认磁盘可写、空间充足后重试',
+  LIBRARY_SOURCE_INVALID: '远程来源配置不合法（id / url / enabled 字段）',
+  LIBRARY_SOURCE_DISABLED: '该远程来源未启用',
+  LIBRARY_URL_REJECTED: '远程地址被拒绝：只允许公网 https（开发用的 file 需显式 allowFile）',
+  LIBRARY_CATALOG_INVALID: '远程目录格式不合法（schemaVersion / sha256 / downloadUrl 未通过校验）',
+  LIBRARY_MACHINE_NOT_IN_CATALOG: '远程目录里没有这台机型（可能已下架）',
+  LIBRARY_NETWORK_FAILED: '远程来源连接失败，请检查网络或稍后重试',
+  LIBRARY_TIMEOUT: '远程下载超时（连接 5 秒 / 总时长 60 秒）'
 });
 
 /**
@@ -184,7 +248,73 @@ function renderRow(entry: MachineLibraryEntryView, state: MachineLibraryPanelSta
 }
 
 /**
- * 抽屉正文：表头（名称/版本/大小/来源/更新时间）+ 行 + 底部按钮 + 空态 + 错误行。
+ * 远程来源区（抽屉里的一行「远程来源」）：来源状态 + 目录机型 + 每行一个「下载」。
+ *
+ * 只复用现有 `.acp-btn` / `.acp-pill` 与 `.mlib-*` 的排版，不加新视觉风格。
+ * 已安装的行按钮 disabled（同名下载会被主进程拒），过期缓存整块标「缓存」。
+ */
+export function renderMachineLibraryRemoteHtml(remote: MachineLibraryRemoteState | null | undefined, busy: boolean): string {
+  if (!remote) return '';
+  const sources = Array.isArray(remote.sources) ? remote.sources : [];
+  const machines = Array.isArray(remote.machines) ? remote.machines : [];
+  const loading = remote.loading === true;
+  const disabled = busy || loading ? ' disabled' : '';
+
+  const sourceRows = sources.map((source) => {
+    const status = !source.enabled ? '停用' : source.online ? (source.stale ? '缓存' : '在线') : '离线';
+    const tone = !source.enabled ? '' : source.online ? (source.stale ? ' is-warn' : ' is-ok') : '';
+    const detail = source.enabled && !source.online && source.errorCode
+      ? `<span class="mlib-id">${escapeHtml(libraryErrorText(source.errorCode))}</span>`
+      : `<span class="mlib-id">${escapeHtml(formatLibraryUpdatedAt(source.fetchedAt ?? ''))}</span>`;
+    return `<div class="mlib-remote-source" data-ml-source="${escapeHtml(source.id)}">`
+      + `<span class="mlib-name">${escapeHtml(source.name)}<span class="mlib-id">${escapeHtml(source.id)}</span></span>`
+      + `<span class="acp-pill${tone}">${escapeHtml(status)}</span>`
+      + `<span class="mono">${escapeHtml(String(source.machineCount))} 台</span>`
+      + detail
+      + '</div>';
+  }).join('');
+
+  const machineRows = machines.map((machine) => {
+    const safe = isSafeLibraryId(machine.id);
+    const canDownload = safe && !machine.installed && !busy && !loading;
+    const button = `<button type="button" class="acp-btn" data-ml-download-source="${escapeHtml(machine.sourceId)}"`
+      + ` data-ml-download-id="${escapeHtml(machine.id)}"${canDownload ? '' : ' disabled'}>`
+      + `${machine.installed ? '已安装' : '下载'}</button>`;
+    return `<div class="mlib-remote-row" data-ml-machine="${escapeHtml(machine.id)}" data-ml-source-id="${escapeHtml(machine.sourceId)}">`
+      + `<span class="mlib-name">${escapeHtml(machine.name)}<span class="mlib-id">${escapeHtml(machine.id)} · ${escapeHtml(machine.sourceName)}</span></span>`
+      + `<span class="mono">${escapeHtml(machine.version)}</span>`
+      + `<span class="mono">${escapeHtml(formatLibrarySize(machine.sizeBytes))}</span>`
+      + button
+      + '</div>';
+  }).join('');
+
+  const emptySources = sources.length === 0
+    ? '<div class="mlib-empty" data-ml-remote-empty>未配置远程来源：在 userData/machine-library/sources.json 里添加 https 目录源（默认不预置任何外网地址）</div>'
+    : '';
+  const emptyMachines = sources.length > 0 && machines.length === 0
+    ? '<div class="mlib-empty" data-ml-remote-empty>来源里没有可下载的机型</div>'
+    : '';
+  const error = remote.error
+    ? `<div class="mlib-error" data-ml-remote-error role="alert">${escapeHtml(remote.error)}</div>`
+    : '';
+
+  return `<div class="mlib-remote" data-machine-library-remote data-ml-remote-count="${machines.length}">
+      <div class="mlib-remote-head">
+        <span>远程来源</span>
+        ${remote.stale ? '<span class="acp-pill is-warn">缓存（未刷新）</span>' : ''}
+        ${loading ? '<span class="acp-pill is-warn" data-ml-remote-loading>读取目录…</span>' : ''}
+        <button type="button" class="acp-btn" data-ml-refresh${disabled}>刷新目录</button>
+      </div>
+      ${error}
+      ${emptySources}
+      ${sourceRows}
+      ${emptyMachines}
+      ${machines.length > 0 ? `<div class="mlib-table-wrap" data-ml-remote-list>${machineRows}</div>` : ''}
+    </div>`;
+}
+
+/**
+ * 抽屉正文：远程来源区 + 表头（名称/版本/大小/来源/更新时间）+ 行 + 底部按钮 + 空态 + 错误行。
  *
  * 不用 `hidden` 切换：单测直接断言字符串里有没有空态文案，`hidden` 在字符串层面看不出真假。
  */
@@ -207,6 +337,8 @@ export function renderMachineLibraryPanelHtml(state: MachineLibraryPanelState): 
     ? `<div class="mlib-error" data-machine-library-error role="alert">${escapeHtml(state.error)}</div>`
     : '';
 
+  const remote = renderMachineLibraryRemoteHtml(state.remote ?? null, busy);
+
   const summary = `<div class="mlib-summary"><span>共 ${entries.length} 台机型</span>`
     + `<span class="acp-pill">${hasSelection ? `已选：${escapeHtml(selectedName)}` : '未选中机型'}</span>`
     + `${busy ? '<span class="acp-pill is-warn" data-machine-library-busy>处理中…</span>' : ''}</div>`;
@@ -221,9 +353,10 @@ export function renderMachineLibraryPanelHtml(state: MachineLibraryPanelState): 
   return `<div class="mlib-panel" data-machine-library-panel data-entry-count="${entries.length}">
       ${summary}
       ${error}
+      ${remote}
       ${table}
       ${actions}
-      <div class="acp-note">加载会用库里的机型替换当前方案（3D 视图、BOM 与 IO 点位一起重建），故需二次确认。导入只接受主进程文件选择框选出的 <code>.machine.zip</code>；包内每个文件都会逐条比对 SHA-256，校验不过不会入库。</div>
+      <div class="acp-note">加载会用库里的机型替换当前方案（3D 视图、BOM 与 IO 点位一起重建），故需二次确认。导入只接受主进程文件选择框选出的 <code>.machine.zip</code>；包内每个文件都会逐条比对 SHA-256，校验不过不会入库。远程来源只放行 https，下载同样逐条比对 SHA-256，同名机型不会被覆盖。</div>
     </div>`;
 }
 
@@ -249,6 +382,16 @@ export const MACHINE_LIBRARY_STYLES = `
 .mlib-error{padding:7px 9px;border:1px solid #6d3c3c;border-radius:3px;background:#332323;color:#ffc9c4;font-size:10px;line-height:1.6}
 .mlib-actions{display:flex;gap:6px;align-items:center}
 .mlib-actions .acp-btn-primary{margin-left:auto}
+.mlib-remote{display:flex;flex-direction:column;gap:6px;padding:7px 8px;border:1px solid #343a40;border-radius:4px;background:#1b1e21}
+.mlib-remote-head{display:flex;align-items:center;gap:6px;font-size:10px;color:#86919a}
+.mlib-remote-head .acp-btn{margin-left:auto}
+.mlib-remote-source{display:flex;align-items:center;gap:8px;font-size:10px;color:#b8c0c7}
+.mlib-remote-source .mlib-name{flex:1;min-width:0}
+.mlib-remote-list{max-height:184px;border:0}
+.mlib-remote-row{display:flex;align-items:center;gap:8px;padding:5px 2px;border-bottom:1px solid #2d3237;font-size:10px;color:#b8c0c7}
+.mlib-remote-row:last-child{border-bottom:0}
+.mlib-remote-row .mlib-name{flex:1;min-width:0}
+.mlib-remote-row .mono{font:9px/1.35 var(--font-mono,monospace);color:#8f9aa3}
 `;
 
 /* ------------------------------------------------------------------ */
@@ -282,11 +425,18 @@ export interface MachineLibraryPanelHandle {
 export function bindMachineLibraryPanel(options: BindMachineLibraryPanelOptions): MachineLibraryPanelHandle {
   const { root, client } = options;
   const confirm = options.confirm ?? ((message: string) => window.confirm(message));
-  const state: { entries: MachineLibraryEntryView[]; selectedId: string | null; busy: boolean; error: string | null } = {
+  const state: {
+    entries: MachineLibraryEntryView[];
+    selectedId: string | null;
+    busy: boolean;
+    error: string | null;
+    remote: MachineLibraryRemoteState | null;
+  } = {
     entries: [],
     selectedId: null,
     busy: false,
-    error: null
+    error: null,
+    remote: null
   };
 
   const render = (): void => {
@@ -294,8 +444,45 @@ export function bindMachineLibraryPanel(options: BindMachineLibraryPanelOptions)
       entries: state.entries,
       selectedId: state.selectedId,
       busy: state.busy,
-      error: state.error
+      error: state.error,
+      remote: state.remote
     });
+  };
+
+  /**
+   * 拉远程来源（只读）。失败只落在远程区块里，不影响本地机型库列表——
+   * 「某个源挂了」不该让用户看不到本机已有的机型。
+   */
+  const loadRemote = async (): Promise<void> => {
+    if (!client.sources) {
+      state.remote = {
+        sources: [],
+        machines: [],
+        error: '当前桌面版本不支持远程来源（preload 未暴露 sources 通道）'
+      };
+      return;
+    }
+    state.remote = { sources: state.remote?.sources ?? [], machines: state.remote?.machines ?? [], loading: true, error: null };
+    try {
+      const result = await client.sources();
+      if (!result.ok) {
+        state.remote = { sources: [], machines: [], error: describeLibraryFailure(result) };
+        return;
+      }
+      state.remote = {
+        sources: Array.isArray(result.sources) ? result.sources : [],
+        machines: Array.isArray(result.machines) ? result.machines : [],
+        stale: result.stale === true,
+        loading: false,
+        error: null
+      };
+    } catch (error) {
+      state.remote = {
+        sources: [],
+        machines: [],
+        error: `远程来源读取失败：${error instanceof Error ? error.message : String(error)}`
+      };
+    }
   };
 
   const selected = (): MachineLibraryEntryView | undefined =>
@@ -334,6 +521,42 @@ export function bindMachineLibraryPanel(options: BindMachineLibraryPanelOptions)
       const first = state.entries.find((entry) => isSafeLibraryId(entry.id));
       if (first) state.selectedId = first.id;
     }
+    await loadRemote();
+  };
+
+  /**
+   * 远程下载（带二次确认）。
+   *
+   * 确认文案要说清三件事：从哪来、多大、同名不覆盖——用户点「下载」前得知道
+   * 这会把一个外部文件放进本机库，而不是「刷新一下列表」。
+   */
+  const downloadRemote = async (sourceId: string, machineId: string): Promise<void> => {
+    const machine = state.remote?.machines.find(
+      (item) => item.sourceId === sourceId && item.id === machineId
+    );
+    if (!machine) return;
+    if (machine.installed) return;
+    const ok = confirm(
+      `从来源「${machine.sourceName}」下载机型「${machine.name}」（${machine.version}，${formatLibrarySize(machine.sizeBytes)}）？\n`
+      + '下载后会逐字节比对 SHA-256，不符即拒绝入库；同名机型已存在时不会覆盖。\n\n继续下载？'
+    );
+    if (!ok) return;
+    const clientDownload = client.download;
+    if (!clientDownload) {
+      state.error = '当前桌面版本不支持远程下载';
+      render();
+      return;
+    }
+    await run(async () => {
+      const result = await clientDownload(sourceId, machine.id);
+      if (!result.ok) {
+        fail(result);
+        return;
+      }
+      state.selectedId = result.entry.id;
+      options.notify(`已下载入库：${result.entry.name}（SHA-256 校验通过）`);
+      await refresh();
+    });
   };
 
   const applySelected = async (): Promise<void> => {
@@ -428,6 +651,19 @@ export function bindMachineLibraryPanel(options: BindMachineLibraryPanelOptions)
   const onClick = (event: Event): void => {
     const target = event.target as HTMLElement | null;
     if (!target) return;
+    const remoteButton = target.closest<HTMLElement>('[data-ml-download-source]');
+    if (remoteButton && !(remoteButton as HTMLButtonElement).disabled) {
+      const sourceId = remoteButton.dataset.mlDownloadSource ?? '';
+      const machineId = remoteButton.dataset.mlDownloadId ?? '';
+      if (sourceId && machineId) void downloadRemote(sourceId, machineId);
+      return;
+    }
+    if (target.closest<HTMLElement>('[data-ml-refresh]')) {
+      void run(async () => {
+        await loadRemote();
+      });
+      return;
+    }
     const button = target.closest<HTMLElement>('[data-machine-library-apply],[data-machine-library-import],[data-machine-library-export],[data-machine-library-remove]');
     if (button && !(button as HTMLButtonElement).disabled) {
       if (button.hasAttribute('data-machine-library-apply')) void applySelected();

@@ -1285,6 +1285,45 @@ interface Window {
     >;
     exportPackage(id: string): Promise<{ ok: true; cancelled?: boolean; path?: string; bytes?: number } | MachineLibraryIpcFailure>;
     remove(id: string): Promise<{ ok: true; entry?: MachineLibraryEntryInfo } | MachineLibraryIpcFailure>;
+    /** 远程来源与可下载机型（只读；URL 与字节都在主进程） */
+    sources(): Promise<
+      | {
+          ok: true;
+          sources: Array<{
+            id: string;
+            name: string;
+            url: string;
+            enabled: boolean;
+            allowFile: boolean;
+            online: boolean;
+            stale: boolean;
+            machineCount: number;
+            fetchedAt: string | null;
+            errorCode?: string;
+            errorMessage?: string;
+          }>;
+          machines: Array<{
+            sourceId: string;
+            sourceName: string;
+            id: string;
+            name: string;
+            version: string;
+            sizeBytes: number;
+            sha256: string;
+            minAppVersion?: string;
+            tags?: string[];
+            stale: boolean;
+            installed: boolean;
+          }>;
+          stale: boolean;
+        }
+      | MachineLibraryIpcFailure
+    >;
+    /** 远程下载并入库；同名返回 LIBRARY_EXISTS（没有 overwrite 通道） */
+    download(sourceId: string, machineId: string): Promise<
+      | { ok: true; entry: MachineLibraryEntryInfo; bytes: number; sha256: string; stale: boolean; sourceId: string; sourceName: string }
+      | MachineLibraryIpcFailure
+    >;
   };
   __Commission3D?: {
     stats(): {
