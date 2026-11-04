@@ -19,6 +19,7 @@ import {
 import { extractPlacementSpec, isPlacementInstruction } from './placement.ts';
 import type { AgentContext } from './context.ts';
 import type { ReferenceSource } from './reference.ts';
+import type { ToolVerification } from './verify.ts';
 import {
   cancellationText,
   summarizeArguments,
@@ -408,12 +409,20 @@ export interface PlanStepResult {
   message?: string;
   elapsedMs: number;
   data?: unknown;
+  /** 写后自动验证结论（只附字段，不改变 ok）。 */
+  verification?: ToolVerification;
 }
 
 export interface ExecutePlanDeps {
   execute(step: PlanStep, index: number, signal?: AbortSignal): Promise<unknown> | unknown;
   /** 存在写步骤时调用一次；返回 false / 抛错都按取消处理。 */
   confirmPlan?(request: ConfirmPlanRequest): Promise<boolean> | boolean;
+  /**
+   * 写后自动验证钩子：步骤成功后调用一次，返回的结论原样附到该步骤结果上。
+   * `raw` 是 `execute` 的原始返回值（用于识别工具自带的验证结论）。
+   * 钩子抛错只记 `verification` 为 null，不影响步骤成败。
+   */
+  verify?(step: PlanStep, raw: unknown, signal?: AbortSignal): Promise<ToolVerification | null> | ToolVerification | null;
   /** 注入时钟，测试可给固定序列。 */
   now?(): number;
   /** 逐步执行：从完整计划的第 startAt 步开始（0 基）。 */
@@ -679,8 +688,10 @@ export async function executePlan(plan: AgentPlan, deps: ExecutePlanDeps): Promi
       source: 'plan'
     });
     let outcome: NormalizedResult;
+    let rawResult: unknown;
     try {
-      outcome = normalizeToolResult(await withAbort(deps.execute(step, index, deps.signal), deps.signal));
+      rawResult = await withAbort(deps.execute(step, index, deps.signal), deps.signal);
+      outcome = normalizeToolResult(rawResult);
     } catch (error) {
       if (error instanceof PlanAborted) {
         emit({
@@ -716,6 +727,15 @@ export async function executePlan(plan: AgentPlan, deps: ExecutePlanDeps): Promi
       elapsedMs: Math.max(0, now() - stepStarted),
       ...(outcome.data !== undefined ? { data: outcome.data } : {})
     };
+    // 写后自动验证：只给成功步骤补一次自查，钩子失效/抛错都不改步骤结论。
+    if (outcome.ok && deps.verify) {
+      try {
+        const verification = await deps.verify(step, rawResult, deps.signal);
+        if (verification) result.verification = verification;
+      } catch (error) {
+        console.warn(`[PLAN_VERIFY_HOOK_FAILED]`, { site: 'desktop/src/agent/planner.ts:721' }, error);
+      }
+    }
     results.push(result);
     completed.push({
       step: index + 1,

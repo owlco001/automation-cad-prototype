@@ -19,6 +19,7 @@ tools.ts（AgentTools + 34 个 AgentTool；只读 16 / 写 18；含只读 `sugge
  ├─ llm-config.ts  → userData/agent-llm.json（600，UI 只读掩码）
  ├─ llm.ts         → OpenAI 兼容 /chat/completions + tools（content 支持 text/image_url 分段）
  ├─ session.ts     → 工具调用循环（自适应预算：只读 6 / 含写工具或计划≥4 步 12；历史 20 条）+ 写后自动验证 + 多轮状态注入
+ ├─ iteration-budget.ts → 自适应预算原语（叶子模块，session.ts re-export；runPlan / runRecipe 共用）
  ├─ vision.ts      → 视觉自检策略：agent-shots 白名单读图、降级判定、image_url 提示词（P2）
  ├─ vision-image.ts → 纯 node:zlib 的 PNG 解码/面积缩放/重编码（长边 ≤1024、单图 ≤400 KB）
  ├─ dedupe.ts      → 同轮 (tool, canonicalArgs) 去重 / 写不合并 / 单轮 12 次上限
@@ -328,13 +329,21 @@ new ToolResultCache({ttlMs, now}).get/set/invalidateAfterWrite
 
 ## 迭代预算与写后自动验证（P7-verify）
 
-提示词管不住两件事：链路一长就停在半路、写完没人验。两件都落在 `session.ts` 的代码里。
+提示词管不住两件事：链路一长就停在半路、写完没人验。两件都做成机制，且**三条执行路径共用同一份实现**：
+会话层（`session.ts`，模型自己调工具）、计划执行（`thread.ts#runPlan`）、流程执行（`recipes.ts#runRecipe`）。
 
 ```ts
+// iteration-budget.ts（叶子模块，session.ts 原样 re-export，故仍可 import from './session.ts'）
 resolveIterationBudget({base?, hasWrite?, planSteps?, intent?}): {base, effective, reason}
 // READ_ONLY_ITERATION_BUDGET=6 / WRITE_ITERATION_BUDGET=12 / LONG_PLAN_STEP_THRESHOLD=4
 AgentSession#turnOutcome(): {iterations, budget, stopped?, pendingHint?}
+runPlan(...): {budget, iterations, stopped:'iteration_limit', pendingHint, nextStepIndex}
+runRecipe(...): {budget, iterations, stopped:'iteration_limit', pendingHint, nextStepIndex}
 ```
+
+> 预算与验证的实现放在 `iteration-budget.ts` / `verify.ts` 两个叶子模块里，`session.ts` 只做 re-export。
+> 原因：`ui.ts` 会 import `recipes.ts`（渲染层预览流程卡片），若 `recipes.ts` 直接 import `session.ts`，
+> 就会把 `llm.ts → api-key-transport.ts → node:net` 拉进渲染 bundle，`vite build` 直接失败。
 
 | 场景 | 预算 |
 | --- | --- |
@@ -351,7 +360,13 @@ AgentSession#turnOutcome(): {iterations, budget, stopped?, pendingHint?}
   - 工具自己已带验证结论（`verification` 或 `{ok,issues}`）时不重复调；
   - 自动验证抛错 / 通道缺失：`verification:{ok:null,error}`，主结果的 `ok` 与 `data` 不受影响，审计不写 `verified`（不伪造通过）。
 - 新增执行器能力 `AgentCommandExecutor.validateMachineDesign?()`：主进程 `ipc.ts` 直接转 `bus.execute('validate_machine_design')`；未实现的执行器如实记 `ok:null`。
-- 验证：`test/agent/session-verification.test.mjs` 10 条（预算 6/12、计划 4 步、到顶 hint、空转收尾、apply/repair/plc 三处 verification、验证抛错、自带结论不重调、无通道不伪造）。
+- **两条编排路径对齐**（`runPlan` / `runRecipe`，不经 `AgentSession`）：
+  - 预算：`runPlan` 用 `resolveIterationBudget({hasWrite: 计划里有写步骤, planSteps: 计划步数})` 换算成 `maxSteps` 上限；`runRecipe` 同理换算成「本轮最多执行几步」（跳过与续跑跳过的步骤不计）。
+  - 到顶：两条路径都返回 `stopped:'iteration_limit'` + `pendingHint` + `nextStepIndex`，**已完成的步骤保留**在 `results` / `completed` 里，不整体判失败；摘要追加「第 N 步起未执行」。
+  - 续跑：`runPlan` 把 `nextStepIndex` 写进 `ThreadState`，`resumeRunPlan(plan, opts)` 从该点接着跑（计划签名 / 工程指纹校验沿用原有拒跑分支）；`runRecipe` 用 `executor.resumeFrom` 跳过更早的步骤。
+  - 验证：`executePlan` 新增可选 `verify(step, raw, signal)` 钩子、`runRecipe` 新增 `executor.verifyChannel`，两者都调 `verify.ts#autoVerifyTool`（会话层同一入口），把 `verification` 附到步骤结果上，不改变步骤 `ok`；验证抛错只记 `ok:null`。
+  - 不接 `verifyChannel` 时不补 `verification` 字段（不伪造结论），**不传**通道与会话层「通道缺失记 ok:null」是两种情形：前者表示前端没开这项能力。
+- 验证：`test/agent/session-verification.test.mjs` 10 条（预算 6/12、计划 4 步、到顶 hint、空转收尾、apply/repair/plc 三处 verification、验证抛错、自带结论不重调、无通道不伪造）+ `test/agent/plan-verification.test.mjs` 9 条（两条路径的预算 6/12、到顶保留、续跑接上、verification ok/null/false、配方失败即停不变）。
 
 ## 多轮状态与续跑（P7-L）
 

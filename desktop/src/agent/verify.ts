@@ -92,3 +92,70 @@ export function withVerification(result: CommandResult, verification: ToolVerifi
   const base: Record<string, unknown> = isRecord(result) ? { ...result } : { ok: true, data: result };
   return { ...base, verification } as CommandResult;
 }
+
+/**
+ * 验证通道（结构化的 `AgentCommandExecutor` 最小面）。
+ *
+ * 会话层传的是整个执行器 bus；计划 / 配方编排层没有 bus 时由调用方注入实现同一方法的对象。
+ * 只要求一个只读方法，避免三条路径各写一套「再自查一次」。
+ */
+export interface VerificationChannel {
+  validateMachineDesign?(signal?: AbortSignal): Promise<CommandResult>;
+}
+
+/**
+ * 写后自动验证的统一入口：会话层、`runPlan`、`runRecipe` 都走这里。
+ *
+ * - 工具不在 `AUTO_VERIFY_TOOLS` 里 → `null`（不附字段）；
+ * - 主操作没成功 → `null`（失败不补验证）；
+ * - 工具自己已经给过结论 → 直接沿用（不重复调）；
+ * - 通道缺失 → `ok:null + error`（说清是「没跑」而不是「通过」）；
+ * - 通道抛错 / 返回失败 → `ok:null + error`，绝不把主操作判失败。
+ *
+ * `channel` 传 null/undefined 表示调用方没有接验证能力：返回 `null`，不伪造结论。
+ */
+export async function autoVerifyTool(
+  channel: VerificationChannel | null | undefined,
+  tool: string,
+  result: unknown,
+  signal?: AbortSignal
+): Promise<ToolVerification | null> {
+  if (!channel) return null;
+  if (!AUTO_VERIFY_TOOLS.has(tool)) return null;
+  if (!isRecord(result) || result.ok !== true) return null;
+  const inline = inlineVerification(result as unknown as CommandResult);
+  if (inline) return inline;
+  const verify = channel.validateMachineDesign;
+  if (typeof verify !== 'function') {
+    return {
+      ok: null,
+      issues: [],
+      source: 'auto',
+      error: '执行器未提供 validate_machine_design 通道，未执行自动验证'
+    };
+  }
+  try {
+    const checked = await verify.call(channel, signal);
+    if (!checked || checked.ok !== true) {
+      return {
+        ok: null,
+        issues: [],
+        source: 'auto',
+        error: checked?.error?.message ?? 'validate_machine_design 未返回结果'
+      };
+    }
+    const data = isRecord(checked.data) ? checked.data : {};
+    const issues = Array.isArray(data.issues) ? data.issues : [];
+    const ok = data.ok === true;
+    return ok
+      ? { ok, issues, source: 'auto' }
+      : { ok, issues, source: 'auto', nextAction: nextActionForDesignIssues(issues) };
+  } catch (error) {
+    return {
+      ok: null,
+      issues: [],
+      source: 'auto',
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}

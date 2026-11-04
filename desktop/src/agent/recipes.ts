@@ -11,6 +11,8 @@
 import { READ_ONLY_TOOLS, WRITE_TOOLS } from './router.ts';
 import { formatDuration, summarizeArguments } from './feedback.ts';
 import { suggestFailure } from './suggest.ts';
+import { resolveIterationBudget, type IterationBudget } from './iteration-budget.ts';
+import { autoVerifyTool, type ToolVerification, type VerificationChannel } from './verify.ts';
 
 export interface RecipePlaceholder {
   from: string;
@@ -129,6 +131,14 @@ interface RecipeExecutorBase {
   /** now 的别名。 */
   clock?: () => number;
   onProgress?: (event: RecipeProgressEvent) => void;
+  /** 0 基续跑起点：早于该下标的步骤不再执行（预算停下后续跑用）。 */
+  resumeFrom?: number;
+  /** 本轮最多执行几步（不含跳过）；与 `executePlan({maxSteps})` 同义，预算还会再收一次。 */
+  maxSteps?: number;
+  /** 迭代预算基线；缺省 6，含写步骤或步骤 ≥4 时上抬到 12。 */
+  maxIterations?: number;
+  /** 写后自动验证通道（与 `AgentSession` 同一个 `verify.ts#autoVerifyTool` 入口）。 */
+  verifyChannel?: VerificationChannel;
 }
 
 export type RecipeExecutor = RecipeExecutorBase;
@@ -150,6 +160,8 @@ export interface RecipeStepResult {
   args?: Record<string, unknown>;
   data?: unknown;
   suggestion?: string;
+  /** 写后自动验证结论（只附字段，不改变 ok）。 */
+  verification?: ToolVerification;
 }
 
 export interface RecipeError {
@@ -183,6 +195,18 @@ export interface RecipeRunResult {
   summary: string;
   report: string;
   error?: RecipeError;
+  /** 本轮预算（与会话层 `turnOutcome().budget` 同源）。 */
+  budget?: IterationBudget;
+  /** 本轮实际执行（不含跳过）的步骤数。 */
+  iterations?: number;
+  /** 续跑起点（0 基）；非续跑时不出现。 */
+  resumedFrom?: number;
+  /** 预算用尽而停下；已完成的步骤保留在 results / completed 里。 */
+  stopped?: 'iteration_limit';
+  /** 停下时给用户的下一步说法。 */
+  pendingHint?: string;
+  /** 预算停下时的 0 基续跑位置（= 第一个未执行步骤）。 */
+  nextStepIndex?: number;
 }
 
 export const DEFAULT_RECIPE_TOOL_NAMES: ReadonlySet<string> = new Set([
@@ -888,7 +912,11 @@ function successRun(
   skipped: RecipeStepResult[]
 ): RecipeRunResult {
   const skippedText = skipped.length > 0 ? `，跳过 ${skipped.length} 步` : '';
-  const summary = `流程「${recipe.title}」已完成 ${completed.length}/${recipe.steps.length} 步${skippedText}；总耗时 ${formatDuration(totalMs)}。`;
+  const unverified = results
+    .filter((item) => item.verification?.ok === false)
+    .map((item) => `第 ${item.step} 步 ${item.tool}${item.verification?.nextAction ? `（${item.verification.nextAction}）` : ''}`);
+  const summary = `流程「${recipe.title}」已完成 ${completed.length}/${recipe.steps.length} 步${skippedText}；总耗时 ${formatDuration(totalMs)}。`
+    + (unverified.length > 0 ? `写后自查未通过：${unverified.join('、')}。` : '');
   const report = [
     `流程「${recipe.title}」执行成功。`,
     `完成：${completed.map((item) => `第 ${item.step} 步「${item.title}」（${item.tool}，${formatDuration(item.elapsedMs)}）`).join('、') || '无'}`,
@@ -908,6 +936,56 @@ function successRun(
     totalMs,
     summary,
     report
+  };
+}
+
+/**
+ * 预算用尽时的收尾：已执行的步骤全部保留，明确告诉用户下一步从哪继续。
+ * 不作为「失败」处理（没有 failedStep），但 `ok:false`，因为流程没跑完。
+ */
+function budgetStop(
+  recipe: Recipe,
+  runId: string,
+  totalMs: number,
+  results: RecipeStepResult[],
+  completed: RecipeStepResult[],
+  skipped: RecipeStepResult[],
+  budget: IterationBudget,
+  executed: number,
+  nextStepIndex: number
+): RecipeRunResult {
+  const remaining = Math.max(0, recipe.steps.length - nextStepIndex);
+  const pendingHint = `本轮已执行 ${executed} 步，达到预算上限 ${budget.effective}（原因 ${budget.reason}）；`
+    + `还剩 ${remaining} 步未执行，说「继续」会从第 ${nextStepIndex + 1} 步接着跑`;
+  const summary = `流程「${recipe.title}」执行到预算上限：本轮完成 ${completed.length} 步，第 ${nextStepIndex + 1} 步起未执行（共 ${recipe.steps.length} 步）。`;
+  const completedText = completed.length > 0
+    ? `已完成清单：${completed.map((item) => `第 ${item.step} 步「${item.title}」（${item.tool}）`).join('、')}。`
+    : '已完成清单：无。';
+  const report = [
+    summary,
+    `下一步：${pendingHint}`,
+    completedText,
+    skipped.length > 0 ? `已跳过：${skipped.map((item) => item.title).join('、')}。` : ''
+  ].filter(Boolean).join('\n');
+  return {
+    ok: false,
+    code: 'ITERATION_LIMIT',
+    recipeId: recipe.id,
+    recipeTitle: recipe.title,
+    runId,
+    results,
+    completed,
+    kept: completed,
+    skipped,
+    totalMs,
+    budget,
+    iterations: executed,
+    stopped: 'iteration_limit',
+    pendingHint,
+    nextStepIndex,
+    summary,
+    report,
+    error: { code: 'ITERATION_LIMIT', message: summary }
   };
 }
 
@@ -983,9 +1061,40 @@ export async function runRecipe(
     }
   };
 
+  // 自适应预算：与会话层同一实现（session.ts#resolveIterationBudget）。
+  const startAt = Math.max(0, Math.min(recipe.steps.length, Math.trunc(exec.resumeFrom ?? 0)));
+  const resolved = resolveIterationBudget({
+    ...(exec.maxIterations !== undefined ? { base: exec.maxIterations } : {}),
+    hasWrite: recipe.steps.some((step) => !READ_ONLY_TOOLS.has(step.tool)),
+    planSteps: recipe.steps.length
+  });
+  // 显式 maxSteps 更小时，本轮真实上限就是它：budget.effective 如实收窄。
+  const explicitMax = Number.isFinite(exec.maxSteps) ? Math.max(1, Math.trunc(exec.maxSteps!)) : null;
+  const budget: IterationBudget = explicitMax !== null && explicitMax < resolved.effective
+    ? { ...resolved, effective: explicitMax }
+    : resolved;
+  const cap = budget.effective;
+  let executed = 0;
+  const withRunMeta = (output: RecipeRunResult): RecipeRunResult => ({
+    ...output,
+    budget,
+    iterations: executed,
+    ...(startAt > 0 ? { resumedFrom: startAt } : {})
+  });
+  const elapsedNow = (): number => Math.max(0, now() - startedAt);
+  const fail = (failed: RecipeStepResult, code: string): RecipeRunResult =>
+    withRunMeta(failedRun(recipe, runId, elapsedNow(), results, completed, skipped, failed, code));
+  const abort = (): RecipeRunResult =>
+    withRunMeta(abortResult(recipe, runId, startedAt, now, results, completed, skipped));
+
   for (const [index, step] of recipe.steps.entries()) {
     if (exec.signal?.aborted) {
-      return abortResult(recipe, runId, startedAt, now, results, completed, skipped);
+      return abort();
+    }
+    // 续跑：早于续跑起点的步骤本轮不重复执行。
+    if (index < startAt) continue;
+    if (executed >= cap) {
+      return budgetStop(recipe, runId, elapsedNow(), results, completed, skipped, budget, executed, index);
     }
 
     if (shouldSkip(step, index, exec)) {
@@ -1047,7 +1156,7 @@ export async function runRecipe(
         code: 'MISSING_CONTEXT',
         ...(failed.message ? { message: failed.message } : {})
       });
-      return failedRun(recipe, runId, Math.max(0, now() - startedAt), results, completed, skipped, failed, 'MISSING_CONTEXT');
+      return fail(failed, 'MISSING_CONTEXT');
     }
 
     if (!READ_ONLY_TOOLS.has(step.tool)) {
@@ -1065,7 +1174,7 @@ export async function runRecipe(
             args: resolved.args
           });
           results.push(failed);
-          return failedRun(recipe, runId, Math.max(0, now() - startedAt), results, completed, skipped, failed, 'CONFIRMATION_REQUIRED');
+          return fail(failed, 'CONFIRMATION_REQUIRED');
         }
         const message = `流程「${recipe.title}」第 ${index + 1}/${recipe.steps.length} 步：${step.title}（${step.tool}），是否允许？`;
         let allowed = false;
@@ -1092,7 +1201,7 @@ export async function runRecipe(
             args: resolved.args
           });
           results.push(failed);
-          return failedRun(recipe, runId, Math.max(0, now() - startedAt), results, completed, skipped, failed, 'CONFIRM_FAILED');
+          return fail(failed, 'CONFIRM_FAILED');
         }
         if (!allowed) {
           const failed = stepResult({
@@ -1105,7 +1214,7 @@ export async function runRecipe(
             args: resolved.args
           });
           results.push(failed);
-          return failedRun(recipe, runId, Math.max(0, now() - startedAt), results, completed, skipped, failed, 'USER_DENIED');
+          return fail(failed, 'USER_DENIED');
         }
         if (exec.rememberSameKind === true || exec.remember === true) {
           suppressed.add(step.tool);
@@ -1127,8 +1236,10 @@ export async function runRecipe(
       source: 'recipe'
     });
     let outcome: { ok: boolean; code: string; message?: string; data?: unknown };
+    let rawResult: unknown;
     try {
-      outcome = normalizeToolResult(await exec.execute({ ...step, args: resolved.args }, index, exec.signal));
+      rawResult = await exec.execute({ ...step, args: resolved.args }, index, exec.signal);
+      outcome = normalizeToolResult(rawResult);
     } catch (error) {
       outcome = {
         ok: false,
@@ -1148,6 +1259,21 @@ export async function runRecipe(
       ...(outcome.data !== undefined ? { data: outcome.data } : {})
     });
     results.push(result);
+    if (outcome.ok) executed += 1;
+    // 写后自动验证：与 AgentSession 同一入口；验证没跑通只记 ok:null，不判步骤失败。
+    if (outcome.ok && exec.verifyChannel) {
+      try {
+        const verification = await autoVerifyTool(
+          exec.verifyChannel,
+          step.tool,
+          isRecord(rawResult) ? rawResult : { ok: true, data: outcome.data },
+          exec.signal
+        );
+        if (verification) result.verification = verification;
+      } catch (error) {
+        console.warn(`[RECIPE_VERIFY_HOOK_FAILED]`, { site: 'desktop/src/agent/recipes.ts:1200' }, error);
+      }
+    }
     emit({
       runId,
       phase: 'end',
@@ -1165,12 +1291,12 @@ export async function runRecipe(
       ...(result.message ? { message: result.message } : {})
     });
     if (!outcome.ok) {
-      return failedRun(recipe, runId, Math.max(0, now() - startedAt), results, completed, skipped, result, outcome.code);
+      return fail(result, outcome.code);
     }
     completed.push(result);
   }
 
-  return successRun(recipe, runId, Math.max(0, now() - startedAt), results, completed, skipped);
+  return withRunMeta(successRun(recipe, runId, elapsedNow(), results, completed, skipped));
 }
 
 function statusText(result: RecipeStepResult): string {

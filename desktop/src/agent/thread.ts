@@ -13,8 +13,10 @@
 import type { AgentContext, AgentSelectionKind } from './context.ts';
 import { readListResult } from './trim.ts';
 import { resolveReference } from './reference.ts';
-import { routeIntent } from './router.ts';
+import { READ_ONLY_TOOLS, routeIntent } from './router.ts';
 import type { CompletedStep } from './feedback.ts';
+import { resolveIterationBudget, type IterationBudget } from './iteration-budget.ts';
+import { autoVerifyTool, type VerificationChannel } from './verify.ts';
 import {
   executePlan,
   type AgentPlan,
@@ -84,6 +86,8 @@ export interface ThreadState {
   source?: 'chat' | 'plan';
   /** 计划步骤签名；同一计划才允许按 completedSteps 续跑。 */
   planSignature?: string;
+  /** 因迭代预算停下时记录的 0 基续跑位置；续跑用完即清。 */
+  nextStepIndex?: number;
   updatedAt?: string;
 }
 
@@ -105,6 +109,8 @@ export interface ThreadFinishInput {
   targetRefs?: readonly ThreadTarget[];
   source?: 'chat' | 'plan';
   planSignature?: string;
+  /** 因迭代预算停下时的 0 基续跑位置；不传表示本轮没有停在中间。 */
+  nextStepIndex?: number;
   now?: string;
 }
 
@@ -328,6 +334,7 @@ export function cloneThreadState(state: ThreadState | null | undefined): ThreadS
     ...(state.targetRefs && state.targetRefs.length > 0 ? { targetRefs: state.targetRefs.map(cloneTarget) } : {}),
     ...(state.source ? { source: state.source } : {}),
     ...(state.planSignature ? { planSignature: state.planSignature } : {}),
+    ...(state.nextStepIndex !== undefined ? { nextStepIndex: state.nextStepIndex } : {}),
     ...(state.updatedAt ? { updatedAt: state.updatedAt } : {})
   };
 }
@@ -422,6 +429,7 @@ export class AgentThread {
       ...(targetRefs.length > 0 ? { targetRefs } : {}),
       ...(input.source ? { source: input.source } : {}),
       ...(input.planSignature ? { planSignature: input.planSignature } : {}),
+      ...(input.nextStepIndex !== undefined ? { nextStepIndex: input.nextStepIndex } : {}),
       updatedAt: input.now ?? new Date().toISOString()
     };
     this.state = state;
@@ -580,6 +588,13 @@ export interface RunPlanOptions extends ExecutePlanDeps {
   /** 状态里的意图；缺省按上一步骤推断。 */
   intent?: string;
   userText?: string;
+  /**
+   * 写后自动验证通道（与 `AgentSession` 同一个 `verify.ts#autoVerifyTool` 入口）。
+   * 不传表示前端没有接验证能力：不补 verification 字段，也不伪造结论。
+   */
+  verifyChannel?: VerificationChannel;
+  /** 迭代预算基线；缺省 6，含写步骤或步骤 ≥4 时上抬到 12。 */
+  maxIterations?: number;
 }
 
 export interface RunPlanResult extends ExecutePlanResult {
@@ -587,6 +602,16 @@ export interface RunPlanResult extends ExecutePlanResult {
   skippedSteps?: number;
   stale?: boolean;
   changed?: string[];
+  /** 本轮预算（含上抬原因），与会话层 `turnOutcome().budget` 同源。 */
+  budget?: IterationBudget;
+  /** 本轮实际执行（不含续跑跳过）的步骤数。 */
+  iterations?: number;
+  /** 预算用尽而停下；已完成的步骤保留在 results / 线程状态里。 */
+  stopped?: 'iteration_limit';
+  /** 停下时给用户的下一步说法。 */
+  pendingHint?: string;
+  /** 预算停下时的 0 基续跑位置（= 第一个未执行步骤）。 */
+  nextStepIndex?: number;
 }
 
 function completedIndexes(steps: readonly ThreadCompletedStep[]): Set<number> {
@@ -684,12 +709,31 @@ function refusal(
   return result;
 }
 
+/** 预算用尽时的下一步说法：必须能照说，且点明从第几步接着跑。 */
+export function iterationLimitHint(
+  nextStepIndex: number,
+  totalSteps: number,
+  budget: IterationBudget,
+  iterations: number
+): string {
+  const remaining = Math.max(0, totalSteps - nextStepIndex);
+  return `本轮已执行 ${iterations} 步，达到预算上限 ${budget.effective}（原因 ${budget.reason}）；`
+    + `还剩 ${remaining} 步未执行，说「继续」会从第 ${nextStepIndex + 1} 步接着跑`;
+}
+
+/** 计划里是否有写步骤（未知工具按写步骤处理，与计划卡片一致）。 */
+export function planHasWrite(plan: AgentPlan): boolean {
+  return plan.steps.some((step) => !READ_ONLY_TOOLS.has(step.tool));
+}
+
 /**
  * 带跨轮续跑的计划执行器。
  *
- * - 不传 `resumeFrom`：等价于 `executePlan`；
+ * - 不传 `resumeFrom`：等价于 `executePlan`，另外套一层自适应预算；
  * - 传 `resumeFrom`：要求上一轮状态存在；指纹不同直接拒绝且不执行任何工具；
- * - 指纹一致时从 `resumeFrom` 起跳过已成功完成的步骤。
+ * - 指纹一致时从 `resumeFrom` 起跳过已成功完成的步骤；
+ * - 预算用尽：返回 `stopped:'iteration_limit'` + `pendingHint` + `nextStepIndex`，
+ *   已完成的步骤保留在 `results` 和线程状态里，可直接 `resumeRunPlan` 接着跑。
  */
 export async function runPlan(plan: AgentPlan, options: RunPlanOptions): Promise<RunPlanResult> {
   const {
@@ -699,6 +743,8 @@ export async function runPlan(plan: AgentPlan, options: RunPlanOptions): Promise
     thread,
     intent,
     userText,
+    verifyChannel,
+    maxIterations,
     ...deps
   } = options;
   const previous = providedPrevious === undefined ? (thread?.read() ?? null) : providedPrevious;
@@ -751,10 +797,52 @@ export async function runPlan(plan: AgentPlan, options: RunPlanOptions): Promise
     };
   }
 
+  // 自适应预算：与会话层同一实现（iteration-budget.ts，session.ts re-export），不在这里另写规则。
+  const totalSteps = plan.steps.length;
+  const remaining = Math.max(0, totalSteps - effectiveStart);
+  const resolved = resolveIterationBudget({
+    ...(maxIterations !== undefined ? { base: maxIterations } : {}),
+    hasWrite: planHasWrite(plan),
+    planSteps: totalSteps
+  });
+  // 调用方显式给的 maxSteps 比预算更小时，本轮真实上限就是 maxSteps：如实写进 budget，
+  // 否则会报「预算 12」却只跑 1 步，验收时对不上。
+  const explicitMax = Number.isFinite(deps.maxSteps) ? Math.max(1, Math.trunc(deps.maxSteps!)) : null;
+  const budget: IterationBudget = explicitMax !== null && explicitMax < resolved.effective
+    ? { ...resolved, effective: explicitMax }
+    : resolved;
+  const allowance = Math.max(1, Math.min(remaining, budget.effective));
+  const truncated = allowance < remaining;
+
   const result = await executePlan(plan, {
     ...deps,
-    ...(startAt !== undefined ? { startAt } : {})
+    ...(startAt !== undefined ? { startAt } : {}),
+    maxSteps: allowance,
+    ...(verifyChannel
+      ? { verify: (step: PlanStep, raw: unknown, signal?: AbortSignal) => autoVerifyTool(verifyChannel, step.tool, raw, signal) }
+      : {})
   });
+
+  const iterations = result.results.length;
+  const stoppedAtBudget = truncated
+    && !result.cancelled
+    && result.failedIndex === undefined
+    && iterations >= allowance;
+  const nextStepIndex = stoppedAtBudget ? effectiveStart + iterations : undefined;
+  const stoppedFields = nextStepIndex !== undefined
+    ? {
+        stopped: 'iteration_limit' as const,
+        pendingHint: iterationLimitHint(nextStepIndex, totalSteps, budget, iterations),
+        nextStepIndex
+      }
+    : {};
+  const verificationNote = verificationFailedNote(result.results);
+  const summary = [
+    result.summary + (nextStepIndex !== undefined
+      ? `（本轮预算 ${budget.effective} 步已用尽，第 ${nextStepIndex + 1} 步起未执行）`
+      : ''),
+    verificationNote
+  ].filter(Boolean).join('；');
 
   if (thread) {
     const currentSteps = result.results.map((item) => resultStepToThread(item, plan.steps[item.index]));
@@ -766,17 +854,53 @@ export async function runPlan(plan: AgentPlan, options: RunPlanOptions): Promise
       ...(intent ? { intent } : previous?.intent ? { intent: previous.intent } : { intent: userText ? routeIntent(userText).intent : 'plan' }),
       ...(currentContext ? { context: currentContext } : {}),
       completedSteps: completed,
-      reply: result.summary,
+      reply: summary,
       source: 'plan',
       planSignature: planSignature(plan),
-      ...(pending ? { pendingConfirm: pending } : {})
+      ...(pending ? { pendingConfirm: pending } : {}),
+      ...(nextStepIndex !== undefined ? { nextStepIndex } : {})
     });
   }
 
   return {
     ...result,
+    summary,
+    budget,
+    iterations,
+    ...stoppedFields,
     ...(resumeFrom !== undefined ? { resumedFrom: effectiveStart, skippedSteps } : {})
   };
+}
+
+/** 写后自查未通过的一行说明（只在真发现问题时出现，正常计划摘要不变）。 */
+function verificationFailedNote(results: readonly PlanStepResult[]): string {
+  const failed = results.filter((item) => item.verification?.ok === false);
+  if (failed.length === 0) return '';
+  return `写后自查未通过：${failed
+    .map((item) => `第 ${item.step} 步 ${item.tool}${item.verification?.nextAction ? `（${item.verification.nextAction}）` : ''}`)
+    .join('、')}`;
+}
+
+/**
+ * 从上一轮状态续跑计划的最小入口：优先用 `nextStepIndex`（预算停下处），
+ * 回落到「第一个未成功的步骤」。没有上一轮状态时返回拒绝结果。
+ */
+export async function resumeRunPlan(plan: AgentPlan, options: RunPlanOptions): Promise<RunPlanResult> {
+  const previous = options.previous === undefined ? (options.thread?.read() ?? null) : options.previous;
+  if (!previous) {
+    return refusal('没有可续跑的上一次计划状态；请先重新执行前置步骤。', {});
+  }
+  const from = resumePoint(plan, previous);
+  return runPlan(plan, { ...options, previous, resumeFrom: from });
+}
+
+/** 续跑起点：预算记录优先，其次第一个未成功步骤。 */
+export function resumePoint(plan: AgentPlan, state: ThreadState | null | undefined): number {
+  if (!state) return 0;
+  if (state.nextStepIndex !== undefined) {
+    return Math.max(0, Math.min(plan.steps.length, Math.trunc(state.nextStepIndex)));
+  }
+  return nextIncompleteStep(state.completedSteps, plan.steps.length, 0);
 }
 
 /** 给 IPC / 评估脚本用：把对话里的 CompletedStep 转成线程步骤。 */
