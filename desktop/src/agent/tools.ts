@@ -53,6 +53,14 @@ export interface AgentCommandExecutor {
   execute(name: string, args?: Record<string, unknown>, signal?: AbortSignal): Promise<CommandResult>;
   undoLast(signal?: AbortSignal): Promise<CommandResult>;
   history?(): CommandHistoryEntry[];
+  /**
+   * 写后自动验证通道（只读 `validate_machine_design`）。
+   *
+   * AgentSession 在 apply_machine_design / repair_plc_config / run_plc_generate 成功后
+   * 调它做机制层复查。主进程用命令总线实现；没有实现的执行器不会附 `verification`
+   * （如实记 ok:null，不伪造「已验证」）。
+   */
+  validateMachineDesign?(signal?: AbortSignal): Promise<CommandResult>;
 }
 
 const COMPONENT_FILTER_SCHEMA = {

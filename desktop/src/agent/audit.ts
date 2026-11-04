@@ -44,6 +44,11 @@ export interface AgentAuditRecord {
   docsSources?: number;
   /** 本次调用复用了同轮去重或会话 TTL 缓存的结果，未真正执行工具。 */
   cacheHit?: boolean;
+  /**
+   * 写操作后的自动验证结论：true=自查通过，false=方案有问题（需修正），
+   * 缺省表示该调用不在自动验证范围或验证未执行。
+   */
+  verified?: boolean;
 }
 
 export interface AgentAuditEntry extends AgentAuditRecord {
@@ -116,6 +121,7 @@ export function formatAuditLine(record: AgentAuditRecord, at: Date = new Date())
       ? { docsSources: record.docsSources }
       : {}),
     ...(record.cacheHit === true ? { cacheHit: true } : {}),
+    ...(typeof record.verified === 'boolean' ? { verified: record.verified } : {}),
     ...(record.message ? { message: maskSecrets(record.message) } : {}),
     ...(record.args ? { args: redactValue(record.args) as Record<string, unknown> } : {})
   };

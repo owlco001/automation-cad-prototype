@@ -1481,6 +1481,13 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
       },
       undoLast(signal?: AbortSignal) {
         return bus.undoLast(signal);
+      },
+      /**
+       * 写后自动验证通道：只读 validate_machine_design，走命令总线（不带确认、不改状态）。
+       * 写工具执行成功后由 AgentSession 调，结论附在工具回执的 `verification` 里。
+       */
+      validateMachineDesign(signal?: AbortSignal) {
+        return bus.execute('validate_machine_design', {}, signal);
       }
     };
     session = new AgentSession({

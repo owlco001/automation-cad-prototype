@@ -372,6 +372,10 @@ function createFakeBus(context) {
     async undoLast() {
       calls.push({ name: 'undo_last', args: {} });
       return { ok: true, data: undo() };
+    },
+    // 写后自动验证通道：返回固定的「结构校验通过」，供 live 脚本观测 verification 字段。
+    async validateMachineDesign() {
+      return { ok: true, data: { ok: true, issues: [], summary: { errors: 0, warnings: 0 }, source: 'active' } };
     }
   };
 }

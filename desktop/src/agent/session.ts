@@ -2,7 +2,21 @@ import type { CommandResult } from './commands.ts';
 import type { AgentCommandExecutor } from './tools.ts';
 import type { LlmChatResponse, LlmClient, LlmMessage, LlmToolCall } from './llm.ts';
 import type { AgentAuditRecord } from './audit.ts';
-import { describePlan, planReadOnly, routeIntent, READ_ONLY_TOOLS, requiresWriteConfirmation } from './router.ts';
+import {
+  describePlan,
+  planReadOnly,
+  routeIntent,
+  READ_ONLY_TOOLS,
+  requiresWriteConfirmation,
+  type IntentKind
+} from './router.ts';
+import {
+  AUTO_VERIFY_TOOLS,
+  inlineVerification,
+  nextActionForDesignIssues,
+  withVerification,
+  type ToolVerification
+} from './verify.ts';
 import {
   emptyAgentContext,
   serializeAgentContext,
@@ -78,6 +92,11 @@ export interface AgentSessionOptions {
     context?: ConfirmWriteContext
   ): Promise<boolean>;
   maxIterations?: number;
+  /**
+   * 外部规划器已知的计划步骤数（可选）。≥4 步时本轮预算自动上抬到 12；
+   * 聊天路径没有计划就不传，只按「是否出现写工具」自适应。
+   */
+  planSteps?: number;
   historyLimit?: number;
   /** 审计回调：主进程写 agent-audit.jsonl；不传则不记录。 */
   audit?: (record: AgentAuditRecord) => void;
@@ -262,6 +281,107 @@ function failedTool(code: string, message: string): Record<string, unknown> {
   return { ok: false, error: { code, message } };
 }
 
+/** 只读问答的默认预算：够一问一答，又不会为死循环白烧 token。 */
+export const READ_ONLY_ITERATION_BUDGET = 6;
+
+/** 含写工具或长计划时的预算：设计→自查→应用→生成 PLC→截图这类链要 10+ 步。 */
+export const WRITE_ITERATION_BUDGET = 12;
+
+/** 计划步骤达到该数量即视为长链任务（读配置→核算→落盘→生成→截图）。 */
+export const LONG_PLAN_STEP_THRESHOLD = 4;
+
+/** 连续这么多步只读工具都没有新信息，就提前收尾。 */
+export const REPEATED_READ_STEP_LIMIT = 3;
+
+/** 与 `llm-config.ts` 的 1..50 上限保持一致。 */
+export const MAX_ITERATION_BUDGET = 50;
+
+export type IterationBudgetReason = 'read-only' | 'write' | 'long-plan' | 'commission';
+
+export interface IterationBudgetInput {
+  /** 基线预算；缺省 6（来自 options.maxIterations 时按配置走）。 */
+  base?: number;
+  /** 本轮已经出现写工具调用（含被拒绝的写：只要模型要写，就说明这不是一问一答）。 */
+  hasWrite?: boolean;
+  /** 外部规划器已知的计划步骤数；≥4 视为长链任务。 */
+  planSteps?: number;
+  /** 本轮路由意图；联调天然多步。 */
+  intent?: IntentKind | null;
+}
+
+export interface IterationBudget {
+  base: number;
+  effective: number;
+  reason: IterationBudgetReason;
+}
+
+/**
+ * 自适应迭代预算（纯函数，便于单测）。
+ *
+ * 规则表：
+ * | 场景                         | effective |
+ * | 只读问答（无写、计划 <4 步）  | base（默认 6） |
+ * | 出现写工具                   | max(base, 12) |
+ * | 计划步骤 ≥4                  | max(base, 12) |
+ * | 意图=联调（commission）       | max(base, 12) |
+ *
+ * 显式 `options.maxIterations` 仍是基线：传 3 的调用方在只读场景依然只跑 3 轮
+ * （既有测试与「缩小范围」的语义都不变），只有在需要写/长链时才上抬到 12。
+ */
+export function resolveIterationBudget(input: IterationBudgetInput = {}): IterationBudget {
+  const raw = Math.trunc(input.base ?? READ_ONLY_ITERATION_BUDGET);
+  const base = Math.min(
+    MAX_ITERATION_BUDGET,
+    Math.max(1, Number.isFinite(raw) ? raw : READ_ONLY_ITERATION_BUDGET)
+  );
+  const planSteps = Math.max(0, Math.trunc(input.planSteps ?? 0));
+  const escalate = (reason: IterationBudgetReason): IterationBudget => ({
+    base,
+    effective: Math.max(base, WRITE_ITERATION_BUDGET),
+    reason
+  });
+  if (input.hasWrite === true) return escalate('write');
+  if (planSteps >= LONG_PLAN_STEP_THRESHOLD) return escalate('long-plan');
+  if (input.intent === 'commission') return escalate('commission');
+  return { base, effective: base, reason: 'read-only' };
+}
+
+/** 一轮对话的收尾信息：预算、是否被截断、以及下一句可以照说的话。 */
+export interface AgentTurnOutcome {
+  /** 实际用掉的模型迭代轮数。 */
+  iterations: number;
+  budget: IterationBudget;
+  /** 被预算截断 / 只读空转提前收尾；未截断时缺省。 */
+  stopped?: 'iteration_limit' | 'repeated_reads';
+  /** 截断后「继续」时模型/用户该补的那一步。 */
+  pendingHint?: string;
+}
+
+const GENERIC_CONTINUE_HINT = '本轮工具调用已达上限，继续请说「继续」';
+
+/** 只读空转提前收尾时的提示：不能说「达到上限」，那是另一回事。 */
+const GENERIC_REPEAT_HINT = '已停止重复调用同类工具；要继续请说「继续」';
+
+/** 去掉复用标记后的结果指纹：用于判定「只读步骤有没有带来新信息」。 */
+function readResultSignature(value: unknown): string {
+  try {
+    if (isRecord(value)) {
+      const rest: Record<string, unknown> = { ...value };
+      delete rest.reused;
+      delete rest.reuseSource;
+      delete rest.cacheHit;
+      return JSON.stringify(rest).slice(0, 2048);
+    }
+    return JSON.stringify(value ?? null) ?? 'null';
+  } catch {
+    return 'unserializable';
+  }
+}
+
+function wasReused(value: unknown): boolean {
+  return isRecord(value) && value.reused === true;
+}
+
 function docsSourceCount(result: unknown): number | undefined {
   if (!isRecord(result)) return undefined;
   const data = isRecord(result.data) ? result.data : result;
@@ -279,7 +399,8 @@ export class AgentSession {
   private readonly llm: LlmClient;
   private readonly bus: AgentCommandExecutor;
   private readonly confirmWrite: ConfirmWrite;
-  private readonly maxIterations: number;
+  private readonly baseIterations: number;
+  private readonly planSteps: number;
   private readonly historyLimit: number;
   private readonly audit: ((record: AgentAuditRecord) => void) | undefined;
   private readonly offlineFallback: boolean;
@@ -312,12 +433,22 @@ export class AgentSession {
   private sessionUsage: TokenUsage = emptyTokenUsage();
   private lastRequestUsage: TokenUsage | null = null;
   private lastBudget: PackedBudget | null = null;
+  /** 本轮是否出现过写工具调用；决定预算是否上抬。 */
+  private turnHasWrite = false;
+  private turnIntent: IntentKind | null = null;
+  /** 连续「只读且没有新信息」的步数；到 REPEATED_READ_STEP_LIMIT 提前收尾。 */
+  private readOnlyStreak = 0;
+  private lastReadSignature: string | null = null;
+  /** 最近一次写操作后的自动验证结论，用于截断时给「继续」提示。 */
+  private lastWriteVerification: ToolVerification | null = null;
+  private lastOutcome: AgentTurnOutcome;
 
   constructor(options: AgentSessionOptions) {
     this.llm = options.llm;
     this.bus = options.bus;
     this.confirmWrite = options.confirmWrite;
-    this.maxIterations = Math.max(1, Math.trunc(options.maxIterations ?? 6));
+    this.baseIterations = Math.max(1, Math.trunc(options.maxIterations ?? READ_ONLY_ITERATION_BUDGET));
+    this.planSteps = Math.max(0, Math.trunc(options.planSteps ?? 0));
     this.historyLimit = Math.max(2, Math.trunc(options.historyLimit ?? 20));
     this.audit = options.audit;
     this.offlineFallback = options.offlineFallback !== false;
@@ -340,6 +471,75 @@ export class AgentSession {
       1,
       Math.trunc(options.parallelConcurrency ?? DEFAULT_PARALLEL_CONCURRENCY)
     );
+    this.lastOutcome = {
+      iterations: 0,
+      budget: resolveIterationBudget({ base: this.baseIterations, planSteps: this.planSteps })
+    };
+  }
+
+  /** 按本轮已知信息（写工具 / 计划步骤 / 意图）算当前预算。 */
+  private currentBudget(): IterationBudget {
+    return resolveIterationBudget({
+      base: this.baseIterations,
+      hasWrite: this.turnHasWrite,
+      planSteps: this.planSteps,
+      intent: this.turnIntent
+    });
+  }
+
+  /**
+   * 最近一轮的收尾信息：实际轮数、预算、是否被截断、以及 pendingHint。
+   * `run()` 仍按约定返回字符串；需要结构化收尾信息（UI/诊断/测试）读这里。
+   */
+  turnOutcome(): AgentTurnOutcome {
+    return { ...this.lastOutcome, budget: { ...this.lastOutcome.budget } };
+  }
+
+  /**
+   * 写后自动验证：对指定写工具再调一次只读 `validate_machine_design`。
+   * 失败（抛错/命令失败）只记 ok:null + error，绝不改写主操作结果。
+   */
+  private async verifyToolResult(
+    name: string,
+    result: CommandResult,
+    signal?: AbortSignal
+  ): Promise<ToolVerification | null> {
+    if (!AUTO_VERIFY_TOOLS.has(name) || result?.ok !== true) return null;
+    const inline = inlineVerification(result);
+    if (inline) return inline;
+    try {
+      const channel = this.bus.validateMachineDesign;
+      if (typeof channel !== 'function') {
+        return {
+          ok: null,
+          issues: [],
+          source: 'auto',
+          error: '执行器未提供 validate_machine_design 通道，未执行自动验证'
+        };
+      }
+      const checked = await channel.call(this.bus, signal);
+      if (!checked || checked.ok !== true) {
+        return {
+          ok: null,
+          issues: [],
+          source: 'auto',
+          error: checked?.error?.message ?? 'validate_machine_design 未返回结果'
+        };
+      }
+      const data = isRecord(checked.data) ? checked.data : {};
+      const issues = Array.isArray(data.issues) ? data.issues : [];
+      const ok = data.ok === true;
+      return ok
+        ? { ok, issues, source: 'auto' }
+        : { ok, issues, source: 'auto', nextAction: nextActionForDesignIssues(issues) };
+    } catch (error) {
+      return {
+        ok: null,
+        issues: [],
+        source: 'auto',
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
   }
 
   private recordAudit(record: AgentAuditRecord): void {
@@ -724,6 +924,7 @@ export class AgentSession {
         deniedTurnId?: string;
         consent?: boolean;
         cacheHit?: boolean;
+        verified?: boolean;
       } = {}
     ): void => {
       const elapsedMs = Math.max(0, Date.now() - startedAt);
@@ -740,7 +941,8 @@ export class AgentSession {
         ...(extras.denialReason ? { denialReason: extras.denialReason } : {}),
         ...(extras.deniedTurnId ? { deniedTurnId: extras.deniedTurnId } : {}),
         ...(extras.consent !== undefined ? { consent: extras.consent } : {}),
-        ...(extras.cacheHit === true ? { cacheHit: true } : {})
+        ...(extras.cacheHit === true ? { cacheHit: true } : {}),
+        ...(extras.verified !== undefined ? { verified: extras.verified } : {})
       });
       this.emitProgress(context.onProgress, {
         runId: context.runId,
@@ -926,13 +1128,17 @@ export class AgentSession {
       }
       const command = COMMAND_ALIASES[name] ?? name;
       if (requiresWriteConfirmation(name)) this.cache.invalidateAfterWrite(name);
-      const result = await withAbort(
+      const rawResult = await withAbort(
         name === 'undo_last'
           ? this.bus.undoLast(context.signal)
           : this.bus.execute(command, args, context.signal),
         context.signal
       );
       if (requiresWriteConfirmation(name)) this.cache.invalidateAfterWrite(name);
+      // 写后自动验证（机制层）：工具自己已带验证结论就不重复调，验证失败也不改主结果。
+      const verification = await this.verifyToolResult(name, rawResult, context.signal);
+      if (verification) this.lastWriteVerification = verification;
+      const result = verification ? withVerification(rawResult, verification) : rawResult;
       this.memory.record(summarizeToolCall(name, args, result));
       const code = result.ok ? 'OK' : (result.error?.code ?? 'COMMAND_FAILED');
       const policyDenial = !result.ok && (code === 'TARGET_PATH_UNSUPPORTED' || code === 'POLICY_DENIED')
@@ -945,6 +1151,7 @@ export class AgentSession {
         result.ok ? undefined : result.error?.message,
         {
           ...(sources !== undefined ? { docsSources: sources } : {}),
+          ...(verification && verification.ok !== null ? { verified: verification.ok } : {}),
           ...(policyDenial
             ? {
                 ...(denialKey ? { target: denialKey } : {}),
@@ -1359,6 +1566,15 @@ export class AgentSession {
     this.threadPrevious = this.thread.read();
     this.currentTurnId = (this.threadPrevious?.turnId ?? 0) + 1;
     this.turnText = text;
+    this.turnIntent = routeIntent(text).intent;
+    this.turnHasWrite = false;
+    this.readOnlyStreak = 0;
+    this.lastReadSignature = null;
+    this.lastWriteVerification = null;
+    this.lastOutcome = {
+      iterations: 0,
+      budget: this.currentBudget()
+    };
     this.denials = normalizeDenials(this.threadPrevious?.denials ?? []);
     this.pendingConfirm = undefined;
     this.bypassIntent = detectBypassIntent(text);
@@ -1406,6 +1622,49 @@ export class AgentSession {
     });
   }
 
+  /**
+   * 记录「只读但没有新信息」的连续步数。
+   *
+   * 复用已有去重信号（`reused:true` 表示同工具同参数已执行过）+ 结果指纹（去掉复用
+   * 标记后同形），不另造一套签名体系。写工具/新结果一律把计数清零。
+   */
+  private noteReadOnlyProgress(
+    calls: readonly LlmToolCall[],
+    results: readonly unknown[]
+  ): void {
+    for (const [index, call] of calls.entries()) {
+      if (!READ_ONLY_TOOLS.has(call.function.name)) {
+        this.readOnlyStreak = 0;
+        this.lastReadSignature = null;
+        continue;
+      }
+      const result = results[index];
+      const signature = readResultSignature(result);
+      const noNewInfo = wasReused(result)
+        || (this.lastReadSignature !== null && this.lastReadSignature === signature);
+      this.readOnlyStreak = noNewInfo ? this.readOnlyStreak + 1 : 0;
+      this.lastReadSignature = signature;
+    }
+  }
+
+  /**
+   * 截断时能具体说「下一步做什么」的提示；没有具体待办时返回 undefined
+   * （只读问答被截断时回复保持原来的「请缩小任务范围」，不硬塞一句废话）。
+   */
+  private concretePendingHint(completed: readonly CompletedStep[]): string | undefined {
+    const okWrite = (tool: string): boolean =>
+      completed.some((step) => step.ok && step.tool === tool);
+    const verification = this.lastWriteVerification;
+    if (verification && verification.ok === false) {
+      const action = verification.nextAction ?? '按 issues 修正方案';
+      return `写入后自动自查未通过（${verification.issues.length} 项问题）：${action}`;
+    }
+    if (okWrite('run_plc_generate')) return undefined;
+    if (okWrite('apply_machine_design')) return '已应用方案但还没生成 PLC，继续请说「继续」';
+    if (okWrite('repair_plc_config')) return '已补齐 PLC 缺口但还没生成 PLC，继续请说「继续」';
+    return undefined;
+  }
+
   private async runLoop(
     text: string,
     options: AgentRunOptions,
@@ -1413,7 +1672,10 @@ export class AgentSession {
     runId: string
   ): Promise<string> {
     let retryUsed = false;
-    for (let iteration = 0; iteration < this.maxIterations; iteration += 1) {
+    let iteration = 0;
+    let budget = this.currentBudget();
+    this.lastOutcome = { iterations: 0, budget };
+    while (iteration < budget.effective) {
       if (options.signal?.aborted) throw new AgentCancelledError(completed);
       let response;
       try {
@@ -1573,9 +1835,30 @@ export class AgentSession {
         });
       }
       if (options.signal?.aborted) throw new AgentCancelledError(completed);
+      iteration += 1;
+      if (!this.turnHasWrite && calls.some((call) => !READ_ONLY_TOOLS.has(call.function.name))) {
+        this.turnHasWrite = true;
+      }
+      this.noteReadOnlyProgress(calls, results);
+      budget = this.currentBudget();
+      this.lastOutcome = { iterations: iteration, budget };
+      if (this.readOnlyStreak >= REPEATED_READ_STEP_LIMIT) {
+        // 连续只读且没有新信息：继续下去只是烧 token，提前收尾并说清下一句怎么继续。
+        const hint = this.concretePendingHint(completed) ?? GENERIC_REPEAT_HINT;
+        const reply = sanitizeConfirmationClaims(
+          `连续 ${REPEATED_READ_STEP_LIMIT} 步只读工具没有返回新信息，已提前结束本轮；${hint}`
+        );
+        this.lastOutcome = { iterations: iteration, budget, stopped: 'repeated_reads', pendingHint: hint };
+        this.push({ role: 'assistant', content: reply });
+        return reply;
+      }
     }
 
-    const reply = sanitizeConfirmationClaims(`已达到最大工具调用轮数（${this.maxIterations}），请缩小任务范围`);
+    const stopHint = this.concretePendingHint(completed);
+    const pendingHint = stopHint ?? GENERIC_CONTINUE_HINT;
+    const limitText = `已达到最大工具调用轮数（${budget.effective}），请缩小任务范围`;
+    const reply = sanitizeConfirmationClaims(stopHint ? `${limitText}\n${stopHint}` : limitText);
+    this.lastOutcome = { iterations: iteration, budget, stopped: 'iteration_limit', pendingHint };
     this.push({ role: 'assistant', content: reply });
     return reply;
   }

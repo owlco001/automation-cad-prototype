@@ -18,7 +18,7 @@ tools.ts（AgentTools + 32 个 AgentTool；只读 15 / 写 17；含只读 `sugge
 应用内对话
  ├─ llm-config.ts  → userData/agent-llm.json（600，UI 只读掩码）
  ├─ llm.ts         → OpenAI 兼容 /chat/completions + tools
- ├─ session.ts     → 工具调用循环（最多 maxIterations，历史 20 条）+ 多轮状态注入
+ ├─ session.ts     → 工具调用循环（自适应预算：只读 6 / 含写工具或计划≥4 步 12；历史 20 条）+ 写后自动验证 + 多轮状态注入
  ├─ dedupe.ts      → 同轮 (tool, canonicalArgs) 去重 / 写不合并 / 单轮 12 次上限
  ├─ parallel.ts    → 只读批并发（默认 3）/ 依赖降级串行 / 写屏障 / 保序结果
  ├─ cache.ts       → 会话内 30 s 结果缓存（BOM / 上下文 / 元件列表）
@@ -289,6 +289,33 @@ new ToolResultCache({ttlMs, now}).get/set/invalidateAfterWrite
 - **审计 / UI**：命中复用走 `finish(..., {cacheHit:true})`，`AgentAuditRecord.cacheHit` 落 NDJSON；`AgentProgressEvent.cacheHit` 驱动进度卡与工具卡显示「已复用」。
 - **验证**：`test/agent/efficiency.test.mjs` 29 条；smoke `SMOKE_AGENT_EFFICIENCY_OK dedupe=2 parallel=2 cache=1`。本机桩延迟（100 ms/工具）：两次只读 211 ms → 102 ms；三次重复 303 ms → 102 ms；两轮 BOM 101+101 ms → 101+2 ms。
 
+## 迭代预算与写后自动验证（P7-verify）
+
+提示词管不住两件事：链路一长就停在半路、写完没人验。两件都落在 `session.ts` 的代码里。
+
+```ts
+resolveIterationBudget({base?, hasWrite?, planSteps?, intent?}): {base, effective, reason}
+// READ_ONLY_ITERATION_BUDGET=6 / WRITE_ITERATION_BUDGET=12 / LONG_PLAN_STEP_THRESHOLD=4
+AgentSession#turnOutcome(): {iterations, budget, stopped?, pendingHint?}
+```
+
+| 场景 | 预算 |
+| --- | --- |
+| 只读问答（无写工具、计划 <4 步） | 6（显式传 `options.maxIterations` 时按该值） |
+| 本轮出现写工具（含被拒绝的写） | max(base, 12) |
+| `options.planSteps ≥ 4` | max(base, 12) |
+| 意图 commission（联调） | max(base, 12) |
+
+- 预算在每轮工具批次后重算（`currentBudget()`），不是构造时一次性定死：第一轮只是只读查询时仍按 6 收，出现写工具后余下的轮次才拿 12。
+- 到顶**不是异常**：`run()` 仍返回字符串（`已达到最大工具调用轮数（12），请缩小任务范围`），结构化收尾信息在 `turnOutcome()`：`stopped:'iteration_limit'` + `pendingHint`。有具体待办时这句也拼进回复（「已应用方案但还没生成 PLC，继续请说『继续』」）；纯只读查询到顶不硬塞提示，回复保持原样。
+- **只读空转提前收尾**：连续 3 步只读且无新信息（`reused:true`，或去掉复用标记后结果指纹相同）→ `stopped:'repeated_reads'`，不拖满上限。去重信号复用 `dedupe.ts`，不另造签名体系。
+- **写后自动验证**：`apply_machine_design` / `repair_plc_config` / `run_plc_generate` 成功（`ok:true`）后调执行器的 `validateMachineDesign()`（主进程实现为只读 `validate_machine_design`），把 `verification:{ok,issues,source:'auto',nextAction?}` 附在工具回执上，原有字段一个不动。
+  - `ok:false` 时附 `nextAction`（如「说『补齐安全回路』可自动修复」），审计行写 `verified:false`；
+  - 工具自己已带验证结论（`verification` 或 `{ok,issues}`）时不重复调；
+  - 自动验证抛错 / 通道缺失：`verification:{ok:null,error}`，主结果的 `ok` 与 `data` 不受影响，审计不写 `verified`（不伪造通过）。
+- 新增执行器能力 `AgentCommandExecutor.validateMachineDesign?()`：主进程 `ipc.ts` 直接转 `bus.execute('validate_machine_design')`；未实现的执行器如实记 `ok:null`。
+- 验证：`test/agent/session-verification.test.mjs` 10 条（预算 6/12、计划 4 步、到顶 hint、空转收尾、apply/repair/plc 三处 verification、验证抛错、自带结论不重调、无通道不伪造）。
+
 ## 多轮状态与续跑（P7-L）
 
 `thread.ts` 是无 IO 的纯状态层 + `runPlan` 包装器；`session.ts` 每轮开始读取、结束写入。
@@ -523,7 +550,7 @@ parseFallbackCandidates(text): string[]
 - 构造参数新增 `toolSchemas`（`Record<string, schema>` 或按工具名取 schema 的函数）；IPC 从 `tools.summaries()` 传入，live 脚本同样传入。
 - `prepareToolCalls` 先 repair 再执行；修复成功但未重试时写审计 `TOOL_CALL_REPAIRED`（`retries:0`、`repairs[]`）。
 - 首次修复/校验失败：写 `TOOL_CALL_INVALID`，把无效输出作为普通 assistant 文本 + `buildRetryPrompt(reason)` 追加到临时上下文，重试 1 次（不计入会话历史）；成功写 `TOOL_CALL_RETRY_OK`（`retries:1`、`reason`），仍失败写 `TOOL_CALL_FALLBACK` 并返回两条候选。
-- 重试只允许 1 次/用户轮次；失败后立即返回，不继续消耗 `maxIterations`。
+- 重试只允许 1 次/用户轮次；失败后立即返回，不继续消耗迭代预算（`resolveIterationBudget` 决定的 `effective` 轮数）。
 - 审计新增 `retries?: number` / `reason?: string` / `repairs?: string[]`，仍经过 `maskSecrets`。
 
 `llm.ts` 在有工具时默认附带 `response_format:{type:'json_object'}`。若端点返回 400/404/422/500 且错误文本提到 `response_format`/unsupported/unknown parameter，客户端去掉该字段并重试一次；`responseFormat:false` 可显式关闭。

@@ -106,6 +106,11 @@ export interface CommandResult {
   ok: boolean;
   data?: unknown;
   error?: CommandError;
+  /**
+   * 写后自动验证结论（由 session.ts 机制层附加；命令实现一律不设置）。
+   * 与本结果的 ok 相互独立：验证没过不代表写操作失败。
+   */
+  verification?: import('./verify.ts').ToolVerification;
 }
 
 export interface CommandHistoryEntry {
