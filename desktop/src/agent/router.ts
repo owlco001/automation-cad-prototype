@@ -250,6 +250,10 @@ export function routeIntent(text: string): IntentMatch {
   if (isToolResultRecallRequest(normalized)) {
     return { intent: 'query', confidence: 'high', score: 4, hits: ['工具结果回取'], reason: '按 resultId 分批读回被截断的完整结果（只读）' };
   }
+  // 失败自查：先于 isDocQuestion，否则「上次为什么失败」会被「为什么」拉去查文档。
+  if (isRecentAuditRequest(normalized)) {
+    return { intent: 'query', confidence: 'high', score: 4, hits: ['失败自查'], reason: '读审计历史看上次为什么失败（只读）' };
+  }
   if (isDocQuestion(normalized)) {
     return { intent: 'query', confidence: 'high', score: 3, hits: ['本地文档'], reason: '文档类问题，查本地知识库' };
   }
@@ -329,7 +333,7 @@ export interface ToolPlan {
   resolvedLabel?: string;
 }
 
-/** 目前注册的 35 个工具里，只读 17 个、写操作 18 个。 */
+/** 目前注册的 36 个工具里，只读 18 个、写操作 18 个。 */
 export const READ_ONLY_TOOLS = new Set([
   'list_components',
   'search_components',
@@ -352,7 +356,9 @@ export const READ_ONLY_TOOLS = new Set([
   // 只读跨会话项目记忆：只读 agent-memory.json，不写不删
   'get_agent_memory',
   // 只读回取已落盘的大工具结果：只读 agent-results/<sha16>.json，不重跑工具、不改工程
-  'get_tool_result'
+  'get_tool_result',
+  // 只读自查失败历史：只读 agent-audit(.N).jsonl，不写审计、不改工程；只回工具名/错误码/耗时/白名单参数
+  'get_recent_audit'
 ]);
 
 export const WRITE_TOOLS = new Set([
@@ -806,6 +812,42 @@ export function isToolResultRecallRequest(text: string): boolean {
 }
 
 /**
+ * 失败自查请求（只读）：问「上次为什么不行」时要查审计，而不是盲目重跑同一组参数。
+ * 负向：纯文档提问（「为什么 PLC 预检会失败」）没有「上次/刚才」这类历史锚点，仍走知识库。
+ */
+export function isRecentAuditRequest(text: string): boolean {
+  const value = (text ?? '').trim();
+  if (!value) return false;
+  // 审计篡改：带删/清/改/回退动词的句子不接，交给 guard 一律拒绝（不能借「自查」包装成写操作）。
+  if (/审计/.test(value) && /(?:删除|删掉|清空|清除|抹掉|擦除|篡改|改掉|隐藏|回退|撤回|撤销|覆盖|拿掉|去掉|移除)/.test(value)) {
+    return false;
+  }
+  if (/get_recent_audit/.test(value)) return true;
+  if (/(?:审计记录|调用记录|工具调用历史|失败历史|上次的?报错)/.test(value)) return true;
+  const past = /(?:上次|上一次|刚才|刚刚|之前|前面|最近|历史)/.test(value);
+  const failure = /(?:为什么|为啥|怎么回事|什么原因|报错|错误|失败|不成功|不行|没通过|卡住)/.test(value);
+  return past && failure;
+}
+
+/** 从「上次生成 PLC 为什么不行」里抽过滤参数：只猜工具名、只看失败与时间窗，不猜别的。 */
+function recentAuditArgs(text: string): Record<string, unknown> {
+  const args: Record<string, unknown> = {};
+  if (/(?:生成|跑|编)[^。；\n]{0,6}plc|plc[^。；\n]{0,6}(?:生成|程序)/i.test(text)) {
+    args.tool = 'run_plc_generate';
+  } else if (/(?:补齐|补全|修复)[^。；\n]{0,8}(?:plc|预检|缺口|急停|安全回路)/.test(text)) {
+    args.tool = 'repair_plc_config';
+  } else if (/(?:应用|落盘|写入)[^。；\n]{0,8}(?:机型|方案|工程)/.test(text)) {
+    args.tool = 'apply_machine_design';
+  }
+  if (/(?:失败|报错|错误|不成功|不行|没通过|为什么|原因)/.test(text)) args.onlyFailed = true;
+  if (/最近\s*(?:一|1)\s*天|24\s*小时/.test(text)) args.sinceMinutes = 1440;
+  else if (/最近\s*(?:两|二|2)\s*天/.test(text)) args.sinceMinutes = 2880;
+  else if (/最近\s*(?:三|3)\s*天/.test(text)) args.sinceMinutes = 4320;
+  else if (/最近\s*(?:七|7)\s*天|一周/.test(text)) args.sinceMinutes = 10080;
+  return args;
+}
+
+/**
  * 把中文指令映射成一个工具计划。
  * 返回 null 表示「没有任何工具能接住」，调用方应如实说做不了。
  */
@@ -839,6 +881,15 @@ function planToolBase(text: string): ToolPlan | null {
       readOnly: true,
       missing: ['resultId'],
       why: '按 resultId 分批读回被截断的完整工具结果（只读，不重跑原工具）'
+    };
+  }
+  if (isRecentAuditRequest(value)) {
+    return {
+      tool: 'get_recent_audit',
+      args: recentAuditArgs(value),
+      readOnly: true,
+      missing: [],
+      why: '读审计历史自查上次为什么失败（只读；按工具名 + onlyFailed 过滤，不盲目重试）'
     };
   }
   const libraryPlan = planMachineLibraryRequest(value);

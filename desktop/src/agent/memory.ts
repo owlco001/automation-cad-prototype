@@ -15,7 +15,8 @@ export interface ToolMemoryEntry {
   code: string;
 }
 
-const KEY_ARGUMENTS = [
+/** 只保留白名单关键参数，避免把密钥/大对象带进提示。 */
+export const KEY_ARGUMENTS = [
   'partId', 'ref', 'q', 'category', 'path', 'format',
   'model', 'qty', 'x', 'y', 'rotate', 'railSnap'
 ] as const;

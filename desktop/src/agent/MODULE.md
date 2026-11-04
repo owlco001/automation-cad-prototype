@@ -5,7 +5,7 @@
 ## 两个入口，一份注册表
 
 ```
-tools.ts（AgentTools + 35 个 AgentTool；只读 17 / 写 18；含只读 `suggest_kinematics`、`get_render_stats`、`list_machine_library`、`validate_machine_design`、`capture_view`、`get_agent_memory`、`get_tool_result`；含只读 `design_machine` 与写工具 `apply_machine_design`、`repair_plc_config`、`clear_agent_memory`；机型库 `save_machine_to_library` / `load_machine_from_library` / `export_machine_package`）
+tools.ts（AgentTools + 36 个 AgentTool；只读 18 / 写 18；含只读 `suggest_kinematics`、`get_render_stats`、`list_machine_library`、`validate_machine_design`、`capture_view`、`get_agent_memory`、`get_tool_result`、`get_recent_audit`；含只读 `design_machine` 与写工具 `apply_machine_design`、`repair_plc_config`、`clear_agent_memory`；机型库 `save_machine_to_library` / `load_machine_from_library` / `export_machine_package`）
  ├─ kb/index.ts → 构建期分块 + kb.json（≤400 KB，标题 hash）
  ├─ kb/search.ts → 纯函数 BM25（中文 2-gram + 英文词，top 3 / ≤2 KB）
  ├─ rpc.ts        → HTTP JSON-RPC，127.0.0.1:7420，Bearer token
@@ -41,6 +41,7 @@ tools.ts（AgentTools + 35 个 AgentTool；只读 17 / 写 18；含只读 `sugge
  │    ├─ audit.ts   → 每次工具调用一行 NDJSON（凭据脱敏 + 耗时）
  │    ├─ audit-store.ts → 审计落盘：按大小轮转 agent-audit.N.jsonl + 保留期清理 + 跨份读取（仅主进程）
  │    ├─ audit-view.ts → 审计筛选 / 时间倒序 / 200 条上限 / CSV
+ │    ├─ audit-recent.ts → 失败自查纯函数：按时间窗/工具名/onlyFailed 过滤 + args 白名单 + 凭据与绝对路径再胞一遍（只读工具 get_recent_audit）
  │    ├─ feedback.ts → 进度事件 / 参数摘要 / 耗时 / 取消文案
  │    ├─ suggest.ts → 失败建议纯函数（六类错误码 + 未知码回落）
  │    ├─ advisor.ts → 主动建议纯函数（0–3 条 next-best-action + BOM 指纹）
@@ -539,7 +540,7 @@ IPC 与 UI：
 
 - `agent-llm.json` 保存 `{baseUrl,apiKey,model,maxIterations}`，POSIX 权限 600。默认 `https://api.openai.com/v1`、`gpt-4o-mini`、6 轮。
 - UI 读取时 apiKey 只返回掩码（如 `sk-****abcd`）；保存时掩码/空值保留原密钥。
-- `llm.ts` 以 OpenAI 兼容格式发送 35 工具 JSON Schema，60 秒超时；非 2xx 返回含状态码的中文错误。
+- `llm.ts` 以 OpenAI 兼容格式发送 36 工具 JSON Schema，60 秒超时；非 2xx 返回含状态码的中文错误。
 - `session.ts` 注入 `{llm,bus,confirmWrite}`：工具结果以 `role:'tool'` 回灌，先经 `serializeToolResult` 裁剪、再由 `guard.ts` 包成不可信数据块，失败不中断；历史只保留最近 20 条；超轮返回「已达到最大工具调用轮数（N），请缩小任务范围」。
 - `import_cad`、`insert_component`、`place_component`、`update_component`、`remove_component`、`run_plc_generate`、`repair_plc_config`、`export_files`、`export_cost_report`、`save_machine_to_library`、`load_machine_from_library`、`export_machine_package`、`undo_last` 执行前由主进程弹出确认；拒绝时回灌 `USER_DENIED`。
 - 面板包含对话消息流/工具卡片、模型设置（apiKey 为 password）与测试连接（ping，`max_tokens=8`）。

@@ -1812,5 +1812,21 @@
       "ambiguous"
     ],
     "note": "负向区分：这是回取已落盘结果（只读），不是重新执行 get_bom；也不能自己编一个 resultId"
+  },
+  {
+    "id": "au01",
+    "input": "上次生成 PLC 为什么不行？",
+    "intent": "query",
+    "expect": {
+      "tool": "get_recent_audit",
+      "argsContains": {
+        "tool": "run_plc_generate",
+        "onlyFailed": true
+      }
+    },
+    "tags": [
+      "audit"
+    ],
+    "note": "失败自查（只读）：先读审计里 run_plc_generate 的失败记录再决定怎么改，不盲目重跑；审计只回工具名/错误码/耗时/白名单参数"
   }
 ]

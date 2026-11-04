@@ -37,6 +37,12 @@ import { checkExportTargetPath } from './policy.ts';
 import { collectAgentContext } from './context.ts';
 import { projectFingerprint } from './thread.ts';
 import { FileProjectMemory, PROJECT_MEMORY_ENTRIES } from './project-memory.ts';
+import { loadAuditRetention, readAuditEntries } from './audit-store.ts';
+import {
+  RECENT_AUDIT_DEFAULTS,
+  buildRecentAudit,
+  normalizeRecentAuditQuery
+} from './audit-recent.ts';
 import { captureAgentView, type AgentViewCapture } from './self-evidence.ts';
 import { runInterferenceStates } from '../machine/interference-states.ts';
 import { parseMachineBrief } from '../machine/spec.ts';
@@ -2596,6 +2602,72 @@ function registerAgentMemoryCommands(bus: CommandBus): void {
 }
 
 /**
+ * 失败自查（P11）：只读命令 `get_recent_audit`。
+ *
+ * 审计已经落盘（`userData/agent-audit.jsonl` + 轮转份），但之前只有界面能看，
+ * 模型看不到自己上次为什么失败，于是会重复撞同一个错（例如再跑 `run_plc_generate`
+ * 又撞 `ESTOP_UNDEFINED`）。这里把 `audit-store.readAuditEntries` 读到的行交给
+ * `audit-recent.ts` 过滤/裁剪：只回 `{ts,tool,code,ms,verified?,args}`，
+ * `args` 只留白名单字段并再胞一遍凭据与绝对路径，工具返回值内容一律不回。
+ */
+function registerRecentAuditCommand(bus: CommandBus): void {
+  const optionalInteger = (args: Record<string, unknown>, key: string): number | undefined => {
+    const value = args[key];
+    if (value === undefined || value === null) return undefined;
+    if (typeof value !== 'number' || !Number.isInteger(value)) {
+      throw new CommandFailure('INVALID_ARGUMENT', `${key} 必须是整数`);
+    }
+    return value;
+  };
+
+  bus.register({
+    name: 'get_recent_audit',
+    async run(args, ctx) {
+      for (const key of Object.keys(args)) {
+        if (key !== 'limit' && key !== 'tool' && key !== 'onlyFailed' && key !== 'sinceMinutes') {
+          throw new CommandFailure('INVALID_ARGUMENT', `未知参数：${key}`);
+        }
+      }
+      if (args.tool !== undefined && args.tool !== null && (typeof args.tool !== 'string' || !args.tool.trim())) {
+        throw new CommandFailure('INVALID_ARGUMENT', 'tool 必须是非空字符串（按工具名精确匹配）');
+      }
+      if (args.onlyFailed !== undefined && args.onlyFailed !== null && typeof args.onlyFailed !== 'boolean') {
+        throw new CommandFailure('INVALID_ARGUMENT', 'onlyFailed 必须是布尔值');
+      }
+      const limit = optionalInteger(args, 'limit');
+      const sinceMinutes = optionalInteger(args, 'sinceMinutes');
+      if (!ctx.userDataRoot) {
+        throw new CommandFailure('AUDIT_UNAVAILABLE', '主进程没有提供 userData 目录，读不到审计');
+      }
+      // 越界不报错、按上限夹紧：模型给 100 条时回 50 条并置 truncated，比直接失败更有用。
+      const query = normalizeRecentAuditQuery({
+        ...(limit !== undefined ? { limit } : {}),
+        ...(sinceMinutes !== undefined ? { sinceMinutes } : {}),
+        ...(typeof args.tool === 'string' ? { tool: args.tool } : {}),
+        ...(args.onlyFailed === true ? { onlyFailed: true } : {})
+      });
+      const now = ctx.now ? ctx.now() : new Date();
+      // 复用审计层：当前文件 + 轮转份一起读，坏行/读失败由 audit-store 自己跳过。
+      const { entries } = readAuditEntries(join(ctx.userDataRoot, 'agent-audit.jsonl'), loadAuditRetention(ctx.userDataRoot));
+      const result = buildRecentAudit(entries, query, now);
+      return {
+        ok: true,
+        data: {
+          ...result,
+          window: {
+            sinceMinutes: query.sinceMinutes,
+            since: new Date(now.getTime() - query.sinceMinutes * 60_000).toISOString()
+          },
+          note: result.total === 0
+            ? '该时间窗内没有匹配的审计记录：这可能是第一次做这类操作，或审计已被保留期清理'
+            : `最近 ${query.sinceMinutes} 分钟内的调用记录（最新在前，最多 ${RECENT_AUDIT_DEFAULTS.maxLimit} 条）；只含工具名/错误码/耗时/白名单参数，不含工具返回值`
+        }
+      };
+    }
+  });
+}
+
+/**
  * 大结果回取（P4）：只读命令 `get_tool_result`。
  *
  * 单个工具结果超过上限时，session 层把**完整结果**写成
@@ -2702,6 +2774,7 @@ export function createAgentCommandBus(
   registerMachineLibraryCommands(bus);
   registerAgentMemoryCommands(bus);
   registerToolResultCommand(bus);
+  registerRecentAuditCommand(bus);
   return bus;
 }
 

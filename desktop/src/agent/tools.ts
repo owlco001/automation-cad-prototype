@@ -167,6 +167,36 @@ export function compactKinematicsSuggestion(value: unknown): Record<string, unkn
   };
 }
 
+const GET_RECENT_AUDIT_SCHEMA = {
+  type: 'object',
+  properties: {
+    limit: {
+      type: 'integer',
+      minimum: 1,
+      maximum: 50,
+      description: '最多返回几条，默认 10，上限 50（传更大按 50 处理并置 truncated=true）',
+      default: 10
+    },
+    tool: {
+      type: 'string',
+      description: '按工具名精确过滤，例如 run_plc_generate（不要写前缀，不做模糊匹配）'
+    },
+    onlyFailed: {
+      type: 'boolean',
+      description: '只看 ok:false 的失败记录；排查「上次为什么不行」时传 true',
+      default: false
+    },
+    sinceMinutes: {
+      type: 'integer',
+      minimum: 1,
+      maximum: 10080,
+      description: '回看时间窗（分钟），默认 1440（一天），上限 10080（七天）',
+      default: 1440
+    }
+  },
+  additionalProperties: false
+};
+
 const PLACE_COMPONENT_SCHEMA = {
   type: 'object',
   properties: {
@@ -1207,6 +1237,39 @@ export class AgentTools {
           }
         }
         const result = await this.execute('get_tool_result', args);
+        return result ? commandSuccess(result) : this.unavailable();
+      }
+    });
+
+    this.add({
+      name: 'get_recent_audit',
+      description:
+        '读取**自己最近的工具调用审计**（最新在前）：工具名、结果码、耗时、自动验证结论与白名单参数。' +
+        '用于「上次为什么不行 / 刚才那个错是什么」——`run_plc_generate`、`repair_plc_config`、`apply_machine_design` 失败后，先按工具名 + onlyFailed:true 查一次再决定怎么改，不要盲目重试同一组参数。' +
+        '只读：不重跑工具、不改工程；返回 {items:[{ts,tool,code,ms,verified?,args}],total,truncated}，不含工具返回值内容、密钥与绝对路径（args 只保留 partId/ref/q/category/path/format/model/qty/x/y/rotate/railSnap）。' +
+        '默认最近 1440 分钟 / 10 条，limit 上限 50，sinceMinutes 上限 10080。',
+      inputSchema: GET_RECENT_AUDIT_SCHEMA,
+      handler: async (args) => {
+        for (const key of Object.keys(args)) {
+          if (key !== 'limit' && key !== 'tool' && key !== 'onlyFailed' && key !== 'sinceMinutes') {
+            return { ok: false, code: 'INVALID_ARGUMENT', message: `未知参数：${key}` };
+          }
+        }
+        for (const key of ['limit', 'sinceMinutes'] as const) {
+          const value = args[key];
+          if (value === undefined || value === null) continue;
+          const number = getNumber(value);
+          if (number === undefined || !Number.isInteger(number)) {
+            return { ok: false, code: 'INVALID_ARGUMENT', message: `${key} 必须是整数` };
+          }
+        }
+        if (args.tool !== undefined && args.tool !== null && (typeof args.tool !== 'string' || !args.tool.trim())) {
+          return { ok: false, code: 'INVALID_ARGUMENT', message: 'tool 必须是非空字符串（按工具名精确匹配）' };
+        }
+        if (args.onlyFailed !== undefined && args.onlyFailed !== null && typeof args.onlyFailed !== 'boolean') {
+          return { ok: false, code: 'INVALID_ARGUMENT', message: 'onlyFailed 必须是布尔值' };
+        }
+        const result = await this.execute('get_recent_audit', args);
         return result ? commandSuccess(result) : this.unavailable();
       }
     });

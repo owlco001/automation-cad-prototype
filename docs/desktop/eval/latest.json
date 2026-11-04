@@ -1,10 +1,10 @@
 {
-  "generatedAt": "2026-11-04T07:24:58.290Z",
+  "generatedAt": "2026-11-04T08:26:53.115Z",
   "version": "0.6.4",
   "mode": "offline-rules",
   "dataset": {
     "path": "docs/desktop/eval/cases.json",
-    "count": 124,
+    "count": 125,
     "references": 18,
     "ambiguous": 8,
     "multiStep": 5,
@@ -22,6 +22,7 @@
       "get_agent_memory",
       "get_bom",
       "get_project_context",
+      "get_recent_audit",
       "get_render_stats",
       "get_tool_result",
       "import_cad",
@@ -65,19 +66,19 @@
   "passed": true,
   "metrics": {
     "intent": {
-      "correct": 124,
-      "total": 124,
+      "correct": 125,
+      "total": 125,
       "rate": 1
     },
     "tools": {
-      "correct": 124,
-      "total": 124,
+      "correct": 125,
+      "total": 125,
       "rate": 1
     },
     "params": {
-      "correct": 62,
-      "total": 63,
-      "rate": 0.9841269841269841
+      "correct": 63,
+      "total": 64,
+      "rate": 0.984375
     },
     "refused": {
       "correct": 7,
@@ -3749,6 +3750,39 @@
           "missing": [
             "resultId"
           ]
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "au01",
+      "input": "上次生成 PLC 为什么不行？",
+      "tags": [
+        "audit"
+      ],
+      "note": "失败自查（只读）：先读审计里 run_plc_generate 的失败记录再决定怎么改，不盲目重跑；审计只回工具名/错误码/耗时/白名单参数",
+      "expectedIntent": "query",
+      "actualIntent": "query",
+      "intentOk": true,
+      "expectedTools": [
+        "get_recent_audit"
+      ],
+      "actualTools": [
+        "get_recent_audit"
+      ],
+      "toolOk": true,
+      "paramsApplicable": true,
+      "paramsOk": true,
+      "refusedOk": true,
+      "actualPlans": [
+        {
+          "tool": "get_recent_audit",
+          "args": {
+            "tool": "run_plc_generate",
+            "onlyFailed": true
+          },
+          "readOnly": true,
+          "missing": []
         }
       ],
       "passed": true
