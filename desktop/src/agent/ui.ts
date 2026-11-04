@@ -49,6 +49,11 @@ import {
 } from './advisor.ts';
 import { READ_ONLY_TOOLS } from './router.ts';
 import {
+  AGENT_CONTINUE_ACTION,
+  renderAgentTurnOutcome,
+  type AgentTurnOutcomeView
+} from './turn-outcome-view.ts';
+import {
   RECIPES,
   checkRecipePreconditions,
   getRecipe,
@@ -2065,6 +2070,26 @@ function chatFeedback(message: string, isError = false): void {
   element.classList.toggle('is-error', isError);
 }
 
+/**
+ * 把「预算到顶 / 只读空转」的收尾信息挂到已有的反馈区（不新建面板）。
+ *
+ * 文案与按钮由纯函数 `renderAgentTurnOutcome` 产出，这里只负责塞进 DOM；
+ * 点击由 `bindControls` 里的委托监听接住，走同一个发送通道（`sendText`）。
+ * 本轮正常结束（没有 outcome.stopped）时不动反馈区，保持原有错误提示行为。
+ */
+function showTurnOutcome(outcome: AgentTurnOutcomeView | null | undefined): void {
+  const element = body?.querySelector<HTMLElement>('#agentChatFeedback');
+  if (!element) return;
+  const html = renderAgentTurnOutcome(outcome ?? null);
+  if (!html) {
+    chatFeedback('');
+    return;
+  }
+  element.innerHTML = html;
+  element.hidden = false;
+  element.classList.remove('is-error');
+}
+
 /** 取最后一条用户消息之后的对话，用于统计本轮工具调用次数。 */
 function lastTurnMessages(): Array<{ role: string; content?: string | null }> {
   let start = 0;
@@ -2108,13 +2133,23 @@ async function sendMessage(): Promise<void> {
   const input = fieldElement('agentChatInput');
   const text = input?.value.trim() ?? '';
   if (!text) return;
+  if (input) input.value = '';
+  await sendText(text);
+}
+
+/**
+ * 真正的发送通道：输入框回车/点击发送、以及【继续】按钮都走这里，
+ * 不另开接口（`agent:chat:send` 一条路）。
+ */
+async function sendText(text: string): Promise<void> {
+  if (!body || thinking || multiPlan?.running || recipeUi.running) return;
+  if (!text) return;
   if (!window.desktop) {
     chatFeedback('智能体对话仅在桌面版可用。', true);
     return;
   }
   thinking = true;
   chatFeedback('');
-  if (input) input.value = '';
   cancelRequested = false;
   resetProgress();
   renderPreview();
@@ -2142,6 +2177,8 @@ async function sendMessage(): Promise<void> {
     if (!result.ok && !result.cancelled) {
       chatFeedback(result.message || '智能体请求失败', true);
     } else if (result.ok) {
+      // 预算到顶 / 只读空转：一行可点的【继续】，点完自动消失。
+      showTurnOutcome(result.outcome ?? null);
       void loadAudit();
     }
   } catch (error) {
@@ -2340,6 +2377,26 @@ async function saveLanAccess(): Promise<void> {
 }
 
 function bindControls(): void {
+  // 【继续】是后插进反馈区的（innerHTML 随时被替换），用委托监听，避免每次重挂。
+  body?.addEventListener('click', (event) => {
+    const target = event.target as HTMLElement | null;
+    const button = target?.closest?.('[data-agent-continue-send]') as HTMLElement | null;
+    if (!button) return;
+    event.preventDefault();
+    const text = button.getAttribute('data-agent-continue-send')?.trim() || AGENT_CONTINUE_ACTION;
+    // 点过就消失：同一轮不该被连点两次。随后走与输入框相同的发送通道。
+    chatFeedback('');
+    void sendText(text);
+  });
+  // 诊断钩子：headless smoke 用它把一份真实 outcome 走一遍「渲染 → 点击」，
+  // 断言提示行真的出现在 #agentChatFeedback 上、点完就消失（AGENT_CONTINUE_HINT_OK）。
+  // 只做预览，不改会话状态；生产代码不读它。
+  (window as unknown as { __AgentTurnOutcomePreview?: (outcome: unknown) => string | null })
+    .__AgentTurnOutcomePreview = (outcome: unknown): string | null => {
+      const view = (outcome ?? null) as AgentTurnOutcomeView | null;
+      showTurnOutcome(view);
+      return renderAgentTurnOutcome(view);
+    };
   body?.querySelector<HTMLButtonElement>('#agentChatSend')?.addEventListener('click', () => { void sendMessage(); });
   body?.querySelector<HTMLButtonElement>('#agentChatClear')?.addEventListener('click', () => { void clearMessages(); });
   body?.querySelector<HTMLSelectElement>('#agentRecipeSelect')?.addEventListener('change', (event) => {

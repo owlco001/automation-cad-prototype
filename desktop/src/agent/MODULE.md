@@ -375,6 +375,25 @@ runRecipe(...): {budget, iterations, stopped:'iteration_limit', pendingHint, nex
   - 工具自己已带验证结论（`verification` 或 `{ok,issues}`）时不重复调；
   - 自动验证抛错 / 通道缺失：`verification:{ok:null,error}`，主结果的 `ok` 与 `data` 不受影响，审计不写 `verified`（不伪造通过）。
 - 新增执行器能力 `AgentCommandExecutor.validateMachineDesign?()`：主进程 `ipc.ts` 直接转 `bus.execute('validate_machine_design')`；未实现的执行器如实记 `ok:null`。
+
+### 收尾信息接到界面（P5：可点的「继续」）
+
+`turnOutcome()` 过去只有测试与诊断在读，界面上没有任何可点的东西，用户只能从回复文字里读到「继续请说『继续』」。现在把它接到已有反馈区，不新建面板、不加样式：
+
+```ts
+// turn-outcome-view.ts（叶子模块，纯函数，node --test 直测）
+renderAgentTurnOutcome(outcome): string | null     // 一行提示 + 一个【继续】按钮（null=本轮正常结束）
+turnOutcomeText(outcome): string | null            // 同文案的纯文本版（IPC 回执用）
+toAgentChatOutcome(outcome): AgentChatOutcome|null // {iterations,budget,stopped?,pendingHint?,continueHint?,nextAction?}
+budgetReasonText(reason, budget): string           // read-only / write / long-plan / commission 四档人话
+truncatePendingHint(text, 200): string             // 按码点截断，不切坏中文/emoji
+```
+
+- IPC：`agent:chat:send` 成功回执新增可选 `outcome`；**只有 `stopped` 存在时**才带 `continueHint` 与 `nextAction`（值恒为 `"继续"`）。旧调用方不读它，字段一个不动。
+- 界面：片段塞进既有 `#agentChatFeedback`（`acp-note`），按钮复用 `.acp-plan-actions` + `.acp-btn`（10px 小号），点击由 `bindControls` 的委托监听接住 →`sendText('继续')`，与输入框同一条 `agent:chat:send` 通道，不另开接口；点完立即清空提示，避免连点。
+- 文案：`stopped='iteration_limit'` → `已达本轮上限（12 步）· {pendingHint}`；`stopped='repeated_reads'` → 固定「这一步没有新的结果，已停；可以缩小范围或换个问法」，绝不说「已达本轮上限」。`budget.reason` 作为 `title` 说明预算为何上抬。
+- 安全：`pendingHint` 来自模型，进 HTML 前转义 `& < > " '`，并截到 200 字（码点截断）。
+- 冒烟：`npm run smoke` 的 `AGENT_CONTINUE_HINT_OK`（真窗口里渲染提示行 → 点【继续】→ 提示消失），注入入口是 `window.__AgentTurnOutcomePreview`（诊断用，生产代码不读）。
 - **两条编排路径对齐**（`runPlan` / `runRecipe`，不经 `AgentSession`）：
   - 预算：`runPlan` 用 `resolveIterationBudget({hasWrite: 计划里有写步骤, planSteps: 计划步数})` 换算成 `maxSteps` 上限；`runRecipe` 同理换算成「本轮最多执行几步」（跳过与续跑跳过的步骤不计）。
   - 到顶：两条路径都返回 `stopped:'iteration_limit'` + `pendingHint` + `nextStepIndex`，**已完成的步骤保留**在 `results` / `completed` 里，不整体判失败；摘要追加「第 N 步起未执行」。

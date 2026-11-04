@@ -3356,6 +3356,64 @@ function createWindow(): BrowserWindow {
         }
         console.log(`SMOKE_AGENT_CHAT_UI_OK fields=${chatUi.fields} log=${chatUi.log}`);
 
+        // P5：预算到顶的「【继续】」提示行——真窗口、真 DOM、真点击。
+        // 一份真实 outcome 走 ui.ts 的渲染函数 → 挂到已有 #agentChatFeedback → 点按钮。
+        // 无 API Key 的 headless 环境里，点击后走 agent:chat:send 失败分支，
+        // 断言三件事：提示行出现在既有反馈区、点击进了同一条发送通道（发送按钮转「思考中…」）、点完提示消失。
+        const continueHint = await window.webContents.executeJavaScript(
+          `(async () => {
+            const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const render = window.__AgentTurnOutcomePreview;
+            const feedback = document.getElementById('agentChatFeedback');
+            if (typeof render !== 'function' || !feedback) return { error: 'hook_missing' };
+            const html = render({
+              iterations: 12,
+              budget: { base: 6, effective: 12, reason: 'write' },
+              stopped: 'iteration_limit',
+              pendingHint: '已应用方案但还没生成 PLC'
+            });
+            await wait(30);
+            const row = feedback.querySelector('[data-agent-continue]');
+            const button = feedback.querySelector('[data-agent-continue-send]');
+            const text = feedback.textContent || '';
+            const visible = Boolean(row) && feedback.hidden === false;
+            const stopped = row?.getAttribute('data-agent-continue') || '';
+            const action = button?.getAttribute('data-agent-continue-send') || '';
+            button?.click();
+            const cleared = feedback.querySelector('[data-agent-continue]') === null;
+            // 点击必须真的进了发送通道：sendText 同步把 thinking 置 true → 发送按钮变「思考中…」并禁用
+            const dispatched = document.getElementById('agentChatSend')?.disabled === true;
+            // 点击会真的发一次「继续」（本项目 headless 无 Key → 失败提示），收尾清干净
+            await wait(30);
+            render(null);
+            return { html: typeof html === 'string', visible, stopped, action, cleared, dispatched, text };
+          })()`
+        ) as {
+          error?: string;
+          html?: boolean;
+          visible?: boolean;
+          stopped?: string;
+          action?: string;
+          cleared?: boolean;
+          dispatched?: boolean;
+          text?: string;
+        };
+        if (
+          continueHint.error || !continueHint.html || !continueHint.visible ||
+          continueHint.stopped !== 'iteration_limit' || continueHint.action !== '继续' ||
+          !continueHint.cleared || !continueHint.dispatched ||
+          !(continueHint.text ?? '').includes('已达本轮上限（12 步）') ||
+          !(continueHint.text ?? '').includes('已应用方案但还没生成 PLC')
+        ) {
+          console.error('SMOKE_FAIL agent_continue_hint', JSON.stringify(continueHint));
+          setTimeout(() => app.exit(1), 100);
+          return;
+        }
+        console.log(
+          `AGENT_CONTINUE_HINT_OK stopped=${continueHint.stopped} action=${continueHint.action} ` +
+            `cleared=${continueHint.cleared} dispatched=${continueHint.dispatched}`
+        );
+
         // P7-I：流程下拉、步骤预览与「开始 / 导出执行记录」按钮。
         const recipeUi = await window.webContents.executeJavaScript(
           `(async () => {

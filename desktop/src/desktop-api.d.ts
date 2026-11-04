@@ -425,6 +425,19 @@ interface DesktopAgentUsage {
   };
 }
 
+interface DesktopAgentChatOutcome {
+  iterations: number;
+  budget: { base: number; effective: number; reason: string };
+  /** 被预算截断 / 只读空转提前收尾；未截断时缺省。 */
+  stopped?: 'iteration_limit' | 'repeated_reads';
+  /** 截断后「继续」该补的那一步（≤200 字）。 */
+  pendingHint?: string;
+  /** 人能直接读的一行结论，仅在 stopped 存在时出现。 */
+  continueHint?: string;
+  /** 点【继续】时该发的原文，仅在 stopped 存在时出现。 */
+  nextAction?: string;
+}
+
 interface DesktopAgentChatResult {
   ok: boolean;
   reply?: string;
@@ -436,6 +449,11 @@ interface DesktopAgentChatResult {
   elapsedMs?: number;
   /** 本轮/本会话 tokens 与估算费用。 */
   tokens?: DesktopAgentUsage;
+  /**
+   * 本轮收尾信息（预算 / 停止原因 / pendingHint）。可选：旧主进程不发这个字段，
+   * 界面按「没有提示」处理。`stopped` 存在时另带 `continueHint` 与 `nextAction`。
+   */
+  outcome?: DesktopAgentChatOutcome;
   messages: DesktopAgentChatMessage[];
 }
 

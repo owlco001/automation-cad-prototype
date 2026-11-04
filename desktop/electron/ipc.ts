@@ -50,6 +50,7 @@ import {
 import { mergeLlmConfig, readLlmConfig, publicLlmConfig, saveLlmConfig } from '../src/agent/llm-config.ts';
 import { OpenAiCompatibleClient, testLlmConnection } from '../src/agent/llm.ts';
 import { AgentCancelledError, AgentSession, emptyAgentUsage } from '../src/agent/session.ts';
+import { toAgentChatOutcome } from '../src/agent/turn-outcome-view.ts';
 import { BYPASS_CONFIRMATION_NOTICE } from '../src/agent/policy.ts';
 import { requestWriteConfirmation } from './write-confirm.ts';
 import { collectAgentContext } from '../src/agent/context.ts';
@@ -2368,13 +2369,17 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
         runId
       });
       if (activeChat === controller) activeChat = null;
+      // 收尾信息（预算 / 停止原因 / pendingHint）一并回给界面：到顶时 ui 用它渲染
+      // 「【继续】」提示行。旧调用方不读这个字段也不受影响。
+      const outcome = toAgentChatOutcome(current.turnOutcome());
       return {
         ok: true,
         reply,
         mode: current.mode(),
         elapsedMs: Math.max(0, Date.now() - started),
         tokens: current.usage(),
-        messages: current.history()
+        messages: current.history(),
+        ...(outcome ? { outcome } : {})
       };
     } catch (error) {
       if (activeChat) {
