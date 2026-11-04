@@ -2,7 +2,7 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织，版本号遵循语义化版本。
 
-## [未发布]
+## [0.6.5] - 2026-11-04
 
 ### Added · 机型库远程目录与下载（用户自选加载/下载）
 
