@@ -376,7 +376,8 @@ buildClarify(brief: MachineBrief): { needs: ('process'|'stations'|'cycle')[]; qu
 - 机架：台面 20 mm、顶面 850 mm；60 方立腿 830 mm，跨距 >1200 mm 加中腿；4 根下横梁。
 - 工位：底板 深 300 × 厚 15，宽 = 槽位之和（气缸 110 / 夹爪 130 / 旋转台 170）+ 100，最小 320；门架横梁高度按最长气缸反算，保证伸出不撞治具。
 - 气缸：竖直下压，缸体 Ø40×(行程+70) + 活塞杆 Ø12 + 压头，缩回位露杆 25；轴 `linear` [0,0,-1]，`strokeMm = travelMm`。夹爪：本体 64×40×56 + 双指，张开位，轴 `gripper` 每指半行程。旋转台：底座 Ø110 + 台面 Ø140 + 偏心治具，轴 `rotary` 绕 Z 0→90°。
-- 传感器：接近 M12、光电、压力靠近所测执行机构；安全光栅为两根 35×35×600 立柱，共用材质一起亮灭。
+- **顶升/转向工位（`id=turner-lift` 或名称含「顶升 / lift」的直线轴）不建压机**：建自下向上的顶升台 —— 安装板 80×70×20、缸体 Ø40×(行程+70)、活塞杆 Ø12、左右两根 φ16 导柱、台板 100×90×12（随动），轴 `linear` **[0,0,+1]**、`strokeMm = travelMm`，与 config 的 `position` 同向。导柱画到台板底面为止（过孔/导套不建模），避免「圆柱穿方板」被解析式求交算成假互穿。这样 lift/sweep 的位姿就是几何里真有的位姿，不靠 `direction-overridden` 反向平移占位（旧做法会把活塞杆整根推进缸体）。
+- 传感器：接近 M12、光电、压力靠近所测执行机构；同一排支架按支架宽 30 + 净空 6（节距 36）重排，不允许两只支架互插；超出底板可用宽度时告警而不是静默重叠。安全光栅为两根 35×35×600 立柱，共用材质一起亮灭。
 - 输出：`parts[]`（唯一 `[a-z0-9-]` id、形状、中心、绕 Z 角、材质、`bomGroup`、归属、`moving`）、`moving[]`（`axis / pivot / strokeMm / rangeDeg / home / points / jaws`）、`stations[]`（含旋转矩形 `footprint`，`footprintsOverlap` 用分离轴判定）、`envelope / bounds`、`structureBom`（结构件，与 `bomDraft` 分开）。`geometryComponentCounts` 与 `bomDraft` 逐项对账。
 - 导出：`geometry-export.ts` 网格 → STL / glTF；`geometryToSidecarAssemblies` 盒体 → `box`，竖直圆柱 → 内接种子方块 + `cylinder`（精确），水平圆柱 → 等截面方棒（列入 `approximated`）；`buildMachineSolids` 逐块实体化、任一块失败整体回退。
 - 渲染：`geometry-three.ts` 与导出共用网格；`createScene3D` 不再画占位方块，`stats()` 增加 `geometryParts / envelopeMm / layout`，`parts` 口径与标注驱动优先级不变。

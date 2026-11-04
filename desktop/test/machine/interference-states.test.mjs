@@ -1,11 +1,15 @@
 // 状态化干涉检查的判定口径守卫（本次故障的直接回归）：
 // 1) 同轴嵌套的执行机构零件（缸体×活塞杆）不得被当成设计干涉；
 // 2) screen hit（只有 AABB 依据 / 位姿不可达）不得判 fail，只有解析式确认的实体重叠才 fail；
-// 3) 真干净时仍然必须是 0（不许为了消警把数字抹平）。
+// 3) 真干净时仍然必须是 0（不许为了消警把数字抹平）；
+// 4) 转向工位必须是「自下向上的顶升台」而不是压机：位姿三态都 valid，
+//    不许再靠 direction-overridden 把「活塞杆整根推进缸体」这类建模假象降级掉；
+// 5) 传感器支架按支架宽度排开、joints 只放行「支架×传感器本体」，支架互穿要报出来。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { screenInterference, exactOverlapMm3, mateReason } from '../../src/machine/interference.ts';
 import { runInterferenceStates, resolveLiftAxis } from '../../src/machine/interference-states.ts';
+import { declaredJoints } from '../../src/machine/joints.ts';
 import { generateMachineGeometry } from '../../src/machine/geometry.ts';
 import { synthMachine } from '../../src/machine/synth.ts';
 import { parseMachineBrief } from '../../src/machine/spec.ts';
@@ -106,7 +110,7 @@ test('确认重叠（非配合）→ fail；只有 AABB 依据 → warn；干净
   assert.equal(clean.reviewStatus, 'pass');
 });
 
-test('光伏板转向输送机：评审不再判 FAIL，但把「为什么不是干涉」写进结果', () => {
+test('光伏板转向输送机：三态位姿都可信，评审从 warn 变 pass（附真实数字）', () => {
   const design = synthMachine(parseMachineBrief(PV_BRIEF));
   const payload = runInterferenceStates({ states: ['rest', 'lift', 'sweep'], config: design.config });
   assert.equal(payload.ok, true);
@@ -116,25 +120,43 @@ test('光伏板转向输送机：评审不再判 FAIL，但把「为什么不是
   assert.equal(rest.confirmedHits, 0, '配合面不得算确认干涉');
   assert.equal(rest.screenHits, 0);
   assert.equal(rest.mates, 1);
+  assert.equal(rest.pairs, 1, 'rest 只有这一对重叠（支架已经不互插）');
+  assert.equal(rest.mm3Declared, 0, '不得再有「已声明」放行的实体互穿');
   const mate = rest.items.find((item) => item.a === 'turner-lift-body' && item.b === 'turner-lift-rod');
   assert.ok(mate, '缸体×活塞杆要出现在 items 里（不能静默丢掉）');
   assert.equal(mate.kind, 'mate');
   assert.equal(mate.confirmation, 'exact');
-  // 精确值 = π·6²·70 = 7916.8 mm³（OCCT 布尔复核同值），AABB 上界是 10080
-  assert.ok(Math.abs(mate.exactOverlapMm3 - 7916.8) < 0.5, `exact=${mate.exactOverlapMm3}`);
+  // 精确值 = π·6²·60 = 6785.8 mm³：缩回位杆露出 25 mm，插在缸孔里的长度正好是行程 60
+  //（修复前压机几何是 π·6²·70 = 7916.8，杆从缸体底部往下伸）
+  assert.ok(Math.abs(mate.exactOverlapMm3 - 6785.8) < 0.5, `exact=${mate.exactOverlapMm3}`);
   assert.ok(mate.overlapMm3 > mate.exactOverlapMm3);
+  assert.equal(mate.exactOverlapMm3 < Math.PI * 36 * (60 + 25), true, '杆不是整根被推进缸体');
 
-  // lift/sweep：位移方向与几何建模的伸出方向相反，位姿不可达 → 只能 warn
-  assert.equal(payload.lift.directionOverridden, true);
-  assert.deepEqual(payload.lift.geometryDirection, [0, 0, -1]);
+  // lift/sweep：位姿与几何建模的伸出方向同向（+Z），三态都 valid
+  assert.equal(payload.lift.directionOverridden, false, '不再靠 config 反向覆盖');
+  assert.deepEqual(payload.lift.geometryDirection, [0, 0, 1]);
   assert.deepEqual(payload.lift.direction, [0, 0, 1]);
-  for (const name of ['lift', 'sweep']) {
+  for (const name of ['rest', 'lift', 'sweep']) {
     const state = payload.states[name];
     assert.equal(state.confirmedHits, 0, `${name} 不得判确认干涉`);
-    assert.equal(state.poseValidity, 'direction-overridden');
-    assert.equal(state.reviewStatus, 'warn');
+    assert.equal(state.screenHits, 0, `${name} 不得有待复核项`);
+    assert.equal(state.poseValidity, 'valid', `${name} 位姿必须可信`);
   }
-  assert.equal(payload.reviewStatus, 'warn', '整机不能判 fail');
+  // 顶升到位：杆完全脱出缸孔，配合面消失 → lift 的重叠对归零
+  assert.equal(payload.states.lift.pairs, 0);
+  assert.equal(payload.states.lift.mates, 0);
+  // 真实数字：rest 1 对 / 8640 mm³（AABB 上界），lift 0 对 / 0 mm³，sweep 6 对（按步累计）/ 30240 mm³
+  assert.equal(payload.states.rest.mm3, 8640);
+  assert.equal(payload.states.lift.mm3, 0);
+  assert.equal(payload.states.sweep.mates, 6);
+  assert.equal(payload.reviewStatus, 'pass', '三态 confirmed/screen/mates 全 0 命中时才允许 pass');
+  assert.deepEqual(
+    ['rest', 'lift', 'sweep'].map((name) => {
+      const state = payload.states[name];
+      return [state.confirmedHits, state.screenHits];
+    }),
+    [[0, 0], [0, 0], [0, 0]]
+  );
 
   // 精度与适用范围必须随结果返回（否则下游会把 screen hit 当确认）
   assert.equal(payload.precision.geometry, 'config-generator');
@@ -143,15 +165,65 @@ test('光伏板转向输送机：评审不再判 FAIL，但把「为什么不是
   assert.match(payload.note, /mate/);
 });
 
-test('resolveLiftAxis 记录「方向被 config 覆盖」，不再静默翻向', () => {
+test('转向工位几何：建的是顶升台板 + 导柱，不是「缸体朝下 + 压头 + 治具」的压机', () => {
+  const design = synthMachine(parseMachineBrief(PV_BRIEF));
+  const geometry = generateMachineGeometry(design.config);
+  const byId = (id) => geometry.parts.find((part) => part.id === id);
+
+  // 顶升台该有的零件（修复前没有导柱和安装板，只有压机件）
+  const mount = byId('turner-lift-mount');
+  const body = byId('turner-lift-body');
+  const rod = byId('turner-lift-rod');
+  const plate = byId('turner-lift-tool');
+  const guides = geometry.parts.filter((part) => /^turner-lift-guide-[lr]$/.test(part.id));
+  assert.ok(mount && body && rod && plate, '缺顶升台零件');
+  assert.equal(guides.length, 2, '顶升台必须有左右两根导柱');
+  // 压机独有的治具（-nest）不许再出现
+  assert.equal(byId('turner-lift-nest'), undefined, '顶升工位不该有压机治具');
+
+  // 轴线方向：缸体在下、杆向上、台板在杆顶 → 伸出方向 +Z，与 config.position 同向
+  assert.equal(body.center[2] < rod.center[2], true, '缸体必须在活塞杆下方');
+  assert.equal(rod.center[2] < plate.center[2], true, '台板必须在活塞杆上方');
+  const axis = geometry.moving.find((item) => item.actuatorId === 'turner-lift');
+  assert.ok(axis);
+  assert.deepEqual(axis.axis, [0, 0, 1], '几何伸出方向必须是 +Z（向上顶升）');
+  assert.equal(axis.strokeMm, 60);
+  assert.equal(rod.moving, true);
+  assert.equal(plate.moving, true, '台板随顶升轴一起动');
+  // 导柱画到台板底面为止：不在台板上制造「圆柱穿方板」的假互穿
+  for (const guide of guides) {
+    const guideTop = guide.center[2] + guide.shape.length / 2;
+    const plateBottom = plate.center[2] - plate.shape.size[2] / 2;
+    assert.ok(Math.abs(guideTop - plateBottom) < 1e-6, `${guide.id} 顶面 ${guideTop} 应贴台板底面 ${plateBottom}`);
+    assert.equal(guide.moving, undefined, '导柱是固定件');
+  }
+});
+
+test('resolveLiftAxis：几何伸出方向与 config 同向，不再触发「反向覆盖」', () => {
   const design = synthMachine(parseMachineBrief(PV_BRIEF));
   const geometry = generateMachineGeometry(design.config);
   const axis = resolveLiftAxis(design.config, geometry);
   assert.ok(axis);
+  assert.equal(axis.directionOverridden, false);
+  assert.deepEqual(axis.geometryDirection, [0, 0, 1]);
+  assert.deepEqual(axis.direction, [0, 0, 1]);
+  assert.deepEqual(axis.partIds.sort(), ['turner-lift-rod', 'turner-lift-tool']);
+});
+
+test('反向覆盖的判定仍在：几何朝下、config 朝上时 directionOverridden=true（口径没被削掉）', () => {
+  // 手工造一个「压机朝下」的轴，确认 resolveLiftAxis 仍能识别反向（不是把告警删掉了）
+  const config = {
+    actuators: [{ id: 'turner-lift', kind: 'cylinder', travelMm: 60, position: [0, 0, 1] }]
+  };
+  const geometry = {
+    parts: [],
+    moving: [{ actuatorId: 'turner-lift', axis: [0, 0, -1], strokeMm: 60, partIds: ['a-rod'] }]
+  };
+  const axis = resolveLiftAxis(config, geometry);
+  assert.ok(axis);
   assert.equal(axis.directionOverridden, true);
   assert.deepEqual(axis.geometryDirection, [0, 0, -1]);
   assert.deepEqual(axis.direction, [0, 0, 1]);
-  assert.deepEqual(axis.partIds.sort(), ['turner-lift-rod', 'turner-lift-tool']);
 });
 
 test('sweep 的 items 按零件对去重（同一对在多个高度重叠只报一次）', () => {
@@ -162,4 +234,75 @@ test('sweep 的 items 按零件对去重（同一对在多个高度重叠只报�
   assert.equal(new Set(keys).size, keys.length, `items 有重复：${keys.join(',')}`);
   assert.ok(payload.states.sweep.steps.length >= 7, '0..60 mm 按 10 mm 应至少 7 步');
   assert.equal(payload.states.sweep.hits, 0);
+});
+
+// ── 缺陷 B：传感器支架互穿（修复前 3 对 9100 + 7700 + 700 = 17500 mm³，被 joints 规则放行）──
+
+test('传感器支架按支架真实宽度排开：支架×支架重叠归零', () => {
+  const design = synthMachine(parseMachineBrief(PV_BRIEF));
+  const geometry = generateMachineGeometry(design.config);
+  const brackets = geometry.parts.filter((part) => /^sensor-.+-bracket$/.test(part.id));
+  assert.ok(brackets.length >= 6, `支架只有 ${brackets.length} 个，PV 机应有 6 个普通传感器支架`);
+
+  // 同一排（同 y、同 z）的支架中心距必须 ≥ 支架宽度（30 mm）——修复前是 17/19/29 mm
+  let sameRowPairs = 0;
+  for (let i = 0; i < brackets.length; i += 1) {
+    for (let j = i + 1; j < brackets.length; j += 1) {
+      const a = brackets[i];
+      const b = brackets[j];
+      if (Math.abs(a.center[1] - b.center[1]) > 1e-6 || Math.abs(a.center[2] - b.center[2]) > 1e-6) continue;
+      sameRowPairs += 1;
+      const width = a.shape.size[0];
+      const gap = Math.abs(a.center[0] - b.center[0]);
+      assert.ok(gap >= width, `${a.id} 与 ${b.id} 中心距 ${gap} < 支架宽 ${width}`);
+      assert.ok(gap > width, `${a.id} 与 ${b.id} 只有贴边、没有净空（${gap}）`);
+    }
+  }
+  assert.ok(sameRowPairs >= 3, '这台机至少有 3 对同排支架，才能覆盖修复前的互插场景');
+
+  const screen = screenInterference(geometry);
+  const bracketPairs = screen.pairs.filter((pair) => /-bracket$/.test(String(pair.a)) && /-bracket$/.test(String(pair.b)));
+  assert.equal(bracketPairs.length, 0, `仍有支架互插：${bracketPairs.map((p) => `${p.a}x${p.b}`).join(',')}`);
+  assert.equal(screen.declaredMm3, 0, '不得再有「已声明」放行的实体互穿（修复前 17500 mm³）');
+  const rest = runInterferenceStates({ states: ['rest'], config: design.config });
+  assert.equal(rest.states.rest.mm3Confirmed, 0);
+  assert.equal(rest.states.rest.mm3Screen, 0);
+  assert.equal(rest.states.rest.reviewStatus, 'pass');
+});
+
+test('joints：支架只与传感器本体成对，支架×支架不再被当成「传感器接支架」', () => {
+  const joints = declaredJoints([
+    { id: 'sensor-st1-a-bracket' },
+    { id: 'sensor-st1-b-bracket' },
+    { id: 'sensor-st1-a' },
+    { id: 'sensor-st1-b' }
+  ]);
+  const keys = joints.map((joint) => `${joint.a}|${joint.b}`);
+  assert.equal(keys.includes('sensor-st1-a-bracket|sensor-st1-b-bracket'), false, '支架×支架不是连接');
+  // 排序键：'sensor-st1-a' < 'sensor-st1-a-bracket'
+  assert.ok(keys.includes('sensor-st1-a|sensor-st1-a-bracket'), `缺支架×本体：${keys.join(',')}`);
+  assert.ok(keys.includes('sensor-st1-b|sensor-st1-b-bracket'), `缺支架×本体：${keys.join(',')}`);
+  assert.equal(joints.length, 2, `只应有 2 对「支架×本体」：${keys.join(',')}`);
+});
+
+test('支架真互穿时必须报 suspect，不能靠 joints 规则放行', () => {
+  const geometry = {
+    parts: [
+      part('sensor-a-bracket', [0, 0, 0], [30, 10, 70]),
+      part('sensor-b-bracket', [20, 0, 0], [30, 10, 70]),
+      part('sensor-a', [0, 40, 0], [18, 32, 40]),
+      part('sensor-b', [30, 40, 0], [18, 32, 40])
+    ]
+  };
+  const screen = screenInterference(geometry);
+  const pair = screen.pairs.find(
+    (item) => item.a === 'sensor-a-bracket' && item.b === 'sensor-b-bracket'
+  );
+  assert.ok(pair, '互插的两只支架必须被筛出来');
+  assert.equal(pair.classification, 'suspect', '支架互插不是已声明连接');
+  assert.equal(pair.confirmation, 'exact');
+  assert.equal(pair.exactOverlapMm3, 10 * 10 * 70, '精确交集体积 = 10×10×70 = 7000 mm³');
+  const rest = runInterferenceStates({ states: ['rest'], config: {}, geometry });
+  assert.equal(rest.states.rest.confirmedHits, 1);
+  assert.equal(rest.states.rest.reviewStatus, 'fail', '真互穿必须判 fail');
 });

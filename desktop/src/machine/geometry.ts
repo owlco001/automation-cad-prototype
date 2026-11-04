@@ -208,6 +208,11 @@ export const GEOMETRY_DIMENSIONS = {
   cylinderRodRadius: 6,
   cylinderBodyExtra: 70,
   rodProtrusion: 25,
+  /** 顶升台：安装板外形 / 台板外形 / 导柱半径与两列中心距（须落在 cylinder 槽宽 110 内） */
+  liftMountSize: [80, 70, 20] as Vec3,
+  liftPlateSize: [100, 90, 12] as Vec3,
+  liftGuideRadius: 8,
+  liftGuideOffset: 40,
   mountBlock: 20,
   gripperBody: [64, 40, 56] as Vec3,
   gripperJaw: [12, 24, 40] as Vec3,
@@ -219,6 +224,10 @@ export const GEOMETRY_DIMENSIONS = {
   fixture: [70, 70, 30] as Vec3,
   workClearance: 60,
   sensorRowInset: 30,
+  /** 传感器支架外形（宽×厚×高）；宽度决定同排支架的最小节距 */
+  sensorBracketSize: [30, 10, 70] as Vec3,
+  /** 同排传感器支架之间的净间隙 mm（相邻支架中心距 = 支架宽 + 该值） */
+  sensorBracketGap: 6,
   safetyPostSection: 35,
   safetyPostHeight: 600,
   safetyPostOffset: 40,
@@ -404,6 +413,21 @@ function strokeOf(actuator: ActuatorConfig): number {
   return actuator.travelMm ?? DEFAULT_ACTUATOR_TRAVEL_MM;
 }
 
+/**
+ * 顶升/举升类直线轴：几何必须建成「自下向上顶升的台板 + 导柱」，
+ * 而不是门架下压的压机（缸体朝下 + 压头 + 治具）。
+ *
+ * 为什么必须分开建：config 把 turner-lift 声明为 `position=[0,0,+1]`（向上顶 60 mm），
+ * 而压机几何的伸出方向是 -Z。状态化干涉按 config 方向翻转后成了「反向平移」，
+ * 活塞杆被整根推进缸体（10744.2 mm³ = 杆 100% 体积）、压头钻进自己的缸筒
+ * （11259.5 mm³ = 压头 100% 体积）——那是建模假象，不是设计干涉。
+ * 判定口径与 `interference-states.ts` 的 resolveLiftAxis 保持一致（id=turner-lift 或含 lift/顶升）。
+ */
+function isLiftActuator(actuator: ActuatorConfig): boolean {
+  return actuator.kind === 'cylinder'
+    && (actuator.id === 'turner-lift' || /lift|顶升/i.test(`${actuator.id} ${actuator.name ?? ''}`));
+}
+
 function buildStation(
   config: MachineConfig,
   station: string,
@@ -506,7 +530,102 @@ function buildStation(
     actuatorIds.push(actuator.id);
     const meta = { stationId, actuatorId: actuator.id };
 
-    if (actuator.kind === 'cylinder') {
+    if (actuator.kind === 'cylinder' && isLiftActuator(actuator)) {
+      // 顶升台（自下向上）：安装板 + 缸体 + 活塞杆 + 两列导柱 + 顶升台板。
+      // 伸出方向 = +Z，与 config.position 同向，所以 lift/sweep 是几何里真有的位姿。
+      const stroke = strokeOf(actuator);
+      const mountTop = D.mountBlock;
+      const bodyLength = stroke + D.cylinderBodyExtra;
+      const bodyTop = mountTop + bodyLength;
+      /** 缩回位杆顶：露出 rodProtrusion，其余（stroke 长度）仍在缸孔里 */
+      const rodTop = bodyTop + D.rodProtrusion;
+      const rodLength = stroke + D.rodProtrusion;
+      const rodCenterZ = rodTop - rodLength / 2;
+      const plateSize = D.liftPlateSize as Vec3;
+      const plateBottom = rodTop;
+      const plateTop = plateBottom + plateSize[2];
+      add({
+        id: `${key}-mount`,
+        name: `${actuator.name} 安装板`,
+        role: 'structure',
+        shape: { type: 'box', size: [D.liftMountSize[0], D.liftMountSize[1], D.mountBlock] },
+        local: [x, 0, mountTop / 2],
+        color: COLORS.bracket,
+        material: 'AL6061',
+        bomGroup: 'structure',
+        ...meta
+      });
+      add({
+        id: `${key}-body`,
+        name: `${actuator.name} 顶升缸缸体 Ø${D.cylinderBore}×${stroke}`,
+        role: 'actuator',
+        shape: { type: 'cylinder', radius: D.cylinderBodyRadius, length: bodyLength, axis: 'z' },
+        local: [x, 0, mountTop + bodyLength / 2],
+        color: COLORS.cylinderBody,
+        material: '铝合金缸筒',
+        bomGroup: 'actuator:cylinder',
+        ...meta
+      });
+      const rodId = add({
+        id: `${key}-rod`,
+        name: `${actuator.name} 活塞杆`,
+        role: 'actuator',
+        shape: { type: 'cylinder', radius: D.cylinderRodRadius, length: rodLength, axis: 'z' },
+        local: [x, 0, rodCenterZ],
+        color: COLORS.rod,
+        material: 'S45C 镀铬',
+        bomGroup: 'actuator:cylinder',
+        moving: true,
+        ...meta
+      });
+      // 导柱画到台板底面为止：台板上的导向过孔/导套不建模，
+      // 否则「圆柱穿方板」会被解析式求交算成实体互穿（真实过孔误报）。
+      const postLength = rodTop - mountTop;
+      for (const side of [-1, 1] as const) {
+        add({
+          id: `${key}-guide-${side < 0 ? 'l' : 'r'}`,
+          name: `${actuator.name} 导柱${side < 0 ? '左' : '右'} φ${D.liftGuideRadius * 2}`,
+          role: 'structure',
+          shape: { type: 'cylinder', radius: D.liftGuideRadius, length: postLength, axis: 'z' },
+          local: [x + side * D.liftGuideOffset, 0, mountTop + postLength / 2],
+          color: COLORS.rod,
+          material: '45# 镀铬光轴',
+          bomGroup: 'structure',
+          ...meta
+        });
+      }
+      const plateId = add({
+        id: `${key}-tool`,
+        name: `${actuator.name} 台板 ${plateSize[0]}×${plateSize[1]}×${plateSize[2]}`,
+        role: 'actuator',
+        shape: { type: 'box', size: [...plateSize] },
+        local: [x, 0, plateBottom + plateSize[2] / 2],
+        color: COLORS.bracket,
+        material: 'AL6061',
+        bomGroup: 'actuator:cylinder',
+        moving: true,
+        ...meta
+      });
+      if (plateTop + stroke > beamBottom - 1e-6) {
+        warnings.push(`${actuator.name} 顶升到位后台板顶面 ${plateTop + stroke} 高于门架横梁底面，请复核行程`);
+      }
+      axes.push({
+        actuatorId: actuator.id,
+        stationId,
+        kind: 'linear',
+        partIds: [rodId, plateId],
+        axisLocal: [0, 0, 1],
+        pivotLocal: [x, 0, bodyTop],
+        strokeMm: stroke,
+        rangeDeg: 0,
+        home: 'retracted',
+        durationMs,
+        points: {
+          ...(actuator.extendPoint ? { extend: actuator.extendPoint } : {}),
+          ...(actuator.retractPoint ? { retract: actuator.retractPoint } : {})
+        }
+      });
+    } else if (actuator.kind === 'cylinder') {
       const stroke = strokeOf(actuator);
       const bodyLength = stroke + D.cylinderBodyExtra;
       const mountTop = beamBottom;
@@ -725,13 +844,54 @@ function buildStation(
   const sensorCountByX = new Map<number, number>();
   const ordinary = sensors.filter((sensor) => sensorKindOf(sensor) !== 'safety');
   const spread = ordinary.length > 1 ? (width - 2 * D.stationMargin - 40) / (ordinary.length - 1) : 0;
-  ordinary.forEach((sensor, order) => {
-    const kind = sensorKindOf(sensor);
+  const bracketWidth = D.sensorBracketSize[0];
+  const bracketPitch = bracketWidth + D.sensorBracketGap;
+  const bracketHalf = bracketWidth / 2;
+  const xLo = -width / 2 + bracketHalf + 10;
+  const xHi = width / 2 - bracketHalf - 10;
+  // 1) 期望位置：优先靠近所检测的槽位，没有槽位就沿底板均布。
+  const desiredX = ordinary.map((sensor, order) => {
     const target = slotCenters.get(sensor.part);
     let x = target ?? (ordinary.length > 1 ? -width / 2 + D.stationMargin + 20 + spread * order : 0);
     const used = sensorCountByX.get(Math.round(x)) ?? 0;
     sensorCountByX.set(Math.round(x), used + 1);
-    if (target !== undefined && used > 0) x += used * 36 * (used % 2 === 0 ? -1 : 1);
+    if (target !== undefined && used > 0) x += used * bracketPitch * (used % 2 === 0 ? -1 : 1);
+    return x;
+  });
+  // 2) 按支架真实宽度重排（这是缺陷 B 的根因）：支架宽 30，必须留 sensorBracketGap 的净空。
+  //    以前只按槽位/均布给 x，一台机 4 个传感器挤在同一段时支架直接插进对方（实测 17500 mm³），
+  //    而 joints 里「传感器接支架」的 /^sensor-/ 规则又把这种互穿当成已声明连接放行。
+  const bracketX = desiredX.map((x) => Math.min(xHi, Math.max(xLo, x)));
+  const rowOrder = bracketX
+    .map((_value, index) => index)
+    .sort((a, b) => (bracketX[a] ?? 0) - (bracketX[b] ?? 0) || a - b);
+  for (let k = 1; k < rowOrder.length; k += 1) {
+    const prev = rowOrder[k - 1] ?? 0;
+    const cur = rowOrder[k] ?? 0;
+    const prevX = bracketX[prev] ?? 0;
+    const curX = bracketX[cur] ?? 0;
+    if (curX < prevX + bracketPitch) bracketX[cur] = prevX + bracketPitch;
+  }
+  const firstInRow = rowOrder[0];
+  const lastInRow = rowOrder[rowOrder.length - 1];
+  const lastX = lastInRow === undefined ? undefined : bracketX[lastInRow];
+  if (lastX !== undefined && lastX > xHi) {
+    const overflow = lastX - xHi;
+    for (const index of rowOrder) {
+      const value = bracketX[index];
+      if (value !== undefined) bracketX[index] = value - overflow;
+    }
+    const firstX = firstInRow === undefined ? undefined : bracketX[firstInRow];
+    if (firstX !== undefined && firstX < xLo) {
+      warnings.push(
+        `${station} 传感器 ${ordinary.length} 个，支架节距 ${bracketPitch} mm 超出底板可用宽度 `
+        + `${Math.round(xHi - xLo + bracketWidth)} mm，支架已挤到板边，需加大底板或改成两排布置。`
+      );
+    }
+  }
+  ordinary.forEach((sensor, order) => {
+    const kind = sensorKindOf(sensor);
+    const x = bracketX[order] ?? 0;
     const key = geometryIdPart(sensor.point);
     sensorPoints.push(sensor.point);
     const meta = { stationId, sensorPoint: sensor.point };
@@ -739,7 +899,7 @@ function buildStation(
       id: `sensor-${key}-bracket`,
       name: `${sensor.point} 支架`,
       role: 'structure',
-      shape: { type: 'box', size: [30, 10, 70] },
+      shape: { type: 'box', size: [...D.sensorBracketSize] },
       local: [x, rowY - 15, 35],
       color: COLORS.bracket,
       material: 'SPCC',
