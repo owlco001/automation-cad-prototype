@@ -15,8 +15,8 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { applyRegion, parseRegionArgs, type CaptureRegion } from './capture-region.ts';
-import { fitPng, VisionImageError } from './vision-image.ts';
+import { applyRegion, clampRegion, parseRegionArgs, type CaptureRegion } from './capture-region.ts';
+import { fitPng, pngSize, VisionImageError } from './vision-image.ts';
 
 export const AGENT_CAPTURE_VIEWS = ['3d', 'linkage', 'library', 'exports'] as const;
 export type AgentCaptureView = (typeof AGENT_CAPTURE_VIEWS)[number];
@@ -107,9 +107,12 @@ export async function captureAgentView(
   if (typeof height === 'string') return invalid(height);
 
   // 区域截图：参数校验放在开窗之前 —— w/h 太小这类错误不该先截一张整窗再报错。
-  const parsed = parseRegionArgs(args);
-  if (!parsed.ok) return invalid(parsed.message);
-  const plan = parsed.plan;
+  // 此刻还不知道图像像素尺寸（高 DPI 下截图会比请求的 1600×1000 大一倍），所以
+  // `parseRegionArgs(args, null)` 只校验、不夹紧；坐标夹紧一律等拿到真实图之后按
+  // `pngSize(png)` 做 —— 否则 3200×2000 上请求右侧 x=2000 会被 1600 的常量夹回左上。
+  const validated = parseRegionArgs(args, null);
+  if (!validated.ok) return invalid(validated.message);
+  const plan = validated.plan;
   const wantsRegion = plan.requested || plan.scale !== 1;
 
   if (!deps.capture) {
@@ -178,7 +181,13 @@ export async function captureAgentView(
   let shotRegion: { region: CaptureRegion; clamped: boolean; scale: number; sourceSize: { w: number; h: number } } | null = null;
   if (wantsRegion) {
     try {
-      let applied = applyRegion(png, plan.region, plan.scale, plan.clamped);
+      // 坐标上界 = 本次截图的真实像素尺寸（高 DPI 是 3200×2000），不是请求的 1600×1000。
+      const source = pngSize(png);
+      // 只给 scale 不给 region 时语义是「整图放大」：按真实整图，而不是默认窗口那一块
+      // （高 DPI 上 1600×1000 的常量会把整图放大变成「左上角一块放大」）。
+      const desired = plan.requested ? plan.region : { x: 0, y: 0, w: source.width, h: source.height };
+      const bounded = clampRegion(desired, source);
+      let applied = applyRegion(png, bounded.region, plan.scale, bounded.clamped);
       // 放大后可能撑破单张 5 MiB：仍按字节上限兜底压一档，不写一张超大图到磁盘。
       if (applied.png.byteLength > MAX_SHOT_BYTES) {
         const capped = fitPng(applied.png, {

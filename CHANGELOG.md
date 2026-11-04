@@ -18,6 +18,7 @@
 
 - 方案卡从裁剪后的列表里读 warnings/statistics（CI 机型截图红过两次）
 - `exports` 视图截图长期是 `3d` 那一帧（sha256 完全相同）；视图切换不清理浮层；入口对隐藏节点直接 `click()` 绕过真实路径
+- 区域截图坐标系写死 1600×1000：高 DPI 屏（`capturePage` 返回 3200×2000）上请求右侧/下侧区域会被常量夹回左上、根本截不到。现在 `region` 按**本次截图的真实像素尺寸**（读 PNG 头 `pngSize`）夹紧，`x=2000,y=1200,w=800,h=600` 在 3200×2000 上原样生效（`clamped:false`、`sourceSize=3200x2000`），可用范围以返回的 `sourceSize` 为准
 - `runPlan` / `runRecipe` 不经过 `AgentSession`，预算与自动验证在那两条路径上未生效
 
 ### Changed · 质量口径

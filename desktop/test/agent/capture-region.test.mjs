@@ -391,6 +391,131 @@ test('视觉回灌提示词写明「这是局部（x,y,w×h）」，整窗提示
 });
 
 // ---------------------------------------------------------------------------
+// 10) 高 DPI 坐标系：region 的上界是**本次截图的真实像素尺寸**，不是常量 1600×1000
+//     （旧实现先按 1600×1000 夹一次，3200×2000 上请求右侧 x=2000 会被夹回左上）
+// ---------------------------------------------------------------------------
+test('高 DPI 3200×2000：请求右侧 x=2000 原样生效（不夹紧），sourceSize 如实回传', async () => {
+  const sourceWidth = 3200;
+  const sourceHeight = 2000;
+  const marked = solid(sourceWidth, sourceHeight);
+  for (let y = 1200; y < 1800; y += 1) {
+    for (let x = 2000; x < 2800; x += 1) marked.data.set([0, 128, 255, 255], (y * sourceWidth + x) * 4);
+  }
+  const png = pngOf(marked);
+  const { tools } = setup({
+    // 通道回的是 capturePage 的真实像素（高 DPI 下与请求的 1600×1000 不同）
+    capture: () => async () => ({ ok: true, png, width: sourceWidth, height: sourceHeight })
+  });
+
+  const result = await tools.call('capture_view', { view: '3d', region: { x: 2000, y: 1200, w: 800, h: 600 } });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(result.region, { x: 2000, y: 1200, w: 800, h: 600 }, '真实尺寸下这块区域完全合法，一个像素都不该挪');
+  assert.equal(result.clamped, false, '大图右半区域不是越界');
+  assert.deepEqual(result.sourceSize, { w: 3200, h: 2000 });
+  assert.equal(result.width, 800);
+  assert.equal(result.height, 600);
+  assert.match(result.note, /x=2000, y=1200/);
+
+  // 像素级证明：裁出来的左上角就是原图 (2000,1200) 的标记色（左上角是纯白）
+  const decoded = decodePng(new Uint8Array(readFileSync(result.path)));
+  assert.equal(decoded.width, 800);
+  assert.equal(decoded.height, 600);
+  assert.deepEqual([...decoded.data.slice(0, 4)], [0, 128, 255, 255], '裁的必须是 (2000,1200) 那一块，不是被夹回左上');
+  const bottomRight = ((600 - 1) * 800 + (800 - 1)) * 4;
+  assert.deepEqual([...decoded.data.slice(bottomRight, bottomRight + 4)], [0, 128, 255, 255]);
+});
+
+// ---------------------------------------------------------------------------
+// 11) 大图越界：仍按真实尺寸夹紧（3200 宽 → x=3000 平移回 2400）
+// ---------------------------------------------------------------------------
+test('高 DPI 大图越界按真实尺寸夹紧（3200×2000 → 平移回 2400,1400），clamped=true', async () => {
+  const sourceWidth = 3200;
+  const sourceHeight = 2000;
+  const png = pngOf(solid(sourceWidth, sourceHeight));
+  const { tools } = setup({
+    capture: () => async () => ({ ok: true, png, width: sourceWidth, height: sourceHeight })
+  });
+
+  const result = await tools.call('capture_view', { view: 'library', region: { x: 3000, y: 1900, w: 800, h: 600 } });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.clamped, true);
+  assert.deepEqual(result.region, { x: 2400, y: 1400, w: 800, h: 600 }, '保留请求尺寸，起点按真实宽高平移回边界内');
+  assert.deepEqual(result.sourceSize, { w: 3200, h: 2000 });
+  assert.equal(result.width, 800);
+  assert.equal(result.height, 600);
+
+  // 纯函数口径再钉一次：同样的坐标，按 1600×1000 夹会得到 800,400（旧 bug），按真实尺寸得到 2400,1400
+  const real = clampRegion({ x: 3000, y: 1900, w: 800, h: 600 }, { width: sourceWidth, height: sourceHeight });
+  assert.deepEqual(real.region, { x: 2400, y: 1400, w: 800, h: 600 });
+  assert.equal(real.clamped, true);
+  const byDefaultWindow = clampRegion({ x: 3000, y: 1900, w: 800, h: 600 }, { width: 1600, height: 1000 });
+  assert.deepEqual(byDefaultWindow.region, { x: 800, y: 400, w: 800, h: 600 }, '按 1600×1000 夹会把请求拉到左上（正是本 bug）');
+});
+
+// ---------------------------------------------------------------------------
+// 12) 小图：请求宽度超过真实宽度时按真实尺寸截断，而不是按 1600 放行
+// ---------------------------------------------------------------------------
+test('小图 800×600：请求 1600 宽按真实宽度夹到 800，clamped=true', async () => {
+  const png = pngOf(solid(800, 600));
+  const { tools } = setup({
+    capture: () => async () => ({ ok: true, png, width: 800, height: 600 })
+  });
+
+  const result = await tools.call('capture_view', { view: 'exports', region: { x: 0, y: 0, w: 1600, h: 400 } });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.clamped, true);
+  assert.deepEqual(result.region, { x: 0, y: 0, w: 800, h: 400 }, '宽度必须按真实 800 截断');
+  assert.deepEqual(result.sourceSize, { w: 800, h: 600 });
+  assert.equal(result.width, 800);
+  assert.equal(result.height, 400);
+
+  const decoded = decodePng(new Uint8Array(readFileSync(result.path)));
+  assert.equal(decoded.width, 800, '落盘宽度不能是请求的 1600');
+  assert.equal(decoded.height, 400);
+});
+
+// ---------------------------------------------------------------------------
+// 13) 不传 region：高 DPI 大图也必须字节级原样落盘（不进任何像素处理）
+// ---------------------------------------------------------------------------
+test('高 DPI 3200×2000 不传 region：落盘字节与截图通道逐字节一致，不出现 region 字段', async () => {
+  const png = pngOf(solid(3200, 2000));
+  const { tools, root } = setup({
+    capture: () => async () => ({ ok: true, png, width: 3200, height: 2000 })
+  });
+
+  const result = await tools.call('capture_view', { view: '3d' });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.bytes, png.byteLength);
+  assert.equal(result.sha256, sha(png));
+  assert.deepEqual(readFileSync(result.path), Buffer.from(png), '整窗路径不能重新编码');
+  assert.equal(result.width, 3200, '真实尺寸如实回传');
+  assert.equal(result.height, 2000);
+  assert.equal('region' in result, false);
+  assert.equal('clamped' in result, false);
+  assert.match(result.path, /2026-11-04T08-09-10-123Z-3d\.png$/);
+  assert.equal(existsSync(join(root, 'agent-shots')), true);
+});
+
+// ---------------------------------------------------------------------------
+// 14) 只传 scale 不传 region：语义是「整图放大」，按真实整图而不是默认窗口那一块
+// ---------------------------------------------------------------------------
+test('只传 scale 不传 region：按真实整图放大（2000×1000 源不会被截成左上 1600×1000）', async () => {
+  const png = pngOf(solid(2000, 1000));
+  const { tools } = setup({
+    capture: () => async () => ({ ok: true, png, width: 2000, height: 1000 })
+  });
+
+  const result = await tools.call('capture_view', { view: '3d', scale: 1.4 });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(result.region, { x: 0, y: 0, w: 2000, h: 1000 }, '没给 region 时 region 必须覆盖真实整图');
+  assert.equal(result.clamped, false);
+  assert.deepEqual(result.sourceSize, { w: 2000, h: 1000 });
+  assert.equal(result.width, 2800, '2000×1.4；若仍按 1600 常量裁会是 2240');
+  assert.equal(result.height, 1400);
+  assert.ok(result.width * result.height <= 4_100_000);
+});
+
+// ---------------------------------------------------------------------------
 // 9) 会话级回灌：region 元数据从工具回执一路进到「发给模型的那条消息」
 // ---------------------------------------------------------------------------
 test('会话回灌：region/clamped/scale/sourceSize 进入提示词，模型拿到图 + 局部说明', async () => {

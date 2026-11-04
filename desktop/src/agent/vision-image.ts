@@ -52,6 +52,32 @@ export function isPng(bytes: Uint8Array): boolean {
   return PNG_SIGNATURE.every((value, index) => bytes[index] === value);
 }
 
+/**
+ * 只读 PNG 头（IHDR）拿**真实像素尺寸**，不解码像素。
+ *
+ * 为什么需要：`capture_view` 的 `region` 是原图像素坐标，而高 DPI 屏上 window 请求的
+ * 1600×1000 截出来是 3200×2000 —— 夹紧必须按图像实际像素来，不能按请求尺寸。
+ * 主进程通道虽然也回传实测尺寸，但那是「通道自报」；这里读文件头是同一份字节的自证。
+ */
+export function pngSize(bytes: Uint8Array): { width: number; height: number } {
+  if (!isPng(bytes)) {
+    throw new VisionImageError('VISION_UNSUPPORTED_FORMAT', '不是 PNG：缺少 PNG 文件头');
+  }
+  if (bytes.length < 24) {
+    throw new VisionImageError('VISION_UNSUPPORTED_FORMAT', 'PNG 头被截断：读不到 IHDR 里的像素尺寸');
+  }
+  const view = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (view.toString('ascii', 12, 16) !== 'IHDR') {
+    throw new VisionImageError('VISION_UNSUPPORTED_FORMAT', 'PNG 第一块不是 IHDR：无法确定像素尺寸');
+  }
+  const width = view.readUInt32BE(16);
+  const height = view.readUInt32BE(20);
+  if (width < 1 || height < 1) {
+    throw new VisionImageError('VISION_UNSUPPORTED_FORMAT', `PNG 头里的尺寸非法：${width}x${height}`);
+  }
+  return { width, height };
+}
+
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256);
   for (let n = 0; n < 256; n += 1) {

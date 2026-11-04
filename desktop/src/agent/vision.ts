@@ -173,7 +173,7 @@ function regionNote(shot: VisionShotMeta): string {
   const source = shot.sourceSize ? `${shot.sourceSize.w}x${shot.sourceSize.h}` : `${shot.width}x${shot.height}`;
   const scale = typeof shot.scale === 'number' && shot.scale !== 1 ? `，放大 ${shot.scale}x` : '';
   const clamp = shot.clamped ? '；请求的取景框越界，已夹紧到这块区域' : '';
-  return `这是 ${shot.view} 视图的**局部**（原图 ${source} 像素坐标 x=${x}, y=${y}, ${w}x${h}${scale}${clamp}），不是整屏：只就这块区域内可见的内容作答，不要把它当成全景，也不要由局部推断区域外的情况。`;
+  return `这是 ${shot.view} 视图的**局部**（原图 ${source} 像素坐标，原点在图像左上：x=${x}, y=${y}, ${w}x${h}${scale}${clamp}）。可用范围以这张原图的 ${source} 为准；不是整屏：只就这块区域内可见的内容作答，不要把它当成全景，也不要由局部推断区域外的情况。`;
 }
 
 /** 带图时给模型的第一段文字（OpenAI 兼容：与 image_url 同处一个 user content 数组）。 */

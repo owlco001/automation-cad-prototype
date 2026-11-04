@@ -321,15 +321,54 @@ export async function checkAgentViewCapture(window: BrowserWindow, userDataRoot:
     throw new Error(`区域截图压缩后仍超限：${regionAttached.width}x${regionAttached.height} / ${regionAttached.bytes} B`);
   }
 
-  // 越界：夹紧 + 如实标 clamped，最终区域与图上像素一致
-  const clampedShot = await captureAgentView({ view: '3d', region: { x: 1400, y: 900, w: 400, h: 300 } }, deps);
+  // 越界：夹紧 + 如实标 clamped，最终区域与图上像素一致。
+  // 期望值由**本次截图的真实像素尺寸**推导 —— 高 DPI 屏上源是 3200×2000（不再是常量 1600×1000），
+  // 按 1600×1000 写死期望会在真机上误报「越界取景框必须标 clamped=true」。
+  const sourceSize = regionShot.sourceSize as { w: number; h: number };
+  const outside = { x: sourceSize.w - 200, y: sourceSize.h - 150, w: 400, h: 300 };
+  const outsideExpected = {
+    x: Math.max(0, sourceSize.w - 400),
+    y: Math.max(0, sourceSize.h - 300),
+    w: 400,
+    h: 300
+  };
+  const clampedShot = await captureAgentView({ view: '3d', region: outside }, deps);
   if (clampedShot.ok !== true) throw new Error(`越界区域截图失败：${JSON.stringify(clampedShot)}`);
-  if (clampedShot.clamped !== true) throw new Error('越界取景框必须标 clamped=true');
+  if (clampedShot.clamped !== true) {
+    throw new Error(
+      `越界取景框必须标 clamped=true（源 ${sourceSize.w}x${sourceSize.h}，请求 ${outside.x},${outside.y},${outside.w}x${outside.h}）`
+    );
+  }
   const clampedRegion = JSON.stringify(clampedShot.region);
-  if (clampedRegion !== JSON.stringify({ x: 1200, y: 700, w: 400, h: 300 })) {
-    throw new Error(`越界取景框夹紧结果不对：${clampedRegion}`);
+  if (clampedRegion !== JSON.stringify(outsideExpected)) {
+    throw new Error(
+      `越界取景框夹紧结果不对：${clampedRegion}（期望 ${JSON.stringify(outsideExpected)}，源 ${sourceSize.w}x${sourceSize.h}）`
+    );
   }
   const finalRegion = clampedShot.region as { x: number; y: number; w: number; h: number };
+
+  // 高 DPI 回归：真实源大于默认窗口时，右半/下半区域必须**原样生效**。
+  // 旧实现按 1600×1000 夹紧，x>1200 会被挪回 1200 —— 高 DPI 屏上右侧整块区域根本截不到。
+  const insideRight = { x: Math.max(0, sourceSize.w - 500), y: Math.max(0, sourceSize.h - 400), w: 400, h: 300 };
+  const rightShot = await captureAgentView({ view: '3d', region: insideRight }, deps);
+  if (rightShot.ok !== true) throw new Error(`右侧区域截图失败：${JSON.stringify(rightShot)}`);
+  const rightRegion = rightShot.region as { x: number; y: number; w: number; h: number };
+  if (rightShot.clamped !== false) {
+    throw new Error(
+      `真实源 ${sourceSize.w}x${sourceSize.h} 上 ${insideRight.x},${insideRight.y} 并不越界，不该标 clamped：${JSON.stringify(
+        rightRegion
+      )}`
+    );
+  }
+  if (JSON.stringify(rightRegion) !== JSON.stringify(insideRight)) {
+    throw new Error(`右侧取景框被挪动了：${JSON.stringify(rightRegion)} vs ${JSON.stringify(insideRight)}`);
+  }
+  const hiDpiNote = sourceSize.w > 1600
+    ? `（旧 1600x1000 常量会把 x=${insideRight.x} 夹回 1200）`
+    : '（源等于默认窗口，此项不区分新旧）';
+  console.log(
+    `AGENT_CAPTURE_REGION_SOURCE_OK source=${sourceSize.w}x${sourceSize.h} requested=${insideRight.x},${insideRight.y},${insideRight.w}x${insideRight.h} final=${rightRegion.x},${rightRegion.y},${rightRegion.w}x${rightRegion.h} clamped=${rightShot.clamped}${hiDpiNote}`
+  );
 
   // 清晰度对比：同一块区域，「先裁后放」vs「先整图缩到 1024 再裁再放」的边缘能量
   const full3d = shots.find((shot) => shot.view === '3d');
@@ -372,7 +411,7 @@ export async function checkAgentViewCapture(window: BrowserWindow, userDataRoot:
     `AGENT_CAPTURE_REGION_OK view=3d region=${REGION.x},${REGION.y},${REGION.w}x${REGION.h} scale=${regionShot.scale} size=${regionShot.width}x${regionShot.height} bytes=${regionDisk.length} sha256=${regionSha} vision=${regionAttached.width}x${regionAttached.height}/${regionAttached.bytes}B path=${regionShot.path}`
   );
   console.log(
-    `AGENT_CAPTURE_REGION_CLAMP_OK requested=1400,900,400x300 final=${finalRegion.x},${finalRegion.y},${finalRegion.w}x${finalRegion.h} clamped=${clampedShot.clamped} size=${clampedShot.width}x${clampedShot.height}`
+    `AGENT_CAPTURE_REGION_CLAMP_OK requested=${outside.x},${outside.y},${outside.w}x${outside.h} source=${sourceSize.w}x${sourceSize.h} final=${finalRegion.x},${finalRegion.y},${finalRegion.w}x${finalRegion.h} clamped=${clampedShot.clamped} size=${clampedShot.width}x${clampedShot.height}`
   );
   console.log(`AGENT_CAPTURE_REGION_SHARPNESS ${sharpness}`);
 

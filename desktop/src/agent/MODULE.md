@@ -89,7 +89,7 @@ interface Bridge {
 | `get_bom` | 无 | `get_bom` | ✅ 简化 BOM |
 | `get_project_context` | 无 | `get_project_context` | ✅ 只读：域/视图/选中/机型/底板/单位/最近操作，缺失为 null |
 | `run_interference_check` | `states?`（`rest`/`lift`/`sweep`） | `run_interference` | ✅ 不传 states=旧行为（渲染层静态位姿，前 20 条）；传 states=按 active 机型位姿化检查（lift 按 `turner-lift.travelMm` 平移可动件，sweep 每 10 mm 一步），无顶升轴返回 `STATE_UNAVAILABLE` |
-| `capture_view` | `view?`（3d/linkage/library/exports）/ `width?` / `height?` / `region?{x,y,w,h}` / `scale?` | `capture_view` → 主进程 `electron/agent-capture.ts` | ✅ 只读：`capturePage` 落盘 `userData/agent-shots/<timestamp>-<view>.png`，返回 `{path,bytes,sha256,width,height,view}`；首页/未就绪 `VIEW_NOT_READY`，>5 MiB 缩尺寸重拍一次。`region` 用原图像素坐标（`w,h>=32`、`0<=x,y`、`x+w<=1600`、`y+h<=1000`），**先裁后缩**，越界夹紧并回 `{region,clamped,scale,sourceSize}`（`clamped:true`），局部图落盘名带 `-region`；不传 region 且 scale=1 时落盘字节与旧版完全一致 |
+| `capture_view` | `view?`（3d/linkage/library/exports）/ `width?` / `height?` / `region?{x,y,w,h}` / `scale?` | `capture_view` → 主进程 `electron/agent-capture.ts` | ✅ 只读：`capturePage` 落盘 `userData/agent-shots/<timestamp>-<view>.png`，返回 `{path,bytes,sha256,width,height,view}`；首页/未就绪 `VIEW_NOT_READY`，>5 MiB 缩尺寸重拍一次。`region` 用原图像素坐标（原点在图像左上；`w,h>=32`、`0<=x,y`），上界是**本次截图的真实像素尺寸**（高 DPI 屏大于 1600×1000，可用范围以返回的 `sourceSize` 为准），**先裁后缩**，越界按真实尺寸夹紧并回 `{region,clamped,scale,sourceSize}`（`clamped:true`），局部图落盘名带 `-region`；不传 region 且 scale=1 时落盘字节与旧版完全一致 |
 | `suggest_kinematics` | `includeLow? / limit?` | `suggest_kinematics` → 渲染桥 `suggestKinematics` | ✅ 只读：返回压缩后的高/低置信度建议，只刷新标注抽屉建议列表，`applied=false`，从不写标注 |
 | `insert_component` | `partId / name?` | `insert_component` | ✅ 可撤销 |
 | `place_component` | `partId / x / y / rotate? / railSnap?` | `place_component` | ✅ 底板放置，可撤销；越界/重叠只告警 |
@@ -119,17 +119,24 @@ xvfb-run -a -s "-screen 0 1920x1200x24" node_modules/.bin/electron . --no-sandbo
 # AGENT_CAPTURE_OK view=library bytes=418040 sha256=0f5937fa… size=1600x1000 colors=2541 luma_std=19.10 path=…/…-library.png
 # AGENT_CAPTURE_OK view=exports bytes=161102 sha256=86285ee8… size=1600x1000 colors=2938 luma_std=16.37 path=…/…-exports.png
 # AGENT_CAPTURE_REGION_OK view=3d region=0,0,480x300 scale=2 size=960x600 bytes=61146 sha256=3c557082… vision=960x600/61146B path=…/…-3d-region.png
-# AGENT_CAPTURE_REGION_CLAMP_OK requested=1400,900,400x300 final=1200,700,400x300 clamped=true size=400x300
+# AGENT_CAPTURE_REGION_CLAMP_OK requested=1400,900,400x300 source=1600x1000 final=1200,700,400x300 clamped=true size=400x300
+# AGENT_CAPTURE_REGION_SOURCE_OK source=1600x1000 requested=1100,600,400x300 final=1100,600,400x300 clamped=false（源等于默认窗口，此项不区分新旧）
 # AGENT_CAPTURE_REGION_SHARPNESS crop_first=2.26 shrink_first=1.32   ← 同一块区域：先裁后放 vs 先整图缩到 1024 再裁
 # AGENT_CAPTURE_SELF_CHECK_OK shots=4 home_gate=true distinct=4
 ```
 
-区域截图（`region` + `scale`）的取景框用**原图像素坐标**：`0<=x,y`、`w,h>=32`、`x+w<=1600`、`y+h<=1000`；
-越界只夹紧并回 `clamped:true` + 最终 `region`（不静默换区域），`w/h<32` 直接 `INVALID_ARGUMENT`（不会先截一张整窗再报错）。
+区域截图（`region` + `scale`）的取景框用**原图像素坐标**（原点在图像左上）：`0<=x,y`、`w,h>=32`；
+上界不是常量，而是**本次 `capturePage` 的实际图像像素尺寸**（高 DPI 屏上 1600×1000 的窗口截出来是
+3200×2000，`x+w`/`y+h` 的上界就是 3200/2000），实际可用范围以返回的 `sourceSize` 为准。
+越界只按真实尺寸夹紧并回 `clamped:true` + 最终 `region`（不静默换区域），`w/h<32` 直接 `INVALID_ARGUMENT`
+（不会先截一张整窗再报错）。实现上参数先 `parseRegionArgs(args, null)` 只校验不夹紧，截到图后用
+`pngSize(png)` 读 PNG 头的真实宽高再 `clampRegion(region, 真实尺寸)` —— 早先按 1600×1000 常量夹紧，
+导致 3200×2000 上请求右侧 `x=2000` 被夹回左上、右半/下半根本截不到。
 顺序是**先裁后缩**：先按 region 从原像素裁出来，再按 `scale`（0.5–3）放大 —— 先整图缩小再裁等于把要看的细节
 提前平均掉了。放大后最多 400 万像素（再多也只会被压到 1024 长边，白占内存与编码时间），所以返回的 `scale`
 是**实际生效倍数**，可据 `width / region.w` 复核。落盘仍是 PNG，回灌照旧走 `fitPng`（长边 ≤1024 / ≤400 KB），
-局部图名带 `-region`；**不传 region 且 scale=1 时整段跳过**，落盘字节与旧版逐字节相同。
+局部图名带 `-region`；**不传 region 且 scale=1 时整段跳过**，落盘字节与旧版逐字节相同；只给 `scale`
+不给 `region` 时按**真实整图**放大（高 DPI 上不会退化成「左上角那一块放大」）。
 
 自检不只比哈希，还做两件防「同帧冒充」的事：像素统计（颜色数 / 亮度标准差）判纯色底，命中就
 `VIEW_EMPTY view=<v> reason=flat-frame …` 且**不参与** distinct 校验；结构探针确认目标面板
@@ -141,8 +148,10 @@ xvfb-run -a -s "-screen 0 1920x1200x24" node_modules/.bin/electron . --no-sandbo
 覆盖层 / 导出菜单收掉 —— 否则 `activeView` 会被遮挡物抢先判成别的视图。
 
 单测：`test/agent/self-evidence-tools.test.mjs` 7 条（首页拒绝、落盘 bytes/sha256 复算、>5 MiB 缩尺寸重拍、旧形状兼容、lift≠rest、STATE_UNAVAILABLE、sweep 步数）；
-区域截图 `test/agent/capture-region.test.mjs` 9 条（不传 region 字节级一致、裁后尺寸、越界夹紧、w/h<32 拒绝、scale 夹紧与像素封顶、
-裁后仍 ≤1024/≤400 KB、先裁后缩边缘能量更高、局部提示词、会话回灌把 region 元数据带进提示词）。
+区域截图 `test/agent/capture-region.test.mjs` 14 条（不传 region 字节级一致、裁后尺寸、越界夹紧、w/h<32 拒绝、scale 夹紧与像素封顶、
+裁后仍 ≤1024/≤400 KB、先裁后缩边缘能量更高、局部提示词、会话回灌把 region 元数据带进提示词，
+以及坐标系 5 条：3200×2000 上右侧区域原样生效、大图越界按真实尺寸夹紧、800×600 小图上 1600 宽被夹、
+不传 region 时高 DPI 仍字节一致、只给 scale 时按真实整图放大）。
 
 ## 视觉自检：截图回灌（P2）
 

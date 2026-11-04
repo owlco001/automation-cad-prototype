@@ -11,6 +11,10 @@
  * 2. **取景框不外扩**：越界只做夹紧（并 `clamped: true` 如实上报最终区域），
  *    不静默挪到别的区域、也不悄悄改用整图。
  *
+ * 坐标系：`region` 是**原图像素坐标**（原点在图像左上），上界是**本次 capturePage 的真实
+ * 像素尺寸**，不是默认窗口尺寸 —— 高 DPI 屏上 1600×1000 的窗口 `capturePage` 会返回
+ * 3200×2000，按 1600×1000 夹紧会把右半/下半整块判成越界（x=2000 被夹回左上）。
+ *
  * 纯函数，只用 `vision-image.ts` 已有的 PNG 解码 / 面积平均缩放 / 编码，不引新依赖
  * （`nativeImage.crop` 在主进程可用，但 `node --test` 里跑不了，裁剪逻辑就没法断言）。
  */
@@ -18,12 +22,24 @@ import { decodePng, encodePng, resizeRgba, type RgbaImage } from './vision-image
 
 /** 取景框最小边长（px）：再小就只剩几个像素，放大也读不出字。 */
 export const REGION_MIN_SIZE = 32;
-/** 取景框坐标系的上界：`capture_view` 默认窗口就是 1600×1000（原图像素）。 */
-export const REGION_SOURCE_WIDTH = 1600;
-export const REGION_SOURCE_HEIGHT = 1000;
+/**
+ * 默认窗口尺寸（1600×1000）。**只是「拿不到真实图像尺寸」时的兜底上界**：
+ * 生产路径必须把本次 capturePage 的实测像素尺寸传给 `clampRegion` / `parseRegionArgs`，
+ * 否则高 DPI（3200×2000）上右侧/下侧区域会被误判越界并夹回左上。
+ */
+export const REGION_DEFAULT_WIDTH = 1600;
+export const REGION_DEFAULT_HEIGHT = 1000;
 /** 放大倍数范围：>3 只是把像素拉大，不会多出信息；<0.5 没必要（vision 侧还会再压）。 */
 export const REGION_SCALE_MIN = 0.5;
 export const REGION_SCALE_MAX = 3;
+
+/**
+ * 图像像素尺寸（`region` 的坐标上界）。生产路径传**本次截图**的真实尺寸。
+ */
+export interface SourceBounds {
+  width: number;
+  height: number;
+}
 
 export interface CaptureRegion {
   x: number;
@@ -56,18 +72,26 @@ function int(value: unknown): number | null {
   return Math.round(value);
 }
 
+/** 尺寸兜底：NaN / 0 / 负数（坏通道、坏调用方）一律退回默认窗口，不让夹紧算出 NaN。 */
+function bound(value: number, fallback: number): number {
+  return Number.isFinite(value) && value >= 1 ? Math.floor(value) : fallback;
+}
+
 /**
  * 把取景框夹到 `0 <= x`、`0 <= y`、`x+w <= width`、`y+h <= height`。
+ *
+ * `bounds` 必须是**本次截图的实际像素尺寸**（高 DPI 下 1600×1000 的窗口给的是 3200×2000）；
+ * 省略时退回默认窗口 1600×1000，只用于拿不到图像尺寸的纯函数调用。
  *
  * 越界时优先保留请求的起点、把宽高截到边界内；起点本身越界则整体平移回来
  * （`x = width - w`）。**最终区域一定回传给调用方**，不静默换成别的区域。
  */
 export function clampRegion(
   region: CaptureRegion,
-  bounds: { width: number; height: number } = { width: REGION_SOURCE_WIDTH, height: REGION_SOURCE_HEIGHT }
+  bounds: SourceBounds = { width: REGION_DEFAULT_WIDTH, height: REGION_DEFAULT_HEIGHT }
 ): { region: CaptureRegion; clamped: boolean } {
-  const width = Math.max(1, Math.floor(bounds.width));
-  const height = Math.max(1, Math.floor(bounds.height));
+  const width = bound(bounds.width, REGION_DEFAULT_WIDTH);
+  const height = bound(bounds.height, REGION_DEFAULT_HEIGHT);
   let clamped = false;
 
   let x = Math.round(region.x);
@@ -114,14 +138,18 @@ export function clampRegion(
 /**
  * 解析 `capture_view` 的 `region` / `scale`。
  *
+ * `bounds` 传**本次 capturePage 的真实像素尺寸**；传 `null` 表示「此刻还不知道图像尺寸」
+ * —— 只做字段与 `w/h>=32` 校验、不做任何夹紧（先把非法参数拒掉，免得白截一张整窗），
+ * 夹紧留给截到图之后的 `clampRegion(region, 真实尺寸)`。
+ *
  * - 不传 region：`region` 取整图，`requested=false`，`clamped=false`（老路径，后续不做任何像素处理）；
  * - w/h < 32 或字段不是数字：`INVALID_ARGUMENT`（明确拒绝，不猜一个「差不多」的区域）；
- * - x/y 为负、x+w/y+h 越界：夹紧并 `clamped=true`；
+ * - x/y 为负、x+w/y+h 越界：按 `bounds` 夹紧并 `clamped=true`；
  * - scale 越界：夹到 0.5–3（返回里给最终值），非数字 → `INVALID_ARGUMENT`。
  */
 export function parseRegionArgs(
   args: Record<string, unknown>,
-  bounds: { width: number; height: number } = { width: REGION_SOURCE_WIDTH, height: REGION_SOURCE_HEIGHT }
+  bounds: SourceBounds | null = { width: REGION_DEFAULT_WIDTH, height: REGION_DEFAULT_HEIGHT }
 ): RegionParseResult {
   let scale = 1;
   const rawScale = args.scale;
@@ -133,8 +161,9 @@ export function parseRegionArgs(
   }
 
   const raw = args.region;
+  const limits = bounds ?? { width: REGION_DEFAULT_WIDTH, height: REGION_DEFAULT_HEIGHT };
   if (raw === undefined || raw === null) {
-    const full = clampRegion({ x: 0, y: 0, w: bounds.width, h: bounds.height }, bounds);
+    const full = clampRegion({ x: 0, y: 0, w: limits.width, h: limits.height }, limits);
     return { ok: true, plan: { region: full.region, requested: false, clamped: false, scale } };
   }
   if (!isRecord(raw)) {
@@ -153,6 +182,10 @@ export function parseRegionArgs(
       code: 'INVALID_ARGUMENT',
       message: `region 的 w/h 至少 ${REGION_MIN_SIZE} px（收到 ${w}x${h}）；太小放大也读不出内容`
     };
+  }
+  if (bounds === null) {
+    // 还不知道真实图像尺寸：原样返回请求坐标（只做过取整），夹紧交给截到图之后。
+    return { ok: true, plan: { region: { x, y, w, h }, requested: true, clamped: false, scale } };
   }
   const clamped = clampRegion({ x, y, w, h }, bounds);
   return { ok: true, plan: { region: clamped.region, requested: true, clamped: clamped.clamped, scale } };
