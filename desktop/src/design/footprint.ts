@@ -1,5 +1,6 @@
 import type { MachineDesign } from '../machine/synth.ts';
-import { generateMachineGeometry, type MachineGeometry } from '../machine/geometry.ts';
+import type { MachineGeometry } from '../machine/geometry.ts';
+import { resolveMachineGeometry } from '../machine/machine-geometry.ts';
 import { applyStationGeometryLayout } from '../machine/station-layout.ts';
 import { stationIdentitiesFor } from '../machine/station-identity.ts';
 import type { MachineFootprintRequirement } from '../machine/spec.ts';
@@ -21,15 +22,18 @@ function validPositive(value: number): boolean {
 
 /** 规则引擎原始摆放（未应用工位位姿）；整机布局编辑器以它为基线判断「编辑引入的」干涉。 */
 export function generatedGeometryForDesign(design: MachineDesign): MachineGeometry {
-  return generateMachineGeometry(design, {
+  // 唯一入口：输送类机型这里是 85 件参数化整机，其余形态仍是工位生成器
+  return resolveMachineGeometry(design, {
     process: design.config.id.match(/design-([a-z]+)-/)?.[1] as never,
     layout: design.form.geometry.kind === 'conveyor' ? 'linear' : design.form.geometry.kind
-  });
+  }).geometry;
 }
 
 /** 与 3D 预览/导出相同的几何路径，返回配置生成的估算包围盒尺寸（X 长 × Y 宽）。 */
 export function geometryForDesign(design: MachineDesign): MachineGeometry {
   const generated = generatedGeometryForDesign(design);
+  // 参数化整机没有工位底板（stations 为空），工位平移对它无意义
+  if (generated.stations.length === 0) return generated;
   const stationIdentities = stationIdentitiesFor(design.config.id, design.config.stations.length, design.stationIdentities);
   return applyStationGeometryLayout(generated, design.stationGeometryLayout, stationIdentities);
 }

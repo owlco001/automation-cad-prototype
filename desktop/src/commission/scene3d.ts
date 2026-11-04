@@ -8,7 +8,8 @@ import {
   type MovingPart
 } from '../cad/kinematics-ui.ts';
 import { type ActuatorConfig, type MachineConfig, validateMachineConfig } from './machine-config.ts';
-import { generateMachineGeometry, partBounds, type GeomLayout, type MachineGeometry, type Vec3 } from '../machine/geometry.ts';
+import { partBounds, type GeomLayout, type MachineGeometry, type Vec3 } from '../machine/geometry.ts';
+import { resolveMachineGeometry } from '../machine/machine-geometry.ts';
 import {
   applyAxisValue,
   buildThreeMachine,
@@ -937,7 +938,12 @@ export class CommissionScene3D {
       disposeThreeMachine(this.machine);
       this.machine = null;
     }
-    const geometry = generateMachineGeometry(this.config, this.layoutOverride ? { layout: this.layoutOverride } : {});
+    // 唯一入口：输送类机型拿到的就是 STEP/GLB/BOM 用的那份参数化整机，
+    // 渲染层只消费数据，不再自己生成第二套几何。
+    const geometry = resolveMachineGeometry(
+      this.config,
+      this.layoutOverride ? { layout: this.layoutOverride } : {}
+    ).geometry;
     const machine = buildThreeMachine(geometry, { targetSpan: SCENE_SPAN, sensorOffColor: SENSOR_OFF });
     this.geometry = geometry;
     this.machine = machine;

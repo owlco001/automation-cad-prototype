@@ -21,7 +21,8 @@ import { readMachinePricing } from '../../electron/pricing.ts';
 import { completeDesign } from '../design/synthesis.ts';
 import { validatePricebook, type Pricebook } from '../cost/pricebook.ts';
 import { buildClarify } from '../machine/clarify.ts';
-import { generateMachineGeometry, summarizeGeometry } from '../machine/geometry.ts';
+import { summarizeGeometry } from '../machine/geometry.ts';
+import { resolveMachineGeometry } from '../machine/machine-geometry.ts';
 import { AGENT_TOOL_MODULES, moduleDisabledResult, moduleIsEnabled, type ModuleEnabledReader } from '../modules/tool-gates.ts';
 import { describeRenderStats, normalizeRenderStats } from '../shared/render-stats.ts';
 
@@ -912,6 +913,9 @@ export class AgentTools {
             pricingLoad,
             ...(builtinPricebook ? { builtinPricebook } : {})
           });
+          // 摘要里的零件数必须来自唯一几何入口：输送类是 85 件参数化整机，
+          // 不是 48 件代理体 —— 否则工具回执与评审/3D 又对不上。
+          const resolvedGeometry = resolveMachineGeometry(design);
           return {
             ok: true,
             // 原始需求随结果一起带回（**放在 design 外层**：design 的字段形状被
@@ -929,7 +933,8 @@ export class AgentTools {
               form: design.form
             },
             summary: summarizeMachineDesign(design),
-            geometry: summarizeGeometry(generateMachineGeometry(design)),
+            // 与评审/三态干涉/3D 同一份几何（输送类走参数化整机，其余走生成器）
+            geometry: { ...summarizeGeometry(resolvedGeometry.geometry), source: resolvedGeometry.source },
             needs: clarify.needs,
             question: clarify.question
           };

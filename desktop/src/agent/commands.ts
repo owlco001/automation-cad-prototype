@@ -89,7 +89,8 @@ import {
 import { AGENT_COMMAND_MODULES, moduleDisabledResult, moduleIsEnabled, type ModuleEnabledReader } from '../modules/tool-gates.ts';
 import { COST_ESTIMATION_MODULE_ID } from '../modules/cost-estimation-gate.ts';
 import { PARAMETRIC_IMPORT_MODULE_ID, PARAMETRIC_MODULE_DISABLED_MESSAGE } from '../modules/parametric-gate.ts';
-import { generateMachineGeometry, summarizeGeometry } from '../machine/geometry.ts';
+import { summarizeGeometry } from '../machine/geometry.ts';
+import { resolveMachineGeometry } from '../machine/machine-geometry.ts';
 import { stationIdentitiesFor } from '../machine/station-identity.ts';
 import { applyStationGeometryLayout } from '../machine/station-layout.ts';
 import {
@@ -1989,12 +1990,15 @@ function registerMachineApplyCommand(bus: CommandBus): void {
           }
         };
         try {
-          const generatedGeometry = generateMachineGeometry(normalized);
-          const geometry = applyStationGeometryLayout(
-            generatedGeometry,
-            normalized.stationGeometryLayout,
-            stationIdentitiesFor(normalized.config.id, normalized.config.stations.length, normalized.stationIdentities)
-          );
+          const generatedGeometry = resolveMachineGeometry(normalized).geometry;
+          const geometry = generatedGeometry.stations.length > 0
+            ? applyStationGeometryLayout(
+              generatedGeometry,
+              normalized.stationGeometryLayout,
+              stationIdentitiesFor(normalized.config.id, normalized.config.stations.length, normalized.stationIdentities)
+            )
+            // 参数化整机没有工位底板（stations 为空），工位平移布局对它无意义，直接原样用
+            : generatedGeometry;
           const bundle = geometryToSidecarAssemblies(geometry, { updatedAt: appliedAt });
           for (const path of [paths.json, paths.stl, paths.gltf, paths.sidecar]) snapshot(path);
           writeText(paths.json, `${JSON.stringify(geometry, null, 2)}\n`);

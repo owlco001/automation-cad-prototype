@@ -16,7 +16,8 @@
  */
 
 import type { MachineConfig } from '../commission/machine-config.ts';
-import { generateMachineGeometry, type MachineGeometry } from './geometry.ts';
+import { resolveMachineGeometry, type MachineGeometrySource } from './machine-geometry.ts';
+import type { MachineGeometry } from './geometry.ts';
 import { screenInterference } from './interference.ts';
 
 export const INTERFERENCE_STATES = ['rest', 'lift', 'sweep'] as const;
@@ -113,8 +114,8 @@ export interface InterferencePrecision {
   screen: 'aabb';
   /** 确认方式：解析式原始体求交（不是布尔的边角/曲面情形） */
   confirm: 'analytic-primitive';
-  /** 本次算的是哪套几何 */
-  geometry: 'config-generator';
+  /** 本次算的是哪套几何：参数化整机 / 工位生成器代理体（唯一入口 resolveMachineGeometry 决定） */
+  geometry: MachineGeometrySource;
   /** 只有包围盒依据的情形（会被降级为 screen hit） */
   aabbOnly: string[];
 }
@@ -122,7 +123,12 @@ export interface InterferencePrecision {
 export interface InterferenceStatesPayload {
   ok: true;
   source: 'machine-geometry';
+  /** 几何来源：参数化整机（输送类）或工位生成器（其余形态） */
+  geometrySource: MachineGeometrySource;
+  /** 几何刚体数（参与干涉计算的实际件数） */
   partCount: number;
+  /** 整机装配件数（BOM/STEP 口径）；活塞杆按刚体拆出时会比 partCount 少几件 */
+  assemblyPartCount: number;
   lift: LiftAxisInfo | null;
   states: Record<string, InterferenceStateSummary | SweepStateSummary>;
   /** 全部状态里最差的一档：fail > warn > pass */
@@ -341,11 +347,17 @@ export function runInterferenceStates(input: {
   }
 
   let geometry: MachineGeometry;
+  let geometrySource: MachineGeometrySource = 'station-generator';
   if (isRecord(input.geometry) && Array.isArray(input.geometry.parts)) {
+    // 调用方直接给了几何：来源按几何自带的标注（没标注就按工位生成器代理体处理）。
+    // 这个字段存在的目的就是让下游知道「别拿两套几何的数字对撞」。
     geometry = input.geometry as unknown as MachineGeometry;
+    geometrySource = geometry.geometrySource === 'conveyor-assembly' ? 'conveyor-assembly' : 'station-generator';
   } else {
     try {
-      geometry = generateMachineGeometry(input.config as unknown as MachineConfig);
+      const resolved = resolveMachineGeometry(input.config as unknown as MachineConfig);
+      geometry = resolved.geometry;
+      geometrySource = resolved.source;
     } catch (error) {
       return {
         ok: false,
@@ -423,14 +435,16 @@ export function runInterferenceStates(input: {
   return {
     ok: true,
     source: 'machine-geometry',
+    geometrySource,
     partCount: geometry.parts.length,
+    assemblyPartCount: geometry.assemblyPartCount ?? geometry.parts.length,
     lift,
     states: output,
     reviewStatus,
     precision: {
       screen: 'aabb',
       confirm: 'analytic-primitive',
-      geometry: 'config-generator',
+      geometry: geometrySource,
       aabbOnly: [
         '绕 Z 旋转的长方体（包围盒会放大到 √2 倍）',
         '圆柱压长方体边角（圆不完整落在盒内）',
@@ -442,5 +456,7 @@ export function runInterferenceStates(input: {
       + 'mm3=pairs 的 AABB 上界合计（含 declared/mate，只作量级参考），mm3Confirmed/mm3Screen 是分开的真实口径。'
       + 'lift/sweep 按 config 的 travelMm 平移；若 config 方向与几何建模的伸出方向相反（poseValidity=direction-overridden），'
       + '该态只是反向平移、位姿不可达，动件相关命中一律降级为待复核。sweep 的计数按步累计，pairs 取单步最大。'
+      + `本次几何来源 geometrySource=${geometrySource}（输送类走参数化整机，其余形态走工位生成器），`
+      + '结论只对这套零件表成立；和 B-Rep 结论对齐前先确认两边 assemblyPartCount 一致。'
   };
 }

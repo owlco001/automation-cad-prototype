@@ -59,12 +59,44 @@ export interface SensorConfig {
   packId?: string;
 }
 
+/**
+ * 输送机整机参数（`config.conveyor`）。
+ *
+ * 为什么写进 config 而不是只留在 design/brief 里：整机几何的唯一入口
+ * `resolveMachineGeometry(config)` 只收 config，落盘的 `machine/<id>.json` 也只有
+ * config + form。参数不跟着 config 走，几何就只能靠猜或者回落代理体
+ * —— 那正是「同一台机器两套几何」的根源。
+ *
+ * 只写**能推出几何的最小集**：线体长 / 带宽是必填（有它才能参数化整机），
+ * 其余缺省沿用 conveyor-assembly 的典型值；转向角可由 turner-rotary 的
+ * rotationRangeDeg 反推，不必重复写（写了以它为准）。
+ */
+export interface MachineConveyorConfig {
+  /** 线体总长 mm */
+  lengthMm: number;
+  /** 皮带有效宽度 mm */
+  widthMm: number;
+  beltHeightMm?: number;
+  pulleyDiameterMm?: number;
+  beltThicknessMm?: number;
+  frameSectionMm?: number;
+  /** 缓存层数：1 = 普通输送线；≥2 = 立体缓存 */
+  layers?: number;
+  layerPitchMm?: number;
+  /** 转向角度：省略时由 turner-rotary 的 rotationRangeDeg 反推；0 = 不做转向 */
+  turnerAngleDeg?: number;
+}
+
 export interface MachineConfig {
   id: string;
   name: string;
   stations: string[];
   actuators: ActuatorConfig[];
   sensors: SensorConfig[];
+  /** 形态 id（forms.ts），与 design.form.id 一致；输送类据此判定走参数化整机 */
+  formId?: string;
+  /** 输送机参数：有它才可能走参数化整机，缺省则回落工位生成器 */
+  conveyor?: MachineConveyorConfig;
 }
 
 export type DesignIssueCode =
@@ -359,13 +391,49 @@ function parseConfig(value: unknown): MachineConfig {
     return normalized;
   });
 
-  return {
+  const config: MachineConfig = {
     id: requiredString(record, 'id', 'id', 'config.id'),
     name: requiredString(record, 'name', 'name', 'config.name'),
     stations,
     actuators,
     sensors
   };
+  // 形态 id 与输送参数是可选的「几何推导输入」：旧方案没有它们也照样合法，
+  // 只是几何会回落到工位生成器（见 machine/machine-geometry.ts 的判定）。
+  const formId = optionalString(record, 'formId', 'formId', 'config.formId');
+  if (formId !== undefined) config.formId = formId;
+  const conveyor = parseConveyorParams(record.conveyor);
+  if (conveyor !== undefined) config.conveyor = conveyor;
+  return config;
+}
+
+/** 可选数值：非有限/非正数按缺失处理（几何层自己回落典型值），不做致命判定。 */
+function optionalPositive(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * 解析 `config.conveyor`。宽容口径：坏值当缺失（几何层回落典型值），
+ * 但**形状错了要报**——把 `conveyor: "6000x1200"` 静默吞掉，用户会以为整机参数生效了。
+ */
+function parseConveyorParams(value: unknown): MachineConveyorConfig | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isRecord(value)) {
+    fail('CONFIG_SHAPE', 'config.conveyor', 'config.conveyor 必须是对象（线体长/带宽等几何参数）');
+  }
+  const lengthMm = optionalPositive(value.lengthMm);
+  const widthMm = optionalPositive(value.widthMm);
+  if (lengthMm === undefined && widthMm === undefined) return undefined;
+  const conveyor: MachineConveyorConfig = { lengthMm: lengthMm ?? 0, widthMm: widthMm ?? 0 };
+  for (const key of ['beltHeightMm', 'pulleyDiameterMm', 'beltThicknessMm', 'frameSectionMm', 'layerPitchMm'] as const) {
+    const parsed = optionalPositive(value[key]);
+    if (parsed !== undefined) conveyor[key] = parsed;
+  }
+  const layers = optionalPositive(value.layers);
+  if (layers !== undefined) conveyor.layers = Math.min(8, Math.max(1, Math.round(layers)));
+  const turner = optionalPositive(value.turnerAngleDeg);
+  if (turner !== undefined) conveyor.turnerAngleDeg = Math.min(180, Math.round(turner));
+  return conveyor;
 }
 
 /** 配置里声明的安全回路点位（safety.emergencyStop / safetyDoor / 顶层 estopPoint 等）。 */

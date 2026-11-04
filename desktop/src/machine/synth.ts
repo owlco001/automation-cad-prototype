@@ -28,7 +28,7 @@ import { DIAL_MAX_STATIONS, DIAL_PROCESSES } from './geometry.ts';
 import { evaluateFlow, type FlowEvaluation, type FlowModel, type FlowOp, type MachineLayout } from './flow.ts';
 import { TEMPLATES, templateFor, templateKinds } from './templates.ts';
 import { conveyorParamsFromBrief, refineConveyor } from './conveyor-synth.ts';
-import { turnerLayout, turnerSkipReason } from './conveyor-assembly.ts';
+import { DEFAULT_CONVEYOR, turnerLayout, turnerSkipReason } from './conveyor-assembly.ts';
 import {
   ACTUATOR_SECONDS,
   PROCESS_BASE_SECONDS,
@@ -912,7 +912,25 @@ export function synthMachine(brief: MachineBrief, options: SynthOptions = {}): M
     name: options.name ?? `${stations} 工位${PROCESS_LABEL[process]}机（方案草案）`,
     stations: stationNames,
     actuators,
-    sensors
+    sensors,
+    // 形态 id 与输送参数一起写进 config：整机几何的唯一入口
+    // （machine/machine-geometry.ts）只读 config，参数不落这里就只能回落代理体。
+    formId: selectedForm.id,
+    ...(process === 'conveyor'
+      ? {
+          conveyor: {
+            lengthMm: turnerParams.lengthMm,
+            widthMm: turnerParams.widthMm,
+            beltHeightMm: turnerParams.beltHeightMm,
+            pulleyDiameterMm: turnerParams.pulleyDiameterMm,
+            beltThicknessMm: turnerParams.beltThicknessMm,
+            frameSectionMm: turnerParams.frameSectionMm,
+            layers: turnerParams.layers,
+            layerPitchMm: turnerParams.layerPitchMm ?? DEFAULT_CONVEYOR.layerPitchMm,
+            turnerAngleDeg
+          }
+        }
+      : {})
   });
 
   const baseSeconds = PROCESS_BASE_SECONDS[process];

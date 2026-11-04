@@ -251,7 +251,7 @@ export function mergeStationDrafts(generated: StationDraft[], previous: StationD
 /** 把第 3 步编辑结果写回 MachineDesign 的 config/points。 */
 export function configFromStations(design: MachineDesign, stations: readonly StationDraft[]): MachineConfig {
   const names = stations.map((station) => station.name.trim());
-  return {
+  const config: MachineConfig = {
     id: design.config.id,
     name: design.config.name,
     stations: names,
@@ -270,6 +270,12 @@ export function configFromStations(design: MachineDesign, stations: readonly Sta
     sensors: stations.flatMap((station) =>
       station.sensors.map((sensor) => ({ ...cloneSensor(sensor), station: station.name.trim() })))
   };
+  // 几何推导输入（形态 id / 输送参数）不是工位派生的，但重建 config 时必须原样带上：
+  // 少一个字段就会被 withStations 判成「配置变了」而清掉手工二维布局。
+  // 字段顺序与 synth 产出的 config 保持一致（下游用 JSON.stringify 比对配置）。
+  if (design.config.formId !== undefined) config.formId = design.config.formId;
+  if (design.config.conveyor !== undefined) config.conveyor = { ...design.config.conveyor };
+  return config;
 }
 
 export function pointsFromConfig(config: MachineConfig): string[] {

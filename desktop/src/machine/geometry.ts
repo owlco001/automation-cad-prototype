@@ -127,6 +127,18 @@ export interface MachineGeometry {
   name: string;
   units: 'mm';
   upAxis: 'z';
+  /**
+   * 几何来源：`conveyor-assembly` = 输送类参数化整机（与 STEP/GLB/BOM 同一份零件表），
+   * `station-generator` = 工位生成器代理体。由 `machine-geometry.ts` 的唯一入口标注；
+   * 直接调 `generateMachineGeometry` 的老调用方留空（等价于 station-generator）。
+   */
+  geometrySource?: 'conveyor-assembly' | 'station-generator';
+  /**
+   * 映射前的整机装配件数（BOM/STEP 的口径）。只在几何刚体数与装配件数不一致时出现：
+   * 输送类的顶升气缸在 BOM 里是一件，但缸体与活塞杆是两个刚体（顶升时只动杆），
+   * 所以 `parts.length` 会比装配件数多 2。缺省与 parts.length 相同。
+   */
+  assemblyPartCount?: number;
   /** 几何精度口径；当前生成器只输出概念估算占位体。 */
   geometryFidelity: 'conceptual-estimate';
   process: MachineProcess;
@@ -1960,6 +1972,9 @@ export function generateMachineGeometry(
     name: config.name,
     units: 'mm',
     upAxis: 'z',
+    // 本函数产出的都是工位生成器的代理体；输送类整机由 machine-geometry.ts 的唯一入口
+    // 改走参数化整机，并把这里标成 conveyor-assembly。
+    geometrySource: 'station-generator',
     geometryFidelity: 'conceptual-estimate',
     process,
     layout,

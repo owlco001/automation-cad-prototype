@@ -2,9 +2,13 @@
  * 整机布局编辑：数据模型、选择、位姿写回与联动校验（纯函数，无 DOM / three）。
  *
  * 主数据：MachineDesign.stationGeometryLayout（按稳定工位身份保存的刚体位姿：xMm / yMm /
- * 可选 rotationZDeg）。几何永远由 generateMachineGeometry → applyStationGeometryLayout 派生
- * （footprint.geometryForDesign），与向导俯视、3D 预览、保存工程/STL、Agent apply_machine_design
- * 是同一条路径。本模块只产出新的 MachineDesign，不另存位姿。
+ * 可选 rotationZDeg）。几何永远由唯一入口 resolveMachineGeometry（输送类 = 85 件参数化整机，
+ * 其余形态 = 工位生成器）→ applyStationGeometryLayout 派生（footprint.geometryForDesign），
+ * 与向导俯视、3D 预览、保存工程/STL、Agent apply_machine_design 是同一条路径。
+ * 本模块只产出新的 MachineDesign，不另存位姿。
+ *
+ * 注意：参数化整机没有工位底板（geometry.stations 为空），这类机型在本编辑器里没有可拖的工位，
+ * 只有整机实体；这是「没有工位」而不是「加载失败」。
  *
  * 可编辑粒度 = 工位（stN 组）。零件与执行机构没有独立的位姿主数据（由规则引擎按工位生成），
  * 因此零件可选中查看，但移动/旋转作用于其所属工位；机架/输送等无工位零件只读。

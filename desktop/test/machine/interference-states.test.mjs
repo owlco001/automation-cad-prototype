@@ -110,46 +110,66 @@ test('确认重叠（非配合）→ fail；只有 AABB 依据 → warn；干净
   assert.equal(clean.reviewStatus, 'pass');
 });
 
-test('光伏板转向输送机：三态位姿都可信，评审从 warn 变 pass（附真实数字）', () => {
+test('光伏板转向输送机（装配 85 件 / 几何 87 刚体）', () => {
   const design = synthMachine(parseMachineBrief(PV_BRIEF));
   const payload = runInterferenceStates({ states: ['rest', 'lift', 'sweep'], config: design.config });
   assert.equal(payload.ok, true);
 
-  // rest：唯一的重叠对是缸体×活塞杆（配合面），不是设计干涉
+  // 统一几何源：输送类走 conveyor-assembly 的 85 件整机，不再算 48 件代理体。
+  // 这一点是本次结构性问题（评审判 FAIL / B-Rep 判 PASS）的根，别退回去。
+  assert.equal(payload.geometrySource, 'conveyor-assembly');
+  // 85 件整机装配 + 2 根活塞杆：缸体与活塞杆是两个刚体（顶升时只动杆），几何件数 87，
+  // 装配件数（BOM/STEP 口径）仍是 85。
+  assert.equal(payload.assemblyPartCount, 85);
+  assert.equal(payload.partCount, 87);
+  assert.equal(payload.precision.geometry, 'conveyor-assembly');
+  assert.equal(payload.precision.confirm, 'analytic-primitive');
+  assert.ok(payload.precision.aabbOnly.length >= 1);
+  assert.match(payload.note, /mate/);
+
+  // rest：52 对重叠全部是装配连接（横撑插纵梁、地脚旋入支腿、皮带绕包滚筒、导柱穿台板过孔…），
+  // 由 joints 显式声明并带中文原因；没有一对升级成 suspect。
   const rest = payload.states.rest;
-  assert.equal(rest.confirmedHits, 0, '配合面不得算确认干涉');
+  assert.equal(rest.confirmedHits, 0, '参数化整机不得有确认干涉');
   assert.equal(rest.screenHits, 0);
-  assert.equal(rest.mates, 1);
-  assert.equal(rest.pairs, 1, 'rest 只有这一对重叠（支架已经不互插）');
-  assert.equal(rest.mm3Declared, 0, '不得再有「已声明」放行的实体互穿');
-  const mate = rest.items.find((item) => item.a === 'turner-lift-body' && item.b === 'turner-lift-rod');
-  assert.ok(mate, '缸体×活塞杆要出现在 items 里（不能静默丢掉）');
-  assert.equal(mate.kind, 'mate');
-  assert.equal(mate.confirmation, 'exact');
-  // 精确值 = π·6²·60 = 6785.8 mm³：缩回位杆露出 25 mm，插在缸孔里的长度正好是行程 60
-  //（修复前压机几何是 π·6²·70 = 7916.8，杆从缸体底部往下伸）
-  assert.ok(Math.abs(mate.exactOverlapMm3 - 6785.8) < 0.5, `exact=${mate.exactOverlapMm3}`);
-  assert.ok(mate.overlapMm3 > mate.exactOverlapMm3);
-  assert.equal(mate.exactOverlapMm3 < Math.PI * 36 * (60 + 25), true, '杆不是整根被推进缸体');
+  assert.equal(rest.hits, 0);
+  assert.equal(rest.pairs, 54, '52 对装配连接 + 2 对缸体×活塞杆配合面');
+  assert.equal(rest.mm3Declared, 1209046.4, '声明放行的重叠体积（AABB 上界）要如实报出来');
+  // 缸体×活塞杆是配合面：出现在 items 里给人看，但判 mate、不算 hits。
+  assert.equal(rest.mates, 2, '两台顶升气缸的缸体×活塞杆都是配合面');
+  assert.equal(rest.items.length, 2);
+  for (const item of rest.items) {
+    assert.equal(item.kind, 'mate');
+    assert.match(`${item.a} ${item.b}`, /turner-lift-cyl-\d+(-rod)?/);
+  }
+  for (const state of Object.values(payload.states)) {
+    for (const item of state.items) {
+      if (!/turner-lift-cyl/.test(`${item.a} ${item.b}`)) continue;
+      assert.equal(item.kind, 'mate', `气缸件只允许以配合面出现：${item.a} × ${item.b} 判成了 ${item.kind}`);
+    }
+  }
 
   // lift/sweep：位姿与几何建模的伸出方向同向（+Z），三态都 valid
   assert.equal(payload.lift.directionOverridden, false, '不再靠 config 反向覆盖');
   assert.deepEqual(payload.lift.geometryDirection, [0, 0, 1]);
   assert.deepEqual(payload.lift.direction, [0, 0, 1]);
+  assert.equal(payload.lift.strokeMm, 60, '行程仍取 config 的 turner-lift.travelMm');
+  // 顶升随动件：台板 / 回转支承 / 转台盘 / 9 只支撑指 + 2 根活塞杆
+  assert.equal(payload.lift.partIds.length, 14);
   for (const name of ['rest', 'lift', 'sweep']) {
     const state = payload.states[name];
     assert.equal(state.confirmedHits, 0, `${name} 不得判确认干涉`);
     assert.equal(state.screenHits, 0, `${name} 不得有待复核项`);
     assert.equal(state.poseValidity, 'valid', `${name} 位姿必须可信`);
   }
-  // 顶升到位：杆完全脱出缸孔，配合面消失 → lift 的重叠对归零
-  assert.equal(payload.states.lift.pairs, 0);
-  assert.equal(payload.states.lift.mates, 0);
-  // 真实数字：rest 1 对 / 8640 mm³（AABB 上界），lift 0 对 / 0 mm³，sweep 6 对（按步累计）/ 30240 mm³
-  assert.equal(payload.states.rest.mm3, 8640);
-  assert.equal(payload.states.lift.mm3, 0);
-  assert.equal(payload.states.sweep.mates, 6);
-  assert.equal(payload.reviewStatus, 'pass', '三态 confirmed/screen/mates 全 0 命中时才允许 pass');
+  // 真实数字（本机实测）：rest 54 对 / 1264432 mm³（含 declared + 2 对配合面），
+  // lift 到位时活塞杆脱出缸孔 → 52 对 / 1214032 mm³，sweep 按步累计 8595424 mm³
+  assert.equal(payload.states.rest.mm3, 1264432);
+  assert.equal(payload.states.lift.mm3, 1214032);
+  assert.ok(payload.states.lift.pairs < payload.states.rest.pairs, 'lift 必须与 rest 不同（活塞杆脱出缸孔）');
+  assert.equal(payload.states.sweep.mm3, 8595424);
+  assert.equal(payload.states.sweep.steps.length, 7, '0..60 mm 按 10 mm 共 7 步');
+  assert.equal(payload.reviewStatus, 'pass', '三态 confirmed/screen 全 0 命中时才允许 pass');
   assert.deepEqual(
     ['rest', 'lift', 'sweep'].map((name) => {
       const state = payload.states[name];
@@ -157,12 +177,26 @@ test('光伏板转向输送机：三态位姿都可信，评审从 warn 变 pass
     }),
     [[0, 0], [0, 0], [0, 0]]
   );
+});
 
-  // 精度与适用范围必须随结果返回（否则下游会把 screen hit 当确认）
-  assert.equal(payload.precision.geometry, 'config-generator');
-  assert.equal(payload.precision.confirm, 'analytic-primitive');
-  assert.ok(payload.precision.aabbOnly.length >= 1);
-  assert.match(payload.note, /mate/);
+test('工位生成器（非输送类/回落路径）仍把缸体×活塞杆判成 mate，不因统一而退化', () => {
+  // 直接打生成器：PV 的 config 现在走参数化整机，但非输送类形态与「输送类缺参数回落」
+  // 依然产出这对同轴圆柱，mateReason 的口径必须还在。
+  const design = synthMachine(parseMachineBrief(PV_BRIEF));
+  const geometry = generateMachineGeometry(design.config);
+  assert.equal(geometry.parts.length, 48, '生成器代理体仍是 48 件');
+  const screen = screenInterference(geometry);
+  assert.equal(screen.suspects, 1, 'rest 只有缸体×活塞杆这一对非声明重叠');
+  assert.equal(screen.confirmed, 0, '配合面不得算确认干涉');
+  assert.equal(screen.screen, 0);
+  assert.equal(screen.mates, 1);
+  const pair = screen.pairs[0];
+  assert.equal(pair.classification, 'mate');
+  assert.equal(pair.confirmation, 'exact');
+  // 精确值 = π·6²·60 = 6785.8 mm³：缩回位杆露出 25 mm，插在缸孔里的长度正好是行程 60
+  assert.ok(Math.abs((pair.exactOverlapMm3 ?? 0) - 6785.8) < 0.5, `exact=${pair.exactOverlapMm3}`);
+  assert.ok(pair.overlapMm3 > (pair.exactOverlapMm3 ?? 0));
+  assert.equal((pair.exactOverlapMm3 ?? 0) < Math.PI * 36 * (60 + 25), true, '杆不是整根被推进缸体');
 });
 
 test('转向工位几何：建的是顶升台板 + 导柱，不是「缸体朝下 + 压头 + 治具」的压机', () => {
