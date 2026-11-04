@@ -177,6 +177,30 @@ const TURNER_BEAM_HEIGHT_MM = 12;
  *  Y 向放宽不挡带，只是给导向柱留安装位） */
 const TURNER_PLATE_LENGTH_MM = 900;
 const TURNER_PLATE_WIDTH_MM = 960;
+/** 吊柱截面边长（20×20）与吊柱到台板边缘的最小装配缝 */
+const TURNER_HANGER_SIZE_MM = 20;
+const TURNER_HANGER_PLATE_GAP_MM = 5;
+/** 纵梁内侧面到带宽边缘的让位（与 buildSingleLayerParts 的 outerY 同一口径：带宽/2 + 15） */
+const RAIL_INNER_OFFSET_MM = 15;
+
+/**
+ * 顶升旋转单元的**横向尺寸护栏**：单元件最占位的不是转台盘，而是「台板 + 两侧吊柱」。
+ *
+ * 横向占位账（y 向，从中心线往外）：
+ *   台板半宽 480 + 吊柱 20 + 吊柱/台板缝 5 = 505 = 吊柱外侧面
+ *   吊柱外侧面就贴在纵梁内侧面上（纵梁内侧面 = 带宽/2 + 15）
+ *   → 带宽/2 + 15 ≥ 505 → 带宽 ≥ 980。
+ * 转台盘 φ880 的账更松：440 + 40 侧隙 ≤ 带宽/2 + 15 → 带宽 ≥ 930。
+ *
+ * 以前只查「带缝放得下 2 条窄带」（≥ 360），400 mm 宽的线体照样生成 φ880 转台盘：
+ * 盘缘切进纵梁 352000 mm³/侧（aabb）、顶升后盘与台板横向扫过纵梁与底座框架，
+ * 吊柱整根穿在台板行程里（4800 mm³ ×4，exact）。盘/台板尺寸是机构定死的，
+ * 因此带宽不足时**拒建并给出可执行理由**，不做「悄悄缩盘出图」。
+ */
+export const TURNER_TABLE_DIAMETER_MM = 2 * TURNER_UNIT_HALF_MM - 20; // 880
+export const TURNER_TABLE_SIDE_CLEARANCE_MM = 40;
+export const TURNER_UNIT_HALF_WIDTH_MM = TURNER_PLATE_WIDTH_MM / 2 + TURNER_HANGER_SIZE_MM + TURNER_HANGER_PLATE_GAP_MM; // 505
+export const TURNER_MIN_WIDTH_MM = 2 * (TURNER_UNIT_HALF_WIDTH_MM - RAIL_INNER_OFFSET_MM); // 980
 /** 导向柱中心（x, y）：y 必须落在带缝里（±200），x 取 425 让柱心到轴线 470 > 台盘半径 440、
  *  柱的包围盒（414..436）也不压进台盘包围盒（±440）——否则 AABB 初筛会把「柱在盘外」误报成干涉 */
 const TURNER_GUIDE_X_MM = 425;
@@ -200,8 +224,9 @@ export interface NarrowBeltLayout {
  *
  * 为什么按带宽反算条数而不是固定 6 条：300 mm 宽的普通线体塞 6 条 80 窄带只剩
  * −30 mm 间隙，必须退回单条。条数取 floor((带宽 + 100) / (80 + 100)) 再逐条回退，
- * 保证带缝 ≥ 100：1200 宽正好 6 条（pitch 200、缝隙 120），600 宽 3 条（pitch 200、
- * 缝隙 120），300 宽退回 1 条（2 条只剩 70 mm 缝，顶升指塞不进去），与真机惯例一致。
+ * 保证带缝 ≥ 100 且条数为偶数（4 折对称指位要求轴线上是缝，见下方）：1200 宽正好
+ * 6 条（pitch 200、缝隙 120），600 宽退到 2 条（pitch 300、缝隙 220），300 宽退回
+ * 1 条（2 条只剩 70 mm 缝，顶升指塞不进去），与真机惯例一致。
  */
 export function narrowBeltLayout(params: ConveyorParams): NarrowBeltLayout {
   const p = normalizeParams(params);
@@ -211,6 +236,11 @@ export function narrowBeltLayout(params: ConveyorParams): NarrowBeltLayout {
   count = Math.max(1, count);
   // 条数取整后带缝可能被压到 100 mm 以下（如 300 mm 宽 → 2 条只剩 70 mm 缝），逐条回退
   while (count > 1 && p.widthMm / count - NARROW_BELT_WIDTH_MM < NARROW_BELT_GAP_MIN_MM) count -= 1;
+  // 条数一律取偶数：顶升指必须 4 折对称（转 90° 后落回同一组带缝），这就要求
+  // **轴线上是带缝而不是带**。奇数条的等节距排布是关于某一条带对称的，轴线上正好是带，
+  // 无论指怎么摆，转 90° 后总有一半落在带上（实测 980 mm 宽 5 条带：中间那条带被
+  // 5 只指垫压住 19600 mm³ ×5）。宁可少一条窄带，也不出「转 90° 就撞带」的工位。
+  if (count > 1 && count % 2 === 1) count -= 1;
   if (count <= 1) {
     return { count: 1, widthMm: p.widthMm, pitchMm: p.widthMm, gapMm: 0, centers: [0], gaps: [] };
   }
@@ -318,7 +348,8 @@ export function turnerActionSeconds(angleDeg: number, strokeMm: number = TURNER_
 
 /**
  * 为什么不能做转向工位；能做的返回 null。
- * 四种情形：没要求、立体缓存、线体太短、带宽太窄（放不下 2 条以上窄带）、机架太矮。
+ * 六种情形：没要求、立体缓存、线体太短、带宽放不下窄带、带宽小于台盘所需最小宽、
+ *            机架太矮。
  */
 export function turnerSkipReason(params: ConveyorParams): string | null {
   const p = normalizeParams(params);
@@ -333,6 +364,16 @@ export function turnerSkipReason(params: ConveyorParams): string | null {
   if (belts.count < 2) {
     // 等节距布置下 gap = 带宽/条数 − 带宽，所以 2 条带至少 2×(80+100) = 360 mm
     return `带宽 ${p.widthMm} mm 放不下窄带并联：顶升指要从带缝穿上来，至少 2 条 ${NARROW_BELT_WIDTH_MM} mm 窄带 + ${NARROW_BELT_GAP_MIN_MM} mm 带缝（等节距，带宽 ≥ ${2 * (NARROW_BELT_WIDTH_MM + NARROW_BELT_GAP_MIN_MM)} mm）`;
+  }
+  // 横向护栏：转台盘 φ880 / 台板 960 + 两侧吊柱要在两侧纵梁之间落下（以前只查带缝、
+  // 不查横向尺寸，400 mm 宽的线体照样生成 φ880 转台盘 → 盘缘切进纵梁 352000 mm³/侧，
+  // 顶升后盘与台板横向扫过纵梁与底座框架，吊柱整根穿在台板里 4800 mm³×4）。
+  if (p.widthMm < TURNER_MIN_WIDTH_MM) {
+    return `带宽 ${p.widthMm} mm < 转向工位所需最小 ${TURNER_MIN_WIDTH_MM} mm：顶升单元横向占「台板 ${TURNER_PLATE_WIDTH_MM} + 两侧吊柱各 ${TURNER_HANGER_SIZE_MM}」`
+      + `＝ ${TURNER_PLATE_WIDTH_MM + 2 * TURNER_HANGER_SIZE_MM} mm，吊柱外侧面贴纵梁内侧面（带宽/2 + ${RAIL_INNER_OFFSET_MM}）、吊柱与台板间留 ${TURNER_HANGER_PLATE_GAP_MM} mm，`
+      + `故带宽 ≥ ${TURNER_PLATE_WIDTH_MM} + 2×${TURNER_HANGER_SIZE_MM} + 2×${TURNER_HANGER_PLATE_GAP_MM} − 2×${RAIL_INNER_OFFSET_MM} = ${TURNER_MIN_WIDTH_MM} mm`
+      + `（转台盘 φ${TURNER_TABLE_DIAMETER_MM} + 两侧各 ${TURNER_TABLE_SIDE_CLEARANCE_MM} mm 侧隙只要 ${TURNER_TABLE_DIAMETER_MM + 2 * TURNER_TABLE_SIDE_CLEARANCE_MM} mm，不是控制项）；`
+      + `请把线体加宽到 ≥ ${TURNER_MIN_WIDTH_MM} mm，或改用「台板 ≤ ${p.widthMm - 2 * (TURNER_HANGER_SIZE_MM + TURNER_HANGER_PLATE_GAP_MM - RAIL_INNER_OFFSET_MM)} mm」的窄型转台`;
   }
   const railTop = p.beltHeightMm - p.pulleyDiameterMm;
   const frameBaseTop = p.beltHeightMm - 186;
@@ -371,17 +412,36 @@ export function turnerLayout(params: ConveyorParams): TurnerLayout | null {
   const frameBaseBottomZ = frameBaseTopZ - TURNER_FRAME_BASE_THICKNESS_MM; // 648
 
   // 指位：每条带缝给一对（横 / 纵），加中心一只 → 4 折对称（转 90° 后落点仍是这组带缝）
+  //
+  // 去重键按**最终坐标**取整（transform 只保留 2 位小数）：带缝中心是「带宽/条数」算出来的，
+  // 例如 1100 mm 宽 6 条时节距 183.333…，从两侧反算同一只指会得到 183.333…43 与
+  // 183.333…31 —— 不取整就会被当成两个指位，同一位置叠两只指（实测互相压 244652 mm³，
+  // 台板上的指垫凭空多出一倍）。
   const fingerCenters: Array<[number, number]> = [[0, 0]];
-  const seenFinger = new Set(['0,0']);
+  const fingerKey = (x: number, y: number): string => `${round(x)},${round(y)}`;
+  const seenFinger = new Set([fingerKey(0, 0)]);
   for (const gapY of belts.gaps) {
-    if (Math.abs(gapY) < 1e-6) continue;
-    for (const pair of [[0, gapY], [-gapY, 0], [gapY, 0]] as Array<[number, number]>) {
-      const key = `${pair[0]},${pair[1]}`;
+    const snapped = round(gapY);
+    if (Math.abs(snapped) < 1e-6) continue;
+    for (const pair of [[0, snapped], [-snapped, 0], [snapped, 0]] as Array<[number, number]>) {
+      const key = fingerKey(pair[0], pair[1]);
       if (seenFinger.has(key)) continue;
       seenFinger.add(key);
       fingerCenters.push([pair[0], pair[1]]);
     }
   }
+
+  // 转向电机的 Y 位：输出轴要**从带缝里穿上来**顶到转台盘（窄带并联本来就是为了给
+  // 穿带件让位）。写死 y=0 只在「带缝正好在轴线」时成立：6 条窄带时缝在 0（120 宽），
+  // 5 条窄带（如 980 mm 宽）时带中心在 0、缝在 ±98，电机箱骑在中间那条带上 →
+  // 实测 turner-motor × belt-return-3-out 28800 mm³（90 × 80 × 4）。
+  // 所以取「离轴线最近、且整箱落得下」的那条带缝；箱体 Y 向 90 mm
+  //（窄带并联保证带缝 ≥ 100，90 + 两侧各 5 mm 一定能塞进去）。
+  const motorHalfWidthMm = 45;
+  const gapHalfMm = (belts.pitchMm - NARROW_BELT_WIDTH_MM) / 2;
+  const motorGapY = gapHalfMm >= motorHalfWidthMm + 5
+    ? belts.gaps.reduce<number>((best, gap) => (Math.abs(gap) < Math.abs(best) ? gap : best), belts.gaps[0] ?? 0)
+    : 0;
 
   return {
     angleDeg: angle,
@@ -401,7 +461,10 @@ export function turnerLayout(params: ConveyorParams): TurnerLayout | null {
     beamCenterZ: railTop + TURNER_BEAM_HEIGHT_MM / 2,
     hangerHeightMm: railTop - frameBaseTopZ,
     hangerCenterZ: (railTop + frameBaseTopZ) / 2,
-    hangerCenterY: railInnerY - 10,
+    hangerCenterY: Math.max(
+      railInnerY - 10,
+      TURNER_PLATE_WIDTH_MM / 2 + TURNER_HANGER_SIZE_MM / 2 + TURNER_HANGER_PLATE_GAP_MM
+    ),
     hangerOffsetX: 430,
     frameBaseLengthMm: 2 * TURNER_UNIT_HALF_MM + 230, // 向 +X 多伸 230：外挂转向电机坐在上面
     frameBaseWidthMm: 2 * (railInnerY - 10),
@@ -429,7 +492,7 @@ export function turnerLayout(params: ConveyorParams): TurnerLayout | null {
     ringBoreMm: 280,
     ringHeightMm: TURNER_RING_HEIGHT_MM,
     ringCenterZ: ringBottomZ + TURNER_RING_HEIGHT_MM / 2,
-    tableDiameterMm: 2 * TURNER_UNIT_HALF_MM - 20, // 880：留在单元轮廓内，仍在带面以下
+    tableDiameterMm: TURNER_TABLE_DIAMETER_MM, // 880：留在单元轮廓内，仍在带面以下
     tableThicknessMm: TURNER_TABLE_THICKNESS_MM,
     tableCenterZ: tableBottomZ + TURNER_TABLE_THICKNESS_MM / 2,
     fingerPostCenterZ: (tableTopZ + padBottomZ) / 2,
@@ -437,7 +500,7 @@ export function turnerLayout(params: ConveyorParams): TurnerLayout | null {
     padTopZ,
     padTopLiftZ: padTopZ + TURNER_LIFT_STROKE_MM,
     // 电机挂在下沉框架上（不随台板升，跟着升起会顶到工件），竖直输出轴从带缝里伸上去
-    motorCenter: [TURNER_UNIT_HALF_MM + 150, 0, frameBaseTopZ + 60], // 电机坐在底盘上（底面贴 664）
+    motorCenter: [TURNER_UNIT_HALF_MM + 150, motorGapY, frameBaseTopZ + 60], // 电机坐在底盘上（底面贴 664）
     liftSeconds: turnerLiftSeconds(TURNER_LIFT_STROKE_MM),
     rotateSeconds: turnerRotateSeconds(angle),
     actionSeconds: turnerActionSeconds(angle)
@@ -475,8 +538,8 @@ function buildTurnerParts(t: TurnerLayout): ConveyorPart[] {
         id,
         name: `下沉框架吊柱 ${index * 2 + sub}`,
         material: 'Q235',
-        spec: `20×20 × ${Math.round(t.hangerHeightMm)}`,
-        features: [box(`${id}-body`, '吊柱', 20, 20, t.hangerHeightMm)],
+        spec: `${TURNER_HANGER_SIZE_MM}×${TURNER_HANGER_SIZE_MM} × ${Math.round(t.hangerHeightMm)}`,
+        features: [box(`${id}-body`, '吊柱', TURNER_HANGER_SIZE_MM, TURNER_HANGER_SIZE_MM, t.hangerHeightMm)],
         transform: { x: round(x), y: round(sign * t.hangerCenterY), z: round(t.hangerCenterZ), rz: 0 }
       });
     }
@@ -607,7 +670,8 @@ function buildTurnerParts(t: TurnerLayout): ConveyorPart[] {
     spec: `0.75 kW · i=180 · 输出约 8 rpm · ${t.angleDeg}°/${t.rotateSeconds}s`,
     massOverrideKg: 6.5,
     features: [
-      box('turner-motor-body', '电机+减速箱', 90, 110, 120),
+      // 箱体 Y 向 90：要让得开窄带之间的缝（最窄的合法带缝 100 mm，见 turnerLayout 的 motorGapY）
+      box('turner-motor-body', '电机+减速箱', 90, 90, 120),
       cylinder('turner-motor-shaft', '输出轴', 22, 60, 'z', [0, 0, 90])
     ],
     transform: {
@@ -843,20 +907,34 @@ function buildSingleLayerParts(p: ResolvedConveyorParams): ConveyorPart[] {
     }
   }
   // 侧挡边：有顶升单元也整条不断（挡边在 y = ±(带宽/2+3) 处，单元的所有件都在
-  // |x| ≤ 450 且 y ≤ 带宽/2 以内，扫不到挡边）
+  // |x| ≤ 450 且 y ≤ 带宽/2 以内，扫不到挡边）。
+  //
+  // 竖向口径：挡边**下沿不得低于带面**。以前挡边中心放在 带面 + 26（高 60 → 下沿 带面 − 4），
+  // 下沿比带面低 4 mm，于是挡边一头扎进皮带上行程、一头扎进滚筒筒体
+  //（pulley-drive/tail × guard 各 360 mm³，普通线与立体缓存都有）。现在下沿 = 带面 + 1。
   for (const [label, sign] of [['left', -1], ['right', 1]] as const) {
     const side = label === 'left' ? '左' : '右';
+    const guardHeightMm = 60;
+    const guardBottomZ = p.beltHeightMm + 1;
     parts.push({
       id: `guard-${label}`,
       name: `侧挡边（${side}）`,
       material: 'Q235',
-      spec: `3 × 60 × ${Math.round(p.lengthMm)}`,
-      features: [box(`guard-${label}-body`, '挡边', p.lengthMm - 60, 3, 60)],
-      transform: { x: 0, y: sign * (halfW + 3), z: p.beltHeightMm + 26, rz: 0 }
+      spec: `3 × ${guardHeightMm} × ${Math.round(p.lengthMm)}`,
+      features: [box(`guard-${label}-body`, '挡边', p.lengthMm - 60, 3, guardHeightMm)],
+      transform: { x: 0, y: sign * (halfW + 3), z: guardBottomZ + guardHeightMm / 2, rz: 0 }
     });
   }
 
   // 7) 减速电机（驱动侧端部，含输出轴）
+  //
+  // Y 向定位分两种：单层线体贴在纵梁外侧；立体缓存时纵梁外侧还立着 4 根缓存立柱
+  //（columnX = halfL − 120，与电机同一个 x），电机箱必须再让到立柱**外侧**去，留 5 mm
+  // 安装面。修复前两者在 x = halfL−120 处完全重叠，实测 224000 mm³（160 × 40 × 140 的
+  // 140/40/40 交叠，exact）——这不是「声明一下就行」的装配面，是两坨实体撞在一起。
+  const motorCenterY = -(p.layers > 1
+    ? bufferColumnCenterY(p) + section / 2 + 5 + 60
+    : outerY + section / 2 + 65);
   parts.push({
     id: 'gearmotor',
     name: '减速电机',
@@ -869,7 +947,7 @@ function buildSingleLayerParts(p: ResolvedConveyorParams): ConveyorPart[] {
     ],
     // 电机箱外挂在纵梁外侧：过去中心只在纵梁外 60、箱体深 120，
     // 有一半压进纵梁（干涉 128000 mm³），现在留 5 mm 安装面间隙
-    transform: { x: halfL - 120, y: -(outerY + section / 2 + 65), z: pulleyZ, rz: 0 }
+    transform: { x: halfL - 120, y: round(motorCenterY), z: pulleyZ, rz: 0 }
   });
 
   // 8) 尾部张紧滑座 + 螺杆（两侧各一套）
@@ -908,6 +986,16 @@ function buildSingleLayerParts(p: ResolvedConveyorParams): ConveyorPart[] {
 }
 
 /**
+ * 缓存立柱中心的 y（4 根柱立在纵梁外侧）：纵梁外侧面 + 40 安装面。
+ * 单层线体没有立柱；这个函数是「立柱在哪儿」的唯一来源 —— 电机让位、升降导柱让位
+ * 都按它算，避免两处各写一遍公式后一走就散。
+ */
+function bufferColumnCenterY(p: ResolvedConveyorParams): number {
+  const outerY = p.widthMm / 2 + p.frameSectionMm / 2 + RAIL_INNER_OFFSET_MM;
+  return outerY + p.frameSectionMm / 2 + 40;
+}
+
+/**
  * 立体缓存叠加层（layers ≥ 2）：4 根缓存立柱 + 每层托条/托板/传动辊/挡停 + 一套升降机构。
  *
  * 为什么单独一段而不是把单层线体按层复制：缓存机型的进出料仍然只有底层一条输送线，
@@ -923,7 +1011,7 @@ function buildBufferStackParts(p: ResolvedConveyorParams): ConveyorPart[] {
   const layerCount = p.layers;
   const topLayerZ = p.beltHeightMm + (layerCount - 1) * p.layerPitchMm;
   const columnH = topLayerZ + 240;
-  const columnY = outerY + section / 2 + 40;
+  const columnY = bufferColumnCenterY(p);
   const columnX = halfL - 120;
 
   // 1) 缓存立柱：4 根，立在纵梁外侧（不与侧挡边、支腿、横撑同位置）
@@ -979,16 +1067,25 @@ function buildBufferStackParts(p: ResolvedConveyorParams): ConveyorPart[] {
       features: [box(`tray-${layer}-body`, '托板', p.lengthMm - 340, round(p.widthMm * 0.9), 3)],
       transform: { x: 0, y: 0, z: round(layerZ + 3 + 2), rz: 0 }
     });
-    // 层内传动辊：进出各一根，托板中间让开
-    for (const [label, sign] of [['in', -1], ['out', 1]] as const) {
+    // 层内传动辊：**改到两根托条之间**（辊长按托条内宽取，两侧各留 5 mm 装配缝）。
+    // 修复前辊筒按 0.85×带宽 做（510 mm 长），横穿两根托条，辊面又只比托条顶低 9 mm
+    // → 每层 4 对、实测 18000 mm³（50 × 9 × 40，aabb）。现在辊面抬到托盘底面
+    //（层高 + 3.5）：托盘坐在辊上，辊只在托条之间转，托条变成侧向限位。
+    const railCenterY = round(halfW * 0.55);
+    // 辊长 = 两根托条内侧面之间再各让 5 mm；实在塞不下（极窄线体）就不装层辊，
+    // 不硬塞一根比托条内宽还长的辊上去
+    const rollerLengthMm = Math.round(2 * (railCenterY - section / 2) - 10);
+    const trayBottomZ = layerZ + 3 + 2 - 1.5;
+    const rollerCenterZ = round(trayBottomZ - p.pulleyDiameterMm / 2);
+    for (const [label, sign] of rollerLengthMm >= 60 ? [['in', -1], ['out', 1]] as const : []) {
       parts.push({
         id: `tray-roller-${layer}-${label}`,
         name: `第 ${layer} 层传动辊（${label === 'in' ? '进' : '出'}）`,
         material: 'STEEL45',
-        spec: `φ${p.pulleyDiameterMm} × ${Math.round(p.widthMm * 0.85)}`,
+        spec: `φ${p.pulleyDiameterMm} × ${rollerLengthMm}`,
         massOverrideKg: 2.4,
-        features: [cylinder(`tray-roller-${layer}-${label}-body`, '辊筒', p.pulleyDiameterMm, round(p.widthMm * 0.85), 'y')],
-        transform: { x: sign * round(halfL - 220), y: 0, z: round(layerZ + 16), rz: 0 }
+        features: [cylinder(`tray-roller-${layer}-${label}-body`, '辊筒', p.pulleyDiameterMm, rollerLengthMm, 'y')],
+        transform: { x: sign * round(halfL - 220), y: 0, z: rollerCenterZ, rz: 0 }
       });
     }
     // 出口挡停：装在托板上方，挡住托盘
@@ -1013,8 +1110,15 @@ function buildBufferStackParts(p: ResolvedConveyorParams): ConveyorPart[] {
   }
 
   // 4) 升降机构：2 根导柱 + 升降台 + 升降电机 + 2 条链条
+  //
+  // 导柱 / 链条的 Y 位：以前取 ±0.8×半宽——那正好是**带面里面**，φ40 柱整根穿过上行程
+  // 与回程皮带（实测 5026.5 mm³ ×4，exact）、链条也穿带（480 mm³ ×4），尾部滚筒还被
+  // 导柱/链条穿过（40000 / 3000 mm³，aabb）。导柱是缓存架的立柱式导轨，必须落在
+  // **缓存立柱外侧的同一排**：y = ±(立柱中心 + 型材 + 5)，与柱面留 5 mm 安装缝；
+  // X 向与立柱错开 60 mm（导柱 halfL−60、立柱 halfL−120），两根立筋不共面。
   const travel = (layerCount - 1) * p.layerPitchMm;
   const postH = travel + 320;
+  const mastY = columnY + section + 5;
   for (const [label, sign] of [['left', -1], ['right', 1]] as const) {
     parts.push({
       id: `lift-post-${label}`,
@@ -1022,7 +1126,7 @@ function buildBufferStackParts(p: ResolvedConveyorParams): ConveyorPart[] {
       material: 'STEEL45',
       spec: `φ${section} × ${Math.round(postH)}`,
       features: [cylinder(`lift-post-${label}-body`, '导柱', section, postH, 'z')],
-      transform: { x: round(-halfL + 60), y: sign * round(halfW * 0.8), z: round(postH / 2 + 20), rz: 0 }
+      transform: { x: round(-halfL + 60), y: sign * round(mastY), z: round(postH / 2 + 20), rz: 0 }
     });
     parts.push({
       id: `lift-chain-${label}`,
@@ -1031,7 +1135,7 @@ function buildBufferStackParts(p: ResolvedConveyorParams): ConveyorPart[] {
       spec: `8B 单排 × ${Math.round(travel + 200)}`,
       massOverrideKg: 1.6,
       features: [box(`lift-chain-${label}-body`, '链条', 10, 12, travel + 200)],
-      transform: { x: round(-halfL + 60), y: sign * round(halfW * 0.8), z: round((travel + 200) / 2 + 90), rz: 0 }
+      transform: { x: round(-halfL + 60), y: sign * round(mastY), z: round((travel + 200) / 2 + 90), rz: 0 }
     });
   }
   // 升降台：位于底层输送线上方一个层距处，宽度略小于皮带，避免压挡边
@@ -1056,8 +1160,15 @@ function buildBufferStackParts(p: ResolvedConveyorParams): ConveyorPart[] {
       box('lift-motor-body', '电机+减速箱', 180, 140, 160),
       cylinder('lift-motor-shaft', '输出轴', 25, 70, 'y', [0, -60, 0])
     ],
-    // 挂在左侧立柱外侧，留 5mm 安装面
-    transform: { x: round(-halfL + 60), y: round(-(columnY + section / 2 + 80)), z: round(p.beltHeightMm), rz: 0 }
+    // 挂在左侧立柱外侧、再让到升降导柱外侧（留 5 mm 安装面）。
+    // 导柱挪到立柱外排之后，电机箱（140 深）正好压住导柱与链条，
+    // 所以这里按导柱排反算：y = -(mastY + 型材/2 + 5 + 箱体半深 70)。
+    transform: {
+      x: round(-halfL + 60),
+      y: round(-(mastY + section / 2 + 5 + 70)),
+      z: round(p.beltHeightMm),
+      rz: 0
+    }
   });
 
   return parts;

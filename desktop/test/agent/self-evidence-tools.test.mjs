@@ -17,7 +17,9 @@ import { READ_ONLY_TOOLS } from '../../src/agent/router.ts';
 import { parseMachineBrief } from '../../src/machine/spec.ts';
 import { synthMachine } from '../../src/machine/synth.ts';
 
-const BRIEF_TURNER = '皮带输送线，皮带有效宽度 600 mm，工件 90° 转向改变方向，节拍 20 件/分钟';
+// 带宽 1200：转向工位要在两侧纵梁之间落下 φ880 转台盘 + 960 台板 + 两侧吊柱，
+// 最小带宽 980（conveyor-assembly 的 TURNER_MIN_WIDTH_MM），600 宽做不了转向工位。
+const BRIEF_TURNER = '皮带输送线，皮带有效宽度 1200 mm，工件 90° 转向改变方向，节拍 20 件/分钟';
 const BRIEF_NO_LIFT = '设计一台三工位锁螺丝机，节拍 20 件/分钟，用 750W 伺服';
 
 /** 一张能过 PNG 头检查的最小假图（不是首页截图，只是可控字节）。 */
