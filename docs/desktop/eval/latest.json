@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-11-04T03:53:16.905Z",
+  "generatedAt": "2026-11-04T07:24:58.290Z",
   "version": "0.6.4",
   "mode": "offline-rules",
   "dataset": {
     "path": "docs/desktop/eval/cases.json",
-    "count": 122,
-    "references": 17,
-    "ambiguous": 7,
+    "count": 124,
+    "references": 18,
+    "ambiguous": 8,
     "multiStep": 5,
     "outOfScope": 7,
     "toolCoverage": [
@@ -23,6 +23,7 @@
       "get_bom",
       "get_project_context",
       "get_render_stats",
+      "get_tool_result",
       "import_cad",
       "insert_component",
       "list_components",
@@ -64,13 +65,13 @@
   "passed": true,
   "metrics": {
     "intent": {
-      "correct": 122,
-      "total": 122,
+      "correct": 124,
+      "total": 124,
       "rate": 1
     },
     "tools": {
-      "correct": 122,
-      "total": 122,
+      "correct": 124,
+      "total": 124,
       "rate": 1
     },
     "params": {
@@ -3684,6 +3685,70 @@
           "args": {},
           "readOnly": false,
           "missing": []
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "tr01",
+      "input": "把刚才那个完整结果给我看看",
+      "tags": [
+        "reference"
+      ],
+      "note": "大结果回取：超限回执里的 resultId 不在离线句子里，规则层只给工具与 missing；在线模型照 hint 里的 resultId 调用",
+      "expectedIntent": "query",
+      "actualIntent": "query",
+      "intentOk": true,
+      "expectedTools": [
+        "get_tool_result"
+      ],
+      "actualTools": [
+        "get_tool_result"
+      ],
+      "toolOk": true,
+      "paramsApplicable": false,
+      "paramsOk": null,
+      "refusedOk": true,
+      "actualPlans": [
+        {
+          "tool": "get_tool_result",
+          "args": {},
+          "readOnly": true,
+          "missing": [
+            "resultId"
+          ]
+        }
+      ],
+      "passed": true
+    },
+    {
+      "id": "tr02",
+      "input": "刚才 get_bom 的结果被截断了，把完整内容取回来",
+      "tags": [
+        "ambiguous"
+      ],
+      "note": "负向区分：这是回取已落盘结果（只读），不是重新执行 get_bom；也不能自己编一个 resultId",
+      "expectedIntent": "query",
+      "actualIntent": "query",
+      "intentOk": true,
+      "expectedTools": [
+        "get_tool_result"
+      ],
+      "actualTools": [
+        "get_tool_result"
+      ],
+      "toolOk": true,
+      "paramsApplicable": false,
+      "paramsOk": null,
+      "refusedOk": true,
+      "actualPlans": [
+        {
+          "tool": "get_tool_result",
+          "args": {},
+          "readOnly": true,
+          "missing": [
+            "resultId"
+          ]
         }
       ],
       "passed": true

@@ -32,6 +32,7 @@ import { createZip } from '../shared/zip.ts';
 import { recordDiagnosticError } from '../shared/diagnostics.ts';
 import { resolvePartReference } from './placement.ts';
 import { listResult } from './trim.ts';
+import { ToolResultError, ToolResultStore, resultStoreDir } from './tool-result-store.ts';
 import { checkExportTargetPath } from './policy.ts';
 import { collectAgentContext } from './context.ts';
 import { projectFingerprint } from './thread.ts';
@@ -2594,6 +2595,75 @@ function registerAgentMemoryCommands(bus: CommandBus): void {
   });
 }
 
+/**
+ * 大结果回取（P4）：只读命令 `get_tool_result`。
+ *
+ * 单个工具结果超过上限时，session 层把**完整结果**写成
+ * `userData/agent-results/<sha16>.json`，回执里的 `resultId` 就是文件名。
+ * 这里按 UTF-8 字符边界分片读回来；参数整形与错误码映射在命令层，
+ * 校验 / 清理 / 防路径穿越全在 `tool-result-store.ts`。
+ */
+function registerToolResultCommand(bus: CommandBus): void {
+  const optionalInt = (
+    args: Record<string, unknown>,
+    key: string,
+    min: number,
+    label: string
+  ): number | undefined => {
+    const value = args[key];
+    if (value === undefined || value === null) return undefined;
+    if (typeof value !== 'number' || !Number.isInteger(value)) {
+      throw new CommandFailure('INVALID_ARGUMENT', `${label}必须是整数`);
+    }
+    if (value < min) throw new CommandFailure('INVALID_ARGUMENT', `${label}不能小于 ${min}`);
+    return value;
+  };
+
+  bus.register({
+    name: 'get_tool_result',
+    async run(args, ctx) {
+      for (const key of Object.keys(args)) {
+        if (key !== 'resultId' && key !== 'offset' && key !== 'limit') {
+          throw new CommandFailure('INVALID_ARGUMENT', `未知参数：${key}`);
+        }
+      }
+      if (typeof args.resultId !== 'string' || !args.resultId.trim()) {
+        throw new CommandFailure(
+          'INVALID_ARGUMENT',
+          'resultId 不能为空',
+          'resultId 取截断回执里的 16 位十六进制（回执里带 {truncated:true,resultId,hint}）'
+        );
+      }
+      if (!ctx.userDataRoot) {
+        throw new CommandFailure('RESULT_STORE_UNAVAILABLE', '主进程没有提供 userData 目录，读不到已落盘的工具结果');
+      }
+      const offset = optionalInt(args, 'offset', 0, 'offset');
+      const limit = optionalInt(args, 'limit', 1, 'limit');
+      const store = new ToolResultStore({ dir: resultStoreDir(ctx.userDataRoot) });
+      try {
+        const page = store.read({
+          resultId: args.resultId,
+          ...(offset !== undefined ? { offset } : {}),
+          ...(limit !== undefined ? { limit } : {})
+        });
+        const next = page.nextOffset;
+        return {
+          ok: true,
+          data: {
+            ...page,
+            note: page.eof || next === undefined
+              ? '已读到末尾（eof=true），各片按顺序拼接即完整结果'
+              : `还有 ${page.bytes - next} 字节未读，用 offset=${next} 继续`
+          }
+        };
+      } catch (error) {
+        if (error instanceof ToolResultError) throw new CommandFailure(error.code, error.message, error.hint);
+        throw error;
+      }
+    }
+  });
+}
+
 export function createAgentCommandBus(
   registry: PackRegistry,
   bridge: Bridge,
@@ -2631,6 +2701,7 @@ export function createAgentCommandBus(
   registerExportFilesCommand(bus);
   registerMachineLibraryCommands(bus);
   registerAgentMemoryCommands(bus);
+  registerToolResultCommand(bus);
   return bus;
 }
 

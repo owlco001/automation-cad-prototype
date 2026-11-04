@@ -116,6 +116,31 @@ const SUGGEST_KINEMATICS_SCHEMA = {
   additionalProperties: false
 };
 
+const GET_TOOL_RESULT_SCHEMA = {
+  type: 'object',
+  properties: {
+    resultId: {
+      type: 'string',
+      description: '截断回执里的 16 位十六进制 resultId（形如 3f2a9c11d4e5b6a7），原样传入'
+    },
+    offset: {
+      type: 'integer',
+      minimum: 0,
+      description: '按 UTF-8 字节计的起点，默认 0；续读请用回执的 nextOffset',
+      default: 0
+    },
+    limit: {
+      type: 'integer',
+      minimum: 1,
+      maximum: 16384,
+      description: '本次最多读多少字节，默认 10240，上限 16384（超过按 16384 处理）',
+      default: 10240
+    }
+  },
+  required: ['resultId'],
+  additionalProperties: false
+};
+
 /** suggest_kinematics 输出给模型的单条建议：只留判断与复核需要的字段。 */
 export function compactKinematicsSuggestion(value: unknown): Record<string, unknown> | null {
   if (!isRecord(value) || typeof value.id !== 'string') return null;
@@ -1149,6 +1174,39 @@ export class AgentTools {
       inputSchema: CAPTURE_VIEW_SCHEMA,
       handler: async (args) => {
         const result = await this.execute('capture_view', args);
+        return result ? commandSuccess(result) : this.unavailable();
+      }
+    });
+
+    this.add({
+      name: 'get_tool_result',
+      description:
+        '按 resultId 分批取回一个被截断的完整工具结果。工具结果超过单次上限时，回执会带 {truncated:true,resultId,bytes,hint}，' +
+        '完整内容已落盘；用 hint 里的 offset 或回执的 nextOffset 续读，直到 eof=true，各片按顺序拼接即原文。' +
+        '只读：不重跑原工具、不改工程；每个 resultId 对应一份固定内容，最多保留最近 50 个 / 32 MB。',
+      inputSchema: GET_TOOL_RESULT_SCHEMA,
+      handler: async (args) => {
+        if (typeof args.resultId !== 'string' || !args.resultId.trim()) {
+          return { ok: false, code: 'INVALID_ARGUMENT', message: 'resultId 必须是截断回执里的 16 位十六进制字符串' };
+        }
+        for (const key of ['offset', 'limit'] as const) {
+          const value = args[key];
+          if (value === undefined || value === null) continue;
+          const number = getNumber(value);
+          if (number === undefined || !Number.isInteger(number) || number < (key === 'offset' ? 0 : 1)) {
+            return {
+              ok: false,
+              code: 'INVALID_ARGUMENT',
+              message: key === 'offset' ? 'offset 必须是不小于 0 的整数' : 'limit 必须是不小于 1 的整数'
+            };
+          }
+        }
+        for (const key of Object.keys(args)) {
+          if (key !== 'resultId' && key !== 'offset' && key !== 'limit') {
+            return { ok: false, code: 'INVALID_ARGUMENT', message: `未知参数：${key}` };
+          }
+        }
+        const result = await this.execute('get_tool_result', args);
         return result ? commandSuccess(result) : this.unavailable();
       }
     });

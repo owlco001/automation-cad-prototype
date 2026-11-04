@@ -211,38 +211,76 @@ export function trimToolResult(value: unknown): unknown {
   return trimValue(value);
 }
 
-function fallbackText(value: unknown, text: string, maxBytes: number): string {
+export interface SerializedToolResult {
+  text: string;
+  bytes: number;
+  truncated: boolean;
+  /** 超限且已外置时的内容 id（16 位 hex）；正常结果没有该字段。 */
+  resultId?: string;
+  /** 外置的完整结果字节数；与 `resultId` 同时出现。 */
+  fullBytes?: number;
+}
+
+/** 一份外置结果的回执信息（由 store 返回）。 */
+export interface OffloadedToolResult {
+  resultId: string;
+  bytes: number;
+}
+
+/**
+ * 超限结果外置回调：`text` 是**完整**结果 JSON（未受 maxBytes 限制），
+ * 返回 null 表示这次没外置（没有 userData 目录 / 写盘失败），回执退回纯 preview。
+ */
+export type ToolResultOffload = (text: string) => OffloadedToolResult | null;
+
+/** 给模型的下一步指令：必须能照着直接调，不能只说「结果被截断了」。 */
+function offloadHint(stored: OffloadedToolResult, previewBytes: number): string {
+  const kb = (stored.bytes / 1024).toFixed(1);
+  const nextOffset = Math.min(previewBytes, Math.max(0, stored.bytes - 1));
+  return `完整结果 ${kb} KB（${stored.bytes} 字节），这里的 preview 只是前 ${previewBytes} 字节；`
+    + `调 get_tool_result(resultId="${stored.resultId}", offset=${nextOffset}) 继续读，每次最多 16384 字节，eof=true 即读完`;
+}
+
+function fallbackText(
+  value: unknown,
+  text: string,
+  maxBytes: number,
+  stored: OffloadedToolResult | null
+): string {
   const ok = isRecord(value) && typeof value.ok === 'boolean' ? value.ok : undefined;
-  const note = '结果超过 10 KB，已截断；请缩小查询范围或分页读取。';
-  const base = {
+  const note = stored
+    ? '结果超过单次上限，已截断；完整内容已落盘，按 hint 里的 offset 分批回取即可。'
+    : '结果超过 10 KB，已截断；请缩小查询范围或分页读取。';
+  const base: Record<string, unknown> = {
     ...(ok === undefined ? {} : { ok }),
     truncated: true,
-    note
+    note,
+    ...(stored ? { resultId: stored.resultId, bytes: stored.bytes } : {})
   };
-  const overhead = byteLength(JSON.stringify({ ...base, preview: '' }));
-  let budget = Math.max(0, maxBytes - overhead - 2);
+  const build = (preview: string): string => JSON.stringify({
+    ...base,
+    ...(stored ? { hint: offloadHint(stored, byteLength(preview)) } : {}),
+    preview
+  });
+  let budget = Math.max(0, maxBytes - byteLength(build('')) - 2);
   for (;;) {
     const preview = truncateUtf8(text, budget, '');
-    const candidate = JSON.stringify({ ...base, preview });
+    const candidate = build(preview);
     const excess = byteLength(candidate) - maxBytes;
     if (excess <= 0 || budget === 0) return candidate;
     budget = Math.max(0, budget - excess - 8);
   }
 }
 
-export interface SerializedToolResult {
-  text: string;
-  bytes: number;
-  truncated: boolean;
-}
-
 /**
  * 工具结果 → 模型上下文文本。先做列表/长文本裁剪，再保证 JSON ≤ 10 KB。
- * 超限时保留 `ok` 状态并给出 `preview`，不把半截 JSON 交给模型。
+ * 超限时保留 `ok` 状态并给出 `preview`，不把半截 JSON 交给模型；
+ * 传了 `offload` 就把**完整结果**外置，回执补 `resultId/bytes/hint` 供模型回取。
  */
 export function serializeToolResult(
   value: unknown,
-  maxBytes = TOOL_RESULT_BYTE_LIMIT
+  maxBytes = TOOL_RESULT_BYTE_LIMIT,
+  offload?: ToolResultOffload
 ): SerializedToolResult {
   const limit = Math.max(256, Math.trunc(maxBytes));
   let text: string;
@@ -254,6 +292,20 @@ export function serializeToolResult(
   if (typeof text !== 'string') text = JSON.stringify({ ok: false, code: 'RESULT_NOT_SERIALIZABLE', message: '工具结果无法序列化' });
   const bytes = byteLength(text);
   if (bytes <= limit) return { text, bytes, truncated: false };
-  const fallback = fallbackText(value, text, limit);
-  return { text: fallback, bytes: byteLength(fallback), truncated: true };
+  let stored: OffloadedToolResult | null = null;
+  if (offload) {
+    try {
+      stored = offload(text);
+    } catch {
+      // 外置失败不影响对话：退回纯 preview（至少模型知道被截断了）。
+      stored = null;
+    }
+  }
+  const fallback = fallbackText(value, text, limit, stored);
+  return {
+    text: fallback,
+    bytes: byteLength(fallback),
+    truncated: true,
+    ...(stored ? { resultId: stored.resultId, fullBytes: stored.bytes } : {})
+  };
 }

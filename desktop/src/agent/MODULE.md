@@ -5,7 +5,7 @@
 ## 两个入口，一份注册表
 
 ```
-tools.ts（AgentTools + 34 个 AgentTool；只读 16 / 写 18；含只读 `suggest_kinematics`、`get_render_stats`、`list_machine_library`、`validate_machine_design`、`capture_view`、`get_agent_memory`；含只读 `design_machine` 与写工具 `apply_machine_design`、`repair_plc_config`、`clear_agent_memory`；机型库 `save_machine_to_library` / `load_machine_from_library` / `export_machine_package`）
+tools.ts（AgentTools + 35 个 AgentTool；只读 17 / 写 18；含只读 `suggest_kinematics`、`get_render_stats`、`list_machine_library`、`validate_machine_design`、`capture_view`、`get_agent_memory`、`get_tool_result`；含只读 `design_machine` 与写工具 `apply_machine_design`、`repair_plc_config`、`clear_agent_memory`；机型库 `save_machine_to_library` / `load_machine_from_library` / `export_machine_package`）
  ├─ kb/index.ts → 构建期分块 + kb.json（≤400 KB，标题 hash）
  ├─ kb/search.ts → 纯函数 BM25（中文 2-gram + 英文词，top 3 / ≤2 KB）
  ├─ rpc.ts        → HTTP JSON-RPC，127.0.0.1:7420，Bearer token
@@ -36,7 +36,8 @@ tools.ts（AgentTools + 34 个 AgentTool；只读 16 / 写 18；含只读 `sugge
  │    ├─ reference.ts → 选中/最近操作/几何三级指代消解（<0.6 不猜）
  │    ├─ memory.ts  → 最近 5 次工具调用摘要（仅内存）
  │    ├─ project-memory.ts → 跨会话项目记忆（userData/agent-memory.json，每工程 ≤20 条 / ≤64 KB、首轮注入 ≤3 条 600 字、字段白名单 + 胞化）
- │    ├─ trim.ts    → 列表 20 条 / 文本 2 KB / 单结果 10 KB 裁剪
+ │    ├─ trim.ts    → 列表 20 条 / 文本 2 KB / 单结果 10 KB 裁剪 + 超限外置回调
+ │    ├─ tool-result-store.ts → 大结果外置：agent-results/<sha16>.json，按 UTF-8 字符边界分片回取，50 个 / 32 MB 清理
  │    ├─ audit.ts   → 每次工具调用一行 NDJSON（凭据脱敏 + 耗时）
  │    ├─ audit-store.ts → 审计落盘：按大小轮转 agent-audit.N.jsonl + 保留期清理 + 跨份读取（仅主进程）
  │    ├─ audit-view.ts → 审计筛选 / 时间倒序 / 200 条上限 / CSV
@@ -99,6 +100,7 @@ interface Bridge {
 | `export_cost_report` | `format / fileName? / overwrite?` + 同上成本参数 | `export_cost_report` | ✅ 写工具：PDF/CSV 落盘到 `userData/exports/`，需确认 |
 | `verify_plc_program` | `config? / timeScale? / safetyTripAtStep? / sensorConflictAtStep?` | `verify_plc_program` | ✅ 只读：预检 + 生成 + 内置模拟器，返回步骤/报警/失败原因 |
 | `get_agent_memory` | 无 | `get_agent_memory` | ✅ 只读：返回当前工程 `{fingerprint,count,limit,entries:[{ts,kind,summary,ref,ok}],note}`（≤20 条事实），不写盘 |
+| `get_tool_result` | `resultId / offset? / limit?` | `get_tool_result` | ✅ 只读：按 UTF-8 字符边界分批回取被截断的完整结果，`{resultId,bytes,offset,limit,content,eof,nextOffset?}`；id 非法/不存在 `RESULT_NOT_FOUND`，offset 越界 `RESULT_RANGE`，limit 上限 16384 |
 | `clear_agent_memory` | 无 | `clear_agent_memory` | ✅ 写：只清当前工程桶，返回 `{fingerprint,cleared}`；需确认，不动其他工程 |
 | `undo_last` | 无 | 直接 `CommandBus.undoLast()` | ✅ 可用 |
 
@@ -282,6 +284,7 @@ AgentMemory.record / entries / prompt / clear
 - **路由补全**：`planTool/planToolSequence/planReadOnly` 接收可选 `AgentContext`；命中后把对象填进 `partId` / `ref`，清掉对应 `missing`，并写 `resolvedFrom` / `resolvedLabel`。`preview.ts` 与侧栏步骤卡片据此显示「已使用选中对象：QF1」。
 - **会话记忆**：`AgentSession` 每次工具调用后记录 `{tool, args, code}`（关键参数白名单，不含密钥），最多 5 条；系统提示顺序为 `SYSTEM_PROMPT → [上一轮会话] → 上下文快照 → [最近工具调用]`。`clear()` 同时清空记忆。
 - **结果裁剪**：`serializeToolResult` 是模型上下文的唯一入口；列表字段一律统一成 `{items,total,truncated}` 且**条目一条不删**（>20 条只截条目内长字符串），字符串 >2 KB 截断并附原文字节数，最终 JSON >10 KB 时保留 `ok` 与 `preview` 兜底。消费方用 `readListResult` / `requireListItems` 读，形状不认识返回 `null`/抛错，不允许静默当空数组。
+- **超限外置（P4）**：同样是那条截断分支——`serializeToolResult(value, limit, offload)`，超限时先把**完整结果**（已做列表/长文本裁剪的 JSON）交给 `offload` 落盘 `userData/agent-results/<sha256 前 16 位>.json`，回执仍是 `preview`，另加 `{truncated:true, resultId, bytes, hint}`，`hint` 直接写「调 get_tool_result(resultId=…, offset=…)，eof=true 即读完」。不超限**不落盘**；同一内容（同 id）重跑只保留一份。`get_tool_result` 按 UTF-8 字符边界分片（offset 落在汉字中间会回退到该字符起点），返回 `{resultId,bytes,offset,limit,content,eof,nextOffset?}`，默认 offset=0 / limit=10240，limit 上限 16384。目录占用上限 50 个文件 / 32 MB，写入与主进程启动时各清理一次最旧；`resultId` 必须匹配 `^[a-f0-9]{16}$`，读路径 `join(dir, id + '.json')` 后再 `realpath` 比前缀（符号链接逃逸当不存在）。审计只记 `resultId` 与 `resultBytes`，**不记内容**（可能含机型参数）。
 
 冒烟：`SMOKE_AGENT_CONTEXT_OK selection=1 recent=3`、`SMOKE_AGENT_THREAD_OK turns=3 resume=1 stale=1`。单测在 `test/agent/context-memory-trim.test.mjs`（28 条）。
 
@@ -517,7 +520,7 @@ IPC 与 UI：
 
 - `agent-llm.json` 保存 `{baseUrl,apiKey,model,maxIterations}`，POSIX 权限 600。默认 `https://api.openai.com/v1`、`gpt-4o-mini`、6 轮。
 - UI 读取时 apiKey 只返回掩码（如 `sk-****abcd`）；保存时掩码/空值保留原密钥。
-- `llm.ts` 以 OpenAI 兼容格式发送 34 工具 JSON Schema，60 秒超时；非 2xx 返回含状态码的中文错误。
+- `llm.ts` 以 OpenAI 兼容格式发送 35 工具 JSON Schema，60 秒超时；非 2xx 返回含状态码的中文错误。
 - `session.ts` 注入 `{llm,bus,confirmWrite}`：工具结果以 `role:'tool'` 回灌，先经 `serializeToolResult` 裁剪、再由 `guard.ts` 包成不可信数据块，失败不中断；历史只保留最近 20 条；超轮返回「已达到最大工具调用轮数（N），请缩小任务范围」。
 - `import_cad`、`insert_component`、`place_component`、`update_component`、`remove_component`、`run_plc_generate`、`repair_plc_config`、`export_files`、`export_cost_report`、`save_machine_to_library`、`load_machine_from_library`、`export_machine_package`、`undo_last` 执行前由主进程弹出确认；拒绝时回灌 `USER_DENIED`。
 - 面板包含对话消息流/工具卡片、模型设置（apiKey 为 password）与测试连接（ping，`max_tokens=8`）。
@@ -669,6 +672,7 @@ parseFallbackCandidates(text): string[]
 18. **截断补全必须限层**：最多补 3 个 `}`/`]`（未闭合字符串先补引号），超限返回 `TRUNCATED_JSON`；不要为了「救回来」无限补括号。
 19. **重试不能吞掉审计**：首次失败与重试结果都要写 `TOOL_CALL_INVALID` / `TOOL_CALL_RETRY_OK` / `TOOL_CALL_FALLBACK`，并带 `retries/reason/repairs`；否则用户看到参数被改却查不到原因。
 20. **绕过意图只收紧权限，不授予权限**：`detectBypassIntent` 命中后仍必须确认；不要在 `executeTool` 之外另开“已授权”分支，也不要让工具结果或模型回复出现“无需确认”。路径拒绝必须发生在生成内容/建目录之前，`allowSanitize` 只能由用户显式意图触发。
+21. **截断必须可回取**：超限只给 `preview` 时模型并不知道自己少了数据，会拿半截结果继续推理。凡是截断分支都要同时给 `resultId + hint`（落盘完整结果），让模型能自己补齐；`hint` 里必须写清下一次调用的 offset，不能只说「结果被截断了」。反过来，**不能靠调大上限**解决——10 KB 是上下文预算，不是配置遗漏。
 
 ## 进度
 

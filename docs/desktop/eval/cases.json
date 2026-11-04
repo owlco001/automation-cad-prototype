@@ -1780,5 +1780,37 @@
       "memory"
     ],
     "note": "清记忆是写操作：只清当前工程桶、需确认；与「删除审计记录」这类越权请求严格区分"
+  },
+  {
+    "id": "tr01",
+    "input": "把刚才那个完整结果给我看看",
+    "intent": "query",
+    "expect": {
+      "tool": "get_tool_result",
+      "argsContains": {},
+      "missing": [
+        "resultId"
+      ]
+    },
+    "tags": [
+      "reference"
+    ],
+    "note": "大结果回取：超限回执里的 resultId 不在离线句子里，规则层只给工具与 missing；在线模型照 hint 里的 resultId 调用"
+  },
+  {
+    "id": "tr02",
+    "input": "刚才 get_bom 的结果被截断了，把完整内容取回来",
+    "intent": "query",
+    "expect": {
+      "tool": "get_tool_result",
+      "argsContains": {},
+      "missing": [
+        "resultId"
+      ]
+    },
+    "tags": [
+      "ambiguous"
+    ],
+    "note": "负向区分：这是回取已落盘结果（只读），不是重新执行 get_bom；也不能自己编一个 resultId"
   }
 ]

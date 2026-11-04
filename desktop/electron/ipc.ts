@@ -54,6 +54,7 @@ import { BYPASS_CONFIRMATION_NOTICE } from '../src/agent/policy.ts';
 import { requestWriteConfirmation } from './write-confirm.ts';
 import { collectAgentContext } from '../src/agent/context.ts';
 import { FileProjectMemory } from '../src/agent/project-memory.ts';
+import { ToolResultStore, resultStoreDir } from '../src/agent/tool-result-store.ts';
 import { readListResult } from '../src/agent/trim.ts';
 import type { AgentPlan, PlanStep } from '../src/agent/planner.ts';
 import { READ_ONLY_TOOLS } from '../src/agent/router.ts';
@@ -1506,6 +1507,17 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
       vision: { mode: config.vision, userDataDir: context.userDataDir },
       // 跨会话项目记忆：userData/agent-memory.json（每工程 ≤20 条、≤64 KB）
       projectMemory: new FileProjectMemory({ root: context.userDataDir }),
+      // 大结果外置（P4）：userData/agent-results/<sha16>.json，50 个 / 32 MB 上限。
+      // 启动时先清一次，避免上一轮残留一直占着配额。
+      resultStore: (() => {
+        const store = new ToolResultStore({ dir: resultStoreDir(context.userDataDir) });
+        try {
+          store.prune();
+        } catch (error) {
+          recordDiagnosticError('AGENT_RESULT_STORE_PRUNE_FAILED', error, { site: 'desktop/electron/ipc.ts' });
+        }
+        return store;
+      })(),
       contextProvider: async () => {
         try {
           const result = await bus.execute('get_project_context');

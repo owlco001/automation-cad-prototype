@@ -246,6 +246,10 @@ export function routeIntent(text: string): IntentMatch {
   if (isProjectMemoryRecallRequest(normalized)) {
     return { intent: 'query', confidence: 'high', score: 3, hits: ['项目记忆'], reason: '读取当前工程的跨会话事实记录（只读）' };
   }
+  // 大结果回取：句子里没有领域名词，通用规则会判成超纲，先在这里归到 query。
+  if (isToolResultRecallRequest(normalized)) {
+    return { intent: 'query', confidence: 'high', score: 4, hits: ['工具结果回取'], reason: '按 resultId 分批读回被截断的完整结果（只读）' };
+  }
   if (isDocQuestion(normalized)) {
     return { intent: 'query', confidence: 'high', score: 3, hits: ['本地文档'], reason: '文档类问题，查本地知识库' };
   }
@@ -325,7 +329,7 @@ export interface ToolPlan {
   resolvedLabel?: string;
 }
 
-/** 目前注册的 34 个工具里，只读 16 个、写操作 18 个。 */
+/** 目前注册的 35 个工具里，只读 17 个、写操作 18 个。 */
 export const READ_ONLY_TOOLS = new Set([
   'list_components',
   'search_components',
@@ -346,7 +350,9 @@ export const READ_ONLY_TOOLS = new Set([
   // 只读截图：写 userData/agent-shots（证据文件），不改工程与机型
   'capture_view',
   // 只读跨会话项目记忆：只读 agent-memory.json，不写不删
-  'get_agent_memory'
+  'get_agent_memory',
+  // 只读回取已落盘的大工具结果：只读 agent-results/<sha16>.json，不重跑工具、不改工程
+  'get_tool_result'
 ]);
 
 export const WRITE_TOOLS = new Set([
@@ -779,6 +785,27 @@ export function isProjectMemoryRecallRequest(text: string): boolean {
 }
 
 /**
+ * 「把刚才那个完整结果给我看看」——超限工具结果被外置后要求回取。
+ *
+ * 只认「完整/全部/全文 + 结果（回执）」且带取回语气，或明确说「结果被截断了，继续读」。
+ * 导出/成本报告类句子一律排除：那是生成任务，抢过来会变成「回取一份不存在的旧结果」。
+ * 离线规则拿不到 resultId（它只出现在回执里），所以计划里 missing 记为 resultId，
+ * 由会话层如实说明「需要回执里的 resultId」而不是瞎猜一个。
+ */
+export function isToolResultRecallRequest(text: string): boolean {
+  const value = (text ?? '').trim();
+  if (!value) return false;
+  if (/get_tool_result/.test(value)) return true;
+  if (/(?:成本|报价|费用|报告|导出|生成|打印)/.test(value)) return false;
+  if (/(?:完整|全部|全文|整份)[^。；;\n]{0,6}(?:结果|回执)/.test(value)
+    && /(?:给|看|读|取|拿|发|来|继续|接着|续|要)/.test(value)) {
+    return true;
+  }
+  return /(?:结果|回执)[^。；;\n]{0,8}(?:被)?(?:截断|截了|只看了一半|看不全|不全)/.test(value)
+    && /(?:继续|接着|续读|看完|读全|完整|全部|取回|拿全)/.test(value);
+}
+
+/**
  * 把中文指令映射成一个工具计划。
  * 返回 null 表示「没有任何工具能接住」，调用方应如实说做不了。
  */
@@ -802,6 +829,16 @@ function planToolBase(text: string): ToolPlan | null {
       readOnly: true,
       missing: [],
       why: '读取本工程最近的成功操作事实（跨会话，只读；最多 20 条）'
+    };
+  }
+  // 大结果回取：必须在本轮意图分类之前判，否则「完整结果」会被判成超纲。
+  if (isToolResultRecallRequest(value)) {
+    return {
+      tool: 'get_tool_result',
+      args: {},
+      readOnly: true,
+      missing: ['resultId'],
+      why: '按 resultId 分批读回被截断的完整工具结果（只读，不重跑原工具）'
     };
   }
   const libraryPlan = planMachineLibraryRequest(value);

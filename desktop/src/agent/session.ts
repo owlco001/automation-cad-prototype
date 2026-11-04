@@ -45,6 +45,7 @@ import {
 import { AgentMemory, resultCode, summarizeToolCall } from './memory.ts';
 import { describeToolFact, type ProjectMemoryStore } from './project-memory.ts';
 import { readListResult, serializeToolResult, toolResultByteLimit } from './trim.ts';
+import type { ToolResultStore } from './tool-result-store.ts';
 import {
   addTokenUsage,
   DEFAULT_SECTION_CAPS,
@@ -160,6 +161,13 @@ export interface AgentSessionOptions {
    * - 不传即不落盘、不注入（测试与无 userData 环境保持原行为）。
    */
   projectMemory?: ProjectMemoryStore | null;
+  /**
+   * 大结果外置（P4）：传 `ToolResultStore` 时，单个工具结果超过上限就把**完整结果**
+   * 写入 `userData/agent-results/<sha16>.json`，回执补 `resultId + bytes + hint`，
+   * 模型可调 `get_tool_result` 分批回取。
+   * 不传即保持旧行为（只给 preview，不落盘）。
+   */
+  resultStore?: ToolResultStore | null;
 }
 
 export interface AgentSessionVisionOptions {
@@ -427,6 +435,8 @@ export class AgentSession {
   private readonly memory = new AgentMemory();
   /** 跨会话项目记忆：null 表示不落盘也不注入。 */
   private readonly projectMemory: ProjectMemoryStore | null;
+  /** 大结果外置：null 表示超限只给 preview（旧行为）。 */
+  private readonly resultStore: ToolResultStore | null;
   /** 首轮已尝试注入：本会话后续轮次不再重复贴历史。 */
   private projectMemoryInjected = false;
   private parallelBatches = 0;
@@ -509,7 +519,22 @@ export class AgentSession {
         }))
     };
     this.projectMemory = options.projectMemory ?? null;
+    this.resultStore = options.resultStore ?? null;
   }
+
+  /**
+   * 超限结果外置：写 `userData/agent-results/<sha16>.json`。
+   * 写盘失败只降级成 preview（`serializeToolResult` 自己也兜一层），不打断对话。
+   */
+  private readonly offloadToolResult = (text: string): { resultId: string; bytes: number } | null => {
+    if (!this.resultStore) return null;
+    try {
+      return this.resultStore.save(text);
+    } catch (error) {
+      console.warn('[agent] 大结果落盘失败，回退为 preview', error);
+      return null;
+    }
+  };
 
   /** 按本轮已知信息（写工具 / 计划步骤 / 意图）算当前预算。 */
   private currentBudget(): IterationBudget {
@@ -1739,7 +1764,19 @@ export class AgentSession {
     // 整段丢掉，离线问答就成了「已执行」却看不到任何结果（与 NL-AGENT.md 4.1「基于
     // source/heading/snippet 回答」的约定不符）。有 data 用 data，否则序列化整个结果。
     const payload = result.data === undefined ? result : result.data;
-    const detail = serializeToolResult(payload, toolResultByteLimit(plan.tool)).text;
+    const serialized = serializeToolResult(payload, toolResultByteLimit(plan.tool), this.offloadToolResult);
+    if (serialized.resultId) {
+      this.recordAudit({
+        tool: plan.tool,
+        ok: true,
+        code: 'TOOL_RESULT_OFFLOADED',
+        source: 'offline',
+        message: `完整结果 ${serialized.fullBytes ?? 0} 字节已外置，回执 ${serialized.bytes} 字节`,
+        resultId: serialized.resultId,
+        resultBytes: serialized.fullBytes ?? 0
+      });
+    }
+    const detail = serialized.text;
     const summary = detail.length > 600 ? `${detail.slice(0, 600)}…` : detail;
     const reference = plan.resolvedFrom
       ? `已使用${plan.resolvedFrom === 'selection' ? '选中对象' : plan.resolvedFrom === 'recent' ? '最近操作对象' : '底板对象'}：${plan.resolvedLabel ?? ''}`
@@ -2023,14 +2060,29 @@ export class AgentSession {
         ...(options.onProgress ? { onProgress: options.onProgress } : {})
       });
       for (const [index, call] of calls.entries()) {
+        // 超限时先把完整结果外置，再给模型 preview + resultId/hint（可回取，不是半截数据）。
+        const serialized = serializeToolResult(
+          results[index],
+          toolResultByteLimit(call.function.name),
+          this.offloadToolResult
+        );
+        if (serialized.resultId) {
+          this.recordAudit({
+            tool: call.function.name,
+            ok: true,
+            code: 'TOOL_RESULT_OFFLOADED',
+            source: 'llm',
+            // 只记 id 与字节数：结果内容可能含机型参数等现场数据。
+            message: `完整结果 ${serialized.fullBytes ?? 0} 字节已外置，回执 ${serialized.bytes} 字节`,
+            resultId: serialized.resultId,
+            resultBytes: serialized.fullBytes ?? 0
+          });
+        }
         this.push({
           role: 'tool',
           tool_call_id: call.id,
           name: call.function.name,
-          content: guardToolResult(
-            serializeToolResult(results[index], toolResultByteLimit(call.function.name)).text,
-            call.function.name
-          ).text
+          content: guardToolResult(serialized.text, call.function.name).text
         });
       }
       // tool 角色只能放字符串，图必须另起一条 user 消息；只在 capture_view 成功时触发。
