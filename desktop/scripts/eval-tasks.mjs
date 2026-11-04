@@ -21,15 +21,23 @@
  * AgentSession 里，所以这两例用真 AgentSession + 固定剧本的假 LLM（只发一条工具调用，
  * 不产生任何模型请求），其余部分仍是真 bus / 真工具 / 真磁盘。
  *
+ * t12 例外：它要证明的是「真内核能出 STEP」，所以不起 AgentTools，而是跑
+ * `scripts/verify-step-export.mjs`（与 `npm run verify:step` 同一条命令），由 ParametricManager
+ * 拉起 build123d 出真实 B-rep 再解析文件。本机没有 build123d 时该例明确 SKIP（打印原因，
+ * 不计 pass），绝不拿内核桩产物冒充通过。
+ *
  * 用法：cd desktop && npm run eval:tasks
- * 输出：每例一行 `TASK_EVAL <id> PASS|FAIL <关键数字>`，末尾 `TASK_EVAL_SUMMARY pass=N/10 failed=M turns_total=T`；
+ * 输出：每例一行 `TASK_EVAL <id> PASS|FAIL|SKIP <关键数字>`，
+ *      末尾 `TASK_EVAL_SUMMARY pass=N/12 failed=M skipped=S turns_total=T`；
  *      任一 FAIL 追加末态差异（期望 vs 实际），退出码 1。
  */
 
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { AgentSession } from '../src/agent/session.ts';
 import { AgentTools } from '../src/agent/tools.ts';
 import { createAgentCommandBus } from '../src/agent/commands.ts';
@@ -1198,6 +1206,77 @@ async function caseDesignReview() {
   return { ok: check.checks.every((item) => item.ok), checks: check.checks, turns, metrics };
 }
 
+/**
+ * t12：**真实内核**出 STEP 并断言（头 / 字节数 / 实体数 / 包络 / 单位 / 逐件覆盖）。
+ *
+ * 为什么单列一例：t01 只验到「几何件数落盘」，`machine:e2e` 那条链路里的 STEP 是内核桩产物
+ * （3 KB、实体数对不上）。这里跑的是 scripts/verify-step-export.mjs —— 与 `npm run verify:step`
+ * 同一条命令、同一个 ParametricManager、同一个 build123d 内核，因此「能出 STEP」这句声明
+ * 在评测里是带数字的：真机 STEP 1.93 MB / 36275 实体 / 27 个合并实体 / 逐件合计 89 个实体 /
+ * 顶点包络 6000×1495×930。
+ *
+ * 本机没有可 import build123d 的 Python 时**显式 SKIP**（打印原因、不计 pass）：
+ * 宁可让这一例空着，也不许拿桩产物冒充通过。
+ */
+async function caseStepExport() {
+  const check = createChecker();
+  const script = fileURLToPath(new URL('./verify-step-export.mjs', import.meta.url));
+  const run = spawnSync(process.execPath, [script, '--json', '--skip-if-no-kernel'], {
+    encoding: 'utf8',
+    timeout: 300_000,
+    maxBuffer: 8 * 1024 * 1024
+  });
+  const jsonLine = `${run.stdout ?? ''}`
+    .split('\n')
+    .find((line) => line.startsWith('STEP_VERIFY_JSON '));
+  let report = null;
+  try {
+    report = jsonLine ? JSON.parse(jsonLine.slice('STEP_VERIFY_JSON '.length)) : null;
+  } catch {
+    report = null;
+  }
+  if (!report) {
+    check.fail(
+      'verify:step 吐出 JSON 摘要',
+      'stdout 里有 STEP_VERIFY_JSON 行',
+      `${(run.stdout ?? '').slice(-500)}${(run.stderr ?? '').slice(-300)}`
+    );
+    return { ok: false, checks: check.checks, turns: 1 };
+  }
+  if (report.skipped) {
+    return { skipped: true, reason: `本机没有 build123d 内核：${report.reason ?? '未知'}`, checks: [], turns: 1 };
+  }
+
+  const merged = report.merged ?? {};
+  const perPart = report.perPart ?? {};
+  const size = Array.isArray(merged.bbox?.size) ? merged.bbox.size : [];
+  check.ok('verify:step 退出码 0', run.status === 0, `exit=${run.status}`);
+  check.eq('STEP 头', merged.header, 'ISO-10303-21');
+  check.ge('STEP 字节数', Number(merged.bytes ?? 0), 50 * 1024);
+  check.eq('长度单位', merged.units, 'MM');
+  check.ge('实体数（逐件合计）', Number(perPart.solids ?? 0), 80);
+  check.ok('实体数在 85±5 内', Number(perPart.solids ?? 0) <= 90, `solids=${perPart.solids}`);
+  check.ok(
+    '包络 X×Y×Z ≈ 6000×1495×930（±1mm）',
+    size.length === 3 && size.every((value, axis) => Math.abs(Number(value) - [6000, 1495, 930][axis]) <= 1),
+    size.map((value) => Number(value).toFixed(1)).join('×')
+  );
+  check.ge('面数（整机）', Number(merged.faces ?? 0), 85);
+  check.ok('汇总判定 ok', report.ok === true, `ok=${report.ok}`);
+  return {
+    ok: check.checks.every((item) => item.ok),
+    checks: check.checks,
+    turns: 1,
+    metrics: [
+      `bytes=${merged.bytes}`,
+      `solids=${perPart.solids}`,
+      `faces=${merged.faces}`,
+      `bbox=${size.map((value) => Number(value).toFixed(0)).join('x')}`,
+      `entities=${merged.entities}`
+    ]
+  };
+}
+
 const CASES = [
   ['t01-conveyor-90', caseConveyor90],
   ['t02-repair-safety', caseRepairSafety],
@@ -1209,7 +1288,8 @@ const CASES = [
   ['t08-project-memory', caseProjectMemory],
   ['t09-plan-budget-resume', casePlanBudgetResume],
   ['t10-verify-attached', caseVerifyAttached],
-  ['t11-design-review', caseDesignReview]
+  ['t11-design-review', caseDesignReview],
+  ['t12-step-export', caseStepExport]
 ];
 
 function printFailure(caseId, result) {
@@ -1225,6 +1305,7 @@ async function main() {
   const startedAt = Date.now();
   let passed = 0;
   let failed = 0;
+  let skipped = 0;
   let turnsTotal = 0;
 
   for (const [caseId, run] of CASES) {
@@ -1241,6 +1322,12 @@ async function main() {
       };
     }
     turnsTotal += result.turns ?? 0;
+    if (result.skipped) {
+      // 显式跳过：不记 pass（避免「没验证」变成「通过」），也不记 fail（环境缺失不是代码缺陷）
+      skipped += 1;
+      console.log(`TASK_EVAL ${caseId} SKIP ${result.reason ?? ''}`.trim());
+      continue;
+    }
     if (result.ok) {
       passed += 1;
       console.log(`TASK_EVAL ${caseId} PASS ${(result.metrics ?? []).join(' ')}`.trim());
@@ -1252,7 +1339,7 @@ async function main() {
   }
 
   console.log(
-    `TASK_EVAL_SUMMARY pass=${passed}/${CASES.length} failed=${failed} turns_total=${turnsTotal}`
+    `TASK_EVAL_SUMMARY pass=${passed}/${CASES.length} failed=${failed} skipped=${skipped} turns_total=${turnsTotal}`
   );
   console.log(`TASK_EVAL_RUNTIME ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
   if (failed > 0) process.exitCode = 1;

@@ -36,6 +36,18 @@ jobs:
         run: npx tsc --noEmit
       - name: 单元测试（含 kb.json 新鲜度与工具数量文档一致性）
         run: npm test
+      # 真实性门禁：真内核出 STEP，断言头/字节数/实体数(85±5)/包络(6000×1495×930)。
+      # runner 默认没装 build123d → 本步会打印 `STEP_VERIFY SKIP <原因>` 并写进 job summary，
+      # 明确「本 job 未验证 STEP」，而不是静默绿。要让本步真跑：在 安装依赖 之后加一步
+      #   python3 -m pip install build123d
+      # 并设 AUTOMATIONCAD_PYTHON 指向该解释器（或直接用 actions/setup-python + pip）。
+      - name: STEP 真实性门禁（真内核出 STEP，无内核则显式 SKIP）
+        timeout-minutes: 12
+        run: |
+          set -o pipefail
+          npm run verify:step -- --skip-if-no-kernel --json 2>&1 | tee /tmp/verify-step.log
+          # 判定不自弃：日志里必须出现结论行（PASS 或 SKIP），两者都没有说明脚本没跑起来
+          grep -Eq '^STEP_VERIFY (PASS verify-step|SKIP )' /tmp/verify-step.log
       - name: 数据包校验
         run: npm run packs:validate
       # FeatureTree 契约服务（自起服务、FT_PORT=0，跑完自动关）
@@ -57,7 +69,9 @@ jobs:
       # 离线规则评估与能力报告此前没人跑，工具加了却不进评估集也发现不了（本轮就是 eval:agent 红的）
       - name: 离线规则评估（含工具覆盖校验）
         run: npm run eval:agent
-      # 任务级评测：10 个「末态断言」（117/117 全过但机器是错的 那类回归只有它能抓住）。
+      # 任务级评测：12 个「末态断言」（117/117 全过但机器是错的 那类回归只有它能抓住）。
+      # t12-step-export 会真起 build123d 出 STEP；runner 没内核时该例打印 SKIP（不计 pass，
+      # 也不计 fail），日志里必须能看到 `TASK_EVAL t12-step-export SKIP`。
       # 不加 `|| true`：TASK_EVAL_SUMMARY 里 failed>0 时脚本本身 exit 1，这里必须跟着红。
       - name: 任务级评测（末态断言，失败即红）
         timeout-minutes: 10
