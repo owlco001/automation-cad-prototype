@@ -22,7 +22,11 @@
  */
 
 import type { MachineConfig } from '../commission/machine-config.ts';
-import { resolveMachineGeometry, type MachineGeometrySource } from './machine-geometry.ts';
+import {
+  WORKPIECE_PART_ID,
+  resolveMachineGeometry,
+  type MachineGeometrySource
+} from './machine-geometry.ts';
 import type { MachineGeometry } from './geometry.ts';
 import { screenInterference } from './interference.ts';
 
@@ -87,6 +91,13 @@ export interface InterferenceStateSummary {
   reviewStatus: ReviewStatus;
   poseValidity: PoseValidity;
   items: InterferenceItem[];
+  /**
+   * 工件参与的**重叠对**数（含 declared/mate）。0 不代表没查（板压在带上是贴面不是重叠），
+   * 只说明这一态板没互穿任何东西；配合 workpieceTouching 一起看才是「真的查了板」。
+   */
+  workpiecePairs?: number;
+  /** 工件参与的**贴面对**数（rest/lift 时板压在带/辊上就是这一类，不算干涉但证明它在场） */
+  workpieceTouching?: number;
 }
 
 export interface SweepStepSummary extends InterferenceStateSummary {
@@ -94,9 +105,70 @@ export interface SweepStepSummary extends InterferenceStateSummary {
   z: number;
 }
 
+/**
+ * 返回给调用方的**紧凑**步进摘要：只保留数字，不带 items。
+ *
+ * 为什么：8 步各带一份 items 就有 4 KB，四态加起来直接顶过 10 KB 的工具结果上限，
+ * 结果会被裁成 `{truncated, preview}` —— 数字全丢。逐步的零件对已在态级 `items` 里去重汇总。
+ */
+export interface CompactSweepStep {
+  z: number;
+  pairs: number;
+  hits: number;
+  screenHits: number;
+  confirmedHits: number;
+  mm3: number;
+  mm3Confirmed: number;
+  poseValidity: PoseValidity;
+  workpiecePairs?: number;
+  workpieceTouching?: number;
+}
+
 export interface SweepStateSummary extends InterferenceStateSummary {
   step: number;
-  steps: SweepStepSummary[];
+  steps: CompactSweepStep[];
+}
+
+export interface PushStepSummary extends InterferenceStateSummary {
+  /** 该步的移载位移 mm（0 = 刚顶升到位、还没开始推） */
+  y: number;
+}
+
+/** push 扫掠里最严重的一步（只给一行，逐对明细在该态的 items 里） */
+export interface PushWorstStep {
+  /** 位移 mm */
+  at: number;
+  pairs: number;
+  screenHits: number;
+  confirmedHits: number;
+  mm3: number;
+  mm3Confirmed: number;
+}
+
+/**
+ * push 是**扫掠态**，不是端点态。
+ *
+ * 为什么必须扫：板沿 +Y 穿过出料口挡边（挡边是沿 X 的一段墙，板要横穿它）。
+ * 端点（y = 1140）板已经在挡边外侧，开口够不够宽根本看不出来 —— 上一轮那个
+ * 「挡边扫切板角 2520 mm³」正是只在**中途**才发生。只查端点等于又回到「看起来对」。
+ *
+ * 为什么**不**把每一点都摊开返回：114 个位姿的完整 summary 会把工具结果顶过 10 KB 上限，
+ * 结果被裁剪成 `{truncated, preview}`，「四态」直接读不到（实测就炸在这一步）。
+ * 所以检查逐点做、**只回聚合量**：查了几点（samples）、有命中的几点与范围（hitSamples/hitRange）、
+ * 最坏一步（worst）；逐对明细在态级 items 里（去重后 ≤10 条）。
+ */
+export interface PushStateSummary extends InterferenceStateSummary {
+  step: number;
+  /** 实际检查过的位姿数（每 step mm 一个，含起点与终点） */
+  samples: number;
+  /** 有命中（确认或待复核）的位姿数；0 = 全程干净 */
+  hitSamples: number;
+  /** 第一个/最后一个有命中的位姿 mm；无命中为 null */
+  hitRange: [number, number] | null;
+  /** 最严重的一步；全程干净时为 null */
+  worst: PushWorstStep | null;
+  /** 有几个位姿「工件与机构贴面」（板在场证据：板被辊道托着推进） */
+  workpieceTouchingSamples?: number;
 }
 
 export interface LiftAxisInfo {
@@ -109,6 +181,11 @@ export interface LiftAxisInfo {
   /** true = config 方向与几何伸出方向相反，本轴是「反向平移」 */
   directionOverridden: boolean;
   partIds: string[];
+  /**
+   * 个别随动件的拾取空行程（mm）：`{ partId: 空行程 }`（一般只有工件）。
+   * 工件静止时压在带面上、而顶升面比带面低几毫米，前几毫米行程它不动 —— 见 geometry.ts 的 partPickupGapMm。
+   */
+  partPickupGapMm?: Record<string, number>;
 }
 
 /**
@@ -126,6 +203,29 @@ export interface InterferencePrecision {
   aabbOnly: string[];
 }
 
+/**
+ * 工件（板）在本次检查里的身份与口径。
+ *
+ * 为什么单列一块：工件是**料**，不是设备零件 —— 它必须参与干涉（板能不能推出出料口是几何问题），
+ * 但绝不能出现在 BOM/成本/装配件数里。把口径做进返回值，下游就不用猜「partCount 为什么比 BOM 多 1」。
+ */
+export interface InterferenceWorkpieceInfo {
+  partId: string;
+  name: string;
+  /** 长×宽×厚（mm），来自机床参数（缺省 1200×800×35） */
+  sizeMm: Vec3;
+  /** rest / lift 两态的工件底面 z（mm）：rest 贴带面，lift 抬到辊面；push = lift 位姿再沿 +Y 平移 */
+  bottomZ: { rest: number; lift: number | null };
+  /** push 态沿 +Y 的平移量（mm）；没有移载轴时为 null */
+  pushTravelMm: number | null;
+  /** 几何刚体数（partCount）**含**工件：+1 */
+  countedInPartCount: true;
+  /** 装配件数（BOM/STEP 口径）**不含**工件：与无工件时一致 */
+  countedInAssemblyPartCount: false;
+  /** BOM / 成本**不含**工件：它是被加工对象，不是采购件 */
+  inBom: false;
+}
+
 export interface InterferenceStatesPayload {
   ok: true;
   source: 'machine-geometry';
@@ -138,9 +238,14 @@ export interface InterferenceStatesPayload {
   lift: LiftAxisInfo | null;
   /** 移载轴（+Y）；机型没有移载工位时为 null */
   push: LiftAxisInfo | null;
+  /**
+   * 工件（板）占位体：本次检查里它作为普通件参与**全部**碰撞对。
+   * 没有工件（非移载机型 / 调用方给的几何里没建）时为 null。
+   */
+  workpiece: InterferenceWorkpieceInfo | null;
   /** 要了却给不出的状态（现在只有 push）：原因写在这里，不悄悄吞掉 */
   unavailable?: Partial<Record<InterferenceState, string>>;
-  states: Record<string, InterferenceStateSummary | SweepStateSummary>;
+  states: Record<string, InterferenceStateSummary | SweepStateSummary | PushStateSummary>;
   /** 全部状态里最差的一档：fail > warn > pass */
   reviewStatus: ReviewStatus;
   precision: InterferencePrecision;
@@ -178,7 +283,7 @@ function dedupeItems(items: InterferenceItem[]): InterferenceItem[] {
 
 function summarize(
   screen: ReturnType<typeof screenInterference>,
-  options: { poseValidity: PoseValidity; movingIds?: ReadonlySet<string> }
+  options: { poseValidity: PoseValidity; movingIds?: ReadonlySet<string>; workpieceId?: string | undefined }
 ): InterferenceStateSummary {
   const overridden = options.poseValidity === 'direction-overridden';
   const moving = options.movingIds ?? new Set<string>();
@@ -213,6 +318,17 @@ function summarize(
     round1(list.reduce((total, pair) => total + pick(pair), 0));
   const confirmedHits = confirmedPairs.length;
   const screenHits = screenPairs.length;
+  // 工件在场证明：重叠对 + 贴面对各自的计数。板压在带上属于「贴面」，不进 pairs，
+  // 所以只报 pairs 会让人以为「板上什么都没查」。
+  const workpieceId = options.workpieceId;
+  const involvesWorkpiece = (pair: { a: unknown; b: unknown }): boolean =>
+    String(pair.a) === workpieceId || String(pair.b) === workpieceId;
+  const workpiecePairs = workpieceId
+    ? screen.pairs.filter((pair) => involvesWorkpiece(pair)).length
+    : undefined;
+  const workpieceTouching = workpieceId
+    ? screen.touchingPairs.filter((pair) => involvesWorkpiece(pair)).length
+    : undefined;
   return {
     pairs: screen.count,
     hits: confirmedHits + screenHits,
@@ -225,7 +341,8 @@ function summarize(
     mm3Declared: round1(screen.declaredMm3),
     reviewStatus: confirmedHits > 0 ? 'fail' : overridden || screenHits > 0 ? 'warn' : 'pass',
     poseValidity: options.poseValidity,
-    items
+    items,
+    ...(workpieceId ? { workpiecePairs: workpiecePairs ?? 0, workpieceTouching: workpieceTouching ?? 0 } : {})
   };
 }
 
@@ -289,7 +406,88 @@ export function resolveLiftAxis(config: unknown, geometry: unknown): LiftAxisInf
     direction,
     geometryDirection,
     directionOverridden,
-    partIds
+    partIds,
+    ...travelOverridesOf(axis)
+  };
+}
+
+/** 轴上的「个别件拾取空行程」：只收有限非负数，脏数据一律忽略（宁可多平移，也不静默乱动）。 */
+function travelOverridesOf(axis: unknown): { partPickupGapMm?: Record<string, number> } {
+  if (!isRecord(axis) || !isRecord(axis.partPickupGapMm)) return {};
+  const table: Record<string, number> = {};
+  for (const [id, value] of Object.entries(axis.partPickupGapMm)) {
+    const gap = Number(value);
+    if (id.length > 0 && Number.isFinite(gap) && gap >= 0) table[id] = gap;
+  }
+  return Object.keys(table).length > 0 ? { partPickupGapMm: table } : {};
+}
+
+/**
+ * 件在顶升轴上的实际位移（mm）= 轴位移 − 拾取空行程（不小于 0，不超过轴位移）。
+ * 没有空行程的件照常按 `zMm` 平移。
+ */
+function liftTravelOf(axis: LiftAxisInfo, partId: string, zMm: number): number {
+  const gap = axis.partPickupGapMm?.[partId];
+  if (gap === undefined) return zMm;
+  return Math.max(0, zMm - gap);
+}
+
+/**
+ * 某态的位姿（与 `runInterferenceStates` 内部**同一实现**）。
+ *
+ * 单独导出的目的：测试/评审要能自己复算「这个态到底是哪套零件摆在哪」，而不是各写一份平移规则。
+ * 以前 push 态就是这样被写出两套口径（一套顶升、一套不顶升），数字对不上却看不出来。
+ */
+export function poseForState(input: {
+  geometry: MachineGeometry;
+  state: InterferenceState;
+  lift: LiftAxisInfo | null;
+  push: LiftAxisInfo | null;
+  /** sweep 用：顶升位移 mm（缺省 = 满行程） */
+  liftMm?: number;
+  /** push 用：移载位移 mm（缺省 = 满行程） */
+  pushMm?: number;
+}): MachineGeometry {
+  const { geometry, state, lift, push } = input;
+  if (state === 'rest' || !lift) return geometry;
+  const zMm = input.liftMm ?? lift.strokeMm;
+  const overrides: Record<string, number> = {};
+  for (const partId of Object.keys(lift.partPickupGapMm ?? {})) {
+    overrides[partId] = liftTravelOf(lift, partId, zMm);
+  }
+  const lifted = shiftParts(geometry, lift.partIds, lift.direction, zMm, overrides);
+  if (state !== 'push' || !push) return lifted;
+  return shiftParts(lifted, push.partIds, push.direction, input.pushMm ?? push.strokeMm);
+}
+
+/** 扫掠态的汇总口径：pairs 取单步最大，计数与体积按步累计，items 去重（同一对会在多步重叠）。 */
+function aggregateSteps<T extends InterferenceStateSummary>(
+  steps: readonly T[],
+  workpiece: boolean
+): InterferenceStateSummary {
+  const total = (pick: (step: T) => number): number => round1(steps.reduce((sum, step) => sum + pick(step), 0));
+  const worst: ReviewStatus = steps.some((step) => step.reviewStatus === 'fail')
+    ? 'fail'
+    : steps.some((step) => step.reviewStatus === 'warn') ? 'warn' : 'pass';
+  return {
+    pairs: Math.max(0, ...steps.map((step) => step.pairs)),
+    hits: steps.reduce((sum, step) => sum + step.hits, 0),
+    screenHits: steps.reduce((sum, step) => sum + step.screenHits, 0),
+    confirmedHits: steps.reduce((sum, step) => sum + step.confirmedHits, 0),
+    mates: steps.reduce((sum, step) => sum + step.mates, 0),
+    mm3: total((step) => step.mm3),
+    mm3Confirmed: total((step) => step.mm3Confirmed),
+    mm3Screen: total((step) => step.mm3Screen),
+    mm3Declared: total((step) => step.mm3Declared),
+    reviewStatus: worst,
+    poseValidity: steps.some((step) => step.poseValidity === 'direction-overridden')
+      ? 'direction-overridden'
+      : 'valid',
+    items: dedupeItems(steps.flatMap((step) => step.items)),
+    ...(workpiece ? {
+      workpiecePairs: steps.reduce((sum, step) => sum + (step.workpiecePairs ?? 0), 0),
+      workpieceTouching: steps.reduce((sum, step) => sum + (step.workpieceTouching ?? 0), 0)
+    } : {})
   };
 }
 
@@ -298,7 +496,9 @@ export function shiftParts(
   geometry: MachineGeometry,
   partIds: readonly string[],
   direction: Vec3,
-  distanceMm: number
+  distanceMm: number,
+  /** 个别件的实际位移覆盖（mm）：不传就全部按 distanceMm 平移 */
+  travelOverridesMm?: Record<string, number>
 ): MachineGeometry {
   const moving = new Set(partIds);
   const [dx, dy, dz] = direction;
@@ -306,13 +506,14 @@ export function shiftParts(
     ...geometry,
     parts: geometry.parts.map((part) => {
       if (!moving.has(String(part.id))) return part;
+      const distance = travelOverridesMm?.[String(part.id)] ?? distanceMm;
       const center = Array.isArray(part.center) ? part.center : [0, 0, 0];
       return {
         ...part,
         center: [
-          Number(center[0]) + dx * distanceMm,
-          Number(center[1]) + dy * distanceMm,
-          Number(center[2]) + dz * distanceMm
+          Number(center[0]) + dx * distance,
+          Number(center[1]) + dy * distance,
+          Number(center[2]) + dz * distance
         ] as Vec3
       };
     })
@@ -449,60 +650,127 @@ export function runInterferenceStates(input: {
   const output: Record<string, InterferenceStateSummary | SweepStateSummary> = {};
   const movingIds = new Set<string>(lift?.partIds ?? []);
   const liftPose: PoseValidity = lift?.directionOverridden ? 'direction-overridden' : 'valid';
+  // 工件（板）：从几何里认，不从参数里另算 —— 保证「几何里有板」=「这次检查查了板」。
+  // 只认 role/id 两条，都是几何自己标的；调用方给的 geometry 里没有就是 null（退回旧口径，不假装查过）。
+  const workpiecePart = geometry.parts.find(
+    (part) => part.id === WORKPIECE_PART_ID || part.role === 'workpiece'
+  ) ?? null;
+  const workpieceId = workpiecePart ? String(workpiecePart.id) : undefined;
+  const workpieceHalfZ = workpiecePart && workpiecePart.shape.type === 'box'
+    ? Number(workpiecePart.shape.size[2]) / 2
+    : 0;
+  // 工件在顶升轴上的实际位移 = 轴行程 − 拾取空行程（带空行程的件按表算）。
+  const workpieceLiftMm = lift
+    ? (workpieceId !== undefined ? liftTravelOf(lift, workpieceId, lift.strokeMm) : lift.strokeMm)
+    : null;
+  const workpiece: InterferenceWorkpieceInfo | null = workpiecePart
+    ? {
+      partId: String(workpiecePart.id),
+      name: String(workpiecePart.name),
+      sizeMm: workpiecePart.shape.type === 'box'
+        ? [Number(workpiecePart.shape.size[0]), Number(workpiecePart.shape.size[1]), Number(workpiecePart.shape.size[2])]
+        : [0, 0, 0],
+      bottomZ: {
+        rest: round1(Number(workpiecePart.center[2]) - workpieceHalfZ),
+        lift: workpieceLiftMm === null
+          ? null
+          : round1(Number(workpiecePart.center[2]) - workpieceHalfZ + workpieceLiftMm)
+      },
+      pushTravelMm: push ? push.strokeMm : null,
+      countedInPartCount: true,
+      countedInAssemblyPartCount: false,
+      inBom: false
+    }
+    : null;
   for (const state of states) {
     if (state === 'rest') {
-      output.rest = summarize(screenInterference(geometry), { poseValidity: 'valid' });
+      output.rest = summarize(screenInterference(geometry), { poseValidity: 'valid', workpieceId });
       continue;
     }
     if (state === 'push') {
       if (!push) continue; // pushUnavailable 已记原因，不产出这一态（不拿 lift 冒充）
-      // 复合位姿：先顶升（有顶升轴才抬）再沿移载方向推出。姿态不可信时（方向被 config 覆盖）
-      // 该态同样降级为待复核，与 lift 同一口径。
-      const liftedPose = lift ? shiftParts(geometry, lift.partIds, lift.direction, lift.strokeMm) : geometry;
-      const pushed = shiftParts(liftedPose, push.partIds, push.direction, push.strokeMm);
+      // 复合位姿 + **沿 +Y 扫掠**：先顶升（有顶升轴才抬）再沿移载方向逐点推出。
+      // 只查端点是不够的：板是横穿出料口挡边出去的，开口窄了只在**中途**撞（见 PushStateSummary）。
       const poseValidity: PoseValidity = push.directionOverridden || lift?.directionOverridden
         ? 'direction-overridden'
         : 'valid';
       const pushMovingIds = new Set<string>([...push.partIds, ...(lift?.partIds ?? [])]);
-      output.push = summarize(screenInterference(pushed), { poseValidity, movingIds: pushMovingIds });
+      const samples: PushStepSummary[] = [];
+      const pushAt = (pushMm: number): PushStepSummary => ({
+        y: round1(pushMm),
+        ...summarize(
+          screenInterference(poseForState({ geometry, state: 'push', lift, push, pushMm })),
+          { poseValidity: pushMm === 0 ? 'valid' : poseValidity, movingIds: pushMovingIds, workpieceId }
+        )
+      });
+      for (let y = 0; y <= push.strokeMm + 1e-9; y += SWEEP_STEP_MM) samples.push(pushAt(y));
+      const lastY = samples[samples.length - 1]?.y ?? 0;
+      if (lastY < push.strokeMm - 1e-9) samples.push(pushAt(push.strokeMm));
+      // 逐点明细只在内部用：返回 samples / hitSamples / hitRange / worst 四个紧凑量（见 PushStateSummary）
+      const hitSteps = samples.filter((step) => step.confirmedHits + step.screenHits > 0);
+      const worstStep = hitSteps.reduce<PushStepSummary | null>((best, step) => {
+        if (!best) return step;
+        if (step.mm3Confirmed !== best.mm3Confirmed) return step.mm3Confirmed > best.mm3Confirmed ? step : best;
+        return step.confirmedHits > best.confirmedHits ? step : best;
+      }, null);
+      const pushSummary: PushStateSummary = {
+        ...aggregateSteps(samples, workpieceId !== undefined),
+        step: SWEEP_STEP_MM,
+        samples: samples.length,
+        hitSamples: hitSteps.length,
+        hitRange: hitSteps.length > 0
+          ? [hitSteps[0]?.y ?? 0, hitSteps[hitSteps.length - 1]?.y ?? 0]
+          : null,
+        worst: worstStep
+          ? {
+            at: worstStep.y,
+            pairs: worstStep.pairs,
+            screenHits: worstStep.screenHits,
+            confirmedHits: worstStep.confirmedHits,
+            mm3: worstStep.mm3,
+            mm3Confirmed: worstStep.mm3Confirmed
+          }
+          : null,
+        ...(workpieceId !== undefined
+          ? { workpieceTouchingSamples: samples.filter((step) => (step.workpieceTouching ?? 0) > 0).length }
+          : {})
+      };
+      output.push = pushSummary;
       continue;
     }
     if (!lift) continue; // needLift 已保证不会走到这里
     if (state === 'lift') {
-      const lifted = shiftParts(geometry, lift.partIds, lift.direction, lift.strokeMm);
-      output.lift = summarize(screenInterference(lifted), { poseValidity: liftPose, movingIds });
+      const lifted = poseForState({ geometry, state: 'lift', lift, push });
+      output.lift = summarize(screenInterference(lifted), { poseValidity: liftPose, movingIds, workpieceId });
       continue;
     }
     // sweep：按 10 mm 逐步顶升；行程不是 10 的整数倍时补最后一步（到位位姿也要查）
     const steps: SweepStepSummary[] = [];
     for (let z = 0; z <= lift.strokeMm + 1e-9; z += SWEEP_STEP_MM) {
-      const posed = shiftParts(geometry, lift.partIds, lift.direction, z);
-      steps.push({ z: round1(z), ...summarize(screenInterference(posed), { poseValidity: z === 0 ? 'valid' : liftPose, movingIds }) });
+      const posed = poseForState({ geometry, state: 'sweep', lift, push, liftMm: z });
+      steps.push({ z: round1(z), ...summarize(screenInterference(posed), { poseValidity: z === 0 ? 'valid' : liftPose, movingIds, workpieceId }) });
     }
     const lastZ = steps[steps.length - 1]?.z ?? 0;
     if (lastZ < lift.strokeMm - 1e-9) {
-      const posed = shiftParts(geometry, lift.partIds, lift.direction, lift.strokeMm);
-      steps.push({ z: round1(lift.strokeMm), ...summarize(screenInterference(posed), { poseValidity: liftPose, movingIds }) });
+      const posed = poseForState({ geometry, state: 'sweep', lift, push });
+      steps.push({ z: round1(lift.strokeMm), ...summarize(screenInterference(posed), { poseValidity: liftPose, movingIds, workpieceId }) });
     }
-    const confirmedHits = steps.reduce((sum, step) => sum + step.confirmedHits, 0);
     output.sweep = {
-      // 扫掠没有单一数字：pairs 取单步最大，其余按步累计（每步都可能撞）
-      pairs: Math.max(0, ...steps.map((step) => step.pairs)),
-      hits: steps.reduce((sum, step) => sum + step.hits, 0),
-      screenHits: steps.reduce((sum, step) => sum + step.screenHits, 0),
-      confirmedHits,
-      mates: steps.reduce((sum, step) => sum + step.mates, 0),
-      mm3: round1(steps.reduce((sum, step) => sum + step.mm3, 0)),
-      mm3Confirmed: round1(steps.reduce((sum, step) => sum + step.mm3Confirmed, 0)),
-      mm3Screen: round1(steps.reduce((sum, step) => sum + step.mm3Screen, 0)),
-      mm3Declared: round1(steps.reduce((sum, step) => sum + step.mm3Declared, 0)),
-      reviewStatus: steps.some((step) => step.reviewStatus === 'fail')
-        ? 'fail'
-        : steps.some((step) => step.reviewStatus === 'warn') ? 'warn' : 'pass',
-      poseValidity: steps.some((step) => step.poseValidity === 'direction-overridden') ? 'direction-overridden' : 'valid',
-      items: dedupeItems(steps.flatMap((step) => step.items)),
+      ...aggregateSteps(steps, workpieceId !== undefined),
       step: SWEEP_STEP_MM,
-      steps
+      // 逐步只回数字：items 已在态级去重汇总，逐步再带一份会把四态结果顶过 10 KB 上限
+      steps: steps.map((step) => ({
+        z: step.z,
+        pairs: step.pairs,
+        hits: step.hits,
+        screenHits: step.screenHits,
+        confirmedHits: step.confirmedHits,
+        mm3: step.mm3,
+        mm3Confirmed: step.mm3Confirmed,
+        poseValidity: step.poseValidity,
+        ...(step.workpiecePairs === undefined ? {} : { workpiecePairs: step.workpiecePairs }),
+        ...(step.workpieceTouching === undefined ? {} : { workpieceTouching: step.workpieceTouching })
+      }))
     };
   }
 
@@ -520,6 +788,7 @@ export function runInterferenceStates(input: {
     assemblyPartCount: geometry.assemblyPartCount ?? geometry.parts.length,
     lift,
     push,
+    workpiece,
     ...(pushUnavailable ? { unavailable: { push: pushUnavailable } } : {}),
     states: output,
     reviewStatus,
@@ -537,8 +806,18 @@ export function runInterferenceStates(input: {
       + 'suspect=待复核；suspect 再分 confirmedHits（解析式精确，可判 FAIL）与 screenHits（只有包围盒依据，只判 WARN）。'
       + 'mm3=pairs 的 AABB 上界合计（含 declared/mate，只作量级参考），mm3Confirmed/mm3Screen 是分开的真实口径。'
       + 'lift/sweep 按 config 的 travelMm 平移；若 config 方向与几何建模的伸出方向相反（poseValidity=direction-overridden），'
-      + '该态只是反向平移、位姿不可达，动件相关命中一律降级为待复核。sweep 的计数按步累计，pairs 取单步最大。'
-      + 'push 是可选的复合位姿（先顶升、再沿 +Y 推出）；机型没有移载轴时该态不产出，原因见 unavailable.push。'
+      + '该态只是反向平移、位姿不可达，动件相关命中一律降级为待复核。'
+      + 'sweep 的计数按步累计，pairs 取单步最大；push 同样是**扫掠**（每 10 mm 一个位姿，先顶升再沿 +Y 推出），'
+      + '返回 samples/hitSamples/hitRange/worst（逐点数组不回传：会把结果顶过 10 KB 上限被裁成 preview）。'
+      + 'push 是可选的复合位姿；机型没有移载轴时该态不产出，原因见 unavailable.push。'
+      + (workpiece
+        ? `工件（${workpiece.sizeMm.join('×')} mm，partId=${workpiece.partId}）作为普通件参与全部碰撞对：`
+          + `rest 底面 ${workpiece.bottomZ.rest}${workpiece.bottomZ.lift === null ? '' : `、lift 底面 ${workpiece.bottomZ.lift}`}`
+          + `${workpiece.pushTravelMm === null ? '' : `、push 再沿 +Y 平移 ${workpiece.pushTravelMm}`}；`
+          + '每态的 workpiecePairs（重叠对）/workpieceTouching（贴面对）是「板真的在查」的证据。'
+          + '口径：partCount（几何刚体数）含它 +1，assemblyPartCount / BOM / 成本**不含**（工件是被加工对象，不是采购件）。'
+        : '本次几何里没有工件占位体（非移载机型或调用方直接给了不含工件的几何）：结论只对机构件成立，'
+          + '「板能不能推出出料口」不在本结果的证明范围内。')
       + `本次几何来源 geometrySource=${geometrySource}（输送类走参数化整机，其余形态走工位生成器），`
       + '结论只对这套零件表成立；和 B-Rep 结论对齐前先确认两边 assemblyPartCount 一致。'
   };

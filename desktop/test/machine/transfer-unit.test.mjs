@@ -27,7 +27,11 @@ import { detectTransfer, parseMachineBrief, detectTurner } from '../../src/machi
 import { synthMachine } from '../../src/machine/synth.ts';
 import { buildMachineIoMap } from '../../src/machine/io-map.ts';
 import { precheck } from '../../src/plcgen/precheck.ts';
-import { runInterferenceStates, shiftParts } from '../../src/machine/interference-states.ts';
+import {
+  poseForState,
+  runInterferenceStates,
+  shiftParts
+} from '../../src/machine/interference-states.ts';
 import { screenInterference } from '../../src/machine/interference.ts';
 import { resolveMachineGeometry } from '../../src/machine/machine-geometry.ts';
 import { validateFeatures } from '../../src/parametric/features.ts';
@@ -374,13 +378,18 @@ test('四态干涉：rest / lift / sweep / push 全部 confirmed=0', () => {
     assert.equal(entry.screenHits, 0, `${name} 态有待复核对：${JSON.stringify(entry.items.slice(0, 4))}`);
     assert.equal(entry.reviewStatus, 'pass', `${name} 态判定应为 pass`);
   }
-  // push 必须是**复合位姿**（先顶升、再沿 +Y 移出），不能是「又顶了一次」也不能等于 lift。
-  // 这里自己按 lift+push 复算一遍，与工具给的数字逐项对齐。
+  // push 是**复合位姿 + 沿 +Y 扫掠**（先顶升、再逐点推出），不能是「又顶了一次」也不能等于 lift。
+  // 这里用同一个 poseForState 复算，与工具给的数字逐项对齐（扫掠态的 pairs 取单步最大）。
   const geometry = resolveMachineGeometry(transferConfig()).geometry;
-  const liftPose = shiftParts(geometry, result.lift.partIds, result.lift.direction, result.lift.strokeMm);
+  const liftPose = poseForState({ geometry, state: 'lift', lift: result.lift, push: result.push });
   assert.equal(result.states.lift.pairs, screenInterference(liftPose).count, 'lift 态应等于「只顶升」的位姿');
-  const pushPose = shiftParts(liftPose, result.push.partIds, result.push.direction, result.push.strokeMm);
-  assert.equal(result.states.push.pairs, screenInterference(pushPose).count, 'push 态应等于「顶升 + 沿 +Y 移出」的位姿');
+  const pushEndPose = poseForState({ geometry, state: 'push', lift: result.lift, push: result.push });
+  assert.ok(result.states.push.pairs >= screenInterference(pushEndPose).count,
+    'push 的 pairs 是全程单点最大，必然 ≥ 端点那一手的对数');
+  assert.equal(result.states.push.samples >= 100, true,
+    `push 必须逐点扫过 1140 行程（≥100 点，实际 ${result.states.push.samples}）：只查端点看不出出料口够不够宽`);
+  assert.equal(result.states.push.hitSamples, 0);
+  assert.equal(result.states.push.worst, null);
   assert.ok(result.push.partIds.includes('transfer-push-plate'), 'push 轴必须包含推板');
   assert.ok(result.states.sweep.steps.length >= 8, 'sweep 应按 10 mm 逐步扫描 0..70（8 步）');
   assert.equal(result.states.sweep.steps.at(-1).z, LIFT_STROKE, 'sweep 必须扫到行程末端（70）');
@@ -542,25 +551,17 @@ test('动作时间：顶升 2.2 s + 移载 4.2 s，节拍按工位封顶而不�
 // ——————————————————————————————————————————————————————————————
 // 出料口 / 顶升行程（缺陷 1 的回归）：板必须真的能沿 +Y 推出去。
 //
-// 工件（板）不在产品几何里（conveyor-assembly 只出机构），所以下面这几条用**测试内注入**的
-// 板模型做位姿检查：板按真实尺寸 1200×800×35 建成一个 box，先随顶升轴抬起、再沿 +Y 推。
-// 注入只发生在测试里，不改产品几何，也不改 BOM。
+// 工件（板 1200×800×35）现在是**产品几何的一部分**（machine-geometry 的工件占位体），
+// 随两条移载轴走，四态（rest/lift/sweep/push）都由 runInterferenceStates 真跑。
+// 下面不再往几何里注入任何盒子 —— 注入只能证明「测试会算」，证明不了「产品会查」。
 // ——————————————————————————————————————————————————————————————
 
-/** 工件模型（与真机同尺寸的占位体；只为干涉检查，不进 BOM/几何） */
-function platePart({ bottomZ, y = 0, lengthMm = 1200, widthMm = 800, centerX = 0 }) {
-  return {
-    id: 'workpiece-plate',
-    name: '光伏板（工件占位）',
-    role: 'workpiece',
-    shape: { type: 'box', size: [lengthMm, widthMm, 35] },
-    center: [centerX, y, bottomZ + 17.5],
-    rotationZDeg: 0,
-    color: '#2f7d4f',
-    material: 'PVC',
-    bomGroup: 'other',
-    estimated: true
-  };
+const WORKPIECE = 'workpiece-plate';
+/** 产品几何里的工件（没有就炸：这台机型必须有板，否则本段断言全是空转） */
+function workpieceOf(geometry) {
+  const part = geometry.parts.find((entry) => entry.role === 'workpiece');
+  assert.ok(part, '产品几何里没有工件占位体：板又回到「只有单测才看得见」的状态');
+  return part;
 }
 
 /** 把指定零件沿坐标轴平移（负向对照用） */
@@ -583,26 +584,38 @@ function narrowOutfeed(geometry, delta) {
   };
 }
 
-/**
- * 板从 y=0 沿 +Y 走完整个移载行程，每 step 取一个位姿，只比「板 × 其它零件」。
- * 返回最严重的一步（mm³ + 命中明细）；全程无命中返回 null。
- */
-function sweepPlate(geometry, { liftStroke = LIFT_STROKE, plateBottomZ = PLATE_BOTTOM_LIFT, step = 10, config = transferConfig() } = {}) {
-  const liftInfo = runInterferenceStates({ states: ['lift'], config: { ...config, actuators: config.actuators.map(
-    (actuator) => (actuator.id === 'transfer-lift' ? { ...actuator, travelMm: liftStroke } : actuator)) }, geometry });
-  assert.equal(liftInfo.ok, true, 'sweep 需要 lift 轴');
-  const lifted = shiftParts(geometry, liftInfo.lift.partIds, liftInfo.lift.direction, liftStroke);
-  let worst = null;
-  for (let dy = 0; dy <= layout.pushStrokeMm; dy += step) {
-    const posed = { ...lifted, parts: [...lifted.parts, platePart({ bottomZ: plateBottomZ, y: dy })] };
-    const hits = screenInterference(posed).pairs.filter((pair) => pair.classification === 'suspect'
-      && (pair.a === 'workpiece-plate' || pair.b === 'workpiece-plate'));
-    const mm3 = hits.reduce((sum, pair) => sum + (pair.exactOverlapMm3 ?? 0), 0);
-    if (mm3 > 0 && (!worst || mm3 > worst.mm3)) {
-      worst = { dy, mm3, pairs: hits.map((pair) => `${pair.a}×${pair.b}=${pair.exactOverlapMm3}mm³`) };
-    }
-  }
-  return worst;
+/** 去掉工件（含两轴的随动登记）：用来证明「新增的板确实在起作用」，不是数字巧合 */
+function withoutWorkpiece(geometry) {
+  return {
+    ...geometry,
+    parts: geometry.parts.filter((part) => part.role !== 'workpiece'),
+    moving: geometry.moving.map((axis) => ({
+      ...axis,
+      partIds: axis.partIds.filter((id) => id !== WORKPIECE),
+      ...(axis.partPickupGapMm ? { partPickupGapMm: {} } : {})
+    }))
+  };
+}
+
+/** 带不同顶升行程的 config（负向对照要能改行程，不改几何） */
+function configWithLiftStroke(strokeMm) {
+  return {
+    ...transferConfig(),
+    actuators: transferConfig().actuators.map((actuator) => (
+      actuator.id === 'transfer-lift' ? { ...actuator, travelMm: strokeMm } : actuator))
+  };
+}
+
+/** push 扫掠里最严重的一步：返回 { at, pairs, mm3, detail }；全程无命中返回 null */
+function worstPushStep(entry) {
+  if (!entry.worst) return null;
+  return {
+    y: entry.worst.at,
+    pairs: entry.worst.confirmedHits,
+    mm3: entry.worst.mm3Confirmed,
+    detail: entry.items.filter((item) => item.kind === 'suspect')
+      .map((item) => `${item.a}×${item.b}=${item.exactOverlapMm3}mm³`)
+  };
 }
 
 test('行程 70 是从挡边顶反推的：板底 915 ≥ 挡边顶 911 + 4，且台板顶/辊底都还在带面正确一侧', () => {
@@ -688,33 +701,56 @@ test('三种板尺寸（800×600 / 1200×800 / 1500×1000）四态 confirmed=0 �
 });
 
 test('板沿 +Y 全行程扫过全部机构：0 命中（板真的推得出去，不是「推到末端才不撞」）', () => {
-  const geometry = resolveMachineGeometry(transferConfig()).geometry;
-  const worst = sweepPlate(geometry, { step: 10 });
-  assert.equal(worst, null, `板在推出途中撞了：${JSON.stringify(worst)}`);
+  const config = transferConfig();
+  const result = runInterferenceStates({ states: ['push'], config });
+  assert.equal(result.ok, true);
+  const push = result.states.push;
+  // 全程 115 点（0..1140 每 10 mm + 末端），逐步都要 0：端点 0 不等于全程 0
+  assert.ok(push.samples >= 100, `push 只查了 ${push.samples} 点，扫不过全程`);
+  assert.equal(push.confirmedHits, 0, `板在推出途中撞了：${JSON.stringify(push.items.slice(0, 4))}`);
+  assert.equal(push.mm3Confirmed, 0);
+  assert.equal(push.hitSamples, 0, `有命中的位姿 ${push.hitSamples} 个（${JSON.stringify(push.hitRange)}）`);
+  assert.equal(push.worst, null);
+  assert.equal(push.reviewStatus, 'pass');
+  // 「0 命中」必须配上「板真的在场」，否则可能只是没查板
+  assert.ok((push.workpieceTouchingSamples ?? 0) >= 40,
+    `push 全程只有 ${push.workpieceTouchingSamples} 个位姿「板与机构贴面」，说明板没跟着推`);
 });
 
-test('负向对照①：旧口径（行程 60 + 开口 ±530）复现挡边扫切 2520 mm³', () => {
+test('负向对照①：行程 60 + 出料口收窄到 ±530 → 单步 2520 mm³（旧缺陷原样复现）', () => {
   const geometry = resolveMachineGeometry(transferConfig()).geometry;
   const oldOpen = narrowOutfeed(geometry, 90); // ±620 → ±530（旧 innerX = unitHalf + 10）
-  const worst = sweepPlate(oldOpen, { liftStroke: 60, plateBottomZ: BELT_FACE - 5 + 60, step: 10 });
+  const result = runInterferenceStates({ states: ['push'], config: configWithLiftStroke(60), geometry: oldOpen });
+  assert.equal(result.ok, true);
+  assert.equal(result.workpiece.bottomZ.lift, 905, '行程 60 时板底只能到 905（比挡边顶 911 低 6 mm）');
+  const worst = worstPushStep(result.states.push);
   assert.ok(worst, '旧口径必须撞出数字：撞不到说明这套检查看不见板，本用例的 confirmed=0 也不可信');
   assert.equal(worst.mm3, 2520,
     `旧口径应为 2×(530..600)=70 × 3（挡边厚）× 6（911−905） = 2520 mm³，实际 ${JSON.stringify(worst)}`);
-  assert.equal(worst.pairs.filter((text) => /guard-right/.test(text)).length, 2, '两侧挡边各扫一对');
+  assert.equal(worst.pairs, 2, '两侧挡边各扫一对');
+  assert.equal(worst.detail.filter((text) => /guard-right/.test(text)).length, 2, `命中应落在出料口挡边上：${worst.detail}`);
+  // 可读的 partId + mm³ 必须逐对给出来（这是「错误也要能报」的最小要求）
+  assert.match(worst.detail[0], /guard-right-(in|out)×workpiece-plate=1260mm³/);
 });
 
 test('负向对照②：单参数 40 mm 偏移，检查器都能报 —— 而 4 mm 竖向余量/20 mm 横向余量单独都能顶住', () => {
   const geometry = resolveMachineGeometry(transferConfig()).geometry;
   // (a) 只把开口收窄 40/侧（±580）：板底 915 仍在挡边顶 911 之上 4 mm → 0
   const narrow = narrowOutfeed(geometry, 40);
-  assert.equal(sweepPlate(narrow, { step: 10 }), null,
-    '只收窄开口 40 mm 时，4 mm 竖向余量应当顶住（这是两个余量各管一个方向的设计）');
-  // (b) 只把板往下偏 40（875）：板沉进辊道/立柱 → 必须报出 mm³
-  const dropped = sweepPlate(geometry, { plateBottomZ: PLATE_BOTTOM_LIFT - 40, step: 10 });
-  assert.ok(dropped, '板低 40 mm 必须被报出来');
-  assert.ok(dropped.mm3 > 1000, `板低 40 mm 的实体重叠应 >1000 mm³，实际 ${dropped.mm3}`);
-  assert.ok(dropped.pairs.some((text) => /transfer-roller|post/.test(text)),
-    `板下沉应当压在辊道/轴承立柱上：${JSON.stringify(dropped.pairs.slice(0, 3))}`);
+  const narrowed = runInterferenceStates({ states: ['rest', 'lift', 'sweep', 'push'], config: transferConfig(), geometry: narrow });
+  assert.equal(narrowed.ok, true);
+  for (const name of ['rest', 'lift', 'sweep', 'push']) {
+    assert.equal(narrowed.states[name].confirmedHits, 0,
+      `只收窄开口 40 mm 时 ${name} 应为 0（4 mm 竖向余量该顶住）：${JSON.stringify(narrowed.states[name].items.slice(0, 3))}`);
+  }
+  // (b) 只把板往下沉 40（875）：板沉进辊道/立柱 → 必须报出 mm³
+  const dropped = shiftById(geometry, [WORKPIECE], [0, 0, -40]);
+  const droppedResult = runInterferenceStates({ states: ['lift'], config: transferConfig(), geometry: dropped });
+  const liftEntry = droppedResult.states.lift;
+  assert.ok(liftEntry.confirmedHits > 0, '板低 40 mm 必须被报出来');
+  assert.ok(liftEntry.mm3Confirmed > 1000, `板低 40 mm 的实体重叠应 >1000 mm³，实际 ${liftEntry.mm3Confirmed}`);
+  assert.ok(liftEntry.items.some((item) => /transfer-roller|post/.test(`${item.a}${item.b}`)),
+    `板下沉应当压在辊道/轴承立柱上：${JSON.stringify(liftEntry.items.slice(0, 3))}`);
   // (c) 机构件对照（与独立审计同口径）：gearmotor 沿 +Y 偏 40 → 260600 mm³
   const moved = shiftById(geometry, ['gearmotor'], [0, 40, 0]);
   const gmHits = screenInterference(moved).pairs.filter((pair) => pair.classification === 'suspect'
@@ -722,6 +758,11 @@ test('负向对照②：单参数 40 mm 偏移，检查器都能报 —— 而 4
   const gmMm3 = gmHits.reduce((sum, pair) => sum + (pair.exactOverlapMm3 ?? 0), 0);
   assert.equal(gmHits.length, 3, `gearmotor +40Y 应报 3 对，实际 ${gmHits.length}`);
   assert.equal(gmMm3, 260600, `gearmotor +40Y 应为 260600 mm³，实际 ${gmMm3}`);
+  // (d) 去掉工件后同一组负向对照必须**全部归零**：证明上面的数字来自新增的板，不是机构自己撞自己
+  const stripped = withoutWorkpiece(narrowed.ok ? narrow : geometry);
+  const strippedResult = runInterferenceStates({ states: ['push'], config: configWithLiftStroke(60), geometry: stripped });
+  assert.equal(strippedResult.workpiece, null, '去掉工件后不该再报 workpiece');
+  assert.equal(strippedResult.states.push.confirmedHits, 0, '没有工件时「板扫挡边」不该出现（旧口径看不见板）');
 });
 
 test('行程同步：config.travelMm / 几何轴 strokeMm / layout.strokeMm 三处必须一致（70）', () => {
@@ -735,7 +776,7 @@ test('行程同步：config.travelMm / 几何轴 strokeMm / layout.strokeMm 三�
   const geometry = resolved.geometry;
   const result = runInterferenceStates({ states: ['lift', 'sweep'], config: design.config });
   assert.equal(result.lift.strokeMm, 70);
-  const lifted = shiftParts(geometry, result.lift.partIds, result.lift.direction, 70);
+  const lifted = poseForState({ geometry, state: 'lift', lift: result.lift, push: result.push });
   assert.equal(result.states.lift.pairs, screenInterference(lifted).count, 'lift 态必须等于「抬 70」的位姿');
   assert.equal(result.states.sweep.steps.at(-1).z, 70, 'sweep 必须扫到 70（行程末端）');
   // 三处任一处忘改，板就会被扫：这条断言就是「一处改一处忘」的探针

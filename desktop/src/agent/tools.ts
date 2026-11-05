@@ -1238,8 +1238,11 @@ export class AgentTools {
       description:
         '对装配体执行干涉检查。不传 states 时只查当前场景静态位姿（包围盒初筛，返回命中数与前 20 条，旧行为）。' +
         '传 states 时按当前 active 机型做位姿化检查：rest=静态、lift=顶升到位（可动件按 config 里真实行程平移）、sweep=按 10 mm 逐步顶升到行程、' +
-        'push=顶升移载复合位姿（先按顶升轴抬到行程顶，再按移载轴沿 +Y 推到行程末端，行程同样读 config 的 travelMm）；' +
-        '返回 {ok,reviewStatus,states:{rest|lift|sweep|push:{pairs,hits,screenHits,confirmedHits,mates,mm3,mm3Confirmed,mm3Screen,poseValidity,items}},lift:{...},push:{...}|null,precision}。' +
+        'push=顶升移载复合位姿（先按顶升轴抬到行程顶，再按移载轴沿 +Y **逐点**推到行程末端，行程同样读 config 的 travelMm）；' +
+        '返回 {ok,reviewStatus,states:{rest|lift|sweep|push:{pairs,hits,screenHits,confirmedHits,mates,mm3,mm3Confirmed,mm3Screen,poseValidity,items}},lift:{...},push:{...}|null,workpiece:{...}|null,precision}。' +
+        '工件（板）在移载机型上是一个**普通零件**（partId=workpiece-plate，尺寸由 conveyor.transferPartLengthMm/WidthMm/ThicknessMm 给，缺省 1200×800×35）：' +
+        '它参与全部碰撞对，所以「板能不能从出料口推出去」是本工具能回答的问题；每态的 workpiecePairs/workpieceTouching 是「板真的在场」的证据。' +
+        '口径：partCount（几何刚体数）含工件 +1，assemblyPartCount/BOM/成本**不含**工件。' +
         '口径必须按字段读：confirmedHits=解析式精确求交确认的实体重叠（唯一能否决出图的数字）；screenHits=只有包围盒依据或位姿不可达，只能当待复核；' +
         'mates=同轴嵌套配合（缸体×活塞杆这类，实体布尔必然重叠但不是干涉，不是缺陷）；mm3 含 declared/mate，只作量级参考。' +
         '顶升行程读 active 机型 config 的执行机构 travelMm（turner-lift），读不到返回 STATE_UNAVAILABLE，绝不拿静态位姿冒充 lift；' +

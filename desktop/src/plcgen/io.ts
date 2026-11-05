@@ -357,11 +357,17 @@ export function collectIoRefs(config: PlcGenConfig): IoRef[] {
 
   for (const [actuatorIndex, rawActuator] of (config.actuators ?? []).entries()) {
     const actuator = rawActuator as ActuatorExtras;
+    /**
+     * `point` 字段在不同 kind 下语义不同：旋转轴是「分度」，气缸/夹爪借它表达**单点直线动作**
+     *（顶升、移载这类没有伸出/缩回之分的轴）。一律写成「旋转」会让变量表长出
+     *「移载工位_移载台_旋转」这种名字，而它实际是 +Y 直线移载——现场按这个名字接线必错。
+     */
+    const pointPurpose = actuator.kind === 'rotary' ? '旋转' : '动作';
     const fields: Array<[string | undefined, string, string]> = [
       [actuator.extendPoint, '伸出', 'extendPoint'],
       [actuator.retractPoint, '缩回', 'retractPoint'],
       [actuator.gripPoint, '夹紧', 'gripPoint'],
-      [actuator.point, '旋转', 'point']
+      [actuator.point, pointPurpose, 'point']
     ];
     for (const [point, purpose, field] of fields) {
       if (!point) continue;

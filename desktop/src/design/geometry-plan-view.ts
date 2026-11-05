@@ -41,6 +41,10 @@ export interface GeometryPlanBlocked {
 export type GeometryPlanResult = GeometryPlanProjection | GeometryPlanBlocked;
 
 const ROLES = new Set<GeomPart['role']>(['frame', 'transfer', 'plate', 'structure', 'fixture', 'actuator', 'sensor', 'safety']);
+/**
+ * 平面视图只画**机台**：工件（role='workpiece'）不在 ROLES 里，投影时被过滤掉。
+ * 这不是漏掉 —— 工件是料，不是设备零件；它的存在意义是参与干涉检查（见 machine-geometry）。
+ */
 const STATION_COLORS = ['#0f766e', '#2563eb', '#c2410c', '#7c3aed', '#4d7c0f', '#be185d', '#0369a1', '#a16207'];
 const ROLE_COLORS: Record<GeomPart['role'], string> = {
   frame: '#475569',
@@ -50,7 +54,8 @@ const ROLE_COLORS: Record<GeomPart['role'], string> = {
   fixture: '#16a34a',
   actuator: '#d97706',
   sensor: '#2563eb',
-  safety: '#dc2626'
+  safety: '#dc2626',
+  workpiece: '#0ea5e9'
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {

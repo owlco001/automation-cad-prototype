@@ -413,6 +413,10 @@ async function main() {
       if (!turnerLift) throw new Error(`actuators 里没有 turner-lift（顶升轴）：${actuators.map((a) => a?.id).join(',')}`);
       if (Number(turner.rotationRangeDeg) !== 90) throw new Error(`turner-rotary 角度异常：${turner.rotationRangeDeg}`);
       if (Number(turnerLift.travelMm) !== 60) throw new Error(`turner-lift 行程异常：${turnerLift.travelMm}`);
+      // 幽灵旋转轴：模板曾给每个输送机型落一条 st1-rotary-1（分度 90°），几何里并不存在，
+      // 却会进 PLC 第 1 步与 DB_IO。转向机型的旋转轴只能来自转向工位（turner-rotary）。
+      const ghost = actuators.filter((entry) => /^st\d+-rotary-\d+$/.test(String(entry?.id ?? '')));
+      if (ghost.length > 0) throw new Error(`输送机型不该有幽灵站轴：${ghost.map((a) => a.id).join(',')}`);
       if (bomDraft.length === 0) throw new Error('BOM 草稿为空');
       const cardStats = await cdp.evaluate(`(() => {
         const card = document.querySelector('.acp-machine-card');
@@ -877,6 +881,9 @@ async function main() {
       if (bound('DI-TRANSFER-END') !== 'transfer-push') throw new Error(`DI-TRANSFER-END 没绑 transfer-push：${bound('DI-TRANSFER-END')}`);
       if (bound('ST-TRANSFER-LIFT-UP') !== 'transfer-lift') throw new Error(`ST-TRANSFER-LIFT-UP 没绑 transfer-lift：${bound('ST-TRANSFER-LIFT-UP')}`);
       if (bound('DI-DOWNSTREAM-ALLOW') !== '移载工位') throw new Error(`DI-DOWNSTREAM-ALLOW 应绑工位：${bound('DI-DOWNSTREAM-ALLOW')}`);
+      // 「板不转」的硬断言：config 里一条旋转轴都不能有（含模板曾落的 st1-rotary-1）
+      const rotaries = actuators.filter((entry) => entry?.kind === 'rotary');
+      if (rotaries.length > 0) throw new Error(`移载机型不应有旋转轴：${rotaries.map((a) => a.id).join(',')}`);
       const ioPoints = (design?.config?.ioPoints ?? []).map((item) => item?.point);
       for (const point of ['DO-TRANSFER-READY', 'DO-TRANSFER-DONE']) {
         if (!ioPoints.includes(point)) throw new Error(`config.ioPoints 缺 ${point}：${ioPoints.join(',')}`);
@@ -1036,10 +1043,17 @@ async function main() {
       const plcDir = dirname(dirname(latestSt.path));
       const readme = readFileSync(join(plcDir, 'README.md'), 'utf8');
       const stepCount = Number((readme.match(/- 自动序列步数：(\d+)/) ?? [])[1] ?? 0);
-      if (!(stepCount > 0)) {
-        throw new Error(`移载机型的 FC_AutoSequence 是空壳：README 里 自动序列步数=${stepCount}`);
+      // 2 步 = 顶升台伸出 → 移载台伸出（旧值 3 步：第 1 步是幽灵旋转轴的分度 90°）
+      if (stepCount !== 2) {
+        throw new Error(`移载机型自动序列应为 2 步（顶升 → 移载），实际 ${stepCount}`);
       }
       const autoSeq = readFileSync(latestSt.path, 'utf8');
+      // 幽灵旋转轴曾被写进第 1 步（「工位1旋转轴1分度 90°」）。移载机型「板不转」，
+      // 第 1 步必须是顶升台伸出，且全程序不得出现 ST1-ROT 点位。
+      if (/ST1-ROT/.test(autoSeq)) throw new Error('FC_AutoSequence 里仍有幽灵旋转轴点位 ST1-ROT');
+      const firstStepBody = /(?:^|\n) {4}1:\n([\s\S]*?)(?=\n {4}\d+:)/.exec(autoSeq)?.[1] ?? '';
+      if (/分度/.test(firstStepBody)) throw new Error(`步序第 1 步仍是「分度」：${firstStepBody.slice(0, 120)}`);
+      if (!/顶升台伸出/.test(firstStepBody)) throw new Error(`步序第 1 步不是顶升台伸出：${firstStepBody.slice(0, 120)}`);
       const logicChecks = [
         ['ALLOW 约束启动', /IF _StartEdge\.Q AND NOT SafeStop AND NOT Abort AND "DB_IO"\.[^\n]+ THEN/],
         ['END 到位才置 DONE', /STEP_HANDSHAKE:[\s\S]*?IF "DB_IO"\.[^\n]+ THEN\n\s+_HandshakeDone := TRUE;/],

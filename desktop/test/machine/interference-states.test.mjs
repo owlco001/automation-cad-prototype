@@ -184,7 +184,9 @@ test('工位生成器（非输送类/回落路径）仍把缸体×活塞杆判�
   // 依然产出这对同轴圆柱，mateReason 的口径必须还在。
   const design = synthMachine(parseMachineBrief(PV_BRIEF));
   const geometry = generateMachineGeometry(design.config);
-  assert.equal(geometry.parts.length, 48, '生成器代理体仍是 48 件');
+  // 45 = 台架 40 + 两个光电 + 顶升气缸/杆 3；旧值 48 含那条「分度 90°」的幽灵旋转轴
+  // （底座/台面/治具 3 件）——它不是几何里真实存在的机构，已从 config 清掉。
+  assert.equal(geometry.parts.length, 45, '生成器代理体 45 件（不含幽灵旋转轴）');
   const screen = screenInterference(geometry);
   assert.equal(screen.suspects, 1, 'rest 只有缸体×活塞杆这一对非声明重叠');
   assert.equal(screen.confirmed, 0, '配合面不得算确认干涉');

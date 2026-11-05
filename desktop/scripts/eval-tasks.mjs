@@ -254,6 +254,12 @@ async function caseConveyor90() {
   const axisIds = Array.isArray(stored?.config?.actuators) ? stored.config.actuators.map((item) => item.id) : [];
   check.includes('config 有顶升轴 turner-lift', axisIds, 'turner-lift');
   check.includes('config 有回转轴 turner-rotary', axisIds, 'turner-rotary');
+  // 幽灵旋转轴：模板曾给每个输送机型落一条 st1-rotary-1（分度 90°），几何里并不存在。
+  // 转向机型只允许转向工位自己的 turner-rotary。
+  const ghostAxes = axisIds.filter((id) => /^st\d+-rotary-\d+$/.test(id));
+  check.eq('没有幽灵站轴 st*-rotary-*', ghostAxes.length, 0);
+  const rotaryIds = (stored?.config?.actuators ?? []).filter((item) => item.kind === 'rotary').map((item) => item.id);
+  check.eq('旋转轴只剩 turner-rotary', rotaryIds.join(','), 'turner-rotary');
 
   // —— 末态 2：真实参数化整机装配件数 ——
   const brief = parseMachineBrief(BRIEF_PV);
@@ -1306,6 +1312,10 @@ async function caseTransferUnit() {
   check.includes('config 有移载轴 transfer-push', axisIds, 'transfer-push');
   check.ok('没有转向回转轴 turner-rotary', !axisIds.includes('turner-rotary'), axisIds.join(','));
   check.ok('没有转向顶升轴 turner-lift', !axisIds.includes('turner-lift'), axisIds.join(','));
+  // 「板不转」的硬约束：整台机器一条旋转轴都不能有。模板曾给输送线落 st1-rotary-1
+  //（分度 90°），它进过 DB_IO 与步序第 1 步——那与「移载不改变板方向」直接冲突。
+  const rotaryIds = cfg.actuators.filter((item) => item.kind === 'rotary').map((item) => item.id);
+  check.eq('config 里没有任何旋转轴', rotaryIds.join(',') || '(空)', '(空)');
   check.ok('工位里有移载工位', cfg.stations.includes('移载工位'), cfg.stations.join(','));
   check.ok('工位里没有转向工位', !cfg.stations.includes('转向工位'), cfg.stations.join(','));
   const push = cfg.actuators.find((item) => item.id === 'transfer-push');

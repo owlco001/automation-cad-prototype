@@ -316,7 +316,11 @@ export function mapMachineBom(
     safetyCurtain ? `光栅/安全门监控，接 ${safetyCurtain.model} 的 OSSD` : '光栅/安全门监控'
   ));
   items.push(item('electrical', '24 V 开关电源', psu, 1, 'psu', `${psuRatedW} W / ${psuRatedA} A`));
-  items.push(item('electrical', '伺服支路断路器', servoBreaker, servoCount, 'other', `计算 ${round(servoLoadA)} A，额定 ${servoRatedA} A`));
+  // 伺服支路只在真有伺服轴时存在：qty=0 的 BOM 行不是「没配」，而是一份非法 BOM
+  //（validateMachineDesign 要求 qty 是正整数，整份方案会被拒签 —— 移载/纯气动方案实测就卡在这）。
+  if (servoCount > 0) {
+    items.push(item('electrical', '伺服支路断路器', servoBreaker, servoCount, 'other', `计算 ${round(servoLoadA)} A，额定 ${servoRatedA} A`));
+  }
   items.push(item('electrical', '总进线断路器', mainBreaker, 1, 'other', `计算 ${round(mainLoadA)} A，额定 ${mainRatedA} A`));
   items.push(item('electrical', '开关电源支路断路器', psuBreaker, 1, 'other', `计算 ${round(psuAcLoadA)} A，额定 ${psuBreakerRatedA} A`));
 

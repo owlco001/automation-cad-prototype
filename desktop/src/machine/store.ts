@@ -99,7 +99,7 @@ function uniqueStrings(values: readonly string[]): string[] {
   return result;
 }
 
-/** 配置中的全部点位，按执行机构字段顺序、再按传感器顺序；大小写不敏感去重。 */
+/** 配置中的全部点位，按执行机构字段顺序、再按传感器顺序、最后是扩展点位；大小写不敏感去重。 */
 export function machineConfigPoints(config: MachineConfig): string[] {
   const points: string[] = [];
   for (const actuator of config.actuators) {
@@ -108,6 +108,10 @@ export function machineConfigPoints(config: MachineConfig): string[] {
     }
   }
   for (const sensor of config.sensors) points.push(sensor.point);
+  // 扩展点位（DO-TRANSFER-READY / DI-DOWNSTREAM-ALLOW 这类握手信号）也在 config 里，
+  // 必须算进来：否则方案的 design.points 引用了它们就成了「配置中没有点位」——
+  // 移载机型的方案会因此整份 apply 失败（实测就卡在这一条上）。
+  for (const ioPoint of config.ioPoints ?? []) points.push(ioPoint.point);
   return uniqueStrings(points);
 }
 
@@ -291,7 +295,9 @@ export function validateMachineDesign(value: unknown): NormalizedMachineDesign {
       if (typeof raw.model === 'string' && raw.model.trim()) item.model = raw.model.trim();
       if (typeof raw.partId === 'string' && raw.partId.trim()) item.partId = raw.partId.trim();
       if (typeof raw.packId === 'string' && raw.packId.trim()) item.packId = raw.packId.trim();
-      const roles = new Set(['servo', 'cylinder', 'gripper', 'rotary', 'sensor', 'safety', 'plc', 'psu', 'valve', 'other']);
+      // role 白名单要和 MachineBomItem['role'] 一致：漏一个角色不会报错，只会把 role 静默丢掉
+      // （drive 掉了的话，落盘后再算功率就漏掉输送线的驱动电机）。
+      const roles = new Set(['servo', 'cylinder', 'gripper', 'rotary', 'drive', 'sensor', 'safety', 'plc', 'psu', 'valve', 'other']);
       if (typeof raw.role === 'string' && roles.has(raw.role)) item.role = raw.role as NonNullable<MachineBomItem['role']>;
       if (typeof raw.ratedW === 'number' && Number.isFinite(raw.ratedW) && raw.ratedW > 0) item.ratedW = raw.ratedW;
       if (raw.pendingSelection === true) item.pendingSelection = true;

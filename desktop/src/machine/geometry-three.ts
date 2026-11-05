@@ -143,6 +143,9 @@ export function buildThreeMachine(
   };
   let meshCount = 0;
   for (const part of geometry.parts) {
+    // 工件（板）不画：3D 视口画的是机台，工件是料。它只进干涉模型（见 machine-geometry 的工件占位体），
+    // 放进场景会让「同一个机型」的视图多出一块没有件号的实体，视觉上等于改 UI。
+    if (part.role === 'workpiece') continue;
     if (part.sensorPoint && (part.role === 'sensor' || part.role === 'safety')) {
       const key = part.sensorPoint.toUpperCase();
       let sensor = sensors.get(key);

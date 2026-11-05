@@ -31,7 +31,14 @@ export type GeomRole =
   | 'fixture'
   | 'actuator'
   | 'sensor'
-  | 'safety';
+  | 'safety'
+  /**
+   * 工件（被加工的板/料，不是机台零件）：只有移载机型才建。
+   *
+   * 它必须能当**普通件**参与干涉（板能不能推出出料口是几何问题，不是机构问题），
+   * 但**不是**设备零件：不进 BOM、不进成本、不进装配件数，3D/平面视图也不画它。
+   */
+  | 'workpiece';
 
 export type GeomBomGroup =
   | 'actuator:cylinder'
@@ -85,6 +92,15 @@ export interface GeomMovingAxis {
   points: { extend?: string; retract?: string; grip?: string; point?: string };
   /** gripper：每个夹指闭合时沿 axis 的符号（+1 / -1）。 */
   jaws?: { partId: string; sign: 1 | -1 }[];
+  /**
+   * 个别随动件的**拾取空行程**（mm）：`{ partId: 空行程 }`。
+   *
+   * 工件必须这样建模：它静止时压在带面上（850），而移载辊道静止位比带面低 5 mm。
+   * 轴走前 5 mm 只是台板贴向板底、板不动；板真正的位移是「轴位移 − 5」（行程 70 → 板升 65，850 → 915）。
+   * 按轴行程原样平移会得出「板底 920、悬在辊面上方 5 mm」—— 那是个不存在的位姿，
+   * 会让「板底 915 比挡边顶 911 高 4 mm」这条关键余量被算成 9 mm。
+   */
+  partPickupGapMm?: Record<string, number>;
 }
 
 export interface GeomFootprint {
@@ -2054,6 +2070,8 @@ export function geometryComponentCounts(geometry: MachineGeometry): Record<GeomB
   };
   const seen = new Set<string>();
   for (const part of geometry.parts) {
+    // 工件不是设备零件：它只进干涉模型，不进「执行机构/传感器/结构件」计数。
+    if (part.role === 'workpiece') continue;
     if (part.bomGroup === 'structure') {
       counts.structure += 1;
       continue;

@@ -123,7 +123,8 @@ export function conveyorParamsFromConfig(config: MachineConfig): ConveyorParams 
     'frameSectionMm',
     'layerPitchMm',
     'transferPartLengthMm',
-    'transferPartWidthMm'
+    'transferPartWidthMm',
+    'transferPartThicknessMm'
   ] as const) {
     const value = raw[key];
     if (isFinitePositive(value)) overrides[key] = value;
@@ -313,6 +314,46 @@ function transferPushPartIds(parts: readonly ConveyorPart[]): string[] {
   return parts.map((part) => part.id).filter((id) => /^transfer-push-plate$|^transfer-push-bracket$/.test(id));
 }
 
+/**
+ * 工件（板）占位体：**只进几何/干涉模型**，不进 BOM、不进成本、不进装配件数。
+ *
+ * 为什么必须有：以前 `push` 态只比推板/滑座/辊道之间的碰撞，所以「板能不能从出料口推出去」
+ * 这件事在产品检查里根本看不见 —— 只能靠单测手工注入一个 1200×800×35 的盒子才发现
+ * 「板角扫切挡边 2520 mm³」。要让它成为产品级可验证项，工件就必须是一个普通零件：
+ * 同一套 AABB 初筛 + 解析式确认，出现在所有碰撞对里，不写任何专用判定。
+ *
+ * 位姿（由下面的两条移载轴给出，见 conveyorMovingAxes）：
+ * - rest： 底面 = 带面（850），顶面 885；
+ * - lift： 随顶升台抬 70 → 底面 915（= 辊面），顶面 950；
+ * - push： 在 lift 位姿上再沿 +Y 平移 1140；
+ * - sweep：顶升全程都带着工件（per step 平移）。
+ *
+ * 口径（写进报告，不许含糊）：`partCount`（几何刚体数）+1，`assemblyPartCount`（BOM/STEP 口径）不变。
+ */
+export const WORKPIECE_PART_ID = 'workpiece-plate';
+
+function workpiecePart(transfer: TransferLayout): GeomPart {
+  const thicknessMm = transfer.partThicknessMm;
+  return {
+    id: WORKPIECE_PART_ID,
+    name: '工件（板件占位体）',
+    role: 'workpiece',
+    shape: {
+      type: 'box',
+      size: [round2(transfer.partLengthMm), round2(transfer.partWidthMm), round2(thicknessMm)]
+    },
+    // 定位在主线中心线上、底面贴带面：与真机「板压在带上」一致
+    center: [0, 0, round2(transfer.partBottomRestZ + thicknessMm / 2)],
+    rotationZDeg: 0,
+    // 工件不是机台零件：给一个和机台都不同的颜色，并且用独立材质名（同一材质必须同一色，见 MATERIAL_COLORS）
+    color: '#0ea5e9',
+    material: 'PV-GLASS',
+    bomGroup: 'structure',
+    estimated: true,
+    moving: true
+  };
+}
+
 function conveyorMovingAxes(
   parts: readonly ConveyorPart[],
   turner: TurnerLayout | null,
@@ -324,8 +365,13 @@ function conveyorMovingAxes(
   if (transfer) {
     // 移载两条轴：顶升（Z）+ 移载（+Y）。3D 里先按顶升挂组、再由推板组覆盖推板两件
     //（buildThreeMachine 里同一件只能挂一个运动组，后写的胜出，与转向工位同一约定）。
-    const lift = transferLiftPartIds(parts);
+    // 工件两条轴都要挂：先随台板抬起、再随推板沿 +Y 移出。它不属于任何 ConveyorPart，
+    // 所以在这里按 id 补进去（否则工件会永远停在 rest 位姿，push 态等于没查板）。
+    const lift = [...transferLiftPartIds(parts), WORKPIECE_PART_ID];
     if (lift.length > 0) {
+      // 工件的拾取空行程：板压在带面（850），辊面静止位 845，先走 5 mm 才贴到板底。
+      // 于是板在顶升轴上的位移是「轴位移 − 5」（行程 70 → 板升 65，850 → 915 = 顶升后的辊面）。
+      const workpiecePickupGapMm = Math.max(0, Math.round(transfer.partBottomRestZ - transfer.rollerTopRestZ));
       axes.push({
         actuatorId: 'transfer-lift',
         stationId,
@@ -337,10 +383,13 @@ function conveyorMovingAxes(
         rangeDeg: 0,
         home: 'retracted',
         durationMs: Math.round(transfer.liftSeconds * 1000),
-        points: { extend: '顶升到位', retract: '顶升原位' }
+        points: { extend: '顶升到位', retract: '顶升原位' },
+        ...(workpiecePickupGapMm > 0
+          ? { partPickupGapMm: { [WORKPIECE_PART_ID]: workpiecePickupGapMm } }
+          : {})
       });
     }
-    const push = transferPushPartIds(parts);
+    const push = [...transferPushPartIds(parts), WORKPIECE_PART_ID];
     if (push.length > 0) {
       axes.push({
         actuatorId: 'transfer-push',
@@ -748,6 +797,20 @@ export function conveyorGeometryFromParts(
     min = [0, 0, 0];
     max = [0, 0, 0];
   }
+
+  // 工件（板）占位体：只在移载机型上产出（rest 底 = 带面，随两条移载轴走）。
+  // 它作为**普通件**参与全部碰撞对（含 sweep），但不进 BOM / 成本 / 装配件数：
+  // 后三者都从 `parts`（ConveyorPart 表，见 conveyorBom/conveyorAssembly）出，工件只加在几何刚体层。
+  if (transfer) {
+    const workpiece = workpiecePart(transfer);
+    geometryParts.push(workpiece);
+    const half = shapeHalfExtents(workpiece.shape);
+    for (let axis = 0; axis < 3; axis += 1) {
+      min[axis] = Math.min(min[axis] ?? Infinity, (workpiece.center[axis] ?? 0) - (half[axis] ?? 0));
+      max[axis] = Math.max(max[axis] ?? -Infinity, (workpiece.center[axis] ?? 0) + (half[axis] ?? 0));
+    }
+  }
+
   const envelope: Vec3 = [round2(max[0] - min[0]), round2(max[1] - min[1]), round2(max[2] - min[2])];
   const bom = conveyorBom(parts).map((row) => ({
     name: row.name,
@@ -786,7 +849,12 @@ export function conveyorGeometryFromParts(
         `${turner ? `、转向工位 ${turner.angleDeg}°（顶升行程 ${turner.strokeMm} mm、${turner.beltCount} 条窄带并联）` : ''}` +
         `${transfer ? `、顶升移载（顶升 ${transfer.strokeMm} mm + 沿 +Y 移载 ${transfer.pushStrokeMm} mm、${transfer.beltCount} 条窄带并联、下游对接段 ${Math.round(transfer.dockWidthMm)}×${Math.round(transfer.dockLengthMm)} mm）` : ''}`,
       '零件外形取参数化件的并集包围盒（纯圆柱件给圆柱），是代理体而不是 B-rep；'
-        + '实体布尔干涉在 build123d 内核里对同一份零件表做，本模块只做 AABB 初筛与解析式确认'
+        + '实体布尔干涉在 build123d 内核里对同一份零件表做，本模块只做 AABB 初筛与解析式确认',
+      `${transfer
+        ? `工件（板）${transfer.partLengthMm}×${transfer.partWidthMm}×${transfer.partThicknessMm} mm 作为占位体进几何：`
+          + `rest 底面贴带面 ${transfer.partBottomRestZ}、lift 抬到底面 ${transfer.partBottomLiftZ}、push 再沿 +Y 移 ${transfer.pushStrokeMm}；`
+        : '本机型没有移载工位，不建工件占位体；'}`
+        + '它只参与干涉检查，不进 BOM/成本/装配件数（几何刚体数含它，装配件数不含）'
     ],
     warnings: []
   };

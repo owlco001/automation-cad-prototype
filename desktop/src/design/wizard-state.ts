@@ -743,11 +743,13 @@ export function validateStep(draft: DesignDraft): string[] {
             actuator.travelMm !== undefined && (!Number.isFinite(actuator.travelMm) || actuator.travelMm < MIN_ACTUATOR_TRAVEL_MM || actuator.travelMm > MAX_ACTUATOR_TRAVEL_MM)) {
           errors.push(`工位「${station.name}」的执行机构「${actuator.name}」行程必须是 ${MIN_ACTUATOR_TRAVEL_MM}–${MAX_ACTUATOR_TRAVEL_MM} mm 的有限数`);
         }
+        // 直线轴（气缸/夹爪借 point 表达单点动作）不能标成「旋转」，否则报错文案会误导
+        const pointLabel = actuator.kind === 'rotary' ? '旋转' : '动作';
         for (const [label, point] of [
           ['伸出', actuator.extendPoint],
           ['缩回', actuator.retractPoint],
           ['夹紧', actuator.gripPoint],
-          ['旋转', actuator.point]
+          [pointLabel, actuator.point]
         ] as const) {
           if (!point) continue;
           const key = normalizedPoint(point);

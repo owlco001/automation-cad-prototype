@@ -104,8 +104,8 @@ export interface MachineBomItem {
   partId?: string;
   /** 真实元件包 id；仅 BOM 映射后存在。 */
   packId?: string;
-  /** 功率/成本分类角色。 */
-  role?: 'servo' | 'cylinder' | 'gripper' | 'rotary' | 'sensor' | 'safety' | 'plc' | 'psu' | 'valve' | 'other';
+  /** 功率/成本分类角色；drive = 输送线驱动电机（传动件，不是站轴）。 */
+  role?: 'servo' | 'cylinder' | 'gripper' | 'rotary' | 'drive' | 'sensor' | 'safety' | 'plc' | 'psu' | 'valve' | 'other';
   /** 单件额定有功功率（W），来自元件库时可直接复用。 */
   ratedW?: number;
   /** true 表示库内没有可选型号，需要补录后确认。 */
@@ -530,7 +530,7 @@ function applyConveyorRefinement(
       name: `减速电机 ${ref.estimate.motorW} W（i=18，输出约 76 rpm）`,
       qty: 1,
       note: `驱动阻力 ${ref.estimate.forceN} N，滚筒扭矩 ${ref.estimate.torqueNm} N·m`,
-      role: 'other',
+      role: 'drive',
       ratedW: ref.estimate.motorW
     },
     {
@@ -624,7 +624,7 @@ function applyConveyorRefinement(
           name: '转向减速电机 0.75 kW（i=180，输出约 8 rpm）',
           qty: 1,
           note: `${layout.angleDeg}° 分度 ${layout.rotateSeconds} s；整段动作 ${layout.actionSeconds} s = 顶升 ${layout.liftSeconds / 2} + 旋转 ${layout.rotateSeconds} + 回落 ${layout.liftSeconds / 2}（点位 ST-TURN-ROT）`,
-          role: 'other',
+          role: 'drive',
           ratedW: 750
         }
       );
@@ -795,6 +795,8 @@ export function synthMachine(rawBrief: MachineBrief, options: SynthOptions = {})
   const form = summarizeForm(formPick);
   const template = templateFor(process);
   const templateActuatorKinds = templateKinds(template.actuators);
+  /** 站轴可缺省（输送类）：动作由线体驱动完成，不能为了「每工位有动作」补假轴。 */
+  const stationActuatorsOptional = template.optionalStationActuators === true;
   const templateSensorKinds = templateKinds(template.sensors);
   const servo = servoDetected(brief);
   const warnings: string[] = [];
@@ -877,14 +879,23 @@ export function synthMachine(rawBrief: MachineBrief, options: SynthOptions = {})
   if (actuatorKinds.length === 0) {
     actuatorKinds = Array.from({ length: stations }, () => templateActuatorKinds).flat();
     actuatorSource = 'template';
-    assumptions.push(`未指定执行机构，按 ${template.label} 模板补全（每工位：${templateDescription(template.actuators.map((entry) => ACTUATOR_LABEL[entry.kind]))}）。`);
+    if (templateActuatorKinds.length > 0) {
+      assumptions.push(`未指定执行机构，按 ${template.label} 模板补全（每工位：${templateDescription(template.actuators.map((entry) => ACTUATOR_LABEL[entry.kind]))}）。`);
+    } else {
+      // 输送线：动作由线体完成，驱动滚筒是传动件而不是站轴——写清楚，别让人以为漏了机构
+      assumptions.push(
+        `未指定执行机构：${template.label}线没有工位级轴，工件由线体带走；` +
+          '驱动滚筒按传动件处理（减速电机进 BOM 与电机选型，不进 PLC 步序/IO，也不改变板材方向）。'
+      );
+    }
   }
 
   let actuatorBuckets = distribute(actuatorKinds, stations);
   const emptyActuatorStations = actuatorBuckets
     .map((bucket, index) => ({ bucket, index }))
     .filter(({ bucket }) => bucket.length === 0);
-  if (emptyActuatorStations.length > 0) {
+  // 输送类不补假轴：给没有动作的工位加一条「旋转轴」，等于让输送线去转板
+  if (emptyActuatorStations.length > 0 && !stationActuatorsOptional) {
     const fillKind = templateActuatorKinds[0] ?? 'cylinder';
     for (const { bucket } of emptyActuatorStations) bucket.push(fillKind);
     actuatorBuckets = actuatorBuckets;
@@ -1394,6 +1405,9 @@ export function synthMachine(rawBrief: MachineBrief, options: SynthOptions = {})
     assumptions,
     form
   } as MachineDesign;
+  // 输送机修正先做：它会把「旋转轴」占位换成线体结构件 + 减速电机（role='drive'），
+  // 功率估算必须读得到这几行，否则整机功率会漏掉驱动电机这个唯一的大负载。
+  if (process === 'conveyor') applyConveyorRefinement(design, brief, warnings, assumptions);
   design.power = estimatePower(design, {
     ...(options.parts ? { parts: options.parts } : {}),
     servo,
@@ -1404,7 +1418,6 @@ export function synthMachine(rawBrief: MachineBrief, options: SynthOptions = {})
     cosPhi: pricing.power.cosPhi,
     ...(options.pricingAssumptions ? { assumptions: options.pricingAssumptions } : {})
   });
-  if (process === 'conveyor') applyConveyorRefinement(design, brief, warnings, assumptions);
   design.cost = estimateCost(design, {
     ...(options.parts ? { parts: options.parts } : {}),
     ...(options.pricebook ? { pricebook: options.pricebook } : {}),

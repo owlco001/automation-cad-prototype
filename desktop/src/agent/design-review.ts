@@ -101,6 +101,24 @@ function fmt(value: number | null): string {
   return Number.isInteger(value) ? String(value) : String(Math.round(value * 100) / 100);
 }
 
+/**
+ * 评审证据里的「工件一句话」：板在不在几何里、三态底面在哪。
+ *
+ * 为什么写进证据：四态数字全绿时，看报告的人无从判断「这次到底有没有查板」。
+ * 写了这一句，confirmed=0 才有意义（板在场且没撞）；没有工件时这句不出现，也不会假装查过。
+ */
+function workpieceEvidence(payload: Record<string, unknown>): string {
+  const workpiece = record(payload.workpiece);
+  const partId = typeof workpiece.partId === 'string' ? workpiece.partId : '';
+  if (!partId) return '';
+  const size = Array.isArray(workpiece.sizeMm) ? workpiece.sizeMm.join('×') : '';
+  const bottom = record(workpiece.bottomZ);
+  const push = num(workpiece.pushTravelMm);
+  return `；工件 ${size}（${partId}）作为普通件参与全部碰撞对：板底 rest ${fmt(num(bottom.rest))}`
+    + ` / lift ${fmt(num(bottom.lift))}${push === null ? '' : `、push +Y ${fmt(push)}`}`
+    + '（不进 BOM/成本/装配件数；partCount 含它 +1）';
+}
+
 function money(value: number | null): string {
   if (value === null) return '未给出';
   return `¥${value.toFixed(2)}`;
@@ -321,6 +339,7 @@ function interferenceItem(outcome: ReviewStepOutcome | undefined): DesignReviewI
       : `${line.name} ${fmt(line.confirmed)} 确认 / ${fmt(line.screen)} 待复核 · ${fmt(line.mm3)} mm³`)
     .join(' · ')
     + (pushUnavailable ? '；push 不适用（机型没有移载轴），按 3 态评' : '')
+    + workpieceEvidence(payload)
     + (lines.some((line) => line.poseOverridden)
       ? `；lift/sweep/push 位姿与几何建模的伸出方向相反（direction-overridden，位移是反向平移）`
       : '');

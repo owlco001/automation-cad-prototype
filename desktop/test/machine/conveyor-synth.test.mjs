@@ -4,6 +4,8 @@ import { estimateConveyorDrive, pitchForWidth, refineConveyor } from '../../src/
 import { DEFAULT_CONVEYOR } from '../../src/machine/conveyor-assembly.ts';
 import { parseMachineBrief } from '../../src/machine/spec.ts';
 import { synthMachine } from '../../src/machine/synth.ts';
+import { buildMachineIoMap } from '../../src/machine/io-map.ts';
+import { buildSequencePlan } from '../../src/plcgen/sequence.ts';
 
 test('输送需求解析：工艺/单工位/尺寸四件套', () => {
   const brief = parseMachineBrief('设计一台水平皮带输送机：总长 2000mm、带宽 300mm、工件 5kg、线速度 0.2m/s');
@@ -56,6 +58,36 @@ test('整机合成：输送机形态、无旋转轴 BOM、结构件齐全', () =
   assert.match(names, /皮带输送线体/);
   assert.match(names, /减速电机 40 W/);
   assert.match(names, /张紧滑座/);
+});
+
+test('输送线 config 里没有任何 rotary 轴：驱动滚筒是传动件，不进站轴/步序/IO', () => {
+  const brief = parseMachineBrief('设计一台水平皮带输送机：总长 2000mm、带宽 300mm、工件 5kg、线速度 0.2m/s');
+  const design = synthMachine(brief);
+  // ① config.actuators 为空：没有那条「分度 90°」的幽灵旋转轴
+  assert.deepEqual(design.config.actuators, [], '输送线不应有站轴');
+  assert.equal(design.config.actuators.filter((a) => a.kind === 'rotary').length, 0);
+  // ② 驱动滚筒仍然在：BOM 里有减速电机（role=drive，有额定功率可做电机选型）
+  const motor = design.bomDraft.items.find((item) => /减速电机/.test(item.name));
+  assert.ok(motor, '减速电机必须留在 BOM 里');
+  assert.equal(motor.role, 'drive', '驱动电机按传动件标注，不能标成 rotary');
+  assert.equal(motor.ratedW, 40, '电机选型给出额定功率');
+  // ③ 驱动电机计入整机功率（不是站轴，但确实耗电）
+  assert.ok(
+    design.power.byGroup.some((group) => group.name === '驱动电机' && group.ratedW === 40),
+    `功率分组里应有驱动电机：${design.power.byGroup.map((g) => `${g.name}@${g.ratedW}`).join(',')}`
+  );
+  // ④ io-map 只有进出料两个光电，没有 Q 区幽灵点位
+  const ioMap = buildMachineIoMap(design.config);
+  assert.equal(ioMap.rows.filter((row) => row.direction === '输出').length, 0, '输送线没有站轴输出');
+  assert.equal(ioMap.rows.length, 2, ioMap.rows.map((row) => row.point).join(','));
+  // ⑤ 也没有任何可推导的步序（线体连续运转，不是分度轴一步一步转）
+  const plan = buildSequencePlan({ config: design.config });
+  assert.equal(plan.steps.length, 0, JSON.stringify(plan.steps));
+  assert.equal(plan.source, 'none');
+  assert.ok(
+    design.assumptions.some((line) => /驱动滚筒按传动件处理/.test(line)),
+    '要在 assumptions 里说明驱动滚筒按传动件处理'
+  );
 });
 
 test('目标节拍高于线速产能时给出提速建议', () => {

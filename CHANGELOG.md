@@ -4,6 +4,14 @@
 
 ## [未发布]
 
+### Fixed · 输送/移载机型里的幽灵 90° 旋转轴与直线轴命名
+
+- **清掉幽灵轴**：`templates.ts` 的输送模板不再给每工位挂 `{ kind:'rotary', count:1 }`。驱动滚筒是**传动件**，按 `role:'drive'` 留在 BOM（带 `ratedW`，用于电机选型），但不落成 `config.actuators` 里的站轴——那条 `st1-rotary-1`（`rotationRangeDeg=90`、`point=ST1-ROT-A1`）几何里根本不存在，却会写进 `DB_IO`（`工位1_工位1旋转轴1_旋转`）并占据 PLC 步序第 1 步「工位1旋转轴1分度 90°」，与「输送/移载不改变板材方向」直接冲突。模块 `templates.ts` 新增 `optionalStationActuators`（只有 `conveyor` 为 true），`synthMachine` 据此**不再为没有动作的工位补假轴**；`validate.ts` 允许 `config.conveyor` 存在时 `actuators: []`（其余机型仍必须有执行机构）。转向机型的 `turner-rotary` 保留不变
+- **直线轴不再叫「旋转」**：`plcgen/io.ts` 的 `actuator.point` 按 kind 取语义（`rotary` → 「旋转」，`cylinder/gripper` → 「动作」）。变量表由 `移载工位_移载工位顶升台_旋转` / `移载工位_移载工位移载台_旋转` 改为 `..._动作`，注释同步；`design/wizard-state.ts` 的点位重复报错文案同样按 kind 取词
+- **驱动电机进功率**：新增功率角色 `drive`（`POWER_ROLE_LABEL.drive = '驱动电机'`，默认 90 W），`powerInputFromDesign` 读 BOM 里 `role='drive'` 的行；`synthMachine` 把 `applyConveyorRefinement` 提到 `estimatePower` 之前，否则线体减速电机（整机唯一大负载）永远不计入电气容量。输送机型功率因此变化（例：4000×600 皮带线 0.108 → 0.056 kW，光伏转向线 0.212 → 0.553 kW）
+- **台阶**：非输送机型（锁螺丝/点胶/装配/检测/包装/转盘/流水线）的 config、io-map、变量表、PLC 十一个文件**逐字节不变**（sha256 对照见 `docs/desktop/AUDIT-transfer-2026-11-05.md` 的修复记录）；输送类机型 BOM 只改 `role`（`other` → `drive`），成本不变，PLC 步数与点位数变化
+- 测试：`templates.test.mjs` 改为断言输送模板无站轴；`conveyor-synth.test.mjs` 新增「输送线 config 里没有任何 rotary 轴 + 驱动电机仍进 BOM/功率 + io-map 无幽灵点位 + 无可推导步序」；`nl-transfer-scenario.test.mjs` 的 tf01 从「剩下的 rotary 不在转向工位」升级为「一条旋转轴都没有」；`interference-states.test.mjs` / `machine-geometry.test.mjs` 的代理体件数 48 → 45（少了幽灵轴的 3 件）；`eval-tasks.mjs` t01/t13 与 `machine-e2e.mjs` 第 2/9/12 步新增硬断言（无 `st*-rotary-*`、移载机无旋转轴、步序第 1 步不得是「分度」）
+
 ### Added · 顶升移载（直角移载，板不转向）
 
 - 需求解析：`顶升移载 / 直角移载 / 移载机构` → `brief.transfer`；与 `turner` 互斥（同一句话里同时出现时移载优先，两套机构抢线体中段同一段 X）；`detectTransfer` 只认明确词，普通输送线不长出移载工位

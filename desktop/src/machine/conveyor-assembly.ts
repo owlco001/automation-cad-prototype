@@ -64,6 +64,14 @@ export interface ConveyorParams {
   transferPartLengthMm?: number;
   /** 板材沿 Y 的宽度（决定移载行程），mm；缺省按带宽推 */
   transferPartWidthMm?: number;
+  /**
+   * 板材厚度（工件占位体的 Z 尺寸），mm；缺省 35。
+   *
+   * 这个参数唯一的用途是**把工件本身建进几何**：干涉检查要能回答「板能不能从出料口推出去」，
+   * 就必须有一个和板同尺寸的实体参与碰撞。给它一个显式参数（而不是写死 35）是为了让「板加厚会不会顶到推板机构」
+   * 这类问题能被数值验证（实测 120 mm 时板顶穿推板无杆气缸），而不是靠人看图猜。
+   */
+  transferPartThicknessMm?: number;
 }
 
 /** 归一化之后的参数：层数一定存在，内部构建器只用这个类型。 */
@@ -86,7 +94,8 @@ export const DEFAULT_CONVEYOR: Required<ConveyorParams> = {
   turnerAngleDeg: 0,
   transferPresent: false,
   transferPartLengthMm: 0,
-  transferPartWidthMm: 0
+  transferPartWidthMm: 0,
+  transferPartThicknessMm: 35
 };
 
 export interface ConveyorPart {
@@ -751,6 +760,8 @@ function buildTurnerParts(t: TurnerLayout): ConveyorPart[] {
 
 /** 移载单元沿 X 的占位半宽（随动台板 1000 → ±500，再留 20 装配余量） */
 const TRANSFER_UNIT_HALF_MM = 520;
+/** 板材厚度缺省值（工件占位体 Z 尺寸），mm；可由 transferPartThicknessMm 覆盖 */
+export const TRANSFER_DEFAULT_PART_THICKNESS_MM = 35;
 /** 侧挡边（线体两侧 3 mm 板）：下沿比带面高 1 mm，高 60 → 顶面 = 带面 + 61 */
 const SIDE_GUARD_LIFT_MM = 1;
 export const SIDE_GUARD_HEIGHT_MM = 60;
@@ -845,6 +856,14 @@ export interface TransferLayout {
   /** 板材（移载行程与对接段宽度都从它推） */
   partLengthMm: number;
   partWidthMm: number;
+  /** 板材厚度（工件占位体 Z 尺寸）：rest 时底面贴带面，顶面 = 带面 + 厚度 */
+  partThicknessMm: number;
+  /** 工件静止位底面 z（= 带面）：工件停在带面上，不悬空也不埋进带里 */
+  partBottomRestZ: number;
+  /** 工件静止位顶面 z */
+  partTopRestZ: number;
+  /** 工件顶升到位底面 z（= 辊面顶升到位 = 915）：板被辊道托起来 */
+  partBottomLiftZ: number;
   /** 移载行程（+Y）：板宽 + 结构间隙 + 余量 */
   pushStrokeMm: number;
   /** 结构间隙：随动台板边缘 → 对接段起点 */
@@ -973,7 +992,7 @@ export function transferActionSeconds(strokeMm: number, pushStrokeMm: number): n
  * **不夹紧**：板宽超过带宽时原样返回，让 transferSkipReason 把它判成「压不住」并拒建。
  * 夹紧会把「要移载 1700 的板」悄悄做成「按 1200 的板移载」，用户看不到任何提示。
  */
-export function transferPartSize(params: ConveyorParams): { lengthMm: number; widthMm: number } {
+export function transferPartSize(params: ConveyorParams): { lengthMm: number; widthMm: number; thicknessMm: number } {
   const p = normalizeParams(params);
   const requestedWidth = p.transferPartWidthMm ?? 0;
   const widthMm = Number.isFinite(requestedWidth) && requestedWidth > 0 ? requestedWidth : p.widthMm;
@@ -981,7 +1000,9 @@ export function transferPartSize(params: ConveyorParams): { lengthMm: number; wi
   const lengthMm = Number.isFinite(requestedLength) && requestedLength > 0
     ? requestedLength
     : Math.max(600, p.widthMm * 2);
-  return { lengthMm, widthMm };
+  // 厚度不参与行程/开口的推导（只做工件占位体），但仍按参数给，缺省 35。
+  const thicknessMm = p.transferPartThicknessMm ?? TRANSFER_DEFAULT_PART_THICKNESS_MM;
+  return { lengthMm, widthMm, thicknessMm };
 }
 
 /** 随动台板的半宽：受带内边约束（顶升后要整块落在带缝以内）。 */
@@ -1174,6 +1195,11 @@ export function transferLayout(params: ConveyorParams): TransferLayout | null {
     beltCenterYs: belts.centers,
     partLengthMm: part.lengthMm,
     partWidthMm: part.widthMm,
+    partThicknessMm: part.thicknessMm,
+    // 工件停在带面上（底面 = 带面 850）：不悬空（否则「板能推」是假的），也不埋进带里（否则 rest 就有干涉）
+    partBottomRestZ: p.beltHeightMm,
+    partTopRestZ: p.beltHeightMm + part.thicknessMm,
+    partBottomLiftZ: rollerTopRestZ + TRANSFER_LIFT_STROKE_MM,
     pushStrokeMm,
     structuralGapMm,
     minPushStrokeMm,
@@ -2102,6 +2128,13 @@ function normalizeParams(params: Partial<ConveyorParams> | undefined): ResolvedC
   const transferPresent = merged.transferPresent === true || (merged.transferPartWidthMm ?? 0) > 0;
   const transferPartLengthMm = positive(merged.transferPartLengthMm ?? 0, 0);
   const transferPartWidthMm = positive(merged.transferPartWidthMm ?? 0, 0);
+  // 板厚：1–200 mm。上限 200 是为了让「板太厚顶到推板机构」能被干涉检查报出来，
+  // 而不是在参数层被夹成一个看不出来的数。
+  const transferPartThicknessMm = clamp(
+    positive(merged.transferPartThicknessMm ?? TRANSFER_DEFAULT_PART_THICKNESS_MM, TRANSFER_DEFAULT_PART_THICKNESS_MM),
+    1,
+    200
+  );
   return {
     lengthMm,
     widthMm,
@@ -2114,7 +2147,8 @@ function normalizeParams(params: Partial<ConveyorParams> | undefined): ResolvedC
     turnerAngleDeg,
     transferPresent,
     transferPartLengthMm,
-    transferPartWidthMm
+    transferPartWidthMm,
+    transferPartThicknessMm
   };
 }
 

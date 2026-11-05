@@ -11,6 +11,8 @@ export type MachinePowerRole =
   | 'cylinder'
   | 'gripper'
   | 'rotary'
+  /** 输送线驱动电机（减速电机 → 驱动滚筒）：传动件，不是站轴，但有真实电气负荷。 */
+  | 'drive'
   | 'sensor'
   | 'safety'
   | 'plc'
@@ -96,6 +98,7 @@ export const ROLE_DEFAULT_W: Record<MachinePowerRole, number> = {
   cylinder: 5,
   gripper: 15,
   rotary: 200,
+  drive: 90,
   sensor: 3,
   safety: 20,
   plc: 25,
@@ -109,6 +112,7 @@ export const POWER_ROLE_LABEL: Record<MachinePowerRole, string> = {
   cylinder: '气缸',
   gripper: '夹爪',
   rotary: '旋转轴',
+  drive: '驱动电机',
   sensor: '传感器',
   safety: '安全光栅',
   plc: 'PLC',
@@ -401,6 +405,16 @@ export function powerInputFromDesign(
     servo ? 'servo' : 'rotary', servo ? '伺服轴' : '旋转轴', rotaryActuators, rotaryCount,
     rotaryBomRows(design), servo ? (servoDrive ?? servoMotor) : undefined
   );
+  // 输送线驱动电机：BOM 里以 role='drive' 标注（不是站轴，所以不参与旋转轴统计），
+  // 但减速电机确实耗电——按台数与额定功率计入，否则整机功率会漏掉唯一的大负载。
+  const driveRows = bomRowsForRole(design, 'actuator', ['drive']);
+  for (const row of driveRows) {
+    const qty = typeof row.qty === 'number' && Number.isInteger(row.qty) && row.qty > 0 ? row.qty : 1;
+    push('drive', qty, row.name ?? POWER_ROLE_LABEL.drive, {
+      ...(row.model ? { model: row.model } : {}),
+      ...(validRatedW(row.ratedW) !== null ? { ratedW: row.ratedW } : {})
+    });
+  }
   addConfiguredDevices(
     'sensor', '传感器', ordinarySensorConfigs, ordinarySensorConfigs.length,
     bomRowsForRole(design, 'sensor', ['sensor']), proximity

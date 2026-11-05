@@ -110,3 +110,90 @@ FALSE，永远不可能为 TRUE；DI-DOWNSTREAM-ALLOW 无人读。"互锁存在"
    不是色差。
 6. **"上行 6 条带一根不断"的断言只覆盖了"长度=5960"** —— 没有覆盖"板宽与带位的关系"和
    "出料口宽度 vs 板长"，而后者才是这条机构真正的边界条件。
+
+---
+
+## 修复记录 · 幽灵旋转轴与直线轴命名（审计问题 3 / 4）
+
+本节的每个数字都是本机 Node 26 直接 import 仓库 `.ts` 现算的（脚本
+`/tmp/snap.mjs`、`/tmp/plc-snap.mjs`：同一批 brief 在**改前/改后**各跑一遍，比 config / io-map.csv /
+io-tags.csv / PLC 十一个文件的 sha256）。
+
+### 改了什么
+
+| 位置 | 改前 | 改后 |
+|---|---|---|
+| `machine/templates.ts`（输送模板） | `actuators: [{ kind:'rotary', count:1 }]` → 每工位落一条 `st1-rotary-1`（`rotationRangeDeg=90`、`point=ST1-ROT-A1`） | `actuators: []` + `optionalStationActuators: true`：输送线没有工位级轴 |
+| `machine/synth.ts` | 没有动作的工位一律补 `templateActuatorKinds[0]`（= 旋转轴） | 站轴可缺省时不补假轴；驱动滚筒按 `role:'drive'` 留在 BOM（带 `ratedW`，进电机选型） |
+| `machine/validate.ts` | `actuators` 非空是硬要求 | `config.conveyor` 存在时允许 `actuators: []`（其余机型仍必须有执行机构） |
+| `plcgen/io.ts` | `actuator.point` 一律 purpose=`旋转` | `kind==='rotary'` → `旋转`；`cylinder/gripper` → `动作` |
+| `machine/power.ts` + `synth.ts` | 驱动电机（减速电机）不被 `estimatePower` 统计；200 W 幽灵旋转轴占位倒是进功率 | 新增功率角色 `drive`（`驱动电机`），`applyConveyorRefinement` 提到 `estimatePower` 之前，按 BOM `ratedW` 计入 |
+| `machine/store.ts` | `role` 白名单缺 `drive`（落盘时静默丢角色） | 白名单补 `drive` |
+| `machine/bom-map.ts` | `伺服支路断路器` 无条件 push，`qty = rotaryCount` | `rotaryCount > 0` 才 push（qty=0 的 BOM 行会被 `validateMachineDesign` 拒签） |
+
+### 变与不变（sha256 前 16 位）
+
+`config sha` = `sha256(JSON.stringify(config))`；`io-map sha` / `io-tags sha` = 两份 CSV 全文的 sha256。
+
+| 机型（brief） | config 改前 | config 改后 | io-map 改前 | io-map 改后 | io-tags 改前 | io-tags 改后 | 判定 |
+|---|---|---|---|---|---|---|---|
+| 锁螺丝 `两工位锁螺丝机` | e2d52b874c9ed5ba | e2d52b874c9ed5ba | ed69a5c4f39b783f | ed69a5c4f39b783f | 93c25c51eb5f7472 | 93c25c51eb5f7472 | 逐字节相同 |
+| 点胶 `两工位点胶机` | 1f7bafb9c0d03da2 | 1f7bafb9c0d03da2 | c3f06d4091771811 | c3f06d4091771811 | d273c07c7fe03e72 | d273c07c7fe03e72 | 逐字节相同 |
+| 装配 `两工位装配线` | 4c93e3431350e5f2 | 4c93e3431350e5f2 | efbe4800d36eeb37 | efbe4800d36eeb37 | 7eda79746a66ff59 | 7eda79746a66ff59 | 逐字节相同 |
+| 检测 `两工位检测机` | 94231162dd13149c | 94231162dd13149c | 1de85aa6dd7e40f8 | 1de85aa6dd7e40f8 | e5476ea4d7e74751 | e5476ea4d7e74751 | 逐字节相同 |
+| 包装 `两工位包装机` | 7ddcefe605a5e68c | 7ddcefe605a5e68c | bde408f986474637 | bde408f986474637 | b82e175074166a63 | b82e175074166a63 | 逐字节相同 |
+| 转盘 `四工位转盘锁螺丝机` | 3eca079e568c410d | 3eca079e568c410d | 0ea1ad6b359266ca | 0ea1ad6b359266ca | 8ce2f259ea63b83f | 8ce2f259ea63b83f | 逐字节相同 |
+| 流水线 `三工位流水线装配` | d5e532eb8d5d4975 | d5e532eb8d5d4975 | fc6b2a557e9e0a9d | fc6b2a557e9e0a9d | 9c780eaa1fbe7759 | 9c780eaa1fbe7759 | 逐字节相同 |
+| 输送（无转向/移载）4000×600 | cc47e972ecf8da91 | 81354260ac73b510 | e9c4f15ecbb379c6 | 28675d4c56ea7eec | 5245cf3532a85243 | fa346e38d4e079c7 | 变化 |
+| 输送+转向 6000×1200 | 105342a0254fdf7e | dcd78966d1526bb7 | 0e1328ef63c07ee6 | 269abdf8b1787d76 | c5f7bf54db955815 | c551dad5d6568656 | 变化 |
+| 输送+顶升移载 6000×1200 | cc263c9a712fcd15 | 3b618591d18ed035 | 90b322ddd0c21d74 | b48500fc219718bd | f4a4d490a8c1e654 | 21a843004a75376b | 变化 |
+
+非输送机型的 PLC 十一个文件同样逐字节相同（七类机型各补一条急停/安全门与到位检测让预检能过，
+然后 `generateProject` 全量出文件比对每文件 sha256）：锁螺丝 2 步 / 点胶 2 步 / 装配 0 步 /
+检测 2 步 / 包装 0 步 / 转盘 4 步 / 流水线 0 步，`ALL_PLC_IDENTICAL`。
+
+### 旧 → 新逐项（输送类机型）
+
+| 项 | 改前 | 改后 |
+|---|---|---|
+| 站轴（无转向/移载 4000×600） | `st1-rotary-1`（rotary, 90°, `ST1-ROT-A1`） | 无（`actuators: []`） |
+| io-map 行数 | 3（1 输出 + 2 输入） | 2（0 输出 + 2 输入） |
+| io-map 幽灵点位 | `Q0.0 ST1-ROT-A1`、`I0.0/I0.1 ST1-PHT-S1/S2`（绑 `旋转轴1`、purpose `到位`） | 无 Q 区；两个光电 purpose=`传感器`、owner 为空 |
+| 变量表 | `工位1_工位1旋转轴1_旋转`（Q0.0）、`工位1_工位1旋转轴1_到位`×2 | `工位1_通用_传感器`、`工位1_通用_传感器_2`（I0.0 / I0.1） |
+| PLC 步序 | 1 步：「工位1旋转轴1分度 90°」（sets `ST1-ROT-A1`） | 0 步（线体连续运转，没有可推导的步序） |
+| 功率 | 0.108 kW / 0.182 A（含 200 W 幽灵旋转轴） | 0.056 kW / 0.095 A（驱动电机 90 W 计入，幽灵轴去掉） |
+| BOM | 8 行，`减速电机 90 W` role=`other` | 8 行，`减速电机 90 W` role=`drive`（仍带 `ratedW=90`，成本不变 ¥2376） |
+| 站轴（输送+**转向** 6000×1200） | `st1-rotary-1` + `turner-lift` + `turner-rotary`（3 条） | `turner-lift` + `turner-rotary`（2 条，转向回转轴保留） |
+| 转向线步序 | 3 步，**第 1 步 = 工位1旋转轴1分度 90°** | 2 步，第 1 步 = 转向工位顶升台伸出 60mm，第 2 步 = 转向工位回转台分度 90° |
+| 转向线变量名 | `转向工位_转向工位顶升台_旋转`（Q0.1） | `转向工位_转向工位顶升台_动作`（Q0.0）；`转向工位_转向工位回转台_旋转`（Q0.1）不变 |
+| 转向线功率 | 0.212 kW / 0.358 A | 0.553 kW / 0.933 A（线体减速电机 180 W + 转向减速电机 750 W 都计入了） |
+| 站轴（输送+**移载** 6000×1200） | `st1-rotary-1` + `transfer-lift` + `transfer-push`（3 条） | `transfer-lift` + `transfer-push`（2 条，**一条旋转轴都没有**） |
+| 移载线步序 | 3 步，第 1 步 = 分度 90° | 2 步：顶升台伸出 70mm → 移载台伸出 1540mm |
+| 移载线变量名 | `移载工位_移载工位顶升台_旋转`（Q0.3）、`移载工位_移载工位移载台_旋转`（Q0.4） | `移载工位_移载工位顶升台_动作`（Q0.2）、`移载工位_移载工位移载台_动作`（Q0.3） |
+
+旧→新变量名完整对照（io-tags.csv 的「名称」列；地址随行数变化，同名者地址也在表里）：
+
+| 点位 | 改前变量名 | 改后变量名 | 说明 |
+|---|---|---|---|
+| `ST1-ROT-A1` | `工位1_工位1旋转轴1_旋转` | —（点位消失） | 幽灵旋转轴输出 |
+| `ST1-PHT-S1` | `工位1_工位1旋转轴1_到位` | `工位1_通用_传感器` | 光电原来被绑到幽灵轴上 |
+| `ST1-PHT-S2` | `工位1_工位1旋转轴1_到位_2` | `工位1_通用_传感器_2` | 同上 |
+| `ST-TURN-LIFT` | `转向工位_转向工位顶升台_旋转` | `转向工位_转向工位顶升台_动作` | 顶升是 Z 向直线轴 |
+| `ST-TRANSFER-LIFT` | `移载工位_移载工位顶升台_旋转` | `移载工位_移载工位顶升台_动作` | 顶升是 Z 向直线轴 |
+| `ST-TRANSFER-PUSH` | `移载工位_移载工位移载台_旋转` | `移载工位_移载工位移载台_动作` | 移载是 +Y 直线轴 |
+| `ST-TURN-ROT` | `转向工位_转向工位回转台_旋转` | 不变 | 真旋转轴，口径不动 |
+
+**外部映射注意**：改名的只是「直线轴用 `point` 表达」的那几个点（`ST-TRANSFER-LIFT/PUSH`、
+`ST-TURN-LIFT` 等）。现场若按旧变量名做过 HMI/脚本映射，需要按上表更新；旋转轴（`ST-TURN-ROT`）与
+所有 `extendPoint/retractPoint/gripPoint`（伸出/缩回/夹紧）的名字没动。
+
+### 回归防线（新增断言）
+
+- `test/machine/conveyor-synth.test.mjs`：输送线 `config.actuators` 必须为空、无 rotary、
+  BOM 里减速电机 role=`drive` 且进功率分组、io-map 无 Q 区、无可推导步序
+- `test/machine/templates.test.mjs`：输送模板 `actuators: []` + `optionalStationActuators`，
+  只有输送线允许站轴缺省
+- `test/machine/nl-transfer-scenario.test.mjs` tf01：移载机型的旋转轴清单必须为空
+- `scripts/eval-tasks.mjs` t01 / t13：无 `st*-rotary-*`、转向线只剩 `turner-rotary`、移载机零旋转轴
+- `scripts/machine-e2e.mjs` 第 2/9/12 步：无幽灵站轴、移载机零旋转轴、`FC_AutoSequence` 无
+  `ST1-ROT` 且第 1 步是顶升台伸出（步数 2）

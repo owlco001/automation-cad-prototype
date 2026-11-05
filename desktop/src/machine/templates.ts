@@ -20,6 +20,13 @@ export interface MachineTemplate {
   sensors: { kind: MachineSensorKind; count: number }[];
   /** 参考节拍区间（件/分钟），只用于提示，不硬性拦截用户目标。 */
   cycleRange: { minPerMin: number; maxPerMin: number };
+  /**
+   * 站轴可缺省：动作由线体驱动完成（减速电机 → 驱动滚筒），没有工位级执行机构。
+   *
+   * true 时 synthMachine 不再为了「每工位至少一个动作」补一条假轴——那种补法会给
+   * 输送线凭空长出一条 90° 分度轴，与「输送/移载不改变板材方向」直接冲突。
+   */
+  optionalStationActuators?: boolean;
   rationale: string;
 }
 
@@ -62,11 +69,16 @@ export const TEMPLATES: Record<MachineTemplateKey, MachineTemplate> = {
     label: '输送',
     // 一条线体即一个工位：不做工序分工，节拍由线速决定
     stations: 1,
-    // 驱动滚筒按旋转轴表达（减速电机输出），几何由 conveyor-assembly 走内核生成
-    actuators: [{ kind: 'rotary', count: 1 }],
+    // 输送线没有工位级执行机构：板在带面上由线体带走。
+    // 驱动滚筒（减速电机输出）是**传动件**，按 drive 进 BOM 与电机选型，不落成站轴——
+    // 落成站轴就会被 PLC 生成器当成「分度 90° 的旋转轴」写进第 1 步与 DB_IO，
+    // 而那件事与「输送/移载不改变板材方向」正好相反。
+    actuators: [],
+    optionalStationActuators: true,
     sensors: [{ kind: 'photoelectric', count: 2 }],
     cycleRange: { minPerMin: 20, maxPerMin: 120 },
-    rationale: '输送线只有一条主线：减速电机带动驱动滚筒（按旋转轴表达），进出料端各一个光电确认工件；节拍由线速与工件间距决定，不受工位机构动作时间限制。'
+    rationale:
+      '输送线只有一条主线：减速电机带动驱动滚筒（传动件，不是工位轴），进出料端各一个光电确认工件；节拍由线速与工件间距决定，不受工位机构动作时间限制。'
   },
   inspection: {
     key: 'inspection',

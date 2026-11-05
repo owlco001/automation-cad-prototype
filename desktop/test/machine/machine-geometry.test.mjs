@@ -179,7 +179,8 @@ test('缺少线体长/带宽时回落生成器而不是报错', () => {
   delete withoutParams.conveyor;
   const fallback = resolveMachineGeometry(withoutParams);
   assert.equal(fallback.source, 'station-generator');
-  assert.equal(fallback.partCount, 48);
+  // 45：输送线 config 没有站轴（驱动滚筒是传动件），代理体不再含幽灵旋转轴的 3 件
+  assert.equal(fallback.partCount, 45);
   assert.ok(fallback.geometry.assumptions.some((line) => /无法参数化整机/.test(line)), '要写清为什么回落');
 
   // ② 参数在但缺带宽

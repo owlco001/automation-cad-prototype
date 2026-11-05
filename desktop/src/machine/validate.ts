@@ -91,6 +91,8 @@ export interface MachineConveyorConfig {
   transferPartLengthMm?: number;
   /** 板材沿 Y 的宽度 mm（移载行程按它给）；省略按带宽推 */
   transferPartWidthMm?: number;
+  /** 板材厚度 mm（工件占位体 Z 尺寸，参与四态干涉）；省略 35 */
+  transferPartThicknessMm?: number;
 }
 
 /**
@@ -304,8 +306,19 @@ function parseConfig(value: unknown): MachineConfig {
   }
 
   const rawActuators = record.actuators;
-  if (!Array.isArray(rawActuators) || rawActuators.length === 0) {
-    fail('CONFIG_SHAPE', 'config.actuators', '缺少必填参数：机型配置.actuators', '没有执行机构的方案无法生成联动与 PLC 程序');
+  /**
+   * 输送线例外：板在带面上由线体带走，站轴是空的（驱动滚筒属传动件，进 BOM/电机选型，
+   * 不进 config.actuators——否则会以「分度 90° 的旋转轴」身份进 PLC 步序与 DB_IO）。
+   * 判定不靠机型名，靠 config.conveyor 是否给出了线体参数；其余机型仍然必须有执行机构。
+   */
+  const conveyorConfig = isRecord(record.conveyor);
+  if (!Array.isArray(rawActuators) || (rawActuators.length === 0 && !conveyorConfig)) {
+    fail(
+      'CONFIG_SHAPE',
+      'config.actuators',
+      '缺少必填参数：机型配置.actuators',
+      '没有执行机构的方案无法生成联动与 PLC 程序；输送线例外——动作由驱动电机完成，给出 config.conveyor 时可留空数组'
+    );
   }
   if (!Array.isArray(record.sensors)) {
     fail('CONFIG_SHAPE', 'config.sensors', '缺少必填参数：机型配置.sensors', '没有传感器时请显式给出 sensors: []');
@@ -467,6 +480,8 @@ function parseConveyorParams(value: unknown): MachineConveyorConfig | undefined 
   if (partLength !== undefined) conveyor.transferPartLengthMm = partLength;
   const partWidth = optionalPositive(value.transferPartWidthMm);
   if (partWidth !== undefined) conveyor.transferPartWidthMm = partWidth;
+  const partThickness = optionalPositive(value.transferPartThicknessMm);
+  if (partThickness !== undefined) conveyor.transferPartThicknessMm = Math.min(200, partThickness);
   return conveyor;
 }
 

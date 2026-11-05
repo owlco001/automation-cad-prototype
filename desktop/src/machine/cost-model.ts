@@ -19,6 +19,8 @@ export type MachinePowerRole =
   | 'cylinder'
   | 'gripper'
   | 'rotary'
+  /** 输送线驱动电机（减速电机）：传动件，成本口径按机械件。 */
+  | 'drive'
   | 'sensor'
   | 'safety'
   | 'plc'

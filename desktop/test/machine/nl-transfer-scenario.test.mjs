@@ -136,10 +136,13 @@ test('tf01 口语「转向输送机，不转板，顶升后向 90° 输送并给
   assert.ok(ioIds.includes('DO-TRANSFER-DONE'), `ioPoints 缺 DO-TRANSFER-DONE：${ioIds.join(',')}`);
   assert.ok(sensorPoints(config).includes('DI-DOWNSTREAM-ALLOW'), '传感器缺 DI-DOWNSTREAM-ALLOW');
   assert.ok(sensorPoints(config).includes('DI-TRANSFER-END'), '传感器缺 DI-TRANSFER-END');
-  // 唯一剩下的 rotary 轴是模板对「减速电机驱动滚筒」的既有表达，不在转向工位上
-  for (const axis of config.actuators.filter((item) => item.kind === 'rotary')) {
-    assert.ok(!/转向/.test(axis.station), `转向工位上不应有旋转轴：${axis.id}`);
-  }
+  // 站轴上一条旋转轴都不该有：移载机型「板不转向」，驱动滚筒是传动件（进 BOM/电机选型），
+  // 它过去被模板落成 st1-rotary-1（分度 90°），会进 PLC 第 1 步与 DB_IO。
+  assert.deepEqual(
+    config.actuators.filter((item) => item.kind === 'rotary').map((item) => item.id),
+    [],
+    `移载机型不应有任何旋转轴：${ids.join(',')}`
+  );
 });
 
 test('tf02 负向：普通皮带输送线不长移载轴', async () => {

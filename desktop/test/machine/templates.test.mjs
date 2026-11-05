@@ -25,9 +25,9 @@ const EXPECTED = {
     actuators: { cylinder: 1, gripper: 1 },
     sensors: { photoelectric: 1 }
   },
-  // 输送：单条线体，驱动滚筒按旋转轴表达，进出料各一个光电
+  // 输送：单条线体没有工位级轴（驱动滚筒是传动件，进 BOM/电机选型，不进 PLC 步序），进出料各一个光电
   conveyor: {
-    actuators: { rotary: 1 },
+    actuators: {},
     sensors: { photoelectric: 2 }
   }
 };
@@ -45,7 +45,13 @@ test('TEMPLATES 直接导出 6 类工艺，且字段完整', () => {
     assert.equal(typeof template.label, 'string');
     // 输送线只有一条线体；其余工艺模板默认 2 工位
     assert.equal(template.stations, key === 'conveyor' ? 1 : 2);
-    assert.ok(Array.isArray(template.actuators) && template.actuators.length > 0);
+    // 输送线没有工位级轴（驱动滚筒是传动件），其余工艺每工位至少一个机构
+    if (template.optionalStationActuators === true) {
+      assert.equal(key, 'conveyor', '只有输送线允许站轴缺省');
+      assert.deepEqual(template.actuators, [], '输送线不得声明站轴');
+    } else {
+      assert.ok(Array.isArray(template.actuators) && template.actuators.length > 0);
+    }
     assert.ok(Array.isArray(template.sensors) && template.sensors.length > 0);
     assert.ok(Number.isFinite(template.cycleRange.minPerMin));
     assert.ok(template.cycleRange.maxPerMin > template.cycleRange.minPerMin);
