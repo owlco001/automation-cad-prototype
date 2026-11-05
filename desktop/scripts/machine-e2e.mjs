@@ -42,6 +42,15 @@ const shotDir = process.env.AUTOMATIONCAD_SCREENSHOT_DIR
 const KEEP = process.env.MACHINE_E2E_KEEP === '1';
 
 const BRIEF = '光伏板加工输送机：输送 2000mm 光伏板，线体长 6000mm、带宽 1200mm，需要把光伏板旋转 90° 改变方向，节拍 6 件/分钟';
+/**
+ * 第二台机器（同一轮 E2E 里跑）：顶升移载（直角移载）。
+ * 与第一台的区别只有「板不转、整块沿 +Y 送到下游」，用来验本轮新增的
+ * 移载单元 / 两条轴 / 四个联锁信号 / 下游对接段。
+ */
+const TRANSFER_BRIEF = '光伏板加工输送机：输送 1200×800mm 光伏板，线体长 6000mm、带宽 1200mm，'
+  + '需要顶升移载沿 90° 方向把板子送到下游输送线，节拍 6 件/分钟';
+/** 移载工位的四个联锁信号（io-map 里必须逐个能看到） */
+const TRANSFER_SIGNALS = ['DO-TRANSFER-READY', 'DO-TRANSFER-DONE', 'DI-DOWNSTREAM-ALLOW', 'DI-TRANSFER-END'];
 const CONFIRM_SELECTOR = '#acwConfirmMask [data-acw="once"]';
 /** 当前 CDP 客户端：确认按钮/截图这些跨函数的动作都从这里走，避免把 cdp 一路透传。 */
 let ACTIVE_CDP = null;
@@ -340,10 +349,12 @@ async function main() {
       if (typeof code === 'number' && code !== 0) console.error(`MACHINE_E2E_ELECTRON_EXIT code=${code}`);
     });
 
+    // 现在一轮跑两台机器（转向 + 移载），10 分钟不够：放宽到 20 分钟。
+    // 它只是防挂死的兜底，真实耗时以 MACHINE_E2E_DONE 的 steps 计时为准。
     const watchdog = setTimeout(() => {
-      console.error('MACHINE_E2E_TIMEOUT 10 分钟内未完成，强制结束');
+      console.error('MACHINE_E2E_TIMEOUT 20 分钟内未完成，强制结束');
       try { electron?.kill('SIGKILL'); } catch { /* ignore */ }
-    }, 10 * 60_000);
+    }, 20 * 60_000);
     watchdog.unref?.();
 
     cdp = await connectCdp();
@@ -786,11 +797,285 @@ async function main() {
       return `shots=${names.join(',')}`;
     });
 
+
+    // =====================================================================
+    // 第二台机器：顶升移载（直角移载，板不转）
+    //   建机 → 两条轴/四个联锁信号 → parts 数 → BOM 行 → PLC 预检 blocked=0
+    //   → io-map 的 4 个信号 → 三态干涉 confirmed=0 → 3D 截图
+    // =====================================================================
+    const transferDesign = await step(9, 'transfer-design', async () => {
+      await cdp.evaluate(`(async () => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        document.getElementById('automationCadOverlay')?.setAttribute('hidden', '');
+        window.AutomationCadViewer?.close();
+        window.AutomationCadParametric?.close();
+        // 只在抽屉**确实是关的**时候点入口按钮：入口是开关，抽屉已开时再点会把它关掉
+        // （实测抽屉 hidden 时 qSA 仍能查到卡片，于是「点了按钮 = 关掉抽屉」这种 bug 不会立刻暴露）
+        const drawer = document.getElementById('agentDrawer');
+        if (!drawer || drawer.hidden) document.querySelector('#agentEntryButton')?.click();
+        await wait(600);
+        return true;
+      })()`);
+      await sendMessage(cdp, `再做一台顶升移载输送机（板不转、沿 +Y 送到下游）：${TRANSFER_BRIEF}`);
+      // 等「这次 design_machine 调用的方案卡」而不是「卡片数变多」：两台机器的机型名一模一样
+      //（都是「1 工位输送机（方案草案）」），且抽屉重绘会把旧卡片换掉，按数量判一定误判。
+      // 判据取 data-apply-machine="<callId>"——只有这一条调用自己的卡片才会有这个按钮。
+      try {
+        await cdp.waitFor(
+          `(() => {
+            const calls = Array.from(document.querySelectorAll('.acp-chat-tool'));
+            const mine = calls.filter((node) => (node.textContent || '').includes('顶升移载'));
+            const callId = mine.length > 0 ? mine[mine.length - 1].getAttribute('data-tool-call-id') : '';
+            if (!callId) return false;
+            return Boolean(document.querySelector('[data-apply-machine="' + CSS.escape(callId) + '"]'));
+          })()`,
+          '移载方案卡出现',
+          120_000,
+          clickConfirm
+        );
+      } catch (error) {
+        // 超时不能只说「等待超时」：把卡片/工具卡/反馈/抽屉状态都打出来
+        const diagnosis = await cdp.evaluate(`(() => {
+          const cards = Array.from(document.querySelectorAll('.acp-machine-card'));
+          return {
+            cards: cards.length,
+            titles: cards.map((node) => (node.querySelector('.acp-machine-title')?.textContent || '').trim()).slice(-3),
+            toolCards: Array.from(document.querySelectorAll('.acp-chat-tool')).slice(-3)
+              .map((node) => (node.textContent || '').trim().slice(0, 200)),
+            messages: document.querySelectorAll('.acp-msg, .acp-chat-msg, [data-acp-message]').length,
+            chatChars: (document.getElementById('agentChatLog')?.textContent || '').length,
+            feedback: (document.getElementById('agentChatFeedback')?.textContent || '').slice(0, 300),
+            drawerHidden: document.getElementById('agentDrawer')?.hidden ?? null,
+            cardParseFail: window.__MACHINE_CARD_LAST_FAIL__ ?? null,
+            lastDesignArgs: (() => {
+              const cards = Array.from(document.querySelectorAll('.acp-chat-tool'));
+              const last = cards[cards.length - 1];
+              return last ? (last.querySelector('.acp-pack-meta')?.textContent || '').slice(0, 200) : null;
+            })(),
+            sendDisabled: document.getElementById('agentChatSend')?.disabled ?? null,
+            inputValue: (document.getElementById('agentChatInput')?.value || '').slice(0, 80)
+          };
+        })()`);
+        throw new Error(`${error.message}：${JSON.stringify(diagnosis)}`);
+      }
+      const payload = await llm.waitForTool('design_machine', 20_000);
+      const body = payload?.data && typeof payload.data === 'object' ? payload.data : payload;
+      const design = body?.design ?? body;
+      const stations = (design?.config?.stations ?? []).map((entry) => (typeof entry === 'string' ? entry : entry?.name ?? ''));
+      const actuators = design?.config?.actuators ?? [];
+      const sensors = design?.config?.sensors ?? [];
+      const lift = actuators.find((entry) => entry?.id === 'transfer-lift');
+      const push = actuators.find((entry) => entry?.id === 'transfer-push');
+      const bound = (point) => sensors.find((entry) => entry?.point === point)?.part;
+      if (!stations.join(',').includes('移载工位')) throw new Error(`方案里没有「移载工位」：${stations.join(',')}`);
+      if (!lift) throw new Error(`actuators 里没有 transfer-lift：${actuators.map((a) => a?.id).join(',')}`);
+      if (!push) throw new Error(`actuators 里没有 transfer-push：${actuators.map((a) => a?.id).join(',')}`);
+      if (Number(lift.travelMm) !== 60) throw new Error(`transfer-lift 行程异常：${lift.travelMm}`);
+      if (!(Number(push.travelMm) > 1000)) throw new Error(`transfer-push 行程异常：${push.travelMm}（应 = 板宽 800 + 结构间隙 220 + 余量 120）`);
+      if (!((push.position?.[1] ?? 0) > 0)) throw new Error(`transfer-push 方向不是 +Y：${JSON.stringify(push.position)}`);
+      if (bound('DI-TRANSFER-END') !== 'transfer-push') throw new Error(`DI-TRANSFER-END 没绑 transfer-push：${bound('DI-TRANSFER-END')}`);
+      if (bound('ST-TRANSFER-LIFT-UP') !== 'transfer-lift') throw new Error(`ST-TRANSFER-LIFT-UP 没绑 transfer-lift：${bound('ST-TRANSFER-LIFT-UP')}`);
+      if (bound('DI-DOWNSTREAM-ALLOW') !== '移载工位') throw new Error(`DI-DOWNSTREAM-ALLOW 应绑工位：${bound('DI-DOWNSTREAM-ALLOW')}`);
+      const ioPoints = (design?.config?.ioPoints ?? []).map((item) => item?.point);
+      for (const point of ['DO-TRANSFER-READY', 'DO-TRANSFER-DONE']) {
+        if (!ioPoints.includes(point)) throw new Error(`config.ioPoints 缺 ${point}：${ioPoints.join(',')}`);
+      }
+      return `stations=${stations.join(',')} lift=${lift.travelMm}mm push=${push.travelMm}mm pos=${JSON.stringify(push.position)} ioPoints=${ioPoints.join(',')} sensors=${sensors.length}`;
+    });
+
+    const transferApplied = await step(10, 'transfer-apply', async () => {
+      // 按 callId 精确点「这次移载方案」的按钮：机型名两台机器一样，靠「最后一张卡」会点错
+      const clicked = await cdp.evaluate(`(() => {
+        const calls = Array.from(document.querySelectorAll('.acp-chat-tool'))
+          .filter((node) => (node.textContent || '').includes('顶升移载'));
+        const callId = calls.length > 0 ? calls[calls.length - 1].getAttribute('data-tool-call-id') : '';
+        if (!callId) return false;
+        const button = document.querySelector('[data-apply-machine="' + CSS.escape(callId) + '"]');
+        if (!button) return false;
+        button.click();
+        return true;
+      })()`);
+      if (!clicked) throw new Error('移载方案卡上点不到「应用到工程」');
+      const confirms = await cdp.waitForConfirm(1, '写操作确认卡', 20_000);
+      try {
+        await cdp.waitFor(
+          `(() => {
+            const calls = Array.from(document.querySelectorAll('.acp-chat-tool'))
+              .filter((node) => (node.textContent || '').includes('顶升移载'));
+            const callId = calls.length > 0 ? calls[calls.length - 1].getAttribute('data-tool-call-id') : '';
+            if (!callId) return false;
+            const card = document.querySelector('[data-machine-card="' + CSS.escape(callId) + '"]');
+            const pill = card?.querySelector('.acp-pill.is-ok');
+            return Boolean(pill && (pill.textContent || '').includes('已应用'));
+          })()`,
+          '移载方案显示已应用',
+          120_000,
+          clickConfirm
+        );
+      } catch (error) {
+        const diagnosis = await cdp.evaluate(`(() => {
+          const calls = Array.from(document.querySelectorAll('.acp-chat-tool'));
+          return {
+            lastToolCards: calls.slice(-3).map((node) => (node.textContent || '').trim().replace(/\\s+/g, ' ').slice(0, 420)),
+            applyButtons: Array.from(document.querySelectorAll('[data-apply-machine]')).map((node) => ({
+              id: node.getAttribute('data-apply-machine'), disabled: node.disabled, text: node.textContent.trim()
+            })),
+            pills: Array.from(document.querySelectorAll('.acp-machine-card .acp-pill')).map((node) => node.textContent.trim()),
+            feedback: (document.getElementById('agentChatFeedback')?.textContent || '').slice(0, 400),
+            confirmMask: Boolean(document.getElementById('acwConfirmMask'))
+          };
+        })()`);
+        throw new Error(`${error.message}：${JSON.stringify(diagnosis)}`);
+      }
+      const activePath = join(userDataDir, 'machine', 'active.json');
+      const active = JSON.parse(readFileSync(activePath, 'utf8'));
+      const stored = JSON.parse(readFileSync(join(userDataDir, 'machine', `${active.machineId}.json`), 'utf8'));
+      const storedDesign = stored?.design ?? stored;
+      const config = storedDesign?.config ?? {};
+      const ids = (config.actuators ?? []).map((entry) => entry?.id);
+      if (!ids.includes('transfer-lift') || !ids.includes('transfer-push')) {
+        throw new Error(`落盘 config 缺移载轴：${ids.join(',')}`);
+      }
+      if (config.conveyor?.transferPresent !== true) throw new Error('落盘 config.conveyor 缺 transferPresent（几何会回落普通线）');
+      const storedSensors = (config.sensors ?? []).map((entry) => entry?.point);
+      for (const point of TRANSFER_SIGNALS) {
+        if (!storedSensors.includes(point) && !(config.ioPoints ?? []).some((entry) => entry?.point === point)) {
+          throw new Error(`落盘 config 缺信号 ${point}`);
+        }
+      }
+      return `machineId=${active.machineId} actuators=${ids.join(',')} confirms=${confirms} signals=${TRANSFER_SIGNALS.length}`;
+    });
+
+    const transferGeometry = await step(11, 'transfer-build-model', async () => {
+      await sendMessage(cdp, `按当前机型生成整机实体模型（参数化几何），需求同前：${TRANSFER_BRIEF}`);
+      // 按「内容」等而不是按「卡片数量」等：抽屉重绘会把旧卡片换掉，数量增长不是可靠判据。
+      // 移载这台机器的 build_machine_model 参数里带「顶升移载」，转向那台不带。
+      await cdp.waitFor(
+        `Array.from(document.querySelectorAll('.acp-chat-tool')).some((node) => {
+          const text = node.textContent || '';
+          return /build_machine_model/.test(text) && /顶升移载/.test(text) && /成功|失败/.test(text);
+        })`,
+        'build_machine_model 工具卡出现',
+        120_000,
+        clickConfirm
+      );
+      const payload = await llm.waitForTool('build_machine_model', 30_000);
+      const body = payload?.data && typeof payload.data === 'object' ? payload.data : payload;
+      if (payload?.ok === false) throw new Error(`build_machine_model 失败：${payload.message ?? payload.code}`);
+      const items = Number(body?.parts ?? 0);
+      const loaded = Number(body?.loadedParts ?? 0);
+      if (items < 100) throw new Error(`移载机型零件数 ${items} < 100（普通线 61 件 + 移载单元 50 件）`);
+      if (loaded < 100) throw new Error(`视口只装配了 ${loaded} 件（期望 ≥100）`);
+      const bomRaw = body?.bom;
+      const bomRows = Array.isArray(bomRaw) ? bomRaw : Array.isArray(bomRaw?.items) ? bomRaw.items : [];
+      const rows = bomRows.filter((row) => /移载|对接段/.test(String(row?.name ?? '')));
+      if (rows.length < 6) throw new Error(`结构 BOM 里移载件不足：${rows.map((row) => row.name).join('/')}`);
+      return `parts=${items} loaded=${loaded} bomRows=${bomRows.length} transferRows=${rows.length} (${rows.slice(0, 5).map((row) => row.name).join(' / ')})`;
+    });
+
+    const transferPlc = await step(12, 'transfer-plc', async () => {
+      await sendMessage(cdp, `按当前机型生成 PLC 程序并落盘（含 IO 点位映射），需求：${TRANSFER_BRIEF}`);
+      // 用 namePrefix=pv-transfer 区分两台机器的 PLC 结果卡
+      await cdp.waitFor(
+        `Array.from(document.querySelectorAll('.acp-chat-tool')).some((node) => {
+          const text = node.textContent || '';
+          return /run_plc_generate/.test(text) && /pv-transfer/.test(text) && /成功|失败/.test(text);
+        })`,
+        'PLC 生成结果卡完成',
+        150_000,
+        clickConfirm
+      );
+      const payload = await llm.waitForTool('run_plc_generate', 20_000);
+      if (payload?.ok === false) {
+        const failure = payload.error && typeof payload.error === 'object' ? payload.error : payload;
+        throw new Error(`移载机型 PLC 预检拒签 code=${failure.code ?? '?'}：${failure.message ?? JSON.stringify(payload).slice(0, 200)}`);
+      }
+      const blocked = Array.isArray(payload?.precheck?.errors) ? payload.precheck.errors.length : 0;
+      if (blocked !== 0) throw new Error(`移载机型 PLC 预检 blocked=${blocked}：${JSON.stringify(payload.precheck.errors).slice(0, 300)}`);
+
+      // io-map.csv：4 个联锁信号逐个可见，且方向正确（DO=输出 / DI=输入）
+      const plcRoot = join(userDataDir, 'exports', 'plc');
+      const csvFiles = [];
+      const walk = (dir) => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          const path = join(dir, entry.name);
+          if (entry.isDirectory()) walk(path);
+          else if (entry.name === 'io-map.csv') csvFiles.push(path);
+        }
+      };
+      walk(plcRoot);
+      if (csvFiles.length === 0) throw new Error('移载机型没有产出 io-map.csv');
+      const latest = csvFiles.map((path) => ({ path, mtime: statSync(path).mtimeMs })).sort((a, b) => b.mtime - a.mtime)[0];
+      const csv = readFileSync(latest.path, 'utf8');
+      const lines = csv.split(/\r?\n/);
+      const rows = {};
+      for (const line of lines) {
+        const [point, address, direction] = line.split(',');
+        if (point) rows[point.trim()] = { address, direction };
+      }
+      for (const point of TRANSFER_SIGNALS) {
+        if (!rows[point]) throw new Error(`io-map 里没有 ${point}`);
+        const expect = point.startsWith('DO') ? '输出' : '输入';
+        if (rows[point].direction !== expect) throw new Error(`${point} 方向应为 ${expect}，实际 ${rows[point].direction}`);
+      }
+      return `blocked=0 io-map=${latest.path} signals=${TRANSFER_SIGNALS.map((p) => `${p}@${rows[p].address}`).join(',')}`;
+    });
+
+    const transferStates = await step(13, 'transfer-interference-states', async () => {
+      await sendMessage(cdp, '对当前机型做三态干涉检查（rest/lift/push），看移载机构和既有线体有没有干涉');
+      await cdp.waitFor(
+        `Array.from(document.querySelectorAll('.acp-chat-tool')).some((node) => {
+          const text = node.textContent || '';
+          return /run_interference_check/.test(text) && /push/.test(text) && /成功|失败/.test(text);
+        })`,
+        '三态干涉结果卡完成',
+        150_000
+      );
+      const payload = await llm.waitForTool('run_interference_check', 20_000);
+      if (payload?.ok === false) throw new Error(`三态干涉失败：${payload.code} ${payload.message ?? ''}`);
+      const states = payload?.states ?? {};
+      const detail = [];
+      for (const name of ['rest', 'lift', 'push']) {
+        const entry = states[name];
+        if (!entry) throw new Error(`三态里没有 ${name}：${Object.keys(states).join(',')}`);
+        detail.push(`${name}=${entry.confirmedHits}/${entry.screenHits}/${entry.mm3Confirmed}`);
+        if (Number(entry.confirmedHits) !== 0) {
+          throw new Error(`${name} 态有确认干涉 ${entry.confirmedHits} 对：${JSON.stringify(entry.items ?? []).slice(0, 400)}`);
+        }
+        if (Number(entry.screenHits) !== 0) {
+          throw new Error(`${name} 态有待复核对 ${entry.screenHits} 对：${JSON.stringify(entry.items ?? []).slice(0, 400)}`);
+        }
+      }
+      if (payload?.push?.actuatorId !== 'transfer-push') {
+        throw new Error(`push 态没用移载轴：${JSON.stringify(payload?.push ?? null).slice(0, 200)}`);
+      }
+      return `confirmed=0/0/0 (rest/lift/push) axis=${payload.push.actuatorId} stroke=${payload.push.strokeMm}mm ${detail.join(' ')}`;
+    });
+
+    const transferShot = await step(14, 'transfer-screenshot', async () => {
+      await cdp.evaluate(`(async () => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        document.querySelector('#agentDrawer [data-acp-close]')?.click();
+        await wait(250);
+        document.querySelector('#cadEntryButton')?.click();
+        await wait(900);
+        document.querySelector('[data-cad-action="fit"]')?.click();
+        await wait(1200);
+        return true;
+      })()`);
+      await cdp.waitFor(`Boolean(document.querySelector('#automationCadOverlay') && !document.querySelector('#automationCadOverlay').hidden)`, 'CAD 覆盖层可见', 20_000);
+      await cdp.waitFor(`(Number(document.getElementById('cadPartCount')?.textContent || 0) >= 100)`, '3D 视口里装着 ≥100 件', 30_000);
+      const name = await capture(cdp, '23-pv-04-transfer-3d.png', '顶升移载整机 3D（主线上方横向移载机构 + 下游对接段）');
+      const partCount = await cdp.evaluate(`Number(document.getElementById('cadPartCount').textContent || 0)`);
+      return `shot=${name} parts=${partCount}`;
+    });
+
     const shotsCheck = checkShotHashes();
     console.log(`MACHINE_E2E_SHOTS ${shotsCheck}`);
     for (const item of blocked) console.log(`MACHINE_E2E_BLOCKED ${item}`);
     console.log(`MACHINE_E2E_DONE steps=${stepsOk} failed=0 blocked=${blocked.length} userData=${userDataDir} shots=${shotDir}`);
     void design; void cardState; void applied; void geometry; void plc; void exports; void interference; void shots;
+    void transferDesign; void transferApplied; void transferGeometry; void transferPlc; void transferStates; void transferShot;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`MACHINE_E2E_ABORT ${message}`);
@@ -833,7 +1118,7 @@ async function stopElectron(child) {
 
 /** 三张截图必须都存在、>20KB、sha256 互异。 */
 function checkShotHashes() {
-  const names = ['23-pv-01-3d.png', '23-pv-02-linkage.png', '23-pv-03-exports.png'];
+  const names = ['23-pv-01-3d.png', '23-pv-02-linkage.png', '23-pv-03-exports.png', '23-pv-04-transfer-3d.png'];
   const seen = new Map();
   const parts = [];
   for (const name of names) {
@@ -956,17 +1241,27 @@ function lastUserText(messages) {
 
 function planFor(text) {
   // 顺序要紧：带需求原文的后续消息里也有「光伏板/输送」，先把更具体的意图挑出来
+  // 第二台机器（顶升移载）的整段对话都带「移载」两个字，先按它分流到对应 brief
+  const isTransfer = /移载/.test(text);
+  const brief = isTransfer ? TRANSFER_BRIEF : BRIEF;
   if (/(实体模型|整机模型|参数化几何|三维模型)/.test(text)) {
-    return { name: 'build_machine_model', args: { process: 'conveyor', brief: BRIEF } };
+    return { name: 'build_machine_model', args: { process: 'conveyor', brief } };
+  }
+  if (/三态/.test(text)) {
+    // 位姿化检查：移载机型必须能跑 rest / lift / push（sweep 已在单测与 eval t05 覆盖）
+    return { name: 'run_interference_check', args: { states: ['rest', 'lift', 'push'] } };
   }
   if (/干涉/.test(text)) {
     return { name: 'run_interference_check', args: {} };
   }
   if (/plc/i.test(text)) {
-    return { name: 'run_plc_generate', args: { namePrefix: 'pv-conveyor' } };
+    return { name: 'run_plc_generate', args: { namePrefix: isTransfer ? 'pv-transfer' : 'pv-conveyor' } };
   }
   if (/导出/.test(text)) {
     return { name: 'export_files', args: { kind: 'glb', fileName: 'pv-conveyor.glb', overwrite: true } };
+  }
+  if (isTransfer) {
+    return { name: 'design_machine', args: { brief: TRANSFER_BRIEF } };
   }
   if (/光伏板/.test(text) && /(设计|做|规划|输送)/.test(text)) {
     return { name: 'design_machine', args: { brief: BRIEF } };

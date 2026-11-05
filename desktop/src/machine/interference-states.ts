@@ -13,6 +13,11 @@
  * 行程来源：active 机型 config 轴上真实的 `travelMm`（turner-lift 由
  * `turnerLayout()` 按 `TURNER_LIFT_STROKE_MM` 写进 config），这里**不写死 60**。
  * 读不到可顶升轴就返回 `STATE_UNAVAILABLE`，不拿静态位姿冒充 lift。
+ *
+ * `push`（顶升移载的 +Y 送出）是**复合位姿**：先按顶升轴把随动台板/辊道/推板抬到行程顶，
+ * 再按移载轴把推板沿 +Y 推到行程末端。真机就是这个顺序（顶起来再推），
+ * 只按 +Y 平移而不顶升会得出一个不存在的位姿（推板会穿带）。没有移载轴时返回
+ * `STATE_UNAVAILABLE`，不退化成「等于 lift」——那正是 t05 抓到的老毛病。
  */
 
 import type { MachineConfig } from '../commission/machine-config.ts';
@@ -20,7 +25,7 @@ import { resolveMachineGeometry, type MachineGeometrySource } from './machine-ge
 import type { MachineGeometry } from './geometry.ts';
 import { screenInterference } from './interference.ts';
 
-export const INTERFERENCE_STATES = ['rest', 'lift', 'sweep'] as const;
+export const INTERFERENCE_STATES = ['rest', 'lift', 'sweep', 'push'] as const;
 export type InterferenceState = (typeof INTERFERENCE_STATES)[number];
 
 /** 扫掠步长 mm：与 `buildLinkage` 的 tick 无关，固定 10 mm 便于逐步复核。 */
@@ -130,6 +135,8 @@ export interface InterferenceStatesPayload {
   /** 整机装配件数（BOM/STEP 口径）；活塞杆按刚体拆出时会比 partCount 少几件 */
   assemblyPartCount: number;
   lift: LiftAxisInfo | null;
+  /** 移载轴（+Y）；机型没有移载工位时为 null */
+  push: LiftAxisInfo | null;
   states: Record<string, InterferenceStateSummary | SweepStateSummary>;
   /** 全部状态里最差的一档：fail > warn > pass */
   reviewStatus: ReviewStatus;
@@ -309,9 +316,58 @@ export function shiftParts(
   };
 }
 
+/**
+ * 找「可移载轴」：id=transfer-push（或名字带移载/push）且 travelMm > 0，
+ * 方向上认 config.position 的 Y 分量；几何里没有它的运动零件就返回 null。
+ */
+export function resolvePushAxis(config: unknown, geometry: unknown): LiftAxisInfo | null {
+  const actuators = isRecord(config) && Array.isArray(config.actuators) ? config.actuators : [];
+  // 先认 id：顶升轴的名字里也带「移载」（移载工位顶升台），只按名字找会把 +Y 轴认成顶升轴，
+  // 于是 push 态变成「顶两次升」——实测 rollers 被抬到 915 撞上推板 400000 mm³。
+  const candidates = actuators.filter((item): item is Record<string, unknown> => (
+    isRecord(item) && typeof item.id === 'string' && item.kind !== 'rotary' && Number(item.travelMm) > 0
+  ));
+  const actuator = candidates.find((item) => item.id === 'transfer-push')
+    ?? candidates.find((item) => /push|移载/i.test(`${String(item.id)} ${String(item.name ?? '')}`)
+      && !/lift|顶升|turn/i.test(`${String(item.id)} ${String(item.name ?? '')}`));
+  if (!actuator) return null;
+  const strokeMm = Number(actuator.travelMm);
+  if (!Number.isFinite(strokeMm) || strokeMm <= 0) return null;
+  const axes = isRecord(geometry) && Array.isArray(geometry.moving) ? geometry.moving : [];
+  const axis = axes.find((item) => isRecord(item) && item.actuatorId === actuator.id);
+  if (!isRecord(axis) || !Array.isArray(axis.partIds)) return null;
+  const partIds = axis.partIds.filter((id): id is string => typeof id === 'string' && id.length > 0);
+  if (partIds.length === 0) return null;
+  const rawAxis: Vec3 = Array.isArray(axis.axis)
+    ? [Number(axis.axis[0]) || 0, Number(axis.axis[1]) || 0, Number(axis.axis[2]) || 0]
+    : [0, 1, 0];
+  let direction = unit(rawAxis);
+  if (!direction) return null;
+  const position = Array.isArray(actuator.position)
+    ? [Number(actuator.position[0]) || 0, Number(actuator.position[1]) || 0, Number(actuator.position[2]) || 0] as Vec3
+    : null;
+  const geometryDirection: Vec3 = [...direction];
+  let directionOverridden = false;
+  if (position && position.some((value) => value !== 0)) {
+    const dot = direction[0] * position[0] + direction[1] * position[1] + direction[2] * position[2];
+    if (dot < 0) {
+      direction = [-direction[0] + 0, -direction[1] + 0, -direction[2] + 0];
+      directionOverridden = true;
+    }
+  }
+  return {
+    actuatorId: String(actuator.id),
+    strokeMm,
+    direction,
+    geometryDirection,
+    directionOverridden,
+    partIds
+  };
+}
+
 function normalizeStates(states: unknown): { ok: true; states: InterferenceState[] } | InterferenceStatesFailure {
   if (!Array.isArray(states) || states.length === 0) {
-    return { ok: false, code: 'INVALID_ARGUMENT', message: 'states 必须是非空数组，元素只能是 rest / lift / sweep' };
+    return { ok: false, code: 'INVALID_ARGUMENT', message: 'states 必须是非空数组，元素只能是 rest / lift / sweep / push' };
   }
   const output: InterferenceState[] = [];
   for (const raw of states) {
@@ -369,13 +425,23 @@ export function runInterferenceStates(input: {
   }
 
   const needLift = states.some((state) => state === 'lift' || state === 'sweep');
-  const lift = needLift ? resolveLiftAxis(input.config, geometry) : null;
+  const needPush = states.some((state) => state === 'push');
+  const lift = needLift || needPush ? resolveLiftAxis(input.config, geometry) : null;
   if (needLift && !lift) {
     return {
       ok: false,
       code: 'STATE_UNAVAILABLE',
       message: '当前机型没有可顶升的轴（config 里找不到 travelMm > 0 的 lift/顶升执行机构，或几何里没有它的运动零件）',
       hint: '先用 design_machine 生成带转向/顶升工位的机型，或确认 turner-lift 的行程字段'
+    };
+  }
+  const push = needPush ? resolvePushAxis(input.config, geometry) : null;
+  if (needPush && !push) {
+    return {
+      ok: false,
+      code: 'STATE_UNAVAILABLE',
+      message: '当前机型没有可移载的轴（config 里找不到 travelMm > 0 的 transfer-push/移载执行机构，或几何里没有它的运动零件）',
+      hint: '先用 design_machine 生成带「顶升移载（直角移载）」的输送机机型；push 态不拿 lift 位姿冒充'
     };
   }
 
@@ -385,6 +451,19 @@ export function runInterferenceStates(input: {
   for (const state of states) {
     if (state === 'rest') {
       output.rest = summarize(screenInterference(geometry), { poseValidity: 'valid' });
+      continue;
+    }
+    if (state === 'push') {
+      if (!push) continue; // needPush 已保证不会走到这里
+      // 复合位姿：先顶升（有顶升轴才抬）再沿移载方向推出。姿态不可信时（方向被 config 覆盖）
+      // 该态同样降级为待复核，与 lift 同一口径。
+      const liftedPose = lift ? shiftParts(geometry, lift.partIds, lift.direction, lift.strokeMm) : geometry;
+      const pushed = shiftParts(liftedPose, push.partIds, push.direction, push.strokeMm);
+      const poseValidity: PoseValidity = push.directionOverridden || lift?.directionOverridden
+        ? 'direction-overridden'
+        : 'valid';
+      const pushMovingIds = new Set<string>([...push.partIds, ...(lift?.partIds ?? [])]);
+      output.push = summarize(screenInterference(pushed), { poseValidity, movingIds: pushMovingIds });
       continue;
     }
     if (!lift) continue; // needLift 已保证不会走到这里
@@ -439,6 +518,7 @@ export function runInterferenceStates(input: {
     partCount: geometry.parts.length,
     assemblyPartCount: geometry.assemblyPartCount ?? geometry.parts.length,
     lift,
+    push,
     states: output,
     reviewStatus,
     precision: {

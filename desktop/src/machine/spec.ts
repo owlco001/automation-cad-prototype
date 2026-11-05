@@ -51,6 +51,14 @@ export interface TurnerSpec {
   angleDeg: number;
 }
 
+/**
+ * 顶升移载（直角移载）：板**不转**，顶升后沿 +Y 平移到下游输送线。
+ * 与 `turner` 互斥——移载本身已经完成 90° 换向，不需要再转板。
+ */
+export interface TransferSpec {
+  present: true;
+}
+
 /** 工程师明确输入的整机占地边界；仅用于与实际几何包络比较，不缩放实体。 */
 export interface MachineFootprintRequirement {
   lengthMm: number;
@@ -79,6 +87,8 @@ export interface MachineBrief {
   workpiece?: WorkpieceSpec;
   /** 需求里明确要求「转向/旋转 90°」时存在；输送线据此加转向工位。 */
   turner?: TurnerSpec;
+  /** 需求里明确要求「顶升移载 / 直角移载」时存在；输送线据此加移载工位。 */
+  transfer?: TransferSpec;
   actuators: { kind: MachineActuatorKind; count: number }[];
   sensors: { kind: MachineSensorKind; count: number }[];
   brand: string | null;
@@ -349,6 +359,18 @@ export function detectTurner(text: string): TurnerSpec | null {
 }
 
 export const DEFAULT_TURNER_ANGLE_DEG = 90;
+
+/**
+ * 顶升移载识别：需求要「板不转、整块移到隔壁线上」。
+ *
+ * 为什么必须比转向先判：中文需求里「移载」和「转向」经常一起出现（「顶升移载，直角转向」），
+ * 而转向的正则只认「转向」两字。先判到移载就把 turner 压掉——两套机构抢同一段线体，
+ * 同时生成会在几何层被判互斥、整台机器退回普通输送线，比只做一套更糟。
+ */
+export function detectTransfer(text: string): TransferSpec | null {
+  if (!/顶升移载|移载机|移载工位|移载单元|移载机构|直角移载|横移移载|移载\s*(?:到|至|给)/.test(text)) return null;
+  return { present: true };
+}
 /** 需求里常见的三种转向角度；其它角度也接受（1–180），只是会写进 notes 提醒复核。 */
 export const TURNER_COMMON_ANGLES = [45, 90, 180] as const;
 
@@ -700,7 +722,12 @@ export function parseMachineBrief(text: string): MachineBrief {
   }
 
   const conveyor = process === 'conveyor' ? detectConveyorSpec(source) : null;
-  const turner = detectTurner(source);
+  const transfer = detectTransfer(source);
+  if (transfer) {
+    notes.push('顶升移载：需求要求把工件整体平移到下游输送线（板不转向），按直角移载单元建模');
+  }
+  // 移载与转向互斥：同时命中时只做移载（见 detectTransfer 注释），并如实记录判断依据
+  const turner = transfer ? null : detectTurner(source);
   if (turner) {
     const standard = (TURNER_COMMON_ANGLES as readonly number[]).includes(turner.angleDeg);
     notes.push(
@@ -726,6 +753,7 @@ export function parseMachineBrief(text: string): MachineBrief {
     ...(processNames.length > 0 ? { processes: processNames } : {}),
     ...(workpiece ? { workpiece } : {}),
     ...(turner ? { turner } : {}),
+    ...(transfer ? { transfer } : {}),
     actuators,
     sensors,
     brand,

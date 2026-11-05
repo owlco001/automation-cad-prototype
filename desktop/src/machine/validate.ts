@@ -85,6 +85,31 @@ export interface MachineConveyorConfig {
   layerPitchMm?: number;
   /** 转向角度：省略时由 turner-rotary 的 rotationRangeDeg 反推；0 = 不做转向 */
   turnerAngleDeg?: number;
+  /** 顶升移载（直角移载）：板不转，顶升后沿 +Y 送出；与 turnerAngleDeg 互斥 */
+  transferPresent?: boolean;
+  /** 板材沿 X 的长度 mm（对接段宽度按它给）；省略按带宽推 */
+  transferPartLengthMm?: number;
+  /** 板材沿 Y 的宽度 mm（移载行程按它给）；省略按带宽推 */
+  transferPartWidthMm?: number;
+}
+
+/**
+ * 非执行机构驱动的扩展点位（`DO-`/`DI-` 这类握手信号）。
+ *
+ * 为什么要有：顶升移载要给下游一个联锁信号（`DO-TRANSFER-READY` / `DO-TRANSFER-DONE`），
+ * 这类输出既不是气缸线圈也不是传感器输入。以前只能塞进某个执行机构的 point 字段，
+ * 语义上就变成了「某条轴的动作点」。这里显式建模成扩展点位，io-map 里 direction/area
+ * 由 area 字段给出，PLC 预检的地址/重复检查同样覆盖它（collectIoRefs 早就支持）。
+ */
+export interface MachineExtraIoPoint {
+  point: string;
+  name?: string;
+  /** 缺省由点位前缀（DO/DQ→输出，其余→输入）推；与 plcgen 的 PlcIoPoint 保持同一形状 */
+  area?: 'input' | 'output';
+  station?: string;
+  /** 用途（进 io-map 的「类型」列），如「移载就绪」「下游允许」 */
+  role?: string;
+  address?: string;
 }
 
 export interface MachineConfig {
@@ -93,6 +118,8 @@ export interface MachineConfig {
   stations: string[];
   actuators: ActuatorConfig[];
   sensors: SensorConfig[];
+  /** 握手/联锁扩展点位（不是执行机构线圈、也不是传感器输入）；plcgen 按同一形状读取 */
+  ioPoints?: readonly MachineExtraIoPoint[];
   /** 形态 id（forms.ts），与 design.form.id 一致；输送类据此判定走参数化整机 */
   formId?: string;
   /** 输送机参数：有它才可能走参数化整机，缺省则回落工位生成器 */
@@ -400,6 +427,8 @@ function parseConfig(value: unknown): MachineConfig {
   };
   // 形态 id 与输送参数是可选的「几何推导输入」：旧方案没有它们也照样合法，
   // 只是几何会回落到工位生成器（见 machine/machine-geometry.ts 的判定）。
+  const ioPoints = parseExtraIoPoints(record.ioPoints);
+  if (ioPoints !== undefined) config.ioPoints = ioPoints;
   const formId = optionalString(record, 'formId', 'formId', 'config.formId');
   if (formId !== undefined) config.formId = formId;
   const conveyor = parseConveyorParams(record.conveyor);
@@ -433,7 +462,45 @@ function parseConveyorParams(value: unknown): MachineConveyorConfig | undefined 
   if (layers !== undefined) conveyor.layers = Math.min(8, Math.max(1, Math.round(layers)));
   const turner = optionalPositive(value.turnerAngleDeg);
   if (turner !== undefined) conveyor.turnerAngleDeg = Math.min(180, Math.round(turner));
+  if (value.transferPresent === true) conveyor.transferPresent = true;
+  const partLength = optionalPositive(value.transferPartLengthMm);
+  if (partLength !== undefined) conveyor.transferPartLengthMm = partLength;
+  const partWidth = optionalPositive(value.transferPartWidthMm);
+  if (partWidth !== undefined) conveyor.transferPartWidthMm = partWidth;
   return conveyor;
+}
+
+/**
+ * 解析扩展点位。宽容口径与 `config.conveyor` 一致：坏项丢掉（几何/PLC 侧会按缺失处理），
+ * 但形状错了要报——把 `ioPoints: "DO-READY"` 静默吞掉，用户会以为信号已经进 IO 表了。
+ */
+function parseExtraIoPoints(value: unknown): MachineExtraIoPoint[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) {
+    fail('CONFIG_SHAPE', 'config.ioPoints', 'config.ioPoints 必须是数组（每项 {point, area, name?}）');
+  }
+  const points: MachineExtraIoPoint[] = [];
+  for (const [index, raw] of value.entries()) {
+    if (!isRecord(raw)) {
+      fail('CONFIG_SHAPE', `config.ioPoints[${index}]`, `config.ioPoints[${index}] 必须是对象`);
+    }
+    const point = optionalString(raw, 'point', `ioPoints[${index}].point`, `config.ioPoints[${index}].point`);
+    if (point === undefined) continue;
+    const area = raw.area === 'input' || raw.area === 'output'
+      ? raw.area
+      : /^D[QO]|^Q/i.test(point) ? 'output' : 'input';
+    const entry: MachineExtraIoPoint = { point, area };
+    const name = optionalString(raw, 'name', `ioPoints[${index}].name`, `config.ioPoints[${index}].name`);
+    if (name !== undefined) entry.name = name;
+    const station = optionalString(raw, 'station', `ioPoints[${index}].station`, `config.ioPoints[${index}].station`);
+    if (station !== undefined) entry.station = station;
+    const role = optionalString(raw, 'role', `ioPoints[${index}].role`, `config.ioPoints[${index}].role`);
+    if (role !== undefined) entry.role = role;
+    const address = optionalString(raw, 'address', `ioPoints[${index}].address`, `config.ioPoints[${index}].address`);
+    if (address !== undefined) entry.address = address;
+    points.push(entry);
+  }
+  return points;
 }
 
 /** 配置里声明的安全回路点位（safety.emergencyStop / safetyDoor / 顶层 estopPoint 等）。 */

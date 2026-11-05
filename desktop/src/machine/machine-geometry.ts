@@ -38,9 +38,11 @@ import {
   DEFAULT_CONVEYOR,
   buildConveyorParts,
   conveyorBom,
+  transferLayout,
   turnerLayout,
   type ConveyorPart,
   type ConveyorParams,
+  type TransferLayout,
   type TurnerLayout
 } from './conveyor-assembly.ts';
 import {
@@ -114,11 +116,22 @@ export function conveyorParamsFromConfig(config: MachineConfig): ConveyorParams 
   // 以典型值为基线，只覆盖 config 里真给了的字段：这样外面拿到的参数是完整、可复算的一份，
   // 具体夹紧/取整仍由 buildConveyorParts 自己的 normalizeParams 做（单一实现）。
   const overrides: Partial<ConveyorParams> = {};
-  for (const key of ['beltHeightMm', 'pulleyDiameterMm', 'beltThicknessMm', 'frameSectionMm', 'layerPitchMm'] as const) {
+  for (const key of [
+    'beltHeightMm',
+    'pulleyDiameterMm',
+    'beltThicknessMm',
+    'frameSectionMm',
+    'layerPitchMm',
+    'transferPartLengthMm',
+    'transferPartWidthMm'
+  ] as const) {
     const value = raw[key];
     if (isFinitePositive(value)) overrides[key] = value;
   }
   if (isFinitePositive(raw.layers)) overrides.layers = Math.round(raw.layers);
+  if (raw.transferPresent === true) overrides.transferPresent = true;
+  // 移载与转向互斥：两个都写时交给 conveyor-assembly 的护栏判（它会给出拒建理由），
+  // 这里不做静默取舍——静默取舍正是「参数不生效却看不出来」的来源。
   return {
     ...DEFAULT_CONVEYOR,
     ...overrides,
@@ -231,11 +244,31 @@ const COLORS = {
   sensor: '#5d666e'
 } as const;
 
+/**
+ * 材质 → 颜色：3D 里**不同材质必须不同色**，否则铝型材机架、Q235 加工件、45# 钢导柱
+ * 在视口里是同一种灰，看图上分不出「哪件是外购钢件、哪件是铝件」。
+ * 取色原则：铝浅（银灰）、Q235 深（钢灰偏蓝）、45# 更亮（亮钢）、PVC 绿（皮带一眼可辨）。
+ * 与 `ConveyorMaterial` 一一对应，新增材质必须在这里给色，否则 type 检查会失败。
+ */
+const MATERIAL_COLORS: Record<string, string> = {
+  AL6063: '#b9c4cc',
+  Q235: '#6d7784',
+  PVC: '#2f7d4f',
+  STEEL45: '#e3eaf0'
+};
+
 const SEMANTICS: Array<{ test: RegExp; role: GeomRole; bomGroup: GeomBomGroup; color: string }> = [
+  { test: /^dock-sensor-/, role: 'sensor', bomGroup: 'sensor:photoelectric', color: COLORS.sensor },
   { test: /^sensor-|^layer-sensor-/, role: 'sensor', bomGroup: 'sensor:photoelectric', color: COLORS.sensor },
+  // 顶升移载：气缸/推板驱动是执行机构，辊道与轴承立柱是传动件，台板/安装板是结构件
+  { test: /^transfer-lift-cyl-|^transfer-push-cyl$/, role: 'actuator', bomGroup: 'actuator:cylinder', color: COLORS.actuator },
+  { test: /^transfer-roller-|^dock-roller-/, role: 'transfer', bomGroup: 'structure', color: COLORS.transfer },
+  { test: /^transfer-push-plate$|^transfer-push-bracket$/, role: 'fixture', bomGroup: 'structure', color: COLORS.fixture },
   { test: /^turner-lift-cyl-/, role: 'actuator', bomGroup: 'actuator:cylinder', color: COLORS.actuator },
   { test: /^turner-motor$|^gearmotor$|^lift-motor$/, role: 'actuator', bomGroup: 'actuator:rotary', color: COLORS.actuator },
   { test: /^belt-|^pulley-|^tray-roller-/, role: 'transfer', bomGroup: 'structure', color: COLORS.transfer },
+  { test: /^transfer-mount-plate$|^transfer-lift-plate$|^transfer-push-beam-|^transfer-push-column-/, role: 'frame', bomGroup: 'structure', color: COLORS.frame },
+  { test: /^dock-rail-|^dock-leg-/, role: 'frame', bomGroup: 'structure', color: COLORS.frame },
   { test: /^turner-finger-|^turner-table$|^turner-ring$|^turner-lift-plate$/, role: 'fixture', bomGroup: 'structure', color: COLORS.fixture },
   { test: /^rail-|^leg-|^cross-|^endplate-|^foot-/, role: 'frame', bomGroup: 'structure', color: COLORS.frame },
   { test: /^guard-/, role: 'safety', bomGroup: 'structure', color: COLORS.structure }
@@ -266,9 +299,67 @@ function rotaryPartIds(parts: readonly ConveyorPart[]): string[] {
   return parts.map((part) => part.id).filter((id) => /^turner-table$|^turner-ring$|^turner-finger-\d+$/.test(id));
 }
 
-function conveyorMovingAxes(parts: readonly ConveyorPart[], turner: TurnerLayout | null, stationId: string): GeomMovingAxis[] {
-  if (!turner) return [];
+/** 顶升随动件（移载）：随动台板 + 移载辊道 + 轴承立柱 + 活塞杆。 */
+function transferLiftPartIds(parts: readonly ConveyorPart[]): string[] {
+  return parts
+    .map((part) => part.id)
+    .filter((id) => /^transfer-lift-plate$|^transfer-roller-\d+$|^transfer-roller-post-\d+$|^transfer-lift-cyl-\d+$/.test(id))
+    // 气缸只取活塞杆（拆件后的 `<件号>-rod`）：缸体固定在安装板上
+    .flatMap((id) => (/^transfer-lift-cyl-\d+$/.test(id) ? [`${id}-rod`] : [id]));
+}
+
+/** 移载随动件（+Y）：推板与它的小滑座。辊道只转不平移，所以不在这条轴里。 */
+function transferPushPartIds(parts: readonly ConveyorPart[]): string[] {
+  return parts.map((part) => part.id).filter((id) => /^transfer-push-plate$|^transfer-push-bracket$/.test(id));
+}
+
+function conveyorMovingAxes(
+  parts: readonly ConveyorPart[],
+  turner: TurnerLayout | null,
+  stationId: string,
+  transfer: TransferLayout | null = null
+): GeomMovingAxis[] {
   const axes: GeomMovingAxis[] = [];
+  if (!turner && !transfer) return axes;
+  if (transfer) {
+    // 移载两条轴：顶升（Z）+ 移载（+Y）。3D 里先按顶升挂组、再由推板组覆盖推板两件
+    //（buildThreeMachine 里同一件只能挂一个运动组，后写的胜出，与转向工位同一约定）。
+    const lift = transferLiftPartIds(parts);
+    if (lift.length > 0) {
+      axes.push({
+        actuatorId: 'transfer-lift',
+        stationId,
+        kind: 'linear',
+        partIds: lift,
+        axis: [0, 0, 1],
+        pivot: [0, 0, transfer.plateCenterZ],
+        strokeMm: transfer.strokeMm,
+        rangeDeg: 0,
+        home: 'retracted',
+        durationMs: Math.round(transfer.liftSeconds * 1000),
+        points: { extend: '顶升到位', retract: '顶升原位' }
+      });
+    }
+    const push = transferPushPartIds(parts);
+    if (push.length > 0) {
+      axes.push({
+        actuatorId: 'transfer-push',
+        stationId,
+        kind: 'linear',
+        partIds: push,
+        // 移载方向固定 +Y（板不转，整块平移到下游对接段）
+        axis: [0, 1, 0],
+        pivot: [0, transfer.pushPlateRestY, transfer.pushPlateCenterZ],
+        strokeMm: transfer.pushStrokeMm,
+        rangeDeg: 0,
+        home: 'retracted',
+        durationMs: Math.round(transfer.pushSeconds * 1000),
+        points: { extend: '移载到位', retract: '移载回位' }
+      });
+    }
+    return axes;
+  }
+  if (!turner) return axes;
   // 顺序有讲究：buildThreeMachine 里同一件只能挂一个运动组，后写的胜出。
   // 转向轴在前、顶升轴在后 —— 3D 里看到的是「台板顶着工件上升」（工位主动作），
   // 旋转在 90° 分度下落到同一组带缝，视觉上由支撑指的对称性表达。
@@ -318,6 +409,25 @@ function conveyorMovingAxes(parts: readonly ConveyorPart[], turner: TurnerLayout
 
 const ID = {
   rail: /^rail-(left|right)$/,
+  // ── 顶升移载 ──
+  transferMount: /^transfer-mount-plate$/,
+  transferHanger: /^transfer-hanger-\d+$/,
+  transferCyl: /^transfer-lift-cyl-\d+$/,
+  transferGuide: /^transfer-guide-post-\d+$/,
+  transferPlate: /^transfer-lift-plate$/,
+  transferRoller: /^transfer-roller-\d+$/,
+  transferPost: /^transfer-roller-post-\d+$/,
+  transferPushPlate: /^transfer-push-plate$/,
+  transferPushBracket: /^transfer-push-bracket$/,
+  transferPushCyl: /^transfer-push-cyl$/,
+  transferPushBeam: /^transfer-push-beam-(left|right)$/,
+  transferPushColumn: /^transfer-push-column-(left|right)$/,
+  dockRail: /^dock-rail-(left|right)$/,
+  dockRoller: /^dock-roller-\d+$/,
+  dockLeg: /^dock-leg-\d+$/,
+  dockGuard: /^dock-guard-(left|right)$/,
+  dockStop: /^dock-stop$/,
+  dockSensor: /^dock-sensor-(inlet|outlet)$/,
   cross: /^cross-\d+$/,
   endplate: /^endplate-(head|tail)$/,
   leg: /^leg-\d+$/,
@@ -403,7 +513,25 @@ const JOINT_RULES: readonly JointRule[] = [
   { a: ID.turnerRing, b: ID.turnerTable, reason: '转台盘坐在回转支承内圈上（随内圈转动）' },
   { a: ID.turnerTable, b: ID.turnerFinger, reason: '支撑指立柱装在转台盘上（4 折对称，穿带缝升降）' },
   { a: ID.turnerPlate, b: ID.turnerFinger, reason: '支撑指立柱穿过台板定位孔，随台板一起升降' },
-  { a: ID.turnerMotor, b: ID.turnerTable, reason: '转向电机输出轴与转台盘同轴（齿轮/联轴器传动）' }
+  { a: ID.turnerMotor, b: ID.turnerTable, reason: '转向电机输出轴与转台盘同轴（齿轮/联轴器传动）' },
+  // ── 顶升移载：安装板 / 气缸 / 导柱 / 台板 / 辊道 / 推板 / 对接段 ──
+  { a: ID.transferMount, b: ID.transferHanger, reason: '吊柱下端与安装板焊接（安装板吊在纵梁之间）' },
+  { a: ID.transferHanger, b: ID.rail, reason: '吊柱上端挂在纵梁内侧面（角件固定）' },
+  { a: ID.transferMount, b: ID.transferCyl, reason: '顶升气缸法兰坐在安装板上（螺栓固定）' },
+  { a: ID.transferMount, b: ID.transferGuide, reason: '导向柱下端装在安装板上' },
+  { a: ID.transferCyl, b: ID.transferPlate, reason: '顶升气缸活塞杆顶住随动台板底面（推力面）' },
+  { a: ID.transferGuide, b: ID.transferPlate, reason: '导向柱穿过随动台板 φ26 过孔（滑动配合，孔径比柱径大 4 mm）' },
+  { a: ID.transferPlate, b: ID.transferPost, reason: '轴承立柱立在随动台板顶面（螺栓固定），把辊道托到辊心高度' },
+  { a: ID.transferPost, b: ID.transferRoller, reason: '移载辊的轴颈装在轴承立柱上（辊只转不平移）' },
+  { a: ID.transferPushPlate, b: ID.transferPushBracket, reason: '推板焊在滑座前端（滑座跟着无杆气缸的滑块走）' },
+  { a: ID.transferPushBracket, b: ID.transferPushCyl, reason: '滑座与无杆气缸滑块刚性连接' },
+  { a: ID.transferPushCyl, b: ID.transferPushBeam, reason: '无杆气缸两端法兰抱在两侧横梁上' },
+  { a: ID.transferPushBeam, b: ID.transferPushColumn, reason: '横梁坐在立柱顶面（螺栓固定）' },
+  { a: ID.dockRail, b: ID.dockRoller, reason: '对接段输送辊的轴承座装在两侧纵梁上' },
+  { a: ID.dockRail, b: ID.dockLeg, reason: '对接段支腿顶板与纵梁底面贴合' },
+  { a: ID.dockRail, b: ID.dockGuard, reason: '对接段挡边支架固定在纵梁上沿' },
+  { a: ID.dockGuard, b: ID.dockStop, reason: '挡停板两端与挡边螺栓连接（同一端部安装节点）' },
+  { a: ID.dockRail, b: ID.dockSensor, reason: '对接段光电支架夹在纵梁外侧' }
 ];
 
 /** 某对零件是否属于已声明的装配连接；不属于返回 null（交回干涉初筛判 suspect）。 */
@@ -571,22 +699,29 @@ export function conveyorGeometryFromParts(
 ): MachineGeometry {
   const stationId = options.stationId ?? '';
   const turner = turnerLayout(params);
-  const axes = conveyorMovingAxes(parts, turner, stationId);
+  const transfer = transferLayout(params);
+  const axes = conveyorMovingAxes(parts, turner, stationId, transfer);
   const liftIds = new Set(liftPartIds(parts));
   const rotaryIds = new Set(rotaryPartIds(parts));
+  const transferLiftIds = new Set(transferLiftPartIds(parts));
+  const transferPushIds = new Set(transferPushPartIds(parts));
   const solids = parts.flatMap(mappedSolids);
   const materialOf = new Map(parts.map((part) => [part.id, part.material]));
 
   let min: Vec3 = [Infinity, Infinity, Infinity];
   let max: Vec3 = [-Infinity, -Infinity, -Infinity];
   const geometryParts: GeomPart[] = solids.map((solid) => {
-    const lift = solid.moving || liftIds.has(solid.id);
+    const lift = solid.moving || liftIds.has(solid.id) || transferLiftIds.has(solid.id);
     const semantics = semanticsOf(solid.parentId);
-    const actuatorId = lift
-      ? 'turner-lift'
-      : rotaryIds.has(solid.id)
-        ? 'turner-rotary'
-        : actuatorOfPart(solid.parentId);
+    const actuatorId = transferLiftIds.has(solid.id)
+      ? 'transfer-lift'
+      : transferPushIds.has(solid.id)
+        ? 'transfer-push'
+        : lift
+          ? 'turner-lift'
+          : rotaryIds.has(solid.id)
+            ? 'turner-rotary'
+            : actuatorOfPart(solid.parentId);
     const geomPart: GeomPart = {
       id: solid.id,
       name: solid.name,
@@ -594,7 +729,8 @@ export function conveyorGeometryFromParts(
       shape: solid.shape,
       center: solid.center,
       rotationZDeg: 0,
-      color: semantics.color,
+      // 材质定色：视口里铝件 / Q235 件 / 45# 钢件 / PVC 皮带必须一眼能分开
+      color: MATERIAL_COLORS[materialOf.get(solid.parentId) ?? ''] ?? semantics.color,
       material: materialOf.get(solid.parentId) ?? 'Q235',
       bomGroup: semantics.bomGroup,
       ...(actuatorId ? { actuatorId } : {}),
@@ -647,7 +783,8 @@ export function conveyorGeometryFromParts(
     assumptions: [
       `几何来源：conveyor-assembly 参数化整机（${parts.length} 件），与 STEP/GLB/BOM 同一份零件表`,
       `输送参数：线体长 ${params.lengthMm} mm、带宽 ${params.widthMm} mm、皮带面高 ${params.beltHeightMm ?? 850} mm` +
-        `${turner ? `、转向工位 ${turner.angleDeg}°（顶升行程 ${turner.strokeMm} mm、${turner.beltCount} 条窄带并联）` : ''}`,
+        `${turner ? `、转向工位 ${turner.angleDeg}°（顶升行程 ${turner.strokeMm} mm、${turner.beltCount} 条窄带并联）` : ''}` +
+        `${transfer ? `、顶升移载（顶升 ${transfer.strokeMm} mm + 沿 +Y 移载 ${transfer.pushStrokeMm} mm、${transfer.beltCount} 条窄带并联、下游对接段 ${Math.round(transfer.dockWidthMm)}×${Math.round(transfer.dockLengthMm)} mm）` : ''}`,
       '零件外形取参数化件的并集包围盒（纯圆柱件给圆柱），是代理体而不是 B-rep；'
         + '实体布尔干涉在 build123d 内核里对同一份零件表做，本模块只做 AABB 初筛与解析式确认'
     ],
@@ -660,6 +797,9 @@ function actuatorOfPart(id: string): string | undefined {
   if (/^gearmotor$/.test(id)) return 'conveyor-drive';
   if (/^turner-motor$|^lift-motor$/.test(id)) return 'lift-motor';
   if (/^turner-lift-cyl-/.test(id)) return 'turner-lift';
+  // 移载：气缸固定件与推板驱动归到对应轴（随动件在上面按 id 集单独判定，优先）
+  if (/^transfer-lift-cyl-/.test(id)) return 'transfer-lift';
+  if (/^transfer-push-/.test(id)) return 'transfer-push';
   return undefined;
 }
 

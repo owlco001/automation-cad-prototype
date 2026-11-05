@@ -602,16 +602,28 @@ export function parseMachineCard(result: DesktopAgentChatMessage | undefined): {
 } | null {
   if (!result) return null;
   const raw = unwrapToolResultData(result.content) ?? result.content ?? '';
+  // 「方案卡没出来」是静默的：下面每个 return null 都不报错，界面上只少一张卡。
+  // 记最后一次失败原因，E2E / diagnose 能读出「为什么没有卡」，不用靠猜。
+  const fail = (reason: string, extra: Record<string, unknown> = {}): null => {
+    (window as unknown as Record<string, unknown>).__MACHINE_CARD_LAST_FAIL__ = {
+      reason, rawChars: raw.length, ...extra
+    };
+    return null;
+  };
   try {
     const parsed = JSON.parse(raw) as unknown;
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return fail('not-object');
     const record = parsed as Record<string, unknown>;
-    if (record.ok === false) return null;
+    if (record.ok === false) return fail('ok-false', { code: String(record.code ?? '') });
     const design = record.design;
-    if (typeof design !== 'object' || design === null || Array.isArray(design)) return null;
+    if (typeof design !== 'object' || design === null || Array.isArray(design)) {
+      return fail('no-design', { keys: Object.keys(record).join(',') });
+    }
     const designRecord = design as Record<string, unknown>;
     const config = designRecord.config;
-    if (typeof config !== 'object' || config === null || Array.isArray(config)) return null;
+    if (typeof config !== 'object' || config === null || Array.isArray(config)) {
+      return fail('no-config', { designKeys: Object.keys(designRecord).join(',') });
+    }
     return {
       design: designRecord,
       brief: typeof record.brief === 'string' ? record.brief : '',

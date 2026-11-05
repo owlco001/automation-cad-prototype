@@ -80,7 +80,7 @@ import {
   toConveyorParams,
   RULES_ONLY_PROCESSES
 } from './machine/model-builders';
-import { detectBufferLayers, detectConveyorSpec, detectTurner } from './machine/spec.ts';
+import { detectBufferLayers, detectConveyorSpec, detectTransfer, detectTurner, detectWorkpiece } from './machine/spec.ts';
 import { buildEntryButton as buildPanelEntryButton, createDrawer } from './ui/panels';
 import { qtExitNotice, qtLaunchNotice, type QtExitPayload, type QtLaunchReply } from './ui/qt-exit-notice.ts';
 import { syncToolMenu } from './ui/tool-menu.ts';
@@ -2458,6 +2458,15 @@ async function buildMachineModel(input: unknown): Promise<Record<string, unknown
     // 否则用户用一句话要转向工位，build_machine_model 出来的还是普通输送线。
     const turner = detectTurner(briefText);
     if (turner?.present) briefParams.turnerAngleDeg = turner.angleDeg;
+    // 顶升移载：brief 里写了「顶升移载 / 直角移载」就把板宽带给参数化生成器——
+    // 不传的话 build_machine_model 出来的还是普通输送线（与转向工位同一类坑）。
+    const transfer = detectTransfer(briefText);
+    if (transfer?.present) {
+      const workpiece = detectWorkpiece(briefText);
+      const partWidth = workpiece?.widthMm ?? spec?.widthMm ?? 0;
+      if (partWidth > 0) briefParams.transferPartWidthMm = Math.round(partWidth);
+      if (workpiece?.lengthMm) briefParams.transferPartLengthMm = Math.round(workpiece.lengthMm);
+    }
   }
   const mergedParams = {
     ...briefParams,

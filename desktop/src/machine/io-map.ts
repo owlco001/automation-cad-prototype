@@ -30,6 +30,13 @@ const ACTUATOR_FIELD_TYPE: Record<string, string> = {
   point: '旋转'
 };
 
+/**
+ * `point` 字段在不同 kind 下语义不同：旋转轴是「分度」，气缸/夹爪借它表达**直线动作点**
+ *（顶升、移载这类没有 extend/retract 之分的单点轴）。按 kind 覆盖，否则 io-map 里
+ * 「移载台」会被标成「气缸·旋转」——看着像台会转的机构。
+ */
+const LINEAR_POINT_TYPE = '直线动作';
+
 function sensorType(point: string): string {
   if (/SAFE|SAFETY|光栅|door|estop/i.test(point)) return '安全光栅';
   if (/PHT|PHOTO|光电/i.test(point)) return '光电传感器';
@@ -55,7 +62,10 @@ function ownerFromPath(config: PlcGenConfig, path: string): {
     const actuator = config.actuators?.[Number(actuatorMatch[1])];
     if (actuator) {
       const base = ACTUATOR_TYPE[actuator.kind] ?? actuator.kind;
-      const action = ACTUATOR_FIELD_TYPE[actuatorMatch[2] ?? ''] ?? '';
+      const field = actuatorMatch[2] ?? '';
+      const action = field === 'point' && actuator.kind !== 'rotary'
+        ? LINEAR_POINT_TYPE
+        : ACTUATOR_FIELD_TYPE[field] ?? '';
       return {
         ownerType: '执行机构',
         owner: actuator.name,
@@ -66,8 +76,18 @@ function ownerFromPath(config: PlcGenConfig, path: string): {
   if (path.startsWith('safety.')) {
     return { ownerType: '安全', owner: '安全回路', type: path.includes('estop') ? '急停' : '安全门/光栅' };
   }
-  if (path.startsWith('ioPoints.') || path.startsWith('safetyPoints.')) {
-    return { ownerType: '扩展', owner: '扩展点位', type: '扩展' };
+  // 注意前缀是 `ioPoints[0].point`（带方括号），历史上写的是 `ioPoints.` 所以从来没命中过，
+  // 扩展点位一律落到最后的兜底「通用/点位」上。
+  if (path.startsWith('ioPoints[') || path.startsWith('safetyPoints[')
+    || path.startsWith('ioPoints.') || path.startsWith('safetyPoints.')) {
+    // 扩展点位带上自己的语义（「移载就绪」「移载完成」），别都落成「扩展点位」
+    const index = Number(/^ioPoints\[(\d+)\]/.exec(path)?.[1] ?? -1);
+    const entry = index >= 0 ? config.ioPoints?.[index] : undefined;
+    return {
+      ownerType: '扩展',
+      owner: entry?.station ?? '扩展点位',
+      type: entry?.role ?? entry?.name ?? '扩展'
+    };
   }
   return { ownerType: '扩展', owner: '通用', type: '点位' };
 }

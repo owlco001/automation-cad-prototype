@@ -28,7 +28,14 @@ import { DIAL_MAX_STATIONS, DIAL_PROCESSES } from './geometry.ts';
 import { evaluateFlow, type FlowEvaluation, type FlowModel, type FlowOp, type MachineLayout } from './flow.ts';
 import { TEMPLATES, templateFor, templateKinds } from './templates.ts';
 import { conveyorParamsFromBrief, refineConveyor } from './conveyor-synth.ts';
-import { DEFAULT_CONVEYOR, turnerLayout, turnerSkipReason } from './conveyor-assembly.ts';
+import {
+  DEFAULT_CONVEYOR,
+  transferActionSeconds,
+  transferLayout,
+  transferSkipReason,
+  turnerLayout,
+  turnerSkipReason
+} from './conveyor-assembly.ts';
 import {
   ACTUATOR_SECONDS,
   PROCESS_BASE_SECONDS,
@@ -184,6 +191,12 @@ const ACTUATOR_POSITION: Record<MachineActuatorKind, [number, number, number]> =
 
 /** 转向工位：输送线上的独立工位名与两条轴的场景位置（线体中段）。 */
 const TURNER_STATION_NAME = '转向工位';
+/** 顶升移载工位（与转向工位互斥，二者抢线体中段同一段 X）。 */
+const TRANSFER_STATION_NAME = '移载工位';
+/** 移载的两条轴的点位名：顶升（Z）与移载（+Y）。 */
+const TRANSFER_LIFT_POINT = 'ST-TRANSFER-LIFT';
+/** 移载轴自己的驱动点位；握手输出 DO-TRANSFER-DONE 是**另一条**扩展点位，不复用这个。 */
+const TRANSFER_PUSH_POINT = 'ST-TRANSFER-PUSH';
 const TURNER_AXIS_POSITION: [number, number, number] = [0, 0, -0.1];
 /** 顶升轴：Z 向向上（场景里 +Z 就是抬升），行程即顶升高度 */
 const TURNER_LIFT_POSITION: [number, number, number] = [0, 0, 0.05];
@@ -435,14 +448,21 @@ function applyConveyorRefinement(
   const turnerSeconds = turnerAxis
     ? ((turnerAxis.durationMs ?? 0) + (turnerLiftAxis?.durationMs ?? 0)) / 1000
     : 0;
-  const turnerCapacity = turnerSeconds > 0 ? Math.round((60 / turnerSeconds) * 100) / 100 : Infinity;
+  // 顶升移载：两条轴（顶升 + 移载）串联，工位时间 = 两段之和；与转向工位互斥，最多一段非零
+  const transferLiftAxis = design.config.actuators.find((actuator) => actuator.id === 'transfer-lift');
+  const transferPushAxis = design.config.actuators.find((actuator) => actuator.id === 'transfer-push');
+  const transferSeconds = transferPushAxis
+    ? ((transferPushAxis.durationMs ?? 0) + (transferLiftAxis?.durationMs ?? 0)) / 1000
+    : 0;
+  const stationActionSeconds = turnerSeconds + transferSeconds;
+  const stationCapacity = stationActionSeconds > 0 ? Math.round((60 / stationActionSeconds) * 100) / 100 : Infinity;
 
   const beltThroughput = ref.estimate.throughputPerMin;
   const targetPerMin = brief.cyclePerMin ?? beltThroughput;
   // 光伏板必须逐件转过 90°，转台是串行工位：产能 = min(线速产能, 60 / 转向时间)
-  const throughput = Math.min(beltThroughput, turnerCapacity);
+  const throughput = Math.min(beltThroughput, stationCapacity);
   const meetsTarget = throughput + 1e-9 >= targetPerMin;
-  const turnerLimited = turnerSeconds > 0 && turnerCapacity < beltThroughput;
+  const turnerLimited = stationActionSeconds > 0 && stationCapacity < beltThroughput;
   design.cycle.perMin = targetPerMin;
   design.cycle.throughputPerMin = throughput;
   design.cycle.partsPerMinute = throughput;
@@ -450,7 +470,7 @@ function applyConveyorRefinement(
   design.cycle.stationSeconds = round(60 / throughput);
   design.cycle.estimatedSecondsPerPiece = design.cycle.stationSeconds;
   design.cycle.slowestStation = 0;
-  design.cycle.slowestActionSeconds = round(turnerSeconds);
+  design.cycle.slowestActionSeconds = round(stationActionSeconds);
   design.cycle.requiredParallelStations = Math.max(1, Math.ceil(targetPerMin / throughput));
   design.cycle.requiredTotalStations = design.cycle.requiredParallelStations;
   design.cycle.meetsTarget = meetsTarget;
@@ -458,14 +478,26 @@ function applyConveyorRefinement(
   design.cycle.bottleneck =
     `线速 ${ref.speedMps} m/s ÷ 工件间距 ${ref.estimate.pitchMm} mm → ${beltThroughput} 件/分钟` +
     (turnerSeconds > 0
-      ? `；转向工位每件 ${turnerSeconds} s（顶升+旋转 ${turnerAngle}°+回落）→ ${turnerCapacity} 件/分钟` +
+      ? `；转向工位每件 ${turnerSeconds} s（顶升+旋转 ${turnerAngle}°+回落）→ ${stationCapacity} 件/分钟` +
         `${turnerLimited ? '（转向为瓶颈）' : '（不构成瓶颈）'}，取小值 ${throughput} 件/分钟`
       : '') +
+    (transferSeconds > 0
+      ? `；移载工位每件 ${transferSeconds} s（顶升+沿 +Y 移载 ${transferPushAxis?.travelMm ?? 0} mm+回落）`
+        + ` → ${stationCapacity} 件/分钟${turnerLimited ? '（移载为瓶颈）' : '（不构成瓶颈）'}，取小值 ${throughput} 件/分钟`
+      : '') +
     `（目标 ${targetPerMin} 件/分钟${meetsTarget ? '，满足' : '，未达标'}）；输送线没有工位节拍，产能靠提速或减小间距。`;
-  if (turnerLimited && !meetsTarget) {
+  if (turnerLimited && !meetsTarget && turnerSeconds > 0) {
     warnings.push(
-      `节拍瓶颈在转向工位：${turnerAngle}° 转向一次 ${turnerSeconds} s，只有 ${turnerCapacity} 件/分钟，` +
+      `节拍瓶颈在转向工位：${turnerAngle}° 转向一次 ${turnerSeconds} s，只有 ${stationCapacity} 件/分钟，` +
         `低于目标 ${targetPerMin} 件/分钟；需要提高回转速度（${turnerAngle}° 建议 ≤ ${round(60 / targetPerMin, 2)} s）或加双工位转台。`
+    );
+  }
+  if (turnerLimited && !meetsTarget && transferSeconds > 0) {
+    warnings.push(
+      `节拍瓶颈在移载工位：一次移载 ${transferSeconds} s（顶升 ${round(transferSeconds - (transferPushAxis?.durationMs ?? 0) / 1000)} s`
+        + ` + 移载 ${round((transferPushAxis?.durationMs ?? 0) / 1000)} s），只有 ${stationCapacity} 件/分钟，`
+        + `低于目标 ${targetPerMin} 件/分钟；需要提高移载速度（建议 ≤ ${round(60 / targetPerMin, 2)} s/件）`
+        + '或让移载与主线重叠动作（双工位/缓冲区）。'
     );
   }
   if (!meetsTarget && !turnerLimited) {
@@ -596,6 +628,98 @@ function applyConveyorRefinement(
       );
     }
   }
+  // 顶升移载 BOM：与 conveyorBom() 同口径（同类同规格归一行），成品件/加工件分行。
+  // 行程、辊数、台板尺寸全部来自 transferLayout，不在这里另写一套数。
+  // 这里重算一次 plan（和 synthMachine 里同一份入参、同一个纯函数），保证 BOM 的尺寸
+  // 就是几何层算出来的那份，不是第二套公式。
+  const transferBomPlan = brief.transfer?.present
+    ? transferLayout({
+        ...params,
+        layers: brief.conveyor?.layers ?? 1,
+        turnerAngleDeg: turnerAngle,
+        transferPresent: true,
+        transferPartLengthMm: brief.workpiece?.lengthMm ?? 0,
+        transferPartWidthMm: brief.workpiece?.widthMm ?? 0
+      })
+    : null;
+  const transferPlan = transferBomPlan;
+  if (transferPlan) {
+    const t = transferPlan;
+    design.bomDraft.items.push(
+      {
+        kind: 'actuator',
+        name: `移载单元安装板 ${Math.round(t.mountLengthMm)}×${Math.round(t.mountWidthMm)}×${t.mountThicknessMm} + 4 吊柱`,
+        qty: 1,
+        note: '自制加工件：顶升气缸/导向柱的安装基面，吊在两侧纵梁之间（不占带面）',
+        role: 'other'
+      },
+      {
+        kind: 'actuator',
+        name: `移载顶升气缸 φ${t.cylBodyDiameterMm}×${t.cylBodyLengthMm}（行程 ${t.strokeMm}）`,
+        qty: 2,
+        note: `竖直直线轴 transfer-lift：顶升 ${t.strokeMm} mm，两缸同步，带磁性开关（上/下两个到位点）`,
+        role: 'other'
+      },
+      {
+        kind: 'actuator',
+        name: `移载导向柱 φ${t.guideDiameterMm}×${Math.round(t.guideTopZ - t.guideBottomZ)}`,
+        qty: 4,
+        note: '外购成品件：45# 镀铬光轴 + 自润滑导套，四角布置，抗偏载',
+        role: 'other'
+      },
+      {
+        kind: 'actuator',
+        name: `移载随动台板 ${t.plateLengthMm}×${Math.round(t.plateWidthMm)}×${t.plateThicknessMm}`,
+        qty: 1,
+        note: `自制加工件：四角开 φ${t.guideDiameterMm + 4} 导向过孔；顶升到位台板顶 ${t.plateTopLiftZ} 仍低于带底，不穿带面`,
+        role: 'other'
+      },
+      {
+        kind: 'actuator',
+        name: `移载辊道 φ${t.rollerDiameterMm}×${t.rollerLengthMm}`,
+        qty: t.rollerYs.length,
+        note: `外购成品件：${t.rollerYs.length} 根辊全部落在带缝中心（φ${t.rollerDiameterMm} < 带缝 ${Math.round(t.beltGapMm)}），`
+          + `静止位辊面 ${t.rollerTopRestZ} 比带面低 5 mm，顶升 ${t.strokeMm} mm 后辊面 ${t.rollerTopLiftZ} 把板托起并沿 +Y 送出`,
+        role: 'other'
+      },
+      {
+        kind: 'actuator',
+        name: `移载辊道轴承立柱 φ${t.postDiameterMm}×${Math.round(t.postTopZ - t.postBottomZ)}`,
+        qty: t.postCenters.length,
+        note: '自制加工件：从随动台板顶托到辊心，同样落在带缝中心（长向梁会扫过带体，所以做成点状支撑）',
+        role: 'other'
+      },
+      {
+        kind: 'actuator',
+        name: `移载推板 ${t.pushPlateLengthMm}×${t.pushPlateThicknessMm}×${t.pushPlateHeightMm}`,
+        qty: 1,
+        note: `自制加工件：下沿 ${t.pushPlateCenterZ - t.pushPlateHeightMm / 2} 高于挡边顶 911，沿 +Y 推出 ${t.pushStrokeMm} mm；静止位停在板外，板进站从下面过`,
+        role: 'other'
+      },
+      {
+        kind: 'actuator',
+        name: `移载无杆气缸 φ63×${Math.round(t.pushCylLengthMm)}（行程 ${t.pushStrokeMm}）`,
+        qty: 1,
+        note: `直线移载轴 transfer-push：沿 +Y 行程 ${t.pushStrokeMm} mm，动作 ${t.pushSeconds} s；装在两根立柱 + 横梁上`,
+        role: 'other',
+        ratedW: 120
+      },
+      {
+        kind: 'actuator',
+        name: `下游对接段辊道 ${Math.round(t.dockWidthMm)}×${Math.round(t.dockLengthMm)}（${t.dockRollerYs.length} 辊）`,
+        qty: 1,
+        note: `自制/集成件：+Y 侧短对接段，起点 y=${t.dockStartY}，带两侧挡边、末端挡停与两只到位光电；宽度按板长 ${t.partLengthMm} + 200 取`,
+        role: 'other'
+      },
+      {
+        kind: 'sensor',
+        name: '移载联锁信号（DO-TRANSFER-READY / DO-TRANSFER-DONE / DI-DOWNSTREAM-ALLOW / DI-TRANSFER-END）',
+        qty: 4,
+        role: 'sensor',
+        note: '与下游输送线的握手：本机就绪 / 移载完成 → 下游；下游允许接收 / 移载到位 → 本机'
+      }
+    );
+  }
   if (removed > 0) {
     assumptions.push(`BOM 已把通用模型的 ${removed} 行「旋转轴」替换为输送机结构件、减速电机与张紧组件。`);
   }
@@ -603,7 +727,9 @@ function applyConveyorRefinement(
     `整机几何：调用 conveyor-assembly 生成参数化装配（${
       turnerAxis
         ? '窄带并联线体 + 顶升旋转单元（底座框架/下沉框架/2 顶升气缸/4 导向柱/台板/回转支承/转台盘/9 支撑指/转向电机）'
-        : '单段线体'
+        : transferPlan
+          ? '窄带并联线体 + 顶升移载单元（安装板/4 吊柱/2 顶升气缸/4 导向柱/随动台板/5 移载辊/10 轴承立柱/推板/无杆气缸）+ 下游对接段'
+          : '单段线体'
     }；` +
       `零件总数随线体长度变化（横撑数 = 长度/500+1），以建模回传为准），由 build123d 内核布尔求并并导出 STEP/STL。`
   );
@@ -790,6 +916,32 @@ export function synthMachine(brief: MachineBrief, options: SynthOptions = {}): M
     assumptions.push(`转向需求已记录（旋转 ${turnerAngleDeg}°），但几何未建转向工位：${turnerBlockedReason}。`);
   }
   if (turnerPlan) stationNames.push(TURNER_STATION_NAME);
+
+  /**
+   * 顶升移载工位（需求「板不转，整块移到隔壁线上」）。
+   *
+   * 行程全部由参数推出：板宽来自需求里的工件尺寸（没写就按带宽），
+   * 结构间隙来自「台板边缘 → 对接段起点」，两者相加再加 120 余量 = 移载行程。
+   * 参数不够（带宽塞不下带缝、线体太短、行程超直线轴上限）就**拒建并写算式**，
+   * 不退化成普通输送线不吭声。
+   */
+  const transferPresent = process === 'conveyor' && brief.transfer?.present === true;
+  const transferParams = {
+    ...conveyorParamsFromBrief(brief.conveyor),
+    layers: brief.conveyor?.layers ?? 1,
+    turnerAngleDeg,
+    transferPresent,
+    transferPartLengthMm: brief.workpiece?.lengthMm ?? 0,
+    transferPartWidthMm: brief.workpiece?.widthMm ?? 0
+  };
+  const transferPlan = transferPresent ? transferLayout(transferParams) : null;
+  const transferBlockedReason = transferPresent && !transferPlan ? transferSkipReason(transferParams) : null;
+  if (transferBlockedReason) {
+    warnings.push(`需求要求顶升移载，但本方案不做：${transferBlockedReason}。`);
+    assumptions.push(`移载需求已记录（板不转向、沿 +Y 送到下游），但几何未建移载工位：${transferBlockedReason}。`);
+  }
+  if (transferPlan) stationNames.push(TRANSFER_STATION_NAME);
+
   const actuators: MachineConfig['actuators'] = [];
   const sensors: MachineConfig['sensors'] = [];
   const points: string[] = [];
@@ -907,8 +1059,104 @@ export function synthMachine(brief: MachineBrief, options: SynthOptions = {}): M
     );
   }
 
+  // 顶升移载工位：两条轴（顶升 +Y 移载）+ 四个联锁信号。
+  //
+  // kind 只有 cylinder/gripper/rotary 三种，这里两条轴都借 cylinder 表达**直线轴**：
+  //   transfer-lift → position [0,0,0.05]（向上），travelMm = 顶升行程；
+  //   transfer-push → position [0,0.05,0]（+Y），travelMm = 移载行程 = 板宽 + 结构间隙 + 余量。
+  // 这不是「有两个气缸」的意思，借用的口径写在 assumptions 里（见下）。
+  if (transferPlan) {
+    actuators.push({
+      id: 'transfer-lift',
+      name: `${TRANSFER_STATION_NAME}顶升台`,
+      kind: 'cylinder',
+      station: TRANSFER_STATION_NAME,
+      point: TRANSFER_LIFT_POINT,
+      travelMm: transferPlan.strokeMm,
+      durationMs: Math.round(transferPlan.liftSeconds * 1000),
+      position: [0, 0, 0.05]
+    });
+    actuators.push({
+      id: 'transfer-push',
+      name: `${TRANSFER_STATION_NAME}移载台`,
+      kind: 'cylinder',
+      station: TRANSFER_STATION_NAME,
+      point: TRANSFER_PUSH_POINT,
+      travelMm: transferPlan.pushStrokeMm,
+      durationMs: Math.round(transferPlan.pushSeconds * 1000),
+      position: [0, 0.05, 0]
+    });
+    for (const point of [TRANSFER_LIFT_POINT, TRANSFER_PUSH_POINT]) {
+      if (!points.includes(point)) points.push(point);
+    }
+    // 握手输出也算本机的点位：工具输出/方案卡的「点位」要能一眼看到给下游的两个信号
+    for (const point of ['DO-TRANSFER-READY', 'DO-TRANSFER-DONE']) {
+      if (!points.includes(point)) points.push(point);
+    }
+
+    // 四个联锁信号：两条轴的到位信号 + 一个"下游允许接收"输入。
+    // DI-TRANSFER-END 必须绑到 transfer-push、ST-TRANSFER-LIFT-* 必须绑到 transfer-lift，
+    // 否则 PLC 预检报 ACTUATOR_SENSOR_MISSING（每条执行机构至少一个绑定的传感器）。
+    // DI-DOWNSTREAM-ALLOW 绑的是**工位**而不是某条轴：它是外部握手，不属于任何一条轴。
+    const transferSensors = [
+      ['ST-TRANSFER-LIFT-UP', `顶升 ${transferPlan.strokeMm} mm 到位`, 'transfer-lift'],
+      ['ST-TRANSFER-LIFT-DOWN', '顶升原位（台板在下）', 'transfer-lift'],
+      ['DI-TRANSFER-END', `移载 ${transferPlan.pushStrokeMm} mm 到位`, 'transfer-push'],
+      ['DI-DOWNSTREAM-ALLOW', '下游允许接收', TRANSFER_STATION_NAME]
+    ] as const;
+    for (const [point, , part] of transferSensors) {
+      sensors.push({ point, station: TRANSFER_STATION_NAME, part });
+      if (!points.includes(point)) points.push(point);
+    }
+    // 安全回路：与转向工位一致的最小安全集（急停 + 安全门）。移载单元要人工干预
+    //（清卡件、换辊），没有这两条 PLC 预检会拒签（ESTOP_UNDEFINED / SAFETY_DOOR_UNDEFINED）。
+    const transferSafety = [
+      ['ST-TRANSFER-ESTOP', '急停'],
+      ['ST-TRANSFER-DOOR', '安全门']
+    ] as const;
+    for (const [point, part] of transferSafety) {
+      sensors.push({ point, station: TRANSFER_STATION_NAME, part });
+      if (!points.includes(point)) points.push(point);
+    }
+
+    // 三条 assumption 装下「机构 + 行程账 + 联锁」：trim.ts 会把 >20 条的 assumptions
+    // 裁成 {items,total,truncated}，而方案卡要求它是字符串数组——超了「应用到工程」会被拒。
+    assumptions.push(
+      `顶升移载：线体中段加直角移载单元（随动台板 ${transferPlan.plateLengthMm}×${Math.round(transferPlan.plateWidthMm)}`
+        + ` + ${transferPlan.rollerYs.length} 根 φ${transferPlan.rollerDiameterMm} 移载辊 + ${transferPlan.postCenters.length} 根轴承立柱 + 推板），`
+        + `顶升 ${transferPlan.strokeMm} mm → 沿 +Y 移出 ${transferPlan.pushStrokeMm} mm → 回落；`
+        + `两条轴 transfer-lift（点位 ${TRANSFER_LIFT_POINT}）/ transfer-push（点位 ${TRANSFER_PUSH_POINT}），`
+        + `合计 ${transferPlan.actionSeconds} s/件 = 顶升回落 ${transferPlan.liftSeconds} + 移载 ${transferPlan.pushSeconds}，已计入工位时间。`
+        + `输送面 ${transferPlan.beltCount} 条 ${transferPlan.beltWidthMm} mm 窄带并联（带缝 ${Math.round(transferPlan.beltGapMm)} mm）整条连续、不为移载断开：`
+        + `辊与立柱全部落在带缝中心（φ${transferPlan.rollerDiameterMm}/φ${transferPlan.postDiameterMm} < 带缝），`
+        + `因为任何沿 Y 延伸的长向梁在顶升过程中都必然扫过带体所在的 846~850；出料侧（+Y）挡边在单元占位内断开，那是物料出口。`
+    );
+    assumptions.push(
+      `借用 cylinder 表达直线移载：本域执行机构只有 cylinder/gripper/rotary，`
+        + `transfer-push 用 kind=cylinder + travelMm=${transferPlan.pushStrokeMm} + position=[0,0.05,0]（+Y）表示「板沿 +Y 平移」这条直线轴，`
+        + `不是气缸实体；实际执行件是辊道（转动）+ 推板（直线），行程/方向见 travelMm + position。`
+        + `移载行程 ${transferPlan.pushStrokeMm} mm = 板宽 ${transferPlan.partWidthMm} + 结构间隙 ${transferPlan.structuralGapMm}`
+        + `（随动台板边缘 y=${Math.round(transferPlan.plateWidthMm / 2)} → 对接段带面起点 y=${transferPlan.dockStartY}）+ 装配余量 120；`
+        + `下限校验：板尾整块落到对接段需 ≥ ${transferPlan.minPushStrokeMm} mm（对接段起点 ${transferPlan.dockStartY} + 板宽/2 ${transferPlan.partWidthMm / 2}）。`
+    );
+    assumptions.push(
+      `下游对接段：+Y 侧独立短辊道段 ${Math.round(transferPlan.dockWidthMm)}（X）×${Math.round(transferPlan.dockLengthMm)}（Y）mm，`
+        + `带面高与主线一致（${transferPlan.dockRollerCenterZ + 25} mm），起点 y=${transferPlan.dockStartY}（主线纵梁外侧 +5 mm），`
+        + `带两侧挡边、末端挡停板与两只到位光电；宽度按板长 ${transferPlan.partLengthMm} + 200 给（比主线宽——板是横着落上去的）。`
+        + `移载工位联锁：输出 DO-TRANSFER-READY（本机就绪）/ DO-TRANSFER-DONE（移载完成），`
+        + `输入 DI-DOWNSTREAM-ALLOW（下游允许接收，绑工位）/ DI-TRANSFER-END（移载 ${transferPlan.pushStrokeMm} mm 到位，绑 transfer-push）；`
+        + `到位信号 ST-TRANSFER-LIFT-UP / ST-TRANSFER-LIFT-DOWN 绑 transfer-lift；`
+        + `安全回路：急停 ${transferSafety[0][0]}、安全门 ${transferSafety[1][0]}（最小安全集，非安全等级认证回路）。`
+    );
+  }
+
   const config = validateMachineConfig({
-    id: options.id ? sanitizeId(options.id) : `design-${process}-${stations}st`,
+    // 机型 id 必须能区分「同一工艺、同一工位数」的不同机器：转向线与移载线都是
+    // form belt-line + 1 工位，只用 process+stations 会撞 id，apply 时会报
+    // 「机型方案已存在，如需覆盖请显式传 overwrite=true」（E2E 实测）。
+    id: options.id
+      ? sanitizeId(options.id)
+      : `design-${process}-${stations}st${transferPlan ? '-transfer' : ''}`,
     name: options.name ?? `${stations} 工位${PROCESS_LABEL[process]}机（方案草案）`,
     stations: stationNames,
     actuators,
@@ -927,8 +1175,38 @@ export function synthMachine(brief: MachineBrief, options: SynthOptions = {}): M
             frameSectionMm: turnerParams.frameSectionMm,
             layers: turnerParams.layers,
             layerPitchMm: turnerParams.layerPitchMm ?? DEFAULT_CONVEYOR.layerPitchMm,
-            turnerAngleDeg
+            turnerAngleDeg,
+            // 移载参数必须跟着 config 走：整机几何的唯一入口只读 config，
+            // 不写进来就只能回落到普通输送线（那正是「参数不生效却看不出来」）
+            ...(transferPlan
+              ? {
+                  transferPresent: true,
+                  transferPartLengthMm: transferPlan.partLengthMm,
+                  transferPartWidthMm: transferPlan.partWidthMm
+                }
+              : {})
           }
+        }
+      : {}),
+    // 握手/联锁扩展点位：DO- 这类输出既不是气缸线圈也不是传感器，单独建表
+    ...(transferPlan
+      ? {
+          ioPoints: [
+            {
+              point: 'DO-TRANSFER-READY',
+              name: '移载工位就绪',
+              area: 'output' as const,
+              station: TRANSFER_STATION_NAME,
+              role: '移载就绪'
+            },
+            {
+              point: 'DO-TRANSFER-DONE',
+              name: '移载完成',
+              area: 'output' as const,
+              station: TRANSFER_STATION_NAME,
+              role: '移载完成'
+            }
+          ]
         }
       : {})
   });

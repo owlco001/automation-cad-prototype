@@ -2,6 +2,21 @@
 
 本文件按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 组织，版本号遵循语义化版本。
 
+## [未发布]
+
+### Added · 顶升移载（直角移载，板不转向）
+
+- 需求解析：`顶升移载 / 直角移载 / 移载机构` → `brief.transfer`；与 `turner` 互斥（同一句话里同时出现时移载优先，两套机构抢线体中段同一段 X）；`detectTransfer` 只认明确词，普通输送线不长出移载工位
+- 参数化几何 `conveyor-assembly.buildTransferParts()`（与 turner 并列，共 50 件）：安装板 + 4 吊柱 + 2 顶升气缸（缸体/活塞杆）+ 4 导柱 + 随动台板 + 5 根 φ50 移载辊（轴向 X）+ 10 根 φ30 轴承立柱 + 推板（+ 无杆气缸 / 2 横梁 / 2 立柱）+ 下游对接段（2 纵梁 / 5 输送辊 / 4 支腿 / 2 挡边 / 挡停 / 2 光电）
+- 三条硬约束（都是算出来才落地的）：辊与立柱**全部落在带缝中心**（φ50/φ30 < 带缝 120），上行程一根带不断；随动台板顶升到位 786 < 带底 846；推板下沿 915 高过挡边顶 911。任何**沿 Y 延伸**的梁/滑车导轨在顶升过程中必然扫过带体所在的 846~850，所以移载件一律做成点状
+- 移载行程 = 板宽 + 结构间隙（台板边 → 对接段起点）+ 120 余量，全部由参数推出（1200 带宽 / 800 板宽 → 1140 mm），并校验下限（板尾整块落料 ≥ 1060 mm）
+- 运动轴：`transfer-lift`（Z，60 mm，与转向工位同口径）+ `transfer-push`（+Y，1140 mm）；本域只有 cylinder/gripper/rotary，`transfer-push` **借 cylinder 表达直线移载**，借用的口径写进 assumptions（行程/方向见 `travelMm` + `position`）
+- 联锁：输出 `DO-TRANSFER-READY` / `DO-TRANSFER-DONE`（新增 `config.ioPoints` 扩展点位，io-map 里 direction=输出）+ 输入 `DI-DOWNSTREAM-ALLOW`（绑工位）/ `DI-TRANSFER-END`（绑 `transfer-push`），到位信号 `ST-TRANSFER-LIFT-UP/DOWN` 绑 `transfer-lift`；安全回路与转向工位一致（急停 + 安全门）
+- 参数护栏（拒建就给数字理由，不静默退化成普通输送线）：带宽 < 1080、线体太短、板宽 > 带宽、移载行程超 2000、与转向/立体缓存互斥、皮带面太低
+- 三态干涉新增 `push` 态（复合位姿：先按顶升轴抬到行程顶，再按移载轴沿 +Y 推到行程末端，行程读 config）；`run_interference_check(states)` 支持 `rest/lift/sweep/push`
+- 3D：视口按**材质**着色（AL6063 / Q235 / STEEL45 / PVC 各一色），两台机器的机架/钢件/皮带一眼可分
+- 机具/落盘：`design-conveyor-<n>st-transfer` 独立机型 id（否则与转向线撞 id，apply 报「机型方案已存在」）；`build_machine_model` 也认移载意图（否则一句话要移载工位，出来的还是普通输送线）
+
 ## [0.6.5] - 2026-11-04
 
 ### Added · 机型库远程目录与下载（用户自选加载/下载）

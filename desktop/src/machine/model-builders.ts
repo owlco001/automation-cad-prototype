@@ -46,7 +46,12 @@ const CONVEYOR_PARAMS: ModelParamSpec[] = [
   { name: 'layers', label: '缓存层数（1=普通线体，≥2=立体缓存）', defaultValue: DEFAULT_CONVEYOR.layers, min: 1, max: 8, unit: '层' },
   { name: 'layerPitchMm', label: '层间距', defaultValue: DEFAULT_CONVEYOR.layerPitchMm, min: 250, max: 900, unit: 'mm' },
   // 转向工位：0 = 不做；45/90/180 = 线体中段把工件就地旋转多少度
-  { name: 'turnerAngleDeg', label: '转向角度（0=不做转向工位，90=旋转 90°）', defaultValue: DEFAULT_CONVEYOR.turnerAngleDeg, min: 0, max: 180, unit: '°' }
+  { name: 'turnerAngleDeg', label: '转向角度（0=不做转向工位，90=旋转 90°）', defaultValue: DEFAULT_CONVEYOR.turnerAngleDeg, min: 0, max: 180, unit: '°' },
+  // 顶升移载（直角移载）：板宽 > 0 才建移载单元（没板宽就没法算移载行程）。
+  // 用板宽当开关而不是再加一个 0/1 开关：行程本来就是「板宽 + 结构间隙 + 余量」，
+  // 没有板宽这个单元根本算不出来，给 0 就是「不做」。
+  { name: 'transferPartWidthMm', label: '移载板宽（0=不做顶升移载；>0 建直角移载单元）', defaultValue: 0, min: 0, max: 1200, unit: 'mm' },
+  { name: 'transferPartLengthMm', label: '移载板长（决定下游对接段宽度，0=按带宽推）', defaultValue: 0, min: 0, max: 4000, unit: 'mm' }
 ];
 
 export const MODEL_BUILDERS: Partial<Record<MachineProcess, ModelBuilder>> = {
@@ -126,6 +131,8 @@ export function toConveyorParams(params: Record<string, number>): ConveyorParams
     frameSectionMm: params.frameSectionMm ?? DEFAULT_CONVEYOR.frameSectionMm,
     layers: params.layers ?? DEFAULT_CONVEYOR.layers,
     layerPitchMm: params.layerPitchMm ?? DEFAULT_CONVEYOR.layerPitchMm,
-    turnerAngleDeg: params.turnerAngleDeg ?? DEFAULT_CONVEYOR.turnerAngleDeg
+    turnerAngleDeg: params.turnerAngleDeg ?? DEFAULT_CONVEYOR.turnerAngleDeg,
+    transferPartWidthMm: params.transferPartWidthMm ?? 0,
+    transferPartLengthMm: params.transferPartLengthMm ?? 0
   };
 }
