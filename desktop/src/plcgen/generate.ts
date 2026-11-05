@@ -20,9 +20,11 @@ import {
 import { generateAlarms } from './alarms.ts';
 import { generateSafety } from './safety.ts';
 import { createRenderContext } from './st.ts';
-import { buildTagBindings, type TagBinding } from './symbols.ts';
+import { buildTagBindings, tagRef, type TagBinding } from './symbols.ts';
 import { normalizePointKey } from './io.ts';
 import { sha256Hex } from './hash.ts';
+import { detectHandshake, type HandshakeModel, type HandshakeRole } from './handshake.ts';
+import type { SequenceSource } from './sequence.ts';
 
 export interface GenerateProjectInput extends StGenerateOptions {
   config: PlcGenConfig;
@@ -39,6 +41,10 @@ export interface ProjectStats extends StStats {
   precheckWarnings: number;
   sequenceWarnings: number;
   sequenceEmpty: boolean;
+  /** 步序来源：显式 sequence / 联动推导 / 空。 */
+  sequenceSource: SequenceSource;
+  /** 参与握手逻辑的信号点位（READY/DONE/ALLOW/END），空数组表示本机型没有握手。 */
+  handshakeSignals: string[];
   hashes: Record<string, string>;
 }
 
@@ -139,11 +145,41 @@ function pointUsages(
   return entries.sort((left, right) => left.stepNo - right.stepNo || left.usage.localeCompare(right.usage, 'en'));
 }
 
+const HANDSHAKE_DRIVER: Record<HandshakeRole, string> = {
+  ready: 'StepNo = STEP_IDLE AND NOT SafeStop AND NOT SeqTimeout AND AlarmWord = 16#0000（CASE 之后每扫描重算）',
+  done: 'STEP_HANDSHAKE 里到位信号为 1 才置位并锁存；SafeStop/Abort/下次启动沿清除（CASE 之后输出）',
+  allow: '串进 STEP_IDLE 的启动条件：ALLOW = 0 时不接受启动沿，序列停在待机位',
+  end: '最后一步的转移条件 + STEP_HANDSHAKE 的置位判据：END 不到位不置 DONE'
+};
+
+/** 握手信号在 mapping.json 里的追溯块：谁驱动它、它在哪个扫描位置写。 */
+function buildHandshakeMapping(model: HandshakeModel): Record<string, unknown> | null {
+  if (!model.present) return null;
+  const role = (list: HandshakeModel['ready']): Array<Record<string, string>> => list.map((signal) => ({
+    point: signal.point,
+    address: signal.address,
+    variable: signal.variable,
+    ref: tagRef(signal.variable),
+    station: signal.station,
+    driver: HANDSHAKE_DRIVER[signal.role]
+  }));
+  return {
+    station: model.station ?? '',
+    signals: [
+      ...role(model.allow),
+      ...role(model.ready),
+      ...role(model.done),
+      ...role(model.end)
+    ]
+  };
+}
+
 function buildMapping(
   config: PlcGenConfig,
   tags: TagTable,
   steps: readonly SequenceStepModel[],
-  inputHash: string
+  inputHash: string,
+  handshake: HandshakeModel
 ): string {
   const usageMap = new Map<string, StepUsage[]>();
   for (const step of steps) {
@@ -170,6 +206,7 @@ function buildMapping(
     };
   });
 
+  const handshakeMapping = buildHandshakeMapping(handshake);
   const payload = {
     schemaVersion: 1,
     generatorVersion: '1.0.0',
@@ -193,7 +230,8 @@ function buildMapping(
       waits: step.waits,
       condition: step.condition,
       timeoutMs: step.timeoutMs
-    }))
+    })),
+    ...(handshakeMapping ? { handshake: handshakeMapping } : {})
   };
   return `${JSON.stringify(payload, null, 2)}\n`;
 }
@@ -207,7 +245,9 @@ function buildReadme(
   inputHash: string,
   version: string,
   target: PlcTarget,
-  namePrefix: string
+  namePrefix: string,
+  sequenceSource: SequenceSource,
+  handshake: HandshakeModel
 ): string {
   const warnings = [...precheckResult.warnings, ...sequenceWarnings];
   const lines = [
@@ -224,7 +264,18 @@ function buildReadme(
     `- 自动序列步数：${steps.length}`,
     `- 预检结果：${precheckResult.errors.length} error / ${precheckResult.warnings.length} warning`,
     `- 序列警告：${sequenceWarnings.length}`,
-    '',
+    ''
+  ];
+  // 只有「联动推导」和「握手」这两种新情况才加行：显式 sequence 的老机型说明文件逐字节不变。
+  if (sequenceSource === 'linkage') {
+    lines.splice(lines.length - 1, 0,
+      `- 序列来源：联动推导（config 无显式 sequence，用执行机构驱动点位 + 到位传感器生成 ${steps.length} 步）`);
+  }
+  if (handshake.present) {
+    lines.splice(lines.length - 1, 0,
+      `- 联锁握手：${handshake.signals.join(' / ')}（ALLOW 约束启动、END 到位才置 DONE、READY = 待机且无报警、SafeStop 同周期复位）`);
+  }
+  lines.push(...[
     '## 文件',
     '',
     ...PROJECT_FILE_ORDER.map((path) => `- \`${path}\``),
@@ -236,7 +287,7 @@ function buildReadme(
     '3. `mapping.json` 提供位号、点位、变量与步序的追溯关系，可用于 HMI 或 MES 对点。',
     '4. 生成结果不含时间戳，同一输入可逐字节复现。',
     ''
-  ];
+  ]);
   if (warnings.length > 0) {
     lines.push('## 警告', '');
     for (const warning of warnings) {
@@ -268,18 +319,22 @@ export function generateProject(input: GenerateProjectInput): GenerateProjectRes
   const base = generateSt(programInput);
   const sequence = generateSequence(programInput);
   const plan = buildSequencePlan(programInput);
+  const handshake = detectHandshake(ctx.config);
   const tags = buildTags(ctx.config);
-  const mapping = buildMapping(ctx.config, tags, plan.steps, ctx.inputHash);
+  const mapping = buildMapping(ctx.config, tags, plan.steps, ctx.inputHash, handshake);
+  const sequenceWarnings = [...plan.warnings, ...handshake.warnings];
   const readme = buildReadme(
     ctx.config,
     check,
     plan.steps,
-    sequence.warnings,
+    sequenceWarnings,
     tags,
     ctx.inputHash,
     ctx.version,
     target,
-    namePrefix?.trim() || ctx.config.id || 'PLC'
+    namePrefix?.trim() || ctx.config.id || 'PLC',
+    plan.source,
+    handshake
   );
 
   const allFiles: GeneratedFile[] = [
@@ -302,7 +357,7 @@ export function generateProject(input: GenerateProjectInput): GenerateProjectRes
   const hashes: Record<string, string> = {};
   for (const file of allFiles) hashes[file.path] = sha256(file.content);
 
-  const warnings = [...check.warnings, ...sequence.warnings];
+  const warnings = [...check.warnings, ...sequenceWarnings];
   const stats: ProjectStats = {
     files: allFiles.length,
     lines: allFiles.reduce((total, file) => total + countLines(file.content), 0),
@@ -316,8 +371,10 @@ export function generateProject(input: GenerateProjectInput): GenerateProjectRes
     toleranceDeg: ctx.toleranceDeg,
     steps: plan.steps.length,
     precheckWarnings: check.warnings.length,
-    sequenceWarnings: sequence.warnings.length,
+    sequenceWarnings: sequenceWarnings.length,
     sequenceEmpty: plan.steps.length === 0,
+    sequenceSource: plan.source,
+    handshakeSignals: handshake.signals,
     hashes
   };
 

@@ -870,7 +870,8 @@ async function main() {
       if (!stations.join(',').includes('移载工位')) throw new Error(`方案里没有「移载工位」：${stations.join(',')}`);
       if (!lift) throw new Error(`actuators 里没有 transfer-lift：${actuators.map((a) => a?.id).join(',')}`);
       if (!push) throw new Error(`actuators 里没有 transfer-push：${actuators.map((a) => a?.id).join(',')}`);
-      if (Number(lift.travelMm) !== 60) throw new Error(`transfer-lift 行程异常：${lift.travelMm}`);
+      // 顶升行程 70 = 板底要越过挡边顶 911 至少 4 mm（旧值 60 时板底 905 < 911，板推不出去）
+      if (Number(lift.travelMm) !== 70) throw new Error(`transfer-lift 行程异常：${lift.travelMm}（应为 70）`);
       if (!(Number(push.travelMm) > 1000)) throw new Error(`transfer-push 行程异常：${push.travelMm}（应 = 板宽 800 + 结构间隙 220 + 余量 120）`);
       if (!((push.position?.[1] ?? 0) > 0)) throw new Error(`transfer-push 方向不是 +Y：${JSON.stringify(push.position)}`);
       if (bound('DI-TRANSFER-END') !== 'transfer-push') throw new Error(`DI-TRANSFER-END 没绑 transfer-push：${bound('DI-TRANSFER-END')}`);
@@ -1018,11 +1019,44 @@ async function main() {
         const expect = point.startsWith('DO') ? '输出' : '输入';
         if (rows[point].direction !== expect) throw new Error(`${point} 方向应为 ${expect}，实际 ${rows[point].direction}`);
       }
-      return `blocked=0 io-map=${latest.path} signals=${TRANSFER_SIGNALS.map((p) => `${p}@${rows[p].address}`).join(',')}`;
+      // 四个信号必须真的进控制逻辑（审计点 2：只有点位、没有逻辑 = 空壳）。
+      // 读这次落盘的工程目录（最新 FC_AutoSequence.st 所在目录）逐条核对，
+      // 而不是看变量表里有没有这四行。
+      const stFiles = [];
+      const walkSt = (dir) => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          const path = join(dir, entry.name);
+          if (entry.isDirectory()) walkSt(path);
+          else if (entry.name === 'FC_AutoSequence.st') stFiles.push(path);
+        }
+      };
+      walkSt(plcRoot);
+      if (stFiles.length === 0) throw new Error('PLC 导出里没有 FC_AutoSequence.st');
+      const latestSt = stFiles.map((path) => ({ path, mtime: statSync(path).mtimeMs })).sort((a, b) => b.mtime - a.mtime)[0];
+      const plcDir = dirname(dirname(latestSt.path));
+      const readme = readFileSync(join(plcDir, 'README.md'), 'utf8');
+      const stepCount = Number((readme.match(/- 自动序列步数：(\d+)/) ?? [])[1] ?? 0);
+      if (!(stepCount > 0)) {
+        throw new Error(`移载机型的 FC_AutoSequence 是空壳：README 里 自动序列步数=${stepCount}`);
+      }
+      const autoSeq = readFileSync(latestSt.path, 'utf8');
+      const logicChecks = [
+        ['ALLOW 约束启动', /IF _StartEdge\.Q AND NOT SafeStop AND NOT Abort AND "DB_IO"\.[^\n]+ THEN/],
+        ['END 到位才置 DONE', /STEP_HANDSHAKE:[\s\S]*?IF "DB_IO"\.[^\n]+ THEN\n\s+_HandshakeDone := TRUE;/],
+        ['DONE 接锁存位', /移载完成 := _HandshakeDone;/],
+        ['READY 就绪判据', /移载就绪 := NOT SafeStop AND NOT SeqTimeout AND \(AlarmWord = 16#0000\)/]
+      ];
+      const logicHits = [];
+      for (const [label, pattern] of logicChecks) {
+        if (!pattern.test(autoSeq)) throw new Error(`FC_AutoSequence 里找不到「${label}」逻辑（信号没进控制）`);
+        logicHits.push(label);
+      }
+      const handshakeRefs = (autoSeq.match(/"DB_IO"\.[^\s:=]+/g) ?? []).length;
+      return `blocked=0 steps=${stepCount} handshake=${logicHits.length}/4 [${logicHits.join(' / ')}] ST点位引用=${handshakeRefs}处 io-map=${latest.path} signals=${TRANSFER_SIGNALS.map((p) => `${p}@${rows[p].address}`).join(',')}`;
     });
 
     const transferStates = await step(13, 'transfer-interference-states', async () => {
-      await sendMessage(cdp, '对当前机型做三态干涉检查（rest/lift/push），看移载机构和既有线体有没有干涉');
+      await sendMessage(cdp, '对当前机型做四态干涉检查（rest/lift/sweep/push），看移载机构和既有线体有没有干涉');
       await cdp.waitFor(
         `Array.from(document.querySelectorAll('.acp-chat-tool')).some((node) => {
           const text = node.textContent || '';
@@ -1035,9 +1069,9 @@ async function main() {
       if (payload?.ok === false) throw new Error(`三态干涉失败：${payload.code} ${payload.message ?? ''}`);
       const states = payload?.states ?? {};
       const detail = [];
-      for (const name of ['rest', 'lift', 'push']) {
+      for (const name of ['rest', 'lift', 'sweep', 'push']) {
         const entry = states[name];
-        if (!entry) throw new Error(`三态里没有 ${name}：${Object.keys(states).join(',')}`);
+        if (!entry) throw new Error(`四态里没有 ${name}：${Object.keys(states).join(',')}`);
         detail.push(`${name}=${entry.confirmedHits}/${entry.screenHits}/${entry.mm3Confirmed}`);
         if (Number(entry.confirmedHits) !== 0) {
           throw new Error(`${name} 态有确认干涉 ${entry.confirmedHits} 对：${JSON.stringify(entry.items ?? []).slice(0, 400)}`);
@@ -1049,7 +1083,7 @@ async function main() {
       if (payload?.push?.actuatorId !== 'transfer-push') {
         throw new Error(`push 态没用移载轴：${JSON.stringify(payload?.push ?? null).slice(0, 200)}`);
       }
-      return `confirmed=0/0/0 (rest/lift/push) axis=${payload.push.actuatorId} stroke=${payload.push.strokeMm}mm ${detail.join(' ')}`;
+      return `confirmed=0/0/0/0 (rest/lift/sweep/push) axis=${payload.push.actuatorId} stroke=${payload.push.strokeMm}mm ${detail.join(' ')}`;
     });
 
     const transferShot = await step(14, 'transfer-screenshot', async () => {
@@ -1247,9 +1281,9 @@ function planFor(text) {
   if (/(实体模型|整机模型|参数化几何|三维模型)/.test(text)) {
     return { name: 'build_machine_model', args: { process: 'conveyor', brief } };
   }
-  if (/三态/.test(text)) {
-    // 位姿化检查：移载机型必须能跑 rest / lift / push（sweep 已在单测与 eval t05 覆盖）
-    return { name: 'run_interference_check', args: { states: ['rest', 'lift', 'push'] } };
+  if (/三态|四态/.test(text)) {
+    // 位姿化检查：移载机型必须能跑 rest / lift / sweep / push（sweep 覆盖顶升途中，push 覆盖顶升后推出）
+    return { name: 'run_interference_check', args: { states: ['rest', 'lift', 'sweep', 'push'] } };
   }
   if (/干涉/.test(text)) {
     return { name: 'run_interference_check', args: {} };

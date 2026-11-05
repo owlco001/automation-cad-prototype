@@ -729,17 +729,19 @@ function buildTurnerParts(t: TurnerLayout): ConveyorPart[] {
  *    那么顶升过程中它必然扫过带体所在的 846~850 —— 逐步顶升一定会撞带。
  *    所以移载件一律做成**点状**（辊子 + 立柱，全部落在带缝中心），不做长向梁。
  * 3) **随动台板必须在顶升到位时仍低于带底**，否则整块板升上来会顶穿每一条带：
- *    台板顶 = 带底 846 − 行程 60 − 净空 60 = 726；顶升到位 786 ≤ 846。
- *    辊道因此不能直接坐在台板上（辊心 820 高于台板顶 726），必须由 φ30 立柱从台板顶
- *    托到辊心（726 → 820，顶升后 786 → 880，全程在带缝里）。
+ *    台板顶 = 带底 846 − 行程 70 − 净空 60 = 716；顶升到位 786 ≤ 846。
+ *    辊道因此不能直接坐在台板上（辊心 820 高于台板顶 716），必须由 φ30 立柱从台板顶
+ *    托到辊心（716 → 820，顶升后 786 → 880，全程在带缝里）。
  *
  * 竖向账（beltFace 850、带厚 4 → 带底 846、滚筒 φ50 → 纵梁顶 800）：
  *   静止位：辊面 845（比带面低 5，板完全压在带上）→ 辊心 820 → 轴承立柱 726..820 →
  *           随动台板 714..726 → 活塞杆顶 714 → 缸体 634..690 → 安装板 622..634；
  *           吊柱 634..800 挂在两侧纵梁内侧面。
- *   顶升 60：辊面 905、辊底 855（> 带面 850，所以辊道平移也不会扫到带）、台板顶 786（< 846）。
- *   推板：下沿 = 辊面 905 + 10 = 915，高 60 → 915..975；静止位停在板外
- *        y = −(板宽/2 + 15 + 10)，所以板进站时从推板下面过去（板顶 885 < 915）。
+ *   顶升 70：辊面 915、辊底 865（> 带面 850，所以辊道平移也不会扫到带）、台板顶 786（< 846）。
+ *        行程 70 = 板底要越过挡边顶 911 至少 4 mm（挡边顶 = 带面+61），不是照转向工位抄的 60。
+ *   推板：下沿 = 辊面 915 + 10 = 925，高 60 → 925..985；静止位停在板外
+ *        y = −(板宽/2 + 15 + 10)…… 推板下沿 925 高于挡边顶 911，推出时整条通道在带面之上。
+ *        板进站时板顶 885 < 925，从推板下面过去。
  *
  * 横向账（y 向）：随动台板半宽 = min(440, 带内边 − 20)，必须 ≥ 最外带缝 + 辊半径；
  *   对接段从纵梁外侧面 + 5 mm 起（y = 带宽/2 + 型材 + 20），所以
@@ -749,13 +751,34 @@ function buildTurnerParts(t: TurnerLayout): ConveyorPart[] {
 
 /** 移载单元沿 X 的占位半宽（随动台板 1000 → ±500，再留 20 装配余量） */
 const TRANSFER_UNIT_HALF_MM = 520;
-/** 顶升行程：与转向工位同口径（> 带厚 + 板厚一半，并留余量吸收带面下垂） */
-const TRANSFER_LIFT_STROKE_MM = 60;
+/** 侧挡边（线体两侧 3 mm 板）：下沿比带面高 1 mm，高 60 → 顶面 = 带面 + 61 */
+const SIDE_GUARD_LIFT_MM = 1;
+export const SIDE_GUARD_HEIGHT_MM = 60;
 /** 移载辊道：φ50 × 800，落在带缝中心 */
 const TRANSFER_ROLLER_DIAMETER_MM = 50;
 const TRANSFER_ROLLER_LENGTH_MM = 800;
 /** 静止位辊面比带面低 5 mm：板完全压在带上，辊道不吃力 */
 const TRANSFER_ROLLER_DROP_MM = 5;
+/**
+ * 板底越过挡边顶的最小间隙：工件是沿 +Y 从挡边**上方**推出去的，不能骑在挡边顶面上。
+ * 4 mm 是装配/带面下垂的可复现余量（挡边顶 911 → 板底必须 ≥ 915）。
+ */
+export const TRANSFER_PLATE_GUARD_CLEAR_MM = 4;
+/**
+ * 顶升行程：**由挡边顶面反推**，不是照转向工位抄的 60。
+ *   静止位板底 = 带面 − 5（辊面比带面低 5，板压在带上）
+ *   挡边顶     = 带面 + 1 + 60 = 带面 + 61
+ *   约束      板底（顶升到位）= 带面 − 5 + 行程 ≥ 挡边顶 + 4  →  行程 ≥ 5 + 1 + 60 + 4 = 70
+ * 旧值 60 的后果（实测）：到位板底 905，比挡边顶 911 低 6 mm，板推出时两侧挡边各扫
+ * 70 × 3 × 6 = 1260 mm³（出料口只开到 ±530 时合计 2520 mm³）。
+ * 行程与带面高度无关（挡边顶与辊面都随带面平移），所以这个 70 是常数而不是参数。
+ */
+export const TRANSFER_LIFT_STROKE_MM = TRANSFER_ROLLER_DROP_MM + SIDE_GUARD_LIFT_MM
+  + SIDE_GUARD_HEIGHT_MM + TRANSFER_PLATE_GUARD_CLEAR_MM; // 5 + 1 + 60 + 4 = 70
+/** 出料口在 X 向的单边余量：开口总宽 ≥ 板长 + 2×20 = 板长 + 40 */
+const TRANSFER_OUTFEED_X_MARGIN_MM = 20;
+/** 出料口两侧剩余挡边段的下限：比这短就整段不生成（否则会出现几毫米宽的碎段） */
+const TRANSFER_OUTFEED_MIN_SEGMENT_MM = 40;
 /** 随动台板顶面到带底的最小净空（顶升到位后仍低于带底） */
 const TRANSFER_PLATE_CLEAR_MM = 60;
 const TRANSFER_PLATE_LENGTH_MM = 1000;
@@ -791,7 +814,7 @@ const TRANSFER_PUSH_CYL_END_MM = 120;
 const TRANSFER_PUSH_BEAM_MM = 40;
 const TRANSFER_PUSH_COLUMN_MM = 30;
 /** 台板半宽必须 ≥ 轴承立柱中心(420) + 柱半径(15) + 装配余量(5) = 440 */
-const TRANSFER_PLATE_MIN_HALF_WIDTH_MM = TRANSFER_ROLLER_LENGTH_MM / 2 + TRANSFER_POST_OFFSET_MM
+export const TRANSFER_PLATE_MIN_HALF_WIDTH_MM = TRANSFER_ROLLER_LENGTH_MM / 2 + TRANSFER_POST_OFFSET_MM
   + TRANSFER_POST_DIAMETER_MM / 2 + 5;
 /** 顶升移载所需最小带宽：台板半宽 = min(440, 带宽/2 − 80 − 20) 要够托住辊道轴承立柱 */
 export const TRANSFER_MIN_WIDTH_MM = 2 * (TRANSFER_PLATE_MIN_HALF_WIDTH_MM + NARROW_BELT_WIDTH_MM + 20);
@@ -911,6 +934,14 @@ export interface TransferLayout {
   liftSeconds: number;
   pushSeconds: number;
   actionSeconds: number;
+  /** 出料侧挡边（+Y）顶面 z：板底必须越过这个面 ≥ 4 mm */
+  guardTopZ: number;
+  /** 顶升到位时的板底 z（= 辊面顶升到位） */
+  plateBottomLiftZ: number;
+  /** 板底 − 挡边顶（≥ TRANSFER_PLATE_GUARD_CLEAR_MM 才能推出） */
+  plateGuardGapMm: number;
+  /** 出料口 X 向半宽（开口总宽 = 2×这个值，必须 ≥ 板长 + 40） */
+  outfeedOpenHalfXMm: number;
 }
 
 /** 移载行程 = 板宽 + 结构间隙 + 装配余量（三个数都来自参数，不写死）。 */
@@ -964,6 +995,20 @@ export function transferStructuralGap(params: ConveyorParams): number {
   const p = normalizeParams(params);
   const railOuterY = p.widthMm / 2 + p.frameSectionMm / 2 + 15 + p.frameSectionMm / 2;
   return Math.round(railOuterY + TRANSFER_DOCK_GAP_MM - transferPlateHalfWidth(p));
+}
+
+/**
+ * 出料口（+Y 侧挡边在单元处的断开）X 向半宽。
+ *
+ * 这是**物料出口**，开口必须让整块板横着过去：板长 1200 → 每侧 ≥ 620（总宽 1240 = 板长 + 40）。
+ * 旧口径写死 `unitHalfMm + 10 = 530`，板每侧超 70 mm —— 就算把板抬到挡边顶以上，
+ * 板两个角仍会撞上残留的近侧挡边段。
+ *
+ * 下限取单元占位 + 10：辊道（±450）和推板（±450）都在里面，挡边段不该压在单元正上方。
+ */
+export function transferOutfeedOpenHalfXMm(partLengthMm: number): number {
+  const byPart = Math.ceil(partLengthMm / 2 + TRANSFER_OUTFEED_X_MARGIN_MM);
+  return Math.max(TRANSFER_UNIT_HALF_MM + 10, byPart);
 }
 
 /**
@@ -1077,13 +1122,28 @@ export function transferLayout(params: ConveyorParams): TransferLayout | null {
   const pushCylCenterY = pushPlateRestY - TRANSFER_PUSH_CYL_END_MM + pushCylLengthMm / 2;
   const pushBeamCenterZ = pushCylCenterZ;
   const pushColumnHeightMm = pushBeamCenterZ - TRANSFER_PUSH_BEAM_MM / 2;
-  const pushColumnX = p.widthMm / 2 + 20;
+  // 机架立柱的 X：既要跨过带宽（width/2 + 20），又**不能站在板的 X 投影里**——
+  // 立柱是从地面立到横梁的实体，板长 1500 时板的两个角正好在 ±620 的立柱平面上，
+  // 板进站/顶升都会被立柱挡住（板件不在几何里，检查器看不见，只能靠这条参数关系保证）。
+  const pushColumnX = Math.max(p.widthMm / 2 + 20, part.lengthMm / 2 + 40);
   // 移载立柱的 y：推板静止位宽板时会落进纵梁带（y = 带宽/2+15 ~ +55），
   // 立柱从地面立到 1006，正好穿过纵梁（实测 1200 宽 / 1200 板：立柱×纵梁 2 对确认干涉）。
   // 落进纵梁带就往外让到纵梁外侧面 +20；气缸体（z ≈ 1000）本来就跨过纵梁，不受影响。
   const railInnerFaceY = railCenterY - section / 2;
   const inRailBand = pushPlateRestY < -railInnerFaceY && pushPlateRestY > -railOuterY;
-  const pushGantryY = inRailBand ? -(railOuterY + 20) : pushPlateRestY;
+  const gantryYBase = inRailBand ? -(railOuterY + 20) : pushPlateRestY;
+  // 立柱还必须落在**带缝**里（与辊道/轴承立柱同一口径）：φ30 的柱子从地面直通横梁，
+  // 落在带体上就直接穿过皮带上行程（实测 1200 宽 / 600 板：静止位 y=−330 压进 belt-2，3000 mm³）。
+  // 压带就吸附到最近的带缝中心（带缝 120 > 柱 30，两侧各留 45）。
+  const columnHalf = TRANSFER_PUSH_COLUMN_MM / 2;
+  const onBelt = belts.centers.some(
+    (center) => Math.abs(gantryYBase - center) < belts.widthMm / 2 + columnHalf + 5
+  );
+  const nearestGap = belts.gaps.reduce<number | null>(
+    (best, gap) => (best === null || Math.abs(gap - gantryYBase) < Math.abs(best - gantryYBase) ? gap : best),
+    null
+  );
+  const pushGantryY = onBelt && nearestGap !== null ? nearestGap : gantryYBase;
 
   const dockWidthMm = Math.max(TRANSFER_DOCK_MIN_WIDTH_MM, part.lengthMm + TRANSFER_DOCK_WIDTH_MARGIN_MM);
   const dockLengthMm = pushStrokeMm + TRANSFER_DOCK_LENGTH_MARGIN_MM;
@@ -1096,8 +1156,8 @@ export function transferLayout(params: ConveyorParams): TransferLayout | null {
   const dockRollerYs = Array.from({ length: dockRollerCount }, (_unused, index) => round(
     dockRollerSpanStart + ((dockRollerSpanEnd - dockRollerSpanStart) * index) / (dockRollerCount - 1)
   ));
-  const guardBottomZ = p.beltHeightMm + 1;
-  const guardHeightMm = 60;
+  const guardBottomZ = p.beltHeightMm + SIDE_GUARD_LIFT_MM;
+  const guardHeightMm = SIDE_GUARD_HEIGHT_MM;
   const dockSensorCenters: Array<[number, number, number]> = [
     // 支架底面贴对接段纵梁顶（800），中心 845 → 805..885
     [round(-dockRailCenterX), round(dockStartY + 80), railTop + 5],
@@ -1198,7 +1258,13 @@ export function transferLayout(params: ConveyorParams): TransferLayout | null {
     dockSensorCenters,
     liftSeconds: transferLiftSeconds(TRANSFER_LIFT_STROKE_MM),
     pushSeconds: transferPushSeconds(pushStrokeMm),
-    actionSeconds: transferActionSeconds(TRANSFER_LIFT_STROKE_MM, pushStrokeMm)
+    actionSeconds: transferActionSeconds(TRANSFER_LIFT_STROKE_MM, pushStrokeMm),
+    // 出料口的三个数：板底 → 挡边顶的间隙、开口半宽。全部进 layout，
+    // 让单测/评审能直接断言「板推得出去」，而不是只靠注释。
+    guardTopZ: guardBottomZ + guardHeightMm,
+    plateBottomLiftZ: rollerTopRestZ + TRANSFER_LIFT_STROKE_MM,
+    plateGuardGapMm: rollerTopRestZ + TRANSFER_LIFT_STROKE_MM - (guardBottomZ + guardHeightMm),
+    outfeedOpenHalfXMm: transferOutfeedOpenHalfXMm(part.lengthMm)
   };
 }
 
@@ -1332,7 +1398,7 @@ function buildTransferParts(t: TransferLayout): ConveyorPart[] {
   });
 
   // 8) 推板：沿 +Y 把板推出主线。静止位停在板外（板进站从下面过），
-  //    下沿 915 高于带面挡边顶 911，所以整条推出通道在带面之上
+  //    下沿 925 高于挡边顶 911（= 顶升后辊面 915 + 10），所以整条推出通道在带面之上
   parts.push({
     id: 'transfer-push-plate',
     name: '移载推板',
@@ -1725,12 +1791,15 @@ function buildSingleLayerParts(p: ResolvedConveyorParams): ConveyorPart[] {
   // 下沿比带面低 4 mm，于是挡边一头扎进皮带上行程、一头扎进滚筒筒体
   //（pulley-drive/tail × guard 各 360 mm³，普通线与立体缓存都有）。现在下沿 = 带面 + 1。
   //
-  // 唯一的例外是**顶升移载的出料侧**（+Y 挡边）：板被顶到 905，比挡边顶 911 只低 6 mm，
-  // 这块板要从这条边出去，所以挡边在单元占位内必须断开——这是物料的出口，不是干涉修补。
+  // 唯一的例外是**顶升移载的出料侧**（+Y 挡边）：这块板要从这条边出去，所以挡边在单元占位内
+  // 必须断开——这是物料的出口，不是干涉修补。
+  //
+  // 开口宽度**从板长推**（≥ 板长 + 40，见 transferOutfeedOpenHalfXMm）：旧口径写死 ±530，
+  // 板长 1200 时每侧差 70 mm，板角直接扫在残留的挡边段上（2×70×3×6 = 2520 mm³）。
   for (const [label, sign] of [['left', -1], ['right', 1]] as const) {
     const side = label === 'left' ? '左' : '右';
-    const guardHeightMm = 60;
-    const guardBottomZ = p.beltHeightMm + 1;
+    const guardHeightMm = SIDE_GUARD_HEIGHT_MM;
+    const guardBottomZ = p.beltHeightMm + SIDE_GUARD_LIFT_MM;
     const exitCut = transfer !== null && sign > 0;
     if (!exitCut) {
       parts.push({
@@ -1745,8 +1814,9 @@ function buildSingleLayerParts(p: ResolvedConveyorParams): ConveyorPart[] {
     }
     // 出料口：单元占位内断开，两段各自留 5 mm 装配缝
     const outerX = halfL - 30;
-    const innerX = unitHalfMm + 10;
+    const innerX = transfer === null ? unitHalfMm + 10 : transferOutfeedOpenHalfXMm(transfer.partLengthMm);
     const pieceLength = outerX - innerX;
+    if (pieceLength < TRANSFER_OUTFEED_MIN_SEGMENT_MM) continue; // 开口盖满整侧：不留碎段
     for (const [seg, segSign] of [['in', -1], ['out', 1]] as const) {
       parts.push({
         id: `guard-${label}-${seg}`,

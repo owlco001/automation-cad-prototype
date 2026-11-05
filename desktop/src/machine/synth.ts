@@ -30,6 +30,8 @@ import { TEMPLATES, templateFor, templateKinds } from './templates.ts';
 import { conveyorParamsFromBrief, refineConveyor } from './conveyor-synth.ts';
 import {
   DEFAULT_CONVEYOR,
+  TRANSFER_MIN_WIDTH_MM,
+  TRANSFER_PLATE_MIN_HALF_WIDTH_MM,
   transferActionSeconds,
   transferLayout,
   transferSkipReason,
@@ -693,7 +695,7 @@ function applyConveyorRefinement(
         kind: 'actuator',
         name: `移载推板 ${t.pushPlateLengthMm}×${t.pushPlateThicknessMm}×${t.pushPlateHeightMm}`,
         qty: 1,
-        note: `自制加工件：下沿 ${t.pushPlateCenterZ - t.pushPlateHeightMm / 2} 高于挡边顶 911，沿 +Y 推出 ${t.pushStrokeMm} mm；静止位停在板外，板进站从下面过`,
+        note: `自制加工件：下沿 ${t.pushPlateCenterZ - t.pushPlateHeightMm / 2} 高于挡边顶 ${t.guardTopZ}（板底 ${t.plateBottomLiftZ}，间隙 ${t.plateGuardGapMm} mm），沿 +Y 推出 ${t.pushStrokeMm} mm；静止位停在板外，板进站从下面过`,
         role: 'other'
       },
       {
@@ -749,7 +751,32 @@ function applyConveyorRefinement(
   }
 }
 
-export function synthMachine(brief: MachineBrief, options: SynthOptions = {}): MachineDesign {
+/**
+ * 顶升移载的带宽缺省：需求没写带宽时，缺省机型（2000×300）根本放不下移载辊道——
+ * 移载单元的下限是 TRANSFER_MIN_WIDTH_MM = 1080 mm（台板半宽要托住辊道轴承立柱）。
+ * 这里只补**未写**的带宽；用户写了的（哪怕 800 mm 不够）原样保留，交给 transferSkipReason
+ * 拒建并给算式，绝不把「带宽不够」悄悄改成「按 1200 的板移载」。
+ */
+export function withTransferConveyorDefaults(brief: MachineBrief): MachineBrief {
+  if (brief.process !== 'conveyor' || brief.transfer?.present !== true) return brief;
+  if (brief.conveyor?.widthMm != null) return brief;
+  return {
+    ...brief,
+    conveyor: {
+      ...(brief.conveyor ?? { lengthMm: null, widthMm: null, speedMps: null, loadKg: null, layers: null }),
+      widthMm: TRANSFER_DEFAULT_WIDTH_MM
+    }
+  };
+}
+
+/** 移载机型未写带宽时取的常用档位（≥ 移载下限 1080 mm，且是输送线标准宽度）。 */
+export const TRANSFER_DEFAULT_WIDTH_MM = 1200;
+
+export function synthMachine(rawBrief: MachineBrief, options: SynthOptions = {}): MachineDesign {
+  const brief = withTransferConveyorDefaults(rawBrief);
+  /** 带宽是「需求没写、被缺省补上」的：要在 assumptions 里说清楚，不能悄悄改机器尺寸。 */
+  const transferWidthDefaulted =
+    brief.process === 'conveyor' && brief.transfer?.present === true && rawBrief.conveyor?.widthMm == null;
   const requestedStations = assertStations(options.stationCount ?? brief.stations);
   const cyclePerMin = assertCycle(options.cyclePerMin ?? brief.cyclePerMin ?? MACHINE_DEFAULT_CYCLE_PER_MIN);
   const process = brief.process;
@@ -941,6 +968,12 @@ export function synthMachine(brief: MachineBrief, options: SynthOptions = {}): M
     assumptions.push(`移载需求已记录（板不转向、沿 +Y 送到下游），但几何未建移载工位：${transferBlockedReason}。`);
   }
   if (transferPlan) stationNames.push(TRANSFER_STATION_NAME);
+  if (transferWidthDefaulted && transferPlan) {
+    assumptions.push(
+      `带宽未写：移载单元下限 ${TRANSFER_MIN_WIDTH_MM} mm（台板半宽 ${TRANSFER_PLATE_MIN_HALF_WIDTH_MM} + 窄带 + 装配余量），` +
+        `按常用档 ${TRANSFER_DEFAULT_WIDTH_MM} mm 取；如实际带宽更窄请显式写出，届时会被拒建并给出所需宽度。`
+    );
+  }
 
   const actuators: MachineConfig['actuators'] = [];
   const sensors: MachineConfig['sensors'] = [];

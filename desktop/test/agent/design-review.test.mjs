@@ -270,7 +270,7 @@ test('干涉 STATE_UNAVAILABLE → na，且单独出现时不致 FAIL', () => {
   const item = review.items.find((row) => row.area === '干涉');
   assert.equal(item.status, 'na');
   assert.equal(review.verdict, 'WARN');
-  assert.match(item.evidence, /states 可用 0\/3 项/);
+  assert.match(item.evidence, /states 可用 0\/4 项/);
   assert.match(item.evidence, /STATE_UNAVAILABLE/);
   assert.match(item.suggestion, /run_interference_check/);
   assert.doesNotMatch(review.summary, /阻断项/);
@@ -429,7 +429,7 @@ test('现有 5 个配方仍是失败即停（onError 未声明 / 显式 stop）'
   assert.equal(getRecipe('review-design').aggregate, 'design-review');
   assert.equal(getRecipe('review-design').steps.length, 5);
   assert.equal(getRecipe('review-design').steps[0].critical, true);
-  assert.deepEqual(getRecipe('review-design').steps[2].args, { states: ['rest', 'lift', 'sweep'] });
+  assert.deepEqual(getRecipe('review-design').steps[2].args, { states: ['rest', 'lift', 'sweep', 'push'] });
   // 别名
   assert.equal(getRecipe('design-review').id, 'review-design');
   assert.equal(getRecipe('review').id, 'review-design');
@@ -491,4 +491,44 @@ test('router 意图：「评审这台机器 / 能不能出图 / 有没有问题�
     assert.equal(matchRecipeIntent(text), null, `${text} 不应命中评审配方`);
   }
   assert.equal(getRecipe(matchRecipeIntent('帮我评审这台机器')).id, 'review-design');
+});
+
+test('四态汇总：push 位的确认/待复核必须出现在证据里（漏评 push 曾是缺陷）', () => {
+  const states = {
+    rest: { pairs: 54, hits: 0, screenHits: 0, confirmedHits: 0, mm3: 50400, poseValidity: 'valid', reviewStatus: 'pass' },
+    lift: { pairs: 52, hits: 0, screenHits: 0, confirmedHits: 0, mm3: 6076, poseValidity: 'valid', reviewStatus: 'pass' },
+    sweep: { pairs: 54, hits: 0, screenHits: 0, confirmedHits: 0, mm3: 66000, poseValidity: 'valid', reviewStatus: 'pass' },
+    push: { pairs: 52, hits: 2, screenHits: 0, confirmedHits: 2, mm3: 2520, poseValidity: 'valid', reviewStatus: 'fail' }
+  };
+  const review = summarizeDesignReview({
+    ...allPassInput(),
+    interference: { ok: true, code: 'OK', data: { ok: true, states, partCount: 112 } }
+  });
+  const item = review.items.find((row) => row.area === '干涉');
+  // push 里那 2 对确认干涉必须把整条判成 fail —— 三态口径下这里会是 pass
+  assert.equal(item.status, 'fail');
+  assert.match(item.title, /rest \/ lift \/ sweep \/ push/);
+  assert.match(item.evidence, /push 2 确认 \/ 0 待复核 · 2520 mm³/);
+  assert.match(item.suggestion, /place_component|update_component/);
+  assert.match(item.suggestion, /push/);
+});
+
+test('机型没有移载轴：push 记「不适用」，其余三态照评，不判 na/fail', () => {
+  const states = {
+    rest: { pairs: 54, hits: 0, screenHits: 0, confirmedHits: 0, mm3: 50400, poseValidity: 'valid', reviewStatus: 'pass' },
+    lift: { pairs: 52, hits: 0, screenHits: 0, confirmedHits: 0, mm3: 6076, poseValidity: 'valid', reviewStatus: 'pass' },
+    sweep: { pairs: 54, hits: 0, screenHits: 0, confirmedHits: 0, mm3: 66000, poseValidity: 'valid', reviewStatus: 'pass' }
+  };
+  const review = summarizeDesignReview({
+    ...allPassInput(),
+    interference: {
+      ok: true,
+      code: 'OK',
+      data: { ok: true, states, partCount: 85, unavailable: { push: '当前机型没有可移载的轴' } }
+    }
+  });
+  const item = review.items.find((row) => row.area === '干涉');
+  assert.equal(item.status, 'pass', '没有移载轴不是缺陷；不能因为要了 push 就整条降级');
+  assert.match(item.evidence, /push 不适用/);
+  assert.doesNotMatch(item.evidence, /push 0 确认/);
 });

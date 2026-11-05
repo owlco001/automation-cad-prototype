@@ -16,6 +16,12 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const DESKTOP_ROOT = resolve(HERE, '..');
 const REPO_ROOT = resolve(DESKTOP_ROOT, '..');
 const CASES_PATH = resolve(REPO_ROOT, 'docs/desktop/eval/cases.json');
+/**
+ * 旧路径兼容副本（`desktop/eval/agent-cases.json`）：文档承诺「内容与 docs 版本一致」，
+ * 但此前没有任何地方校验，实际已经漂了 3 条（ml05/ml06/au01）。这里做硬校验：
+ * 副本存在就必须与权威集逐条相同，漂了直接失败——副本不能变成第二份真理。
+ */
+const LEGACY_CASES_PATH = resolve(DESKTOP_ROOT, 'eval/agent-cases.json');
 const OUTPUT_PATH = resolve(REPO_ROOT, 'docs/desktop/eval/latest.json');
 
 const REJECTION_TAGS = [
@@ -171,6 +177,40 @@ function validateCases(cases) {
   return errors;
 }
 
+/**
+ * 兼容副本必须与权威集逐条一致：只比 id 集合 + 每条 input/intent/expect，不比 note 排版。
+ * 副本不存在时跳过（允许别人删掉旧路径），存在就必须同步。
+ */
+async function validateLegacyCopy(cases) {
+  let raw;
+  try {
+    raw = await readFile(LEGACY_CASES_PATH, 'utf8');
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return [];
+    return [`读取失败：${error instanceof Error ? error.message : String(error)}`];
+  }
+  let legacy;
+  try {
+    legacy = JSON.parse(raw);
+  } catch (error) {
+    return [`不是合法 JSON：${error instanceof Error ? error.message : String(error)}`];
+  }
+  if (!Array.isArray(legacy)) return ['必须是 JSON 数组'];
+  const signature = (list) => JSON.stringify(
+    list.map((entry) => [entry?.id, entry?.input, entry?.intent, entry?.expect])
+  );
+  if (signature(legacy) === signature(cases)) return [];
+  const legacyIds = new Set(legacy.map((entry) => entry?.id));
+  const caseIds = new Set(cases.map((entry) => entry?.id));
+  const onlyLegacy = [...legacyIds].filter((id) => !caseIds.has(id));
+  const onlyCases = [...caseIds].filter((id) => !legacyIds.has(id));
+  return [
+    `副本 ${legacy.length} 条 / 权威集 ${cases.length} 条，内容不一致；` +
+      `只在副本：${onlyLegacy.join(',') || '无'}；只在权威集：${onlyCases.join(',') || '无'}；` +
+      '请把 docs/desktop/eval/cases.json 整份复制过来，不要手改副本'
+  ];
+}
+
 async function readVersion() {
   try {
     const pkg = JSON.parse(await readFile(resolve(DESKTOP_ROOT, 'package.json'), 'utf8'));
@@ -314,6 +354,10 @@ async function main() {
   const validationErrors = validateCases(cases);
   if (validationErrors.length > 0) {
     throw new Error(`评估集校验失败：\n- ${validationErrors.join('\n- ')}`);
+  }
+  const legacyErrors = await validateLegacyCopy(cases);
+  if (legacyErrors.length > 0) {
+    throw new Error(`兼容副本校验失败（desktop/eval/agent-cases.json）：\n- ${legacyErrors.join('\n- ')}`);
   }
 
   const { details, metrics, passed } = evaluate(cases);

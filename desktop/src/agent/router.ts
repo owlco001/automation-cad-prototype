@@ -176,6 +176,32 @@ export function isMachineDesignRequest(text: string): boolean {
   return designVerb && machineNoun;
 }
 
+/**
+ * 机型描述句：**没有「设计」动词**的一句整机需求（「转向输送机，不改变板材方向…」）。
+ *
+ * 为什么需要：口语里 8 成需求是名词短语 + 参数，不带「设计/做一台」；这类句子在意图层
+ * 拿不到任何关键词，会被判 out_of_scope（等于拒答一台完全可做的机器）。这里只认「线体类
+ * 名词」这一条锚点，再用问句/指代/统计口径三个否定条件挡掉「在问现有机器」的句子。
+ */
+const MACHINE_BRIEF_NOUN =
+  /输送机|输送线|皮带线|传送带|滚筒线|链条线|缓存机|缓存线|线体|移载机|移载线|移载单元|移载工位/;
+/** 问句：在问现状，不是在描述一台新机器。 */
+const MACHINE_BRIEF_QUESTION =
+  /(?:怎么|如何|为什么|为何|多少|几个|几台|几种|哪种|什么|是不是|能否|能不能|有没有|吗|呢|\?|？)/;
+/** 指代现有机器：查询句而不是需求句。 */
+const MACHINE_BRIEF_REFERENCE = /(?:这台|这个|这条|该机|当前|现有|已有)/;
+
+export function isMachineBriefRequest(text: string): boolean {
+  const value = (text ?? '').trim();
+  if (!value) return false;
+  if (!MACHINE_BRIEF_NOUN.test(value)) return false;
+  if (MACHINE_BRIEF_QUESTION.test(value)) return false;
+  if (MACHINE_BRIEF_REFERENCE.test(value)) return false;
+  // 成本/干涉/电气结论是对已有工程的核算，不是新机型需求
+  if (/(?:成本|报价|价格|费用|干涉|电气校验|载流量)/.test(value)) return false;
+  return true;
+}
+
 /** 机型方案落盘请求：需要已有 design（通常来自上一轮 design_machine）。 */
 /** 生成整机实体模型（内核逐件导出）而非合成方案/落盘工程。 */
 export function isMachineModelRequest(text: string): boolean {
@@ -307,6 +333,11 @@ export function routeIntent(text: string): IntentMatch {
   }
   if (isMachineDesignRequest(normalized)) {
     return { intent: 'generate', confidence: 'high', score: 4, hits: ['机型设计'], reason: '从中文需求合成机型方案（只读，不落盘）' };
+  }
+  // 无「设计」动词的机型描述句同样是需求（「转向输送机，顶升后向 90° 方向输送板材」）：
+  // 不在这里接住就落到「未匹配到工程意图关键词」被当超纲拒答。
+  if (isMachineBriefRequest(normalized)) {
+    return { intent: 'generate', confidence: 'medium', score: 3, hits: ['机型描述'], reason: '按机型描述合成方案（只读，不落盘）' };
   }
   // PLC 预检缺口补齐 / 机型方案自查：先于通用打分，否则「补齐」会被判超纲或抢成生成。
   if (isMachineRepairRequest(normalized)) {
@@ -1077,6 +1108,17 @@ function planToolBase(text: string): ToolPlan | null {
       readOnly: true,
       missing: [],
       why: '按中文需求合成机型方案（只读，不落盘、不改当前工程）'
+    };
+  }
+
+  // 机型描述句（无「设计」动词）走同一个工具：整句交给 brief，抽取规则在 machine/spec.ts。
+  if (isMachineBriefRequest(value)) {
+    return {
+      tool: 'design_machine',
+      args: { brief: value },
+      readOnly: true,
+      missing: [],
+      why: '按机型描述合成方案（只读，不落盘、不改当前工程）'
     };
   }
 

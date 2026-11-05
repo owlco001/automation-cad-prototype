@@ -659,7 +659,7 @@ const RECIPES: Recipe[] = [
     id: 'review-design',
     title: '设计评审',
     // 一句话回答「这台机器能不能出图」：一次跑完 4 项检查，由 design-review.ts 汇总成 PASS/WARN/FAIL。
-    summary: '把当前机型从头到尾评一遍：结构校验、三态干涉、电气合规、成本缺价，一次看完并给出带数字证据的结论。',
+    summary: '把当前机型从头到尾评一遍：结构校验、四态干涉、电气合规、成本缺价，一次看完并给出带数字证据的结论。',
     // 评审的第一步就是取上下文，所以这里不再重复声明「机型」前置条件：
     // 拿不到机型由第 1 步（critical）直接停下，避免同一个原因报两遍。
     preconditions: [],
@@ -685,10 +685,12 @@ const RECIPES: Recipe[] = [
       },
       {
         id: 'interference',
-        title: '三态干涉',
+        title: '四态干涉',
         tool: 'run_interference_check',
-        args: { states: ['rest', 'lift', 'sweep'] },
-        why: '静态 / 顶升到位 / 逐步顶升三态各查一遍，避免「静态没事、动起来撞」；无顶升轴时记为 N/A，不算失败。'
+        args: { states: ['rest', 'lift', 'sweep', 'push'] },
+        why: '静态 / 顶升到位 / 逐步顶升 / 顶升后推出四态各查一遍，避免「静态没事、动起来撞」；'
+          + 'push 是移载工位的复合位姿（先顶到行程顶再沿 +Y 推到底），三态漏的正是这一下；'
+          + '无顶升轴记为 N/A，无移载轴时 push 记「不适用」，都不算失败。'
       },
       {
         id: 'electrical',

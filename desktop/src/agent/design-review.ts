@@ -9,7 +9,7 @@
  * 1. 任一条目 `fail` → `FAIL`；没有 fail 但有 `warn` 或 `na` → `WARN`；全 `pass` → `PASS`。
  * 2. 每条 `evidence` 必须带数字：
  *    - 结构：issues 条数 + 首个 code；
- *    - 干涉：rest/lift/sweep 各自的「确认 / 待复核」对数与 mm³；
+ *    - 干涉：rest/lift/sweep/push 各自的「确认 / 待复核」对数与 mm³（push = 顶升后推出的复合位姿）；
  *    - 电气：过载（最大相电流）、压降（24V 余量）、断路器（额定/进线截面）三项实际值；
  *    - 成本：缺价条数与总价。
  *    没有数字就不算证据：该条降级为 `warn`（`fail` 保留，错误码本身已可定位），
@@ -18,7 +18,8 @@
  *    「先调 repair_plc_config(dryRun) 补齐急停/安全门」），不写「建议进一步检查」。
  *
  * 口径说明（不猜数字）：
- * - 干涉 `STATE_UNAVAILABLE`（机型没有顶升轴）记为 `na`，不算失败；证据写「states 可用 0/3」。
+ * - 干涉 `STATE_UNAVAILABLE`（机型没有顶升轴）记为 `na`，不算失败；证据写「states 可用 0/4」。
+ *   push 是可选态：机型没有移载轴时工具在 `unavailable.push` 里说明，本条按 3 态评。
  * - 干涉判 FAIL 的唯一依据是 `confirmedHits`（工具用解析式精确求交确认的实体重叠）；
  *   `screenHits`（只有 AABB 依据、或位姿不可达）只判 `warn` 并指名复核方式。
  *   旧口径 payload（只有 `hits`、没有拆分）按「未确认」记 `warn`，不冒充 FAIL/PASS。
@@ -229,7 +230,7 @@ function structureItem(outcome: ReviewStepOutcome | undefined, machineName: stri
 }
 
 interface InterferenceStateLine {
-  name: 'rest' | 'lift' | 'sweep';
+  name: 'rest' | 'lift' | 'sweep' | 'push';
   hits: number | null;
   screen: number | null;
   confirmed: number | null;
@@ -241,20 +242,29 @@ interface InterferenceStateLine {
 }
 
 /**
- * 三态干涉条目。
+ * 四态干涉条目（rest / lift / sweep / push）。
+ *
+ * 为什么补 push：顶升移载的**推出**是一个复合位姿（先顶升到行程顶、再沿 +Y 到行程末端），
+ * 只评 rest/lift/sweep 三态等于漏掉「板真的被推出去」这一下——实测漏掉的正是它：
+ * 出料口只开到 ±530、板底 905 比挡边顶 911 低 6 mm，四个角在 push 位姿上扫切挡边
+ * 2×70×3×6 = 2520 mm³，而三态全绿。
  *
  * 判定口径（这是修过一次的实际故障）：`hits`（AABB 候选）**不能**直接判 FAIL。
  * 只有 `confirmedHits`（解析式精确求交确认的实体重叠）才判 FAIL；`screenHits`
  * （只有包围盒依据，或位姿不可达）判 WARN，并指名复核方式。
  * 旧口径 payload（只有 hits、没有拆分）一律按「未确认」处理：WARN，不冒充 FAIL，
  * 也不冒充 PASS —— 证据里写明「未拆分」。
+ * push 是可选态：机型没有移载轴时工具会在 `unavailable.push` 里说明，本条按 3 态评，不判失败。
  */
 function interferenceItem(outcome: ReviewStepOutcome | undefined): DesignReviewItem {
-  const title = '三态干涉（rest / lift / sweep）';
+  const title = '四态干涉（rest / lift / sweep / push）';
   const payload = record(outcome?.data);
   const states = record(payload.states);
-  const names = ['rest', 'lift', 'sweep'] as const;
+  const names = ['rest', 'lift', 'sweep', 'push'] as const;
   const lift = record(payload.lift);
+  const pushAxis = record(payload.push);
+  const unavailable = record(payload.unavailable);
+  const pushUnavailable = typeof unavailable.push === 'string' ? unavailable.push : null;
   const poseOverriddenAll = lift.directionOverridden === true;
   const lines: InterferenceStateLine[] = [];
   let available = 0;
@@ -265,6 +275,7 @@ function interferenceItem(outcome: ReviewStepOutcome | undefined): DesignReviewI
     const confirmed = num(entry.confirmedHits);
     const mm3 = num(entry.mm3);
     const legacy = screen === null && confirmed === null;
+    const override = name === 'push' ? pushAxis.directionOverridden === true : poseOverriddenAll;
     lines.push({
       name,
       hits,
@@ -272,7 +283,7 @@ function interferenceItem(outcome: ReviewStepOutcome | undefined): DesignReviewI
       confirmed,
       mm3,
       legacy,
-      poseOverridden: entry.poseValidity === 'direction-overridden' || (name !== 'rest' && poseOverriddenAll)
+      poseOverridden: entry.poseValidity === 'direction-overridden' || (name !== 'rest' && override)
     });
     if (hits !== null || mm3 !== null) available += 1;
   }
@@ -283,7 +294,7 @@ function interferenceItem(outcome: ReviewStepOutcome | undefined): DesignReviewI
       area: '干涉',
       status: 'na',
       title,
-      evidence: `states 可用 ${available}/3 项（STATE_UNAVAILABLE：当前机型没有可顶升轴，未拿静态位姿冒充 lift）`,
+      evidence: `states 可用 ${available}/4 项（STATE_UNAVAILABLE：当前机型没有可顶升轴，未拿静态位姿冒充 lift）`,
       suggestion: '当前机型没有顶升轴：要评顶升工况，先在机型 config 加 turner-lift 执行机构（含 travelMm），再跑 run_interference_check(states)'
     };
   }
@@ -297,19 +308,21 @@ function interferenceItem(outcome: ReviewStepOutcome | undefined): DesignReviewI
       area: '干涉',
       status: 'warn',
       title,
-      evidence: 'states 可用 0/3 项（工具未返回 hits / mm³）',
-      suggestion: '重跑 run_interference_check(states:[\'rest\',\'lift\',\'sweep\']) 拿到三态数字'
+      evidence: 'states 可用 0/4 项（工具未返回 hits / mm³）',
+      suggestion: '重跑 run_interference_check(states:[\'rest\',\'lift\',\'sweep\',\'push\']) 拿到四态数字'
     }, '干涉结果缺数字');
   }
 
   // 证据里必须把「确认」与「待复核」分开写，不能合成一个 hits 数字糊过去。
   const evidence = lines
+    .filter((line) => line.hits !== null || line.mm3 !== null)
     .map((line) => line.legacy
       ? `${line.name} ${fmt(line.hits)} hits（未拆分确认/待复核） / ${fmt(line.mm3)} mm³`
       : `${line.name} ${fmt(line.confirmed)} 确认 / ${fmt(line.screen)} 待复核 · ${fmt(line.mm3)} mm³`)
     .join(' · ')
+    + (pushUnavailable ? '；push 不适用（机型没有移载轴），按 3 态评' : '')
     + (lines.some((line) => line.poseOverridden)
-      ? `；lift/sweep 位姿与几何建模的伸出方向相反（direction-overridden，位移是反向平移）`
+      ? `；lift/sweep/push 位姿与几何建模的伸出方向相反（direction-overridden，位移是反向平移）`
       : '');
 
   const confirmedTotal = lines.reduce((sum, line) => sum + (line.confirmed ?? 0), 0);
@@ -323,7 +336,7 @@ function interferenceItem(outcome: ReviewStepOutcome | undefined): DesignReviewI
       status: 'fail',
       title,
       evidence,
-      suggestion: `先处理 ${confirmedTotal} 处确认干涉（解析式精确求交，非包围盒估计）：用 place_component 或 update_component 调整 ${worst.name} 处干涉对的间距/型号，改完重跑 run_interference_check(states:['rest','lift','sweep'])`
+      suggestion: `先处理 ${confirmedTotal} 处确认干涉（解析式精确求交，非包围盒估计）：用 place_component 或 update_component 调整 ${worst.name} 处干涉对的间距/型号，改完重跑 run_interference_check(states:['rest','lift','sweep','push'])`
     };
   }
   if (screenTotal > 0 || legacyHits > 0) {
@@ -346,8 +359,8 @@ function interferenceItem(outcome: ReviewStepOutcome | undefined): DesignReviewI
       status: 'warn',
       title,
       evidence,
-      suggestion: 'lift 位移方向与几何建模的伸出方向相反：先确认是几何生成器把该工位建成了朝下伸出的压机（缸体/压头/治具），还是 config 的 travelMm/position 写反；'
-        + '改完重跑 run_interference_check(states:[\'rest\',\'lift\',\'sweep\']) 确认 directionOverridden=false 再判 lift/sweep'
+      suggestion: 'lift/push 位移方向与几何建模的伸出方向相反：先确认是几何生成器把该工位建成了朝下伸出的压机（缸体/压头/治具），还是 config 的 travelMm/position 写反；'
+        + '改完重跑 run_interference_check(states:[\'rest\',\'lift\',\'sweep\',\'push\']) 确认 directionOverridden=false 再判 lift/sweep/push'
     };
   }
   return {
@@ -355,7 +368,7 @@ function interferenceItem(outcome: ReviewStepOutcome | undefined): DesignReviewI
     status: 'pass',
     title,
     evidence,
-    suggestion: '三态均无确认干涉与待复核对：可继续看电气与成本，出图前跑 run_plc_generate 拿 PLC 预检'
+    suggestion: '四态（rest/lift/sweep/push）均无确认干涉与待复核对：可继续看电气与成本，出图前跑 run_plc_generate 拿 PLC 预检'
   };
 }
 

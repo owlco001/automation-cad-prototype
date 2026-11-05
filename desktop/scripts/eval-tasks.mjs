@@ -28,7 +28,7 @@
  *
  * 用法：cd desktop && npm run eval:tasks
  * 输出：每例一行 `TASK_EVAL <id> PASS|FAIL|SKIP <关键数字>`，
- *      末尾 `TASK_EVAL_SUMMARY pass=N/12 failed=M skipped=S turns_total=T`；
+ *      末尾 `TASK_EVAL_SUMMARY pass=N/13 failed=M skipped=S turns_total=T`；
  *      任一 FAIL 追加末态差异（期望 vs 实际），退出码 1。
  */
 
@@ -63,6 +63,12 @@ import {
 /** 光伏板 90° 转向输送机：t01 / t05 的主体。 */
 const BRIEF_PV =
   '光伏板加工输送机：输送 2000mm 光伏板，线体长 6000mm、带宽 1200mm，需要把光伏板旋转 90° 改变方向，节拍 6 件/分钟';
+/** 顶升移载（直角移载）：t13 的主体——板不转，顶升后沿 +Y 送到下游线并给下游信号。 */
+const BRIEF_TRANSFER =
+  '光伏板加工输送机：输送 1200×800mm 光伏板，线体长 6000mm、带宽 1200mm，'
+  + '需要顶升移载沿 90° 方向把板子送到下游输送线，节拍 6 件/分钟';
+/** 移载与下游的四个握手信号（io-map 里必须逐个能看到）。 */
+const TRANSFER_SIGNALS = ['DO-TRANSFER-READY', 'DO-TRANSFER-DONE', 'DI-DOWNSTREAM-ALLOW', 'DI-TRANSFER-END'];
 /** 出厂就不带急停/安全门的方案（t02 的修复对象）。 */
 const BRIEF_SCREW = '设计一台三工位锁螺丝机，节拍 20 件/分钟，用 750W 伺服';
 /** t03 的第二台方案：用来把 active 指针挪走，验证 load 能指回来。 */
@@ -1168,7 +1174,7 @@ async function caseDesignReview() {
   //   无状态数据 → na；任一态 confirmedHits>0 → fail；
   //   任一态 screenHits>0 或位姿 direction-overridden → warn；否则 pass。
   // 这里不能用 hits 判 fail：hits 含 AABB 候选，正是这次误判「不可出图」的来源。
-  const stateEntries = ['rest', 'lift', 'sweep']
+  const stateEntries = ['rest', 'lift', 'sweep', 'push']
     .map((name) => interference?.data?.[name] ?? interference?.data?.states?.[name])
     .filter((entry) => entry && typeof entry === 'object');
   const confirmedHits = stateEntries.map((entry) => entry.confirmedHits).filter((value) => typeof value === 'number');
@@ -1277,6 +1283,103 @@ async function caseStepExport() {
   };
 }
 
+/**
+ * t13：顶升移载（直角移载）机型末态。
+ *
+ * 与 t01 的区别只有需求：板不转、顶升后沿 +Y 送到下游线并给下游一个联锁信号。
+ * 断言的是**做完之后机器是不是对的**：config 里是两条直线轴（Z 顶升 + Y 移载）而不是回转轴、
+ * 落盘零件数 110（主线 60 + 移载单元 50）、PLC 预检 blocked=0、io-map 四个握手信号齐、
+ * 三态干涉（rest/lift/push）确认干涉 0。
+ */
+async function caseTransferUnit() {
+  const check = createChecker();
+  const h = createHarness();
+  let turns = 0;
+
+  const design = await h.tools.call('design_machine', { brief: BRIEF_TRANSFER });
+  turns += 1;
+  if (!requireOk(check, 'design_machine 成功', design)) return { ok: false, checks: check.checks, turns };
+
+  const cfg = design.design.config;
+  const axisIds = cfg.actuators.map((item) => item.id);
+  check.includes('config 有顶升轴 transfer-lift', axisIds, 'transfer-lift');
+  check.includes('config 有移载轴 transfer-push', axisIds, 'transfer-push');
+  check.ok('没有转向回转轴 turner-rotary', !axisIds.includes('turner-rotary'), axisIds.join(','));
+  check.ok('没有转向顶升轴 turner-lift', !axisIds.includes('turner-lift'), axisIds.join(','));
+  check.ok('工位里有移载工位', cfg.stations.includes('移载工位'), cfg.stations.join(','));
+  check.ok('工位里没有转向工位', !cfg.stations.includes('转向工位'), cfg.stations.join(','));
+  const push = cfg.actuators.find((item) => item.id === 'transfer-push');
+  check.eq('移载轴方向是 +Y', push?.position, [0, 0.05, 0]);
+  check.ge('移载行程 ≥ 板宽 + 结构间隙', push?.travelMm ?? 0, 1060);
+  const ioIds = (cfg.ioPoints ?? []).map((item) => item.point);
+  check.includes('ioPoints 含 DO-TRANSFER-READY', ioIds, 'DO-TRANSFER-READY');
+  check.includes('ioPoints 含 DO-TRANSFER-DONE', ioIds, 'DO-TRANSFER-DONE');
+  const sensorPoints = cfg.sensors.map((item) => item.point);
+  check.includes('传感器含 DI-DOWNSTREAM-ALLOW', sensorPoints, 'DI-DOWNSTREAM-ALLOW');
+  check.includes('传感器含 DI-TRANSFER-END', sensorPoints, 'DI-TRANSFER-END');
+
+  // —— 末态 1：落盘方案 + io-map（withPlc）——
+  const applied = await h.tools.call('apply_machine_design', { design: design.design, withPlc: true });
+  turns += 1;
+  if (!requireOk(check, 'apply_machine_design 成功', applied)) {
+    return { ok: false, checks: check.checks, turns };
+  }
+  const stored = readStoredMachineDesign(h.root, applied.machineId);
+  check.eq('落盘机型 id', stored?.id ?? stored?.config?.id, applied.machineId);
+
+  // —— 末态 2：真实参数化整机装配件数（110 = 主线 60 + 移载单元 50）——
+  const brief = parseMachineBrief(BRIEF_TRANSFER);
+  const conveyorParams = {
+    ...conveyorParamsFromBrief(brief.conveyor),
+    layers: brief.conveyor?.layers ?? 1,
+    turnerAngleDeg: 0,
+    transferPresent: true,
+    transferPartLengthMm: brief.workpiece?.lengthMm ?? 0,
+    transferPartWidthMm: brief.workpiece?.widthMm ?? 0
+  };
+  const assemblyParts = buildConveyorParts(conveyorParams).length;
+  check.eq('参数化整机零件数 parts', assemblyParts, 110);
+
+  // —— 末态 3：io-map 四个握手信号 ——
+  const ioMapPath = join(h.root, 'exports', 'plc', applied.machineId, 'io-map.csv');
+  const ioCsv = existsSync(ioMapPath) ? readFileSync(ioMapPath, 'utf8') : '';
+  check.ok('io-map.csv 存在', ioCsv.length > 0, ioMapPath);
+  for (const signal of TRANSFER_SIGNALS) {
+    check.ok(`io-map 含 ${signal}`, ioCsv.includes(signal), signal);
+  }
+
+  // —— 末态 4：PLC 生成 ——
+  const plc = await h.tools.call('run_plc_generate', {});
+  turns += 1;
+  if (!requireOk(check, 'run_plc_generate 成功', plc)) {
+    return { ok: false, checks: check.checks, turns };
+  }
+  const blocked = Array.isArray(plc.precheck?.errors) ? plc.precheck.errors.length : -1;
+  check.eq('PLC 预检 blocked', blocked, 0);
+
+  // —— 末态 5：四态干涉（rest / lift / sweep / push）确认干涉 0 ——
+  const interference = await h.tools.call('run_interference_check', { states: ['rest', 'lift', 'sweep', 'push'] });
+  turns += 1;
+  if (!requireOk(check, 'run_interference_check 成功', interference)) {
+    return { ok: false, checks: check.checks, turns };
+  }
+  for (const state of ['rest', 'lift', 'sweep', 'push']) {
+    check.eq(`干涉 ${state} confirmedHits`, interference.states?.[state]?.confirmedHits, 0);
+  }
+  check.eq('push 态用的执行机构', interference.push?.actuatorId, 'transfer-push');
+
+  const metrics = [
+    `parts=${assemblyParts}`,
+    `axes=${axisIds.filter((id) => id.startsWith('transfer-')).join('+')}`,
+    `io=${ioIds.join('/')}`,
+    `blocked=${blocked}`,
+    `confirmed=${['rest', 'lift', 'sweep', 'push']
+      .map((state) => interference.states?.[state]?.confirmedHits ?? '?')
+      .join('/')}`
+  ];
+  return { ok: check.checks.every((item) => item.ok), checks: check.checks, turns, metrics };
+}
+
 const CASES = [
   ['t01-conveyor-90', caseConveyor90],
   ['t02-repair-safety', caseRepairSafety],
@@ -1289,7 +1392,8 @@ const CASES = [
   ['t09-plan-budget-resume', casePlanBudgetResume],
   ['t10-verify-attached', caseVerifyAttached],
   ['t11-design-review', caseDesignReview],
-  ['t12-step-export', caseStepExport]
+  ['t12-step-export', caseStepExport],
+  ['t13-transfer-unit', caseTransferUnit]
 ];
 
 function printFailure(caseId, result) {

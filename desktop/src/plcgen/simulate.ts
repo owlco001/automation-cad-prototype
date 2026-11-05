@@ -13,6 +13,7 @@ import type { ActuatorConfig, MachineConfig, SensorConfig } from '../commission/
 import type { GeneratedFile } from './types.ts';
 import type { PlcGenConfig } from './types.ts';
 import { extractSafetyRefs, normalizePointKey } from './io.ts';
+import { detectHandshake, type HandshakeModel } from './handshake.ts';
 
 export interface SimStep {
   stepNo: number;
@@ -23,12 +24,27 @@ export interface SimStep {
   reason?: string;
 }
 
+/** 握手判据的仿真结果：与 FC_AutoSequence 里那份逻辑一一对应。 */
+export interface SimHandshake {
+  /** 启动是否被放行（ALLOW=0 → false）。 */
+  startPermitted: boolean;
+  /** 启动被拒的原因（ALLOW 点位）。 */
+  startBlockedBy?: string;
+  /** DO-*-READY 最终值。 */
+  ready: boolean;
+  /** DO-*-DONE 最终值（只有到位信号为 1 才可能为 true）。 */
+  done: boolean;
+  signals: string[];
+}
+
 export interface SimResult {
   ok: boolean;
   steps: SimStep[];
   alarms: string[];
   elapsedMs: number;
   finalOutputs: Record<string, boolean>;
+  /** 本机型没有联锁握手信号时为 undefined。 */
+  handshake?: SimHandshake;
 }
 
 /** 只依赖 `files`，兼容 generateProject 成功结果与导出的工程对象。 */
@@ -50,6 +66,13 @@ export interface SimulateOptions {
   sensorConflictAtStep?: number;
   /** 矛盾执行机构 id；缺省取第一个有双传感器的执行机构。 */
   sensorConflictActuator?: string;
+  /**
+   * 现场强制写的外部输入（点位号或变量名 → 值），按扫描重写（held）。
+   * 用于验证互锁：`{'DI-DOWNSTREAM-ALLOW': false}` 就是「下游不允许」。
+   */
+  inputs?: Record<string, boolean>;
+  /** 启动信号；默认 true。false 等价于操作面板没按启动。 */
+  start?: boolean;
 }
 
 export interface SimulateInput extends SimulateOptions {
@@ -416,6 +439,46 @@ export function simulate(
     addAlarm('EMPTY_SEQUENCE:联调步序为空，无法进行模拟验证');
   }
 
+  // ---- 现场强制输入（held）：每扫描重写，模拟操作面板/上下游的硬线信号 ----
+  const keyOfToken = (token: string): string | undefined => {
+    const variable = variableIndex.get(token.trim());
+    if (variable) return variable;
+    const direct = normalizePointKey(token);
+    if (pointIndex.has(direct)) return direct;
+    for (const point of pointIndex.values()) {
+      if (point.address === token.trim()) return normalizePointKey(point.point);
+    }
+    return undefined;
+  };
+  const heldInputs: Array<{ key: string; value: boolean; token: string }> = [];
+  for (const [token, value] of Object.entries(options.inputs ?? {})) {
+    const key = keyOfToken(token);
+    if (!key) {
+      addAlarm(`INPUT_UNRESOLVED:强制输入 ${token} 不在 IO 表里`);
+      continue;
+    }
+    heldInputs.push({ key, value, token });
+  }
+  const applyHeldInputs = (): void => {
+    for (const input of heldInputs) states.set(input.key, input.value);
+  };
+  applyHeldInputs();
+
+  // ---- 联锁握手（与 FC_AutoSequence 里那份判据一一对应）----
+  const handshake: HandshakeModel = detectHandshake(raw.config as PlcGenConfig);
+  const keysOf = (list: HandshakeModel['ready']): string[] => list
+    .map((signal) => normalizePointKey(signal.point))
+    .filter((key) => pointIndex.has(key));
+  const allowKeys = keysOf(handshake.allow);
+  const endKeys = keysOf(handshake.end);
+  const readyKeys = keysOf(handshake.ready);
+  const doneKeys = keysOf(handshake.done);
+  const startRequested = options.start !== false;
+  const allowSatisfied = allowKeys.every((key) => states.get(key) === true);
+  // ST 里的启动条件：_StartEdge.Q AND NOT SafeStop AND NOT Abort AND <ALLOW>
+  const startPermitted = startRequested && allowSatisfied;
+  let safetyTripped = false;
+
   const checkSensorConflicts = (): void => {
     for (const model of actuators) {
       if (model.sensors.length < 2) continue;
@@ -475,6 +538,10 @@ export function simulate(
       } else if (target === 'retract') {
         if (model.sensors.length > 1) setSensor(1, true);
         setSensor(0, false);
+      } else {
+        // 单线圈直线轴（只给 point，没有 extend/retract 两个线圈）：
+        // 置位＝动作到位，复位＝回原位，与 FB_Cylinder 的单点口径一致。
+        setSensor(0, target === 'active');
       }
     } else {
       setSensor(0, target === 'active');
@@ -516,6 +583,10 @@ export function simulate(
         if (extended && retracted) target = 'both';
         else if (extended) target = 'extend';
         else if (retracted) target = 'retract';
+        else if (!model.extendKey && !model.retractKey && model.rotaryKey) {
+          // 单线圈直线轴：point 就是唯一的驱动线圈（移载顶升/移载台属于这一类）。
+          target = outputs.get(model.rotaryKey) === true ? 'active' : 'inactive';
+        }
       } else if (model.gripKey || model.rotaryKey) {
         const key = model.gripKey ?? model.rotaryKey;
         target = key && outputs.get(key) === true ? 'active' : 'inactive';
@@ -528,8 +599,10 @@ export function simulate(
     return safetyTrip;
   };
 
-  const conditionSatisfied = (step: MappingStep): boolean =>
-    evaluateCondition(step.condition, context);
+  const conditionSatisfied = (step: MappingStep): boolean => {
+    applyHeldInputs();   // 硬线输入每扫描重写：注入的值不会被运动事件改掉
+    return evaluateCondition(step.condition, context);
+  };
 
   const waitForCondition = (
     step: MappingStep,
@@ -567,6 +640,7 @@ export function simulate(
   };
 
   const tripSafety = (point: string | undefined, reason: string, stepNo: number | null): void => {
+    safetyTripped = true;
     for (const key of outputKeys) outputs.set(key, false);
     const label = point ? `${reason} ${point}` : reason;
     addAlarm(`SAFE_STOP:${label}`);
@@ -598,6 +672,24 @@ export function simulate(
     }
   };
 
+  // ---- 启动互锁：ALLOW=0（或没按启动）时序列一步都不许走 ----
+  // 对应 FC_AutoSequence 的 `IF _StartEdge.Q AND NOT SafeStop AND NOT Abort AND <ALLOW> THEN`。
+  if (mapping.sequence.length > 0 && !startPermitted && handshake.present) {
+    const blockedBy = allowSatisfied ? null : (handshake.allow[0]?.point ?? 'ALLOW');
+    addAlarm(startRequested
+      ? `START_INHIBIT:${blockedBy} = FALSE（下游不允许接收），序列不启动`
+      : 'START_INHIBIT:没有启动信号，序列不启动');
+    for (const [index, step] of mapping.sequence.entries()) {
+      steps.push({
+        stepNo: step.stepNo ?? index + 1,
+        name: step.name ?? `步骤 ${step.stepNo ?? index + 1}`,
+        actions: [],
+        waitedMs: 0,
+        ok: false,
+        reason: startRequested ? '下游未允许（ALLOW=0），启动被互锁拦住' : '未按启动，序列不启动'
+      });
+    }
+  } else {
   for (const [index, step] of mapping.sequence.entries()) {
     const stepNo = step.stepNo ?? index + 1;
     const name = step.name ?? `步骤 ${stepNo}`;
@@ -623,6 +715,7 @@ export function simulate(
     // 生成的步序若显式断开安全输入，同样立即 SafeStop。
     const actionTrip = applyActions(step, logs);
     if (actionTrip) {
+      safetyTripped = true;
       const point = [...estopKeys, ...doorKeys].find((key) => states.get(key) === false);
       for (const key of outputKeys) outputs.set(key, false);
       events = [];
@@ -670,6 +763,27 @@ export function simulate(
     clock = outcome.at;
     break;
   }
+  }
+
+  // ---- 握手输出：与 ST 一致（READY 每扫描重算；DONE 只有走到最后一步且到位才置位）----
+  const allStepsOk = mapping.sequence.length > 0 && steps.every((step) => step.ok);
+  const endSatisfied = endKeys.every((key) => states.get(key) === true);
+  // ST 里 READY 的判据是 `AlarmWord = 16#0000`：只认真正写进报警字的那几类
+  // （序列超时 / 传感器矛盾 / 安全）。START_INHIBIT 只是仿真记录，不进报警字。
+  const alarmWordBits = alarms.filter((alarm) => /^(SEQ_TIMEOUT|SENSOR_CONFLICT|SAFE_STOP)/.test(alarm));
+  const readyValue = handshake.present && !safetyTripped && alarmWordBits.length === 0;
+  let doneValue = false;
+  if (handshake.done.length > 0) {
+    if (allStepsOk && !safetyTripped) {
+      if (endSatisfied) {
+        doneValue = true;
+      } else {
+        addAlarm(`HANDSHAKE_DONE_BLOCKED:${handshake.end[0]?.point ?? 'END'} 未到位，DONE 不置位`);
+      }
+    }
+    for (const key of doneKeys) outputs.set(key, doneValue);
+  }
+  for (const key of readyKeys) outputs.set(key, readyValue);
 
   const finalOutputs: Record<string, boolean> = {};
   for (const point of outputPoints) {
@@ -679,13 +793,24 @@ export function simulate(
 
   // 空序列不能靠 every() 的空集合语义误判为验证通过。
   const ok = mapping.sequence.length > 0 && alarms.length === 0 && steps.every((step) => step.ok);
-  return {
+  const result: SimResult = {
     ok,
     steps,
     alarms,
     elapsedMs: Math.max(0, Math.round(clock)),
     finalOutputs
   };
+  if (handshake.present) {
+    const blockedBy = handshake.allow[0]?.point;
+    result.handshake = {
+      startPermitted,
+      ...(startRequested && !allowSatisfied && blockedBy ? { startBlockedBy: blockedBy } : {}),
+      ready: readyValue,
+      done: doneValue,
+      signals: handshake.signals
+    };
+  }
+  return result;
 }
 
 /** 兼容别名：保留对外导出，当前仓库内无调用；新代码请使用 `simulate`。 */

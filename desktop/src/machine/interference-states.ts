@@ -16,8 +16,9 @@
  *
  * `push`（顶升移载的 +Y 送出）是**复合位姿**：先按顶升轴把随动台板/辊道/推板抬到行程顶，
  * 再按移载轴把推板沿 +Y 推到行程末端。真机就是这个顺序（顶起来再推），
- * 只按 +Y 平移而不顶升会得出一个不存在的位姿（推板会穿带）。没有移载轴时返回
- * `STATE_UNAVAILABLE`，不退化成「等于 lift」——那正是 t05 抓到的老毛病。
+ * 只按 +Y 平移而不顶升会得出一个不存在的位姿（推板会穿带）。没有移载轴时**不产出** push 态
+ * （不退化成「等于 lift」，那正是 t05 抓到的老毛病），原因写进 `unavailable.push`，整次检查仍算成功
+ * —— 否则给一台转向机做四态评审会整条降级成 N/A。
  */
 
 import type { MachineConfig } from '../commission/machine-config.ts';
@@ -137,6 +138,8 @@ export interface InterferenceStatesPayload {
   lift: LiftAxisInfo | null;
   /** 移载轴（+Y）；机型没有移载工位时为 null */
   push: LiftAxisInfo | null;
+  /** 要了却给不出的状态（现在只有 push）：原因写在这里，不悄悄吞掉 */
+  unavailable?: Partial<Record<InterferenceState, string>>;
   states: Record<string, InterferenceStateSummary | SweepStateSummary>;
   /** 全部状态里最差的一档：fail > warn > pass */
   reviewStatus: ReviewStatus;
@@ -436,14 +439,12 @@ export function runInterferenceStates(input: {
     };
   }
   const push = needPush ? resolvePushAxis(input.config, geometry) : null;
-  if (needPush && !push) {
-    return {
-      ok: false,
-      code: 'STATE_UNAVAILABLE',
-      message: '当前机型没有可移载的轴（config 里找不到 travelMm > 0 的 transfer-push/移载执行机构，或几何里没有它的运动零件）',
-      hint: '先用 design_machine 生成带「顶升移载（直角移载）」的输送机机型；push 态不拿 lift 位姿冒充'
-    };
-  }
+  // push 是**可选**状态：没有移载轴的机型（转向线、普通输送线、压机…）不该因为「要了 push」就整次检查失败——
+  // 那会让「四态评审」在非移载机型上整条降级成 N/A。这里照样**不**产出 push 态（绝不拿 lift 位姿冒充），
+  // 只把原因写进 unavailable，由调用方显示「push 不适用」。
+  const pushUnavailable = needPush && !push
+    ? '当前机型没有可移载的轴（config 里找不到 travelMm > 0 的 transfer-push/移载执行机构，或几何里没有它的运动零件）'
+    : null;
 
   const output: Record<string, InterferenceStateSummary | SweepStateSummary> = {};
   const movingIds = new Set<string>(lift?.partIds ?? []);
@@ -454,7 +455,7 @@ export function runInterferenceStates(input: {
       continue;
     }
     if (state === 'push') {
-      if (!push) continue; // needPush 已保证不会走到这里
+      if (!push) continue; // pushUnavailable 已记原因，不产出这一态（不拿 lift 冒充）
       // 复合位姿：先顶升（有顶升轴才抬）再沿移载方向推出。姿态不可信时（方向被 config 覆盖）
       // 该态同样降级为待复核，与 lift 同一口径。
       const liftedPose = lift ? shiftParts(geometry, lift.partIds, lift.direction, lift.strokeMm) : geometry;
@@ -519,6 +520,7 @@ export function runInterferenceStates(input: {
     assemblyPartCount: geometry.assemblyPartCount ?? geometry.parts.length,
     lift,
     push,
+    ...(pushUnavailable ? { unavailable: { push: pushUnavailable } } : {}),
     states: output,
     reviewStatus,
     precision: {
@@ -536,6 +538,7 @@ export function runInterferenceStates(input: {
       + 'mm3=pairs 的 AABB 上界合计（含 declared/mate，只作量级参考），mm3Confirmed/mm3Screen 是分开的真实口径。'
       + 'lift/sweep 按 config 的 travelMm 平移；若 config 方向与几何建模的伸出方向相反（poseValidity=direction-overridden），'
       + '该态只是反向平移、位姿不可达，动件相关命中一律降级为待复核。sweep 的计数按步累计，pairs 取单步最大。'
+      + 'push 是可选的复合位姿（先顶升、再沿 +Y 推出）；机型没有移载轴时该态不产出，原因见 unavailable.push。'
       + `本次几何来源 geometrySource=${geometrySource}（输送类走参数化整机，其余形态走工位生成器），`
       + '结论只对这套零件表成立；和 B-Rep 结论对齐前先确认两边 assemblyPartCount 一致。'
   };

@@ -9,7 +9,9 @@
 | `precheck.ts` | `precheck(config, bom?)`：地址重复/越界、点位多机构占用、传感器绑定、安全件、步序点位、双线圈、BOM 点数容量；全量返回 `errors/warnings` |
 | `tags.ts` | `buildTags(config)`：I/Q 顺序分配、32 字符变量名、UTF-8 BOM CSV |
 | `st.ts` | `generateSt(input)`：五个 ST 文件 + `stats`，`inputHash` 取输入 JSON SHA-256 前 12 位 |
-| `sequence.ts` | `generateSequence(input)`：联调步序 → `FC_AutoSequence.st` 的 CASE 状态机，含动作、AND/OR 条件、步超时与 Abort/SafeStop 复位 |
+| `sequence.ts` | `generateSequence(input)`：联调步序 → `FC_AutoSequence.st` 的 CASE 状态机，含动作、AND/OR 条件、步超时与 Abort/SafeStop 复位；config 无显式 sequence 时用 `linkageFromConfig` → `buildSequenceFromLinkage` 生成步序（不再是空壳），并渲染联锁握手块（启动/ALLOW、DONE/END、READY、SafeStop） |
+| `linkage-program.ts` | `linkageFromConfig(config)` / `buildSequenceFromLinkage(linkage, config)`：执行机构驱动点位 + 到位传感器 → 联调步序；`auditLinkageVsProgram` 做 3D↔PLC 对账 |
+| `handshake.ts` | `detectHandshake(config)`：识别 `DO-*-READY` / `DO-*-DONE` / `DI-*-ALLOW` / `DI-*-END` 四个联锁信号并解析到变量表；缺信号、点位没进变量表、多工位未支持一律出告警 |
 | `safety.ts` | `generateSafety(config)`：`FC_Safety.st`，急停/安全门/光栅常闭串联、SafeStop 锁存、Reset 上升沿解除、输出复位 |
 | `alarms.ts` | `generateAlarms(config)`：`FC_Alarms.st`，超时/传感器矛盾/安全触发汇总到 `AlarmWord`，`FirstFault` 首故障锁存 |
 | `generate.ts` | `generateProject(input)`：预检拦截 + 固定 11 文件顺序 + `mapping.json` / `README.md` / 每文件 SHA-256 |
@@ -41,6 +43,9 @@
 12. **模拟是纯函数**：使用虚拟时钟与 `timeScale`，不读墙钟；超时/`SafeStop` 后当前步失败、后续步记为跳过，重复调用结果一致。
 13. **验证不落盘**：`verifyGenerated` / Agent 工具 `verify_plc_program` 只返回摘要，不写 zip、不写历史、不连接 PLC。
 14. **模块关闭不清数据**：模块状态由 `src/modules/registry.ts` 管理，缺省开启以兼容旧体验；关闭不删除机型配置、PLC 项目数据、生成历史或已导出文件，不做热卸载。面板、Agent `verify_plc_program` / `run_plc_generate`（包括 JSON-RPC/MCP）、本地 PLC 文件生成/导出、`plcgen:recordHistory` 和 `plcgen:export` IPC 共用 `plcgen` 门禁；关闭后动态隐藏工具并在写入/生成前拒绝旧名称或底层直调。智慧工厂同步包中的 PLC 源码与 IO mapping 另受 `factory.plc-sync` 门禁，只有两个模块都启用时才生成和上传同步扩展；关闭同步扩展不影响本地 PLC 生成/导出。历史读取和打开已有导出目录保留，以便访问旧数据。
+15. **步序来源三级**：显式 `config.sequence` → 联动推导（`actuator.point` 单点驱动的执行机构，一步一个向前动作，wait 取该机构第一条非安全传感器）→ 空骨架。第三级必须带 `SEQUENCE_NOT_DERIVABLE`（有执行机构却 0 步）或 `SEQUENCE_EMPTY`，不允许静默生成空壳。
+16. **握手必须进判据**：ALLOW 串进 `STEP_IDLE` 的启动条件（掉线不启动）、END 是最后一步的转移条件且是 `STEP_HANDSHAKE` 置 DONE 的唯一判据、READY 在 `CASE` 之后按「待机 + 无报警」重算、`SafeStop` 同周期清完成位并复位全部输出（`FC_Safety` 仍最后执行）。没有握手信号的机型一个字都不变。
+17. **仿真与 ST 同源**：`simulate` 的握手判据来自同一份 `detectHandshake` 模型；`simulate` 本身不放行（`inputs` 不注入时 ALLOW 视为未就绪），基线假设只放在 `verifyGenerated` 这一层，否定路径用显式 `inputs` 覆盖。
 
 ## 进度与验证
 

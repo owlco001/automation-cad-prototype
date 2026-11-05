@@ -1682,6 +1682,37 @@
     "note": "导出 .machine.zip 到 userData/exports/machines/，路径越界要拒绝。"
   },
   {
+    "id": "ml05",
+    "input": "看看机型库有哪些远程来源、目录里能下载什么",
+    "intent": "query",
+    "expect": {
+      "tool": "list_machine_sources",
+      "argsContains": {}
+    },
+    "tags": [
+      "machine-library",
+      "machine-library-remote"
+    ],
+    "note": "只读列远程来源与目录：未配置 sources.json 时空清单、不报错；来源连通性逐条给 online/errorCode。"
+  },
+  {
+    "id": "ml06",
+    "input": "从机型库的远程来源 corp 下载机型 design-screw-3st 装进本机库",
+    "intent": "modify",
+    "expect": {
+      "tool": "download_machine_from_source",
+      "argsContains": {
+        "sourceId": "corp",
+        "machineId": "design-screw-3st"
+      }
+    },
+    "tags": [
+      "machine-library",
+      "machine-library-remote"
+    ],
+    "note": "远程下载：限 https/50 MiB、比对 SHA-256 后走同一套严格导入；同名 LIBRARY_EXISTS 且工具没有 overwrite 参数。"
+  },
+  {
     "id": "pc01",
     "input": "检查当前机型方案是否合法",
     "intent": "query",
@@ -1812,5 +1843,88 @@
       "ambiguous"
     ],
     "note": "负向区分：这是回取已落盘结果（只读），不是重新执行 get_bom；也不能自己编一个 resultId"
+  },
+  {
+    "id": "au01",
+    "input": "上次生成 PLC 为什么不行？",
+    "intent": "query",
+    "expect": {
+      "tool": "get_recent_audit",
+      "argsContains": {
+        "tool": "run_plc_generate",
+        "onlyFailed": true
+      }
+    },
+    "tags": [
+      "audit"
+    ],
+    "note": "失败自查（只读）：先读审计里 run_plc_generate 的失败记录再决定怎么改，不盲目重跑；审计只回工具名/错误码/耗时/白名单参数"
+  },
+  {
+    "id": "tf01",
+    "input": "转向输送机，不改变板材方向，顶升后向 90° 方向输送板材，并给下游输送机一个信号",
+    "intent": "generate",
+    "expect": {
+      "tool": "design_machine",
+      "argsContains": {
+        "brief": "转向输送机，不改变板材方向，顶升后向 90° 方向输送板材，并给下游输送机一个信号"
+      }
+    },
+    "tags": [
+      "machine",
+      "transfer"
+    ],
+    "note": "口语需求：没有「设计」动词、也没有「移载」二字。靠「顶升 + 向 90° 方向 + 输送」识别顶升移载（spec.ts:TRANSFER_INTENT），「不改变板材方向」压掉转向工位（spec.ts:TURNER_NEGATION）；末态断言见 test/machine/nl-transfer-scenario.test.mjs（移载工位 + transfer-lift/transfer-push + 两个 DO + DI-DOWNSTREAM-ALLOW/DI-TRANSFER-END，且无 turner-rotary）"
+  },
+  {
+    "id": "tf02",
+    "input": "普通皮带输送线",
+    "intent": "generate",
+    "expect": {
+      "tool": "design_machine",
+      "argsContains": {
+        "brief": "普通皮带输送线"
+      }
+    },
+    "tags": [
+      "machine",
+      "transfer",
+      "negative"
+    ],
+    "note": "负向：普通输送线只为「输送」建方案，不得凭空长出 transfer-lift/transfer-push 或移载工位（末态断言见 nl-transfer-scenario.test.mjs）"
+  },
+  {
+    "id": "tf03",
+    "input": "顶升旋转 90° 转向的输送机，带宽 1200mm，线体长 6000mm",
+    "intent": "generate",
+    "expect": {
+      "tool": "design_machine",
+      "argsContains": {
+        "brief": "顶升旋转 90° 转向的输送机，带宽 1200mm，线体长 6000mm"
+      }
+    },
+    "tags": [
+      "machine",
+      "transfer",
+      "negative"
+    ],
+    "note": "负向交叉：同样有「顶升」「90°」「转向」，但没有方向介词（向/沿/往/朝）+ 输送动词，判成转向工位（turner-lift + turner-rotary），不得判成移载——两个意图必须能区分"
+  },
+  {
+    "id": "tf04",
+    "input": "加一个移载工位，带宽 800mm，线体长 6000mm",
+    "intent": "generate",
+    "expect": {
+      "tool": "design_machine",
+      "argsContains": {
+        "brief": "加一个移载工位，带宽 800mm，线体长 6000mm"
+      }
+    },
+    "tags": [
+      "machine",
+      "transfer",
+      "negative"
+    ],
+    "note": "负向：带宽 800 < 移载下限 1080 mm。方案必须拒建并给出算式（transferSkipReason：台板半宽 440 ← 辊长 800/2 + 立柱偏移 20 + 柱半径 15 + 装配余量 5），不能静默建成一台「看起来能移载」的机器"
   }
 ]

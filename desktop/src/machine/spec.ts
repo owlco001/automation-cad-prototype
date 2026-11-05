@@ -113,7 +113,7 @@ const PROCESS_RULES: Array<{ process: Exclude<MachineProcess, 'unknown'>; patter
   { process: 'inspection', pattern: /检测|检查|检验|视觉|测量|AOI/i },
   { process: 'packaging', pattern: /包装|装箱|装盒|封箱|贴标|码垛/ },
   // 输送放最后：只有没提到其他工艺时才判为输送线，避免「装配线配输送」被抢走工艺类型。
-  { process: 'conveyor', pattern: /输送机|输送线|皮带线|传送带|皮带输送|链条输送|链式输送|流水线输送|输送段|缓存机|缓存线|缓存台|缓存线体|积放|倍速链/ }
+  { process: 'conveyor', pattern: /输送机|输送线|皮带线|传送带|皮带输送|链条输送|链式输送|流水线输送|输送段|缓存机|缓存线|缓存台|缓存线体|积放|倍速链|带宽|滚筒线/ }
 ];
 
 /**
@@ -353,10 +353,18 @@ export function detectBufferLayers(text: string): number | null {
  * 不是转向角度——把 4 当成 4° 会让输送线凭空长出一个转向工位。
  */
 export function detectTurner(text: string): TurnerSpec | null {
+  // 显式否认转向（「不改变板材方向」「板不转」）时不留转向工位：
+  // 中文需求常把否定和机构名写在一句话里（「转向输送机，不改变板材方向」），
+  // 只按「转向」两个字就会给一台不转板的机器长出回转机构。
+  if (TURNER_NEGATION.test(text)) return null;
   const angle = detectTurnerAngle(text);
   if (!TURNER_INTENT.test(text) && angle === null) return null;
   return { present: true, angleDeg: angle ?? DEFAULT_TURNER_ANGLE_DEG };
 }
+
+/** 否认转向的说法：动词被「不/无需/不用/不要」直接否定，或「板不转」这种主谓否定。 */
+const TURNER_NEGATION =
+  /(?:不|无需|不用|不需要|不要|别|禁止)\s*(?:再)?\s*(?:改变?|旋转|转|换)[^。；;\n]{0,6}(?:方向|角度|朝向)|(?:板材|工件|板|料|产品)[^。；;\n]{0,4}不(?:旋转|转向|转动|转)/;
 
 export const DEFAULT_TURNER_ANGLE_DEG = 90;
 
@@ -368,9 +376,25 @@ export const DEFAULT_TURNER_ANGLE_DEG = 90;
  * 同时生成会在几何层被判互斥、整台机器退回普通输送线，比只做一套更糟。
  */
 export function detectTransfer(text: string): TransferSpec | null {
-  if (!/顶升移载|移载机|移载工位|移载单元|移载机构|直角移载|横移移载|移载\s*(?:到|至|给)/.test(text)) return null;
+  if (!TRANSFER_INTENT.test(text)) return null;
   return { present: true };
 }
+
+/**
+ * 移载意图的三种说法，缺一不可：
+ * 1. 直接点名机构（「顶升移载」「直角移载」「加一个移载工位」）；
+ * 2. 只描述动作、不点名机构——中文口语最常见的写法是「顶升后向 90° 方向输送板材」，
+ *    句子里根本没有「移载」二字。要求「顶升」在前、方向词 + 角度 + 输送动词在后：
+ *    「顶升旋转 90° 转向」这种**没有方向介词**的说法不会被误吞（见 test b 例）。
+ * 3. 顶升 + 送到下游/隔壁线：方向靠目的地表达，不写角度。
+ */
+const TRANSFER_INTENT = new RegExp(
+  [
+    '顶升移载|移载机|移载工位|移载单元|移载机构|直角移载|横移移载|移载\\s*(?:到|至|给)',
+    '顶升[^。；;\\n]{0,12}(?:向|沿|往|朝)\\s*\\d{1,3}\\s*(?:°|度|deg)\\s*(?:方向)?[^。；;\\n]{0,6}(?:输送|送|移|推|平移)',
+    '顶升[^。；;\\n]{0,12}(?:横移|平移|送到|送至|转移到)[^。；;\\n]{0,10}(?:下游|隔壁|旁侧|侧线)'
+  ].join('|')
+);
 /** 需求里常见的三种转向角度；其它角度也接受（1–180），只是会写进 notes 提醒复核。 */
 export const TURNER_COMMON_ANGLES = [45, 90, 180] as const;
 

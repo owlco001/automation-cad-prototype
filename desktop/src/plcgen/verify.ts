@@ -13,6 +13,7 @@ import {
   type GenerateProjectSuccess
 } from './generate.ts';
 import { simulate, type GeneratedProjectLike, type SimResult, type SimulateOptions } from './simulate.ts';
+import { detectHandshake } from './handshake.ts';
 
 export type VerifyStage = 'precheck' | 'generate' | 'simulate' | 'done';
 
@@ -137,6 +138,22 @@ function precheckOf(result: GenerateProjectResult): PrecheckResult {
 }
 
 /**
+ * 模拟基线：把「下游允许」这条外部输入按现场就绪置 1。
+ *
+ * 为什么不在 simulate 里默认放行：那样「ALLOW=0 就不许启动」这条互锁永远测不出来。
+ * 所以判据留在 simulate（严格），基线假设只放在「验证」这一层，并由
+ * test/plcgen/handshake-sequence.test.mjs 用显式 inputs 覆盖否定路径。
+ * 到位信号（END）不预置：它由执行机构动作产生，预置会掩盖「等不到位」。
+ */
+function baselineInputs(config: PlcGenConfig, options: VerifyOptions): VerifyOptions {
+  const handshake = detectHandshake(config);
+  if (!handshake.present || handshake.allow.length === 0) return options;
+  const merged: Record<string, boolean> = {};
+  for (const signal of handshake.allow) merged[signal.point] = true;
+  return { ...options, inputs: { ...merged, ...(options.inputs ?? {}) } };
+}
+
+/**
  * 验证生成程序。推荐调用：`verifyGenerated(config, { bom, timeScale })`。
  * 也接受 `verifyGenerated(project, config)`，此时跳过重新生成、直接模拟已有工程，
  * 但仍先跑预检；预检 error 直接失败。
@@ -213,7 +230,7 @@ export function verifyGenerated(
       generatedCheck.ok && generatedCheck.stats.sequenceEmpty
     );
     if (emptySequenceFailure) return emptySequenceFailure;
-    const simulation = simulate({ project: providedProject, config, ...options });
+    const simulation = simulate({ project: providedProject, config, ...baselineInputs(config, options) });
     const errors = simulationIssues(simulation);
     return {
       ok: simulation.ok,
@@ -243,7 +260,7 @@ export function verifyGenerated(
   );
   if (emptySequenceFailure) return emptySequenceFailure;
 
-  const simulation = simulate({ project: generated, config, ...options });
+  const simulation = simulate({ project: generated, config, ...baselineInputs(config, options) });
   const errors = simulationIssues(simulation);
   const result: VerifyResult = {
     ok: simulation.ok,

@@ -17,6 +17,20 @@
 - 3D：视口按**材质**着色（AL6063 / Q235 / STEEL45 / PVC 各一色），两台机器的机架/钢件/皮带一眼可分
 - 机具/落盘：`design-conveyor-<n>st-transfer` 独立机型 id（否则与转向线撞 id，apply 报「机型方案已存在」）；`build_machine_model` 也认移载意图（否则一句话要移载工位，出来的还是普通输送线）
 
+### Fixed · 移载需求的口语说法能被智能体入口接住
+
+- 路由器新增「机型描述句」意图（`isMachineBriefRequest`）：没有「设计/做一台」动词的名词短语需求（「转向输送机，不改变板材方向，顶升后向 90° 方向输送板材，并给下游输送机一个信号」）此前落 `out_of_scope`，等于拒答一台完全可做的机器；现在判 `generate` + `design_machine`，问句/指代现有机器/成本干涉这类句子仍按原意图走
+- `detectTransfer` 认「顶升 + 向/沿/往/朝 + 角度 + 输送动词」和「顶升 + 送到/平移 + 下游」两种**只描述动作、不点名机构**的说法（中文需求里 8 成不写「移载」二字）；「顶升旋转 90° 转向」没有方向介词，仍判转向工位
+- `detectTurner` 认否定式（「不改变板材方向」「板不转」）：否则「转向输送机 + 不转板」会凭空长出回转机构
+- 带宽只写了「带宽 800mm」也算输送线工艺（`process=conveyor`），否则移载意图拿不到带宽、拒建理由也不会出
+- 移载机型未写带宽时按 1200 mm 常用档取（缺省 300 mm 根本放不下移载辊道，下限 1080 mm），并在 assumptions 里写明「带宽未写、按常用档取」；**用户写了的带宽原样保留**（800 mm 仍拒建给算式）
+
+### Tests · 移载场景固化
+
+- `docs/desktop/eval/cases.json` + 旧路径副本 `desktop/eval/agent-cases.json`：新增 `tf01`–`tf04`（127 → 131 条），`eval:agent` 另加**副本一致性硬校验**（此前副本已悄悄漂了 ml05/ml06/au01 三条）
+- `desktop/test/machine/nl-transfer-scenario.test.mjs`：用真 `AgentSession` + 真 `AgentTools` + 真 `CommandBus`（组合与 `electron/ipc.ts` 的 `agentExecutor` 相同）跑四条句子，断言末态（移载工位 / transfer-lift Z / transfer-push +Y / 两个 DO / 两个 DI / 无 turner-* / 800 mm 拒建含 1080 算式）
+- `scripts/eval-tasks.mjs` 新增 `t13-transfer-unit`（12 → 13 例）：parts=110、PLC 预检 blocked=0、io-map 四个握手信号、rest/lift/push 三态 confirmedHits=0
+
 ## [0.6.5] - 2026-11-04
 
 ### Added · 机型库远程目录与下载（用户自选加载/下载）

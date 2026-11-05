@@ -10,6 +10,8 @@ import {
   type GenerateInput
 } from './st.ts';
 import { buildSymbolMap, outputBindings, resolveSymbol, tagRef } from './symbols.ts';
+import { detectHandshake, type HandshakeModel } from './handshake.ts';
+import { linkageFromConfig, type LinkageDerivation } from './linkage-program.ts';
 
 export interface SequenceStepModel {
   stepNo: number;
@@ -26,7 +28,13 @@ export interface SequenceStepModel {
 export interface SequencePlan {
   steps: SequenceStepModel[];
   warnings: Issue[];
+  /** 步序来源：显式 config.sequence / 由联动推出来 / 空（无执行机构可驱动）。 */
+  source: SequenceSource;
+  /** 联动推导明细；仅 source='linkage' 时存在。 */
+  derivation?: LinkageDerivation;
 }
+
+export type SequenceSource = 'explicit' | 'linkage' | 'none';
 
 export interface SequenceGenerateResult {
   content: string;
@@ -168,15 +176,63 @@ function normalizeTimeout(
   return defaultTimeoutMs;
 }
 
-/** 把联调步序归一化为状态机模型；不做 IO 存在性判断（预检负责拦截）。 */
+/**
+ * 把联调步序归一化为状态机模型；不做 IO 存在性判断（预检负责拦截）。
+ *
+ * 步序来源三级（顺序不可颠倒）：
+ *   1. `config.sequence` / `config.steps` 显式写了 → 原样采用（老机型逐字节不变）；
+ *   2. 没写但有执行机构 → `linkageFromConfig` → `buildSequenceFromLinkage` 生成步序
+ *      （这就是「联动进生成路径」：以前 buildSequenceFromLinkage 只在测试里被调用，
+ *      生成出来的是空壳）；
+ *   3. 都没有 → 空骨架，并且**必须**带告警说明为什么空（有执行机构却没驱动点位时
+ *      单独报 SEQUENCE_NOT_DERIVABLE，不允许静默生成空壳）。
+ */
 export function buildSequencePlan(input: GenerateInput): SequencePlan {
   const ctx = createRenderContext(input);
   const config: PlcGenConfig = ctx.config;
-  const rawSteps: readonly PlcSequenceStep[] = config.sequence ?? config.steps ?? [];
+  const configured: readonly PlcSequenceStep[] = config.sequence ?? config.steps ?? [];
   const warnings: Issue[] = [];
+  let source: SequenceSource = 'explicit';
+  let derivation: LinkageDerivation | undefined;
+  let rawSteps: readonly PlcSequenceStep[] = configured;
+
+  if (configured.length === 0) {
+    derivation = linkageFromConfig(config);
+    if (derivation.steps.length > 0) {
+      source = 'linkage';
+      rawSteps = derivation.steps;
+    } else {
+      source = 'none';
+    }
+  }
+
   if (rawSteps.length === 0) {
+    const actuators = (config.actuators ?? []).length;
     warnings.push(issue('SEQUENCE_EMPTY', '联调步序为空，FC_AutoSequence 仅生成空状态机骨架'));
-    return { steps: [], warnings };
+    if (actuators > 0) {
+      const skipped = (derivation?.skipped ?? []).map((item) => `${item.name}(${item.actuatorId})：${item.reason}`).join('；');
+      warnings.push(issue(
+        'SEQUENCE_NOT_DERIVABLE',
+        `${actuators} 个执行机构一个步序都没能生成：${skipped || '没有可用的驱动点位'}。`
+          + '空骨架不会驱动任何动作；补齐单点驱动（actuator.point）或显式 sequence 后重新生成'
+      ));
+    }
+    return { steps: [], warnings, source };
+  }
+
+  if (derivation) {
+    if (derivation.skipped.length > 0) {
+      warnings.push(issue(
+        'SEQUENCE_ACTUATOR_SKIPPED',
+        `以下执行机构没有单点驱动点位，未生成步序：${derivation.skipped.map((item) => `${item.name}(${item.actuatorId})`).join('、')}`
+      ));
+    }
+    if (derivation.withoutSensor.length > 0) {
+      warnings.push(issue(
+        'SEQUENCE_STEP_NO_WAIT',
+        `以下执行机构的步序没有到位判据（超时兜底）：${derivation.withoutSensor.join('、')}`
+      ));
+    }
   }
 
   const symbols = buildSymbolMap(config);
@@ -264,7 +320,7 @@ export function buildSequencePlan(input: GenerateInput): SequencePlan {
     return model;
   });
 
-  return { steps, warnings };
+  return { steps, warnings, source, ...(derivation ? { derivation } : {}) };
 }
 
 function buildOutputRefs(config: PlcGenConfig): string[] {
@@ -278,22 +334,48 @@ function buildOutputRefs(config: PlcGenConfig): string[] {
   return refs;
 }
 
+export interface HandshakeRender {
+  readyRefs: string[];
+  doneRefs: string[];
+  /** 下游允许的表达式（多个通道按「与」串，保守）；没有 ALLOW 信号时为 null。 */
+  allowExpr: string | null;
+  /** 到位判据表达式；没有 END 信号时为 null。 */
+  endExpr: string | null;
+}
+
+/** 握手渲染输入：只在这里把变量名翻成 `"DB_IO".<名字>`，渲染与对账共用同一口径。 */
+export function handshakeRenderOf(model: HandshakeModel): HandshakeRender | null {
+  if (!model.present) return null;
+  const ref = (signal: { variable: string }): string => tagRef(signal.variable);
+  return {
+    readyRefs: model.ready.map(ref),
+    doneRefs: model.done.map(ref),
+    allowExpr: model.allow.length > 0 ? model.allow.map(ref).join(' AND ') : null,
+    endExpr: model.end.length > 0 ? model.end.map(ref).join(' AND ') : null
+  };
+}
+
 function renderStateMachine(
   plan: SequencePlan,
   config: PlcGenConfig,
-  sequenceTimeout: string
+  sequenceTimeout: string,
+  hs: HandshakeRender | null = null
 ): string[] {
   const symbols = buildSymbolMap(config);
   const lines: string[] = [];
   const outputs = buildOutputRefs(config);
   const resetOutputs = outputs.map((reference) => `        ${reference} := FALSE;`);
 
-  lines.push('_AbortEdge(CLK := Abort);', '');
+  lines.push('_AbortEdge(CLK := Abort);');
+  if (hs) lines.push('_StartEdge(CLK := Start);');
+  const doneLatch = hs !== null && hs.doneRefs.length > 0;
+  lines.push('');
   lines.push('// 中止或安全停止均回到 Step0，空步只保留待机状态。');
   lines.push('IF _AbortEdge.Q OR SafeStop THEN');
   lines.push('    StepNo := STEP_IDLE;');
   lines.push('    SeqTimeout := FALSE;');
   lines.push('    StepErrorCode := 16#0000;');
+  if (doneLatch) lines.push('    _HandshakeDone := FALSE;   // 安全停止/中止：握手完成位一并清掉');
   lines.push('    _StepTimer(IN := FALSE, PT := ' + sequenceTimeout + ');');
   lines.push('END_IF;', '');
   lines.push('CASE StepNo OF');
@@ -303,18 +385,37 @@ function renderStateMachine(
   lines.push('        SeqTimeout := FALSE;');
   lines.push('        StepErrorCode := 16#0000;');
   lines.push('        _StepTimer(IN := FALSE, PT := ' + sequenceTimeout + ');');
-  lines.push('        IF Start AND NOT SafeStop AND NOT Abort THEN');
-  lines.push(`            StepNo := ${plan.steps.length > 0 ? 1 : 'STEP_IDLE'};`);
-  lines.push('            _StepTimer(IN := FALSE, PT := ' + sequenceTimeout + ');');
-  lines.push('        END_IF;');
+  if (hs) {
+    // 启动互锁：只在下游允许时接受启动沿；ALLOW 掉线就不启动（停在待机位等许可）。
+    if (hs.allowExpr) {
+      lines.push('        _StartInhibit := NOT ' + hs.allowExpr + ';');
+    }
+    lines.push(`        IF _StartEdge.Q AND NOT SafeStop AND NOT Abort${hs.allowExpr ? ` AND ${hs.allowExpr}` : ''} THEN`);
+    if (doneLatch) lines.push('            _HandshakeDone := FALSE;');
+    lines.push(`            StepNo := ${plan.steps.length > 0 ? 1 : 'STEP_IDLE'};`);
+    lines.push('            _StepTimer(IN := FALSE, PT := ' + sequenceTimeout + ');');
+    lines.push('        END_IF;');
+  } else {
+    lines.push('        IF Start AND NOT SafeStop AND NOT Abort THEN');
+    lines.push(`            StepNo := ${plan.steps.length > 0 ? 1 : 'STEP_IDLE'};`);
+    lines.push('            _StepTimer(IN := FALSE, PT := ' + sequenceTimeout + ');');
+    lines.push('        END_IF;');
+  }
 
   if (plan.steps.length === 0) {
     lines.push('        (* 联调步序为空：未生成转移动画分支。 *)');
   }
 
+  const lastStepNo = plan.steps.length;
   for (const step of plan.steps) {
-    const next = step.stepNo < plan.steps.length ? step.stepNo + 1 : 0;
+    const last = step.stepNo === lastStepNo;
+    const next = last ? (doneLatch ? 'STEP_HANDSHAKE' : 0) : step.stepNo + 1;
     const timeout = formatTime(step.timeoutMs);
+    // 最后一步同时受「到位信号」约束：移载到位（END）之前不许进握手状态。
+    let condition = step.condition;
+    if (hs?.endExpr && last && !condition.includes(hs.endExpr)) {
+      condition = condition === 'TRUE' ? hs.endExpr : `${condition} AND ${hs.endExpr}`;
+    }
     lines.push('');
     lines.push(`    ${step.stepNo}:`);
     lines.push(`        // ${step.name}`);
@@ -327,7 +428,7 @@ function renderStateMachine(
       if (variable) lines.push(`        ${tagRef(variable)} := FALSE;`);
     }
     lines.push(`        _StepTimer(IN := TRUE, PT := ${timeout});`);
-    lines.push(`        IF ${step.condition} THEN`);
+    lines.push(`        IF ${condition} THEN`);
     lines.push(`            StepNo := ${next};`);
     lines.push('            _StepTimer(IN := FALSE, PT := ' + sequenceTimeout + ');');
     lines.push('        ELSIF _StepTimer.Q THEN');
@@ -340,6 +441,20 @@ function renderStateMachine(
   }
 
   lines.push('');
+  if (doneLatch) {
+    lines.push('    STEP_HANDSHAKE:');
+    lines.push('        // 移载完成握手：只有到位信号为 1 才置完成位，不用定时器猜「大概到了」。');
+    lines.push('        StepNo := STEP_IDLE;');
+    if (hs && hs.endExpr) {
+      lines.push(`        IF ${hs.endExpr} THEN`);
+      lines.push('            _HandshakeDone := TRUE;');
+      lines.push('        END_IF;');
+    } else {
+      lines.push('        // 没配到位信号：序列走完即视为完成（如实写在这里，不假装有判据）。');
+      lines.push('        _HandshakeDone := TRUE;');
+    }
+    lines.push('');
+  }
   lines.push('    STEP_ERROR:');
   lines.push('        // StepError：超时锁存，报警字已写入，等待 Abort 复位。');
   lines.push('        SeqTimeout := TRUE;');
@@ -348,12 +463,32 @@ function renderStateMachine(
   lines.push('        StepNo := STEP_ERROR;');
   lines.push('        SeqTimeout := TRUE;');
   lines.push('END_CASE;');
+  if (hs) {
+    lines.push('');
+    lines.push('// 联锁握手输出放在 CASE 之后：否则 IDLE/ERROR 分支的「输出全复位」会每扫描把完成位写回 FALSE。');
+    for (const reference of hs.readyRefs) {
+      lines.push(`// 就绪 = 无安全停止、无序列报警、停在待机步（与下游 ALLOW 无关：ready 是「我能接」，allow 是「你可以给」）。`);
+      lines.push(`${reference} := NOT SafeStop AND NOT SeqTimeout AND (AlarmWord = 16#0000) AND (StepNo = STEP_IDLE);`);
+    }
+    for (const reference of hs.doneRefs) {
+      lines.push(`${reference} := _HandshakeDone;`);
+    }
+  }
   return lines;
 }
 
 export function generateSequence(input: GenerateInput): SequenceGenerateResult {
   const ctx = createRenderContext(input);
   const plan = buildSequencePlan(input);
+  const handshake = detectHandshake(ctx.config);
+  const hs = handshakeRenderOf(handshake);
+  const warnings = [...plan.warnings, ...handshake.warnings];
+  const hsVars: string[] = [];
+  if (hs) {
+    hsVars.push('    _StartEdge : R_TRIG;');
+    if (hs.doneRefs.length > 0) hsVars.push('    _HandshakeDone : BOOL;');
+    if (hs.allowExpr) hsVars.push('    _StartInhibit : BOOL;');
+  }
   const body: string[] = [
     'FUNCTION FC_AutoSequence : VOID',
     'VAR_INPUT',
@@ -372,18 +507,20 @@ export function generateSequence(input: GenerateInput): SequenceGenerateResult {
     'VAR',
     '    _StepTimer : TON;',
     '    _AbortEdge : R_TRIG;',
+    ...hsVars,
     'END_VAR',
     'VAR CONSTANT',
     '    STEP_IDLE : INT := 0;',
     '    STEP_ERROR : INT := 99;',
+    ...(hs && hs.doneRefs.length > 0 ? ['    STEP_HANDSHAKE : INT := 90;'] : []),
     '    ALARM_SEQ_TIMEOUT : WORD := 16#8101;',
     'END_VAR',
     ''
   ];
-  body.push(...renderStateMachine(plan, ctx.config, ctx.sequenceTimeout));
+  body.push(...renderStateMachine(plan, ctx.config, ctx.sequenceTimeout, hs));
   body.push('');
   const content = renderGeneratedFile(ctx, 'src/FC_AutoSequence.st', body.join('\n'));
-  return { content, steps: plan.steps.length, warnings: plan.warnings };
+  return { content, steps: plan.steps.length, warnings };
 }
 
 /** 兼容别名：保留对外导出，当前仓库内无调用；新代码请使用 `generateSequence`。 */

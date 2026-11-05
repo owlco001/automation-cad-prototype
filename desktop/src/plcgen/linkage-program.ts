@@ -20,6 +20,13 @@ export interface LinkageStepLike {
   endMs: number;
   io: string[];
   amount: number;
+  /**
+   * 本步的到位判据（可选）。
+   * 给了就只用它；没给才回落到「该执行机构绑定的全部传感器」。
+   * 联动时间线本身不带方向信息，双传感器（伸出/缩回两条）靠它区分——
+   * 否则 wait 会被拼成「伸出到位 AND 缩回到位」，永远等不到。
+   */
+  waitPoints?: readonly string[];
 }
 
 export interface LinkageLike {
@@ -30,7 +37,12 @@ export interface LinkageLike {
 const ACTION_LABEL: Record<string, string> = {
   gripper: '夹紧',
   cylinder: '伸出',
+  linear: '移载',
   rotary: '分度'
+};
+
+const ACTION_UNIT: Record<string, string> = {
+  rotary: '°'
 };
 
 const sensorPointsOf = (config: PlcGenConfig, actuatorId: string, actuatorName?: string): string[] => {
@@ -54,10 +66,15 @@ export function buildSequenceFromLinkage(linkage: LinkageLike, config: PlcGenCon
     const actuator = (config.actuators ?? []).find((item) => item.id === step.actuatorId);
     const name = actuator?.name ?? step.actuatorId;
     const duration = Math.max(1, step.endMs - step.startMs);
-    const waits = sensorPointsOf(config, step.actuatorId, actuator?.name);
+    // 有显式到位判据就用它；没有才回落到该执行机构绑定的全部传感器（不伪造等待点）。
+    const waits = step.waitPoints === undefined
+      ? sensorPointsOf(config, step.actuatorId, actuator?.name)
+      : step.waitPoints.map((point) => String(point).trim()).filter((point) => point.length > 0);
+    const amount = Math.round(step.amount);
+    const label = `${name}${ACTION_LABEL[step.kind] ?? '动作'}${amount ? ` ${amount}${ACTION_UNIT[step.kind] ?? 'mm'}` : ''}`;
     steps.push({
       id: `S${index + 1}`,
-      name: `${name}${ACTION_LABEL[step.kind] ?? '动作'}`,
+      name: label,
       action: step.kind === 'gripper' ? 'grip' : step.kind === 'rotary' ? 'rotate' : 'extend',
       points: step.io,
       sets: step.io,
@@ -67,6 +84,89 @@ export function buildSequenceFromLinkage(linkage: LinkageLike, config: PlcGenCon
   });
 
   return steps;
+}
+
+/** 执行机构上「单点驱动」的点位：一步只能置一个线圈，双线圈（伸出/缩回）不猜方向。 */
+function drivePointOf(actuator: { point?: string }): string | undefined {
+  const point = String(actuator.point ?? '').trim();
+  return point.length > 0 ? point : undefined;
+}
+
+export interface LinkageDerivation {
+  linkage: LinkageLike;
+  steps: PlcSequenceStep[];
+  /** 参与生成的执行机构 id */
+  usedActuators: string[];
+  /** 拿不到驱动点位、因此没有进步序的执行机构（如实列出，不静默） */
+  skipped: Array<{ actuatorId: string; name: string; reason: string }>;
+  /** 有驱动点位却没有到位传感器的执行机构（步序里没有 wait，靠超时兜底） */
+  withoutSensor: string[];
+}
+
+/**
+ * 从机型配置推联动时间线：**PLC 生成路径**在没有显式 sequence 时用它。
+ *
+ * 为什么不是 `buildLinkage(geometry)`：几何轴的 `points` 是中文标签（"顶升到位"），
+ * 不是 PLC 点位号；配置里的 `actuator.point`（ST-TRANSFER-LIFT / ST-TRANSFER-PUSH）
+ * 才是变量表里那个点，两者必须同源，否则步序会引用到不存在的符号。
+ *
+ * 口径（一步一个向前动作，不做回程——回程由现场/操作面板决定，生成器不替人编）：
+ *   - 只收有单点驱动（`actuator.point`）的执行机构；只有 extend/retract/grip 多线圈的
+ *     旧式执行机构不猜方向，列进 `skipped`；
+ *   - 步序按 config.actuators 顺序串行，时长取 `durationMs`（缺省 400 ms）；
+ *   - wait 取该执行机构在 config.sensors 里绑定的第一条非安全传感器（synth 对顶升/
+ *     移载/气缸先写动作侧），双传感器不会被拼成「伸出 AND 缩回」。
+ */
+export function linkageFromConfig(
+  config: PlcGenConfig,
+  options: { defaultDurationMs?: number } = {}
+): LinkageDerivation {
+  const defaultDuration = Number.isFinite(options.defaultDurationMs) && Number(options.defaultDurationMs) > 0
+    ? Number(options.defaultDurationMs)
+    : 400;
+  const steps: LinkageStepLike[] = [];
+  const usedActuators: string[] = [];
+  const skipped: LinkageDerivation['skipped'] = [];
+  const withoutSensor: string[] = [];
+  let cursor = 0;
+
+  for (const rawActuator of config.actuators ?? []) {
+    const actuator = rawActuator as { id: string; name?: string; kind?: string; station?: string; point?: string; durationMs?: number };
+    const drivePoint = drivePointOf(actuator);
+    if (!drivePoint) {
+      const multi = (actuator as { extendPoint?: string; retractPoint?: string; gripPoint?: string });
+      skipped.push({
+        actuatorId: actuator.id,
+        name: actuator.name ?? actuator.id,
+        reason: multi.retractPoint
+          ? '只有伸出/缩回双线圈（extendPoint/retractPoint），没有单点驱动点位，不猜方向'
+          : '没有单点驱动点位（point）'
+      });
+      continue;
+    }
+    const sensors = sensorPointsOf(config, actuator.id, actuator.name);
+    const duration = Number.isFinite(actuator.durationMs) && Number(actuator.durationMs) > 0
+      ? Number(actuator.durationMs)
+      : defaultDuration;
+    const kind = String(actuator.kind ?? 'cylinder');
+    if (sensors.length === 0) withoutSensor.push(actuator.id);
+    const step: LinkageStepLike = {
+      actuatorId: actuator.id,
+      stationId: String(actuator.station ?? '未指定'),
+      kind,
+      startMs: cursor,
+      endMs: cursor + duration,
+      io: [drivePoint],
+      amount: kind === 'rotary' ? Math.round(Number((actuator as { rotationRangeDeg?: number }).rotationRangeDeg) || 0) : Math.round(Number((actuator as { travelMm?: number }).travelMm) || 0),
+      waitPoints: sensors.length > 0 ? [sensors[0] as string] : []
+    };
+    steps.push(step);
+    usedActuators.push(actuator.id);
+    cursor += duration;
+  }
+
+  const linkage: LinkageLike = { cycleMs: cursor, steps };
+  return { linkage, steps: buildSequenceFromLinkage(linkage, config), usedActuators, skipped, withoutSensor };
 }
 
 export interface LinkageProgramGap {
