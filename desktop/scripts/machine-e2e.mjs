@@ -47,7 +47,7 @@ const BRIEF = '光伏板加工输送机：输送 2000mm 光伏板，线体长 60
  * 与第一台的区别只有「板不转、整块沿 +Y 送到下游」，用来验本轮新增的
  * 移载单元 / 两条轴 / 四个联锁信号 / 下游对接段。
  */
-const TRANSFER_BRIEF = '光伏板加工输送机：输送 1200×800mm 光伏板，线体长 6000mm、带宽 1200mm，'
+const TRANSFER_BRIEF = '光伏板加工输送机：输送 1200×800mm 光伏板，线体长 3000mm、带宽 1200mm，'
   + '需要顶升移载沿 90° 方向把板子送到下游输送线，节拍 6 件/分钟';
 /** 移载工位的四个联锁信号（io-map 里必须逐个能看到） */
 const TRANSFER_SIGNALS = ['DO-TRANSFER-READY', 'DO-TRANSFER-DONE', 'DI-DOWNSTREAM-ALLOW', 'DI-TRANSFER-END'];
@@ -803,7 +803,8 @@ async function main() {
 
 
     // =====================================================================
-    // 第二台机器：顶升移载（直角移载，板不转）
+    // 第二台机器：顶升移载（Y 向短带式直角移载，板不转）
+    //   3 条 X 窄带 + 带缝里 4 段 Y 短带 + 顶升把板送到 +Y 接料段，线长 3000
     //   建机 → 两条轴/四个联锁信号 → parts 数 → BOM 行 → PLC 预检 blocked=0
     //   → io-map 的 4 个信号 → 三态干涉 confirmed=0 → 3D 截图
     // =====================================================================
@@ -874,9 +875,9 @@ async function main() {
       if (!stations.join(',').includes('移载工位')) throw new Error(`方案里没有「移载工位」：${stations.join(',')}`);
       if (!lift) throw new Error(`actuators 里没有 transfer-lift：${actuators.map((a) => a?.id).join(',')}`);
       if (!push) throw new Error(`actuators 里没有 transfer-push：${actuators.map((a) => a?.id).join(',')}`);
-      // 顶升行程 70 = 板底要越过挡边顶 911 至少 4 mm（旧值 60 时板底 905 < 911，板推不出去）
-      if (Number(lift.travelMm) !== 70) throw new Error(`transfer-lift 行程异常：${lift.travelMm}（应为 70）`);
-      if (!(Number(push.travelMm) > 1000)) throw new Error(`transfer-push 行程异常：${push.travelMm}（应 = 板宽 800 + 结构间隙 220 + 余量 120）`);
+      // 顶升行程 90 = 静止位 Y 带面比 X 带面低 25 + 挡边 1+60 + 间隙 4（板底 915 ≥ 挡边顶 911 + 4）
+      if (Number(lift.travelMm) !== 90) throw new Error(`transfer-lift 行程异常：${lift.travelMm}（应为 90）`);
+      if (!(Number(push.travelMm) > 1000)) throw new Error(`transfer-push 行程异常：${push.travelMm}（应 = 板宽/2 400 + 板心到接料段 660 + 余量 120）`);
       if (!((push.position?.[1] ?? 0) > 0)) throw new Error(`transfer-push 方向不是 +Y：${JSON.stringify(push.position)}`);
       if (bound('DI-TRANSFER-END') !== 'transfer-push') throw new Error(`DI-TRANSFER-END 没绑 transfer-push：${bound('DI-TRANSFER-END')}`);
       if (bound('ST-TRANSFER-LIFT-UP') !== 'transfer-lift') throw new Error(`ST-TRANSFER-LIFT-UP 没绑 transfer-lift：${bound('ST-TRANSFER-LIFT-UP')}`);
@@ -972,7 +973,7 @@ async function main() {
       if (payload?.ok === false) throw new Error(`build_machine_model 失败：${payload.message ?? payload.code}`);
       const items = Number(body?.parts ?? 0);
       const loaded = Number(body?.loadedParts ?? 0);
-      if (items < 100) throw new Error(`移载机型零件数 ${items} < 100（普通线 61 件 + 移载单元 50 件）`);
+      if (items < 100) throw new Error(`移载机型零件数 ${items} < 100（3 条窄带主线 39 件 + 移载单元 52 件 + 接料段 15 件）`);
       if (loaded < 100) throw new Error(`视口只装配了 ${loaded} 件（期望 ≥100）`);
       const bomRaw = body?.bom;
       const bomRows = Array.isArray(bomRaw) ? bomRaw : Array.isArray(bomRaw?.items) ? bomRaw.items : [];
@@ -1113,7 +1114,7 @@ async function main() {
       })()`);
       await cdp.waitFor(`Boolean(document.querySelector('#automationCadOverlay') && !document.querySelector('#automationCadOverlay').hidden)`, 'CAD 覆盖层可见', 20_000);
       await cdp.waitFor(`(Number(document.getElementById('cadPartCount')?.textContent || 0) >= 100)`, '3D 视口里装着 ≥100 件', 30_000);
-      const name = await capture(cdp, '23-pv-04-transfer-3d.png', '顶升移载整机 3D（主线上方横向移载机构 + 下游对接段）');
+      const name = await capture(cdp, '23-pv-04-transfer-3d.png', '顶升移载整机 3D（3 条 X 窄带 + 带缝里 4 段 Y 短带 + +Y 接料输送机）');
       const partCount = await cdp.evaluate(`Number(document.getElementById('cadPartCount').textContent || 0)`);
       return `shot=${name} parts=${partCount}`;
     });

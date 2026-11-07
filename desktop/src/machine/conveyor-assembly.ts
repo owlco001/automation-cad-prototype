@@ -68,8 +68,9 @@ export interface ConveyorParams {
    * 板材厚度（工件占位体的 Z 尺寸），mm；缺省 35。
    *
    * 这个参数唯一的用途是**把工件本身建进几何**：干涉检查要能回答「板能不能从出料口推出去」，
-   * 就必须有一个和板同尺寸的实体参与碰撞。给它一个显式参数（而不是写死 35）是为了让「板加厚会不会顶到推板机构」
-   * 这类问题能被数值验证（实测 120 mm 时板顶穿推板无杆气缸），而不是靠人看图猜。
+   * 就必须有一个和板同尺寸的实体参与碰撞。给它一个显式参数（而不是写死 35）是为了让「板加厚会不会顶到
+   * 接料段挡边/挡停」这类问题能被数值验证（这一版把板抬到 915 后才送出去，挡边顶 911 只留 4 mm，
+   * 板越厚越要先看竖向账），而不是靠人看图猜。
    */
   transferPartThicknessMm?: number;
 }
@@ -720,181 +721,210 @@ function buildTurnerParts(t: TurnerLayout): ConveyorPart[] {
 }
 
 /* ------------------------------------------------------------------ *
- * 顶升移载（直角移载 / right-angle transfer）：顶升 — 横向送出 — 回落
+ * 顶升移载（Y 向短带式直角移载 / belt-to-belt right-angle transfer）
  *
- * 与转向工位的区别只有一句：**板不转，整个平移出货**。所以两套机构的竖向叠层不一样，
- * 横向约束也不一样。为什么要单独一段而不是给 turner 加个开关：转向的横向构件（φ880
- * 转台盘 / 回转支承）在移载里全都不存在，而移载多了一整套「辊道 + 推板 + 下游对接段」，
- * 两者除了共用「窄带并联 + 带缝让位」之外没有可复用件。共用参数化的只有那一件事。
+ * 构型（老王定的）：X 向 **3 条**窄带 → 带缝里放 **4 段短 Y 向传送带**（每个带缝 2 段）→
+ * 板到位后整组 Y 带顶升把板托离 X 带 → Y 短带转动把板送进 +Y 侧下游接料输送机。
  *
- * 三个硬约束（都是先算过才落下来的，不是设计偏好）：
+ * 与上一版（6 条窄带 + 带缝里的辊道 + 推板 + 无杆气缸）的差别不是换零件，是换原理：
+ * 上一版靠推板沿 +Y 推板件，推板/无杆气缸/立柱横梁在机台中段占掉一大片，线长只能做 6 m；
+ * 这一版板件由 Y 短带的摩擦力搬走，移载机构整体缩到带面以下，线长缩到 3 m（2400~4000）。
  *
- * 1) **上行带面必须连续，所以能穿过带面的东西只能是「细的、落在带缝里的」**。
- *    辊道每根 φ50，落在带缝中心（带缝 120），纵向占 50 < 120，两侧各留 35 mm；
- *    辊子的轴承立柱 φ30 也立在同一条带缝上。这是「辊道式移载」能成立的全部原因：
- *    板顶上去了、辊子在板下面转，输送面一根带都没断。
- * 2) **不能做「移载小车」式的平移机构**。任何沿 Y 延伸的结构（辊道侧梁、滑车导轨）
- *    都要横跨 6 条带体；静止位它可以在带面下（≤845），顶升后要在带面上（≥855），
- *    那么顶升过程中它必然扫过带体所在的 846~850 —— 逐步顶升一定会撞带。
- *    所以移载件一律做成**点状**（辊子 + 立柱，全部落在带缝中心），不做长向梁。
- * 3) **随动台板必须在顶升到位时仍低于带底**，否则整块板升上来会顶穿每一条带：
- *    台板顶 = 带底 846 − 行程 70 − 净空 60 = 716；顶升到位 786 ≤ 846。
- *    辊道因此不能直接坐在台板上（辊心 820 高于台板顶 716），必须由 φ30 立柱从台板顶
- *    托到辊心（716 → 820，顶升后 786 → 880，全程在带缝里）。
+ * 四个硬约束（都是先算过才落下来的）：
  *
- * 竖向账（beltFace 850、带厚 4 → 带底 846、滚筒 φ50 → 纵梁顶 800）：
- *   静止位：辊面 845（比带面低 5，板完全压在带上）→ 辊心 820 → 轴承立柱 726..820 →
- *           随动台板 714..726 → 活塞杆顶 714 → 缸体 634..690 → 安装板 622..634；
- *           吊柱 634..800 挂在两侧纵梁内侧面。
- *   顶升 70：辊面 915、辊底 865（> 带面 850，所以辊道平移也不会扫到带）、台板顶 786（< 846）。
- *        行程 70 = 板底要越过挡边顶 911 至少 4 mm（挡边顶 = 带面+61），不是照转向工位抄的 60。
- *   推板：下沿 = 辊面 915 + 10 = 925，高 60 → 925..985；静止位停在板外
- *        y = −(板宽/2 + 15 + 10)…… 推板下沿 925 高于挡边顶 911，推出时整条通道在带面之上。
- *        板进站时板顶 885 < 925，从推板下面过去。
+ * 1) **X 带上行必须整条连续**，所以能穿过带面的东西只能「落在带缝里且足够窄」。
+ *    3 条窄带按节距 = 带宽/3 排（1200 → 100/400/300），Y 段宽 100 < 带缝 300，两侧各留 100。
+ * 2) **Y 段的 Y 向长度受带缝宽度限制**：段长 = 带缝 − 2×10 让位（1200 → 280）。
+ *    这条不是保守：段长一旦超过带缝，段的两端就伸到 X 带**下方**，顶升 90 mm 的中途
+ *    必然扫过带体（带上行 846~850）—— 这是几何硬约束，不是工艺余量。
+ *    带宽加大到带缝 ≥ 440 时段长才会自动长到建议值 420（见 transferYBeltLength）。
+ * 3) **静止位 Y 带面比 X 带面低 25 mm**：板完全压在 X 带上，Y 带不吃力、不蹭板。
+ * 4) **顶升行程由挡边顶反推**：板要从 +Y 侧挡边上方过，板底必须 ≥ 挡边顶 + 4。
+ *    板底（静止）= X 带面 850；顶升后板底 = Y 带面（850 − 25）+ 行程
+ *    → 行程 = 25 + 1（挡边下沿离带面）+ 60（挡边高）+ 4（间隙）= 90。
+ *    （上一版辊面 845 起步 → 70；这一版 Y 带面低 25，行程多 20。）
  *
- * 横向账（y 向）：随动台板半宽 = min(440, 带内边 − 20)，必须 ≥ 最外带缝 + 辊半径；
- *   对接段从纵梁外侧面 + 5 mm 起（y = 带宽/2 + 型材 + 20），所以
- *   移载行程 = 板宽 + 结构间隙（台板边 → 对接段起点）+ 120 装配余量，
- *   并且必须 ≥ 对接段起点 + 板宽/2（板尾要整块落到对接段上），三个数都在 assumptions 里。
+ * 竖向账（beltFace 850 / 带厚 4 → 带底 846 / X 滚筒 φ50 → 纵梁顶 800）：
+ *   静止位：Y 带面 825（= 带面 − 25）→ 带底 821 → 端滚筒 φ20 心 815 → 回程 801..805 →
+ *           模块底板 794..802 → 升降架横梁 710..750（横梁顶 = 带底 846 − 净空 6 − 行程 90）
+ *           → 活塞杆 596..710 → 缸体 630..686 → 安装板 618..630；
+ *           吊柱 630..800 挂纵梁内侧面；导向柱 630..845（柱顶低于带底 1 mm）。
+ *   顶升 90：Y 带面 915、板底 915（= 挡边顶 911 + 4）、横梁顶 840 < 846（全程不穿带）；
+ *           Y 带面顶升到位后仍**只在带缝里**（X 带、机架都在带缝外），所以 sweep 全程 0 干涉。
+ *   下游接料段带面 = 915（与 Y 带出料面同高，落料无落差）。
+ *
+ * 横向账：Y 段 X 位 = ±节距/2（±200），段宽 100；同步轴沿 X 串起同一带缝的两段（φ20 落在带缝里）；
+ *   单元 X 占位半宽 = max(板长/2 + 20, 节距 + 带缝/2 + 40)（1200 板 → 620）。
+ *   移载行程（板沿 +Y 的位移）= 板宽/2 + 板心到接料段带面起点（纵梁外侧面 + 5）+ 余量 120
+ *   = 400 + 660 + 120 = 1180；下限校验 = 接料段起点 + 板宽/2 = 1060（板尾要整块落到接料段上）。
  * ------------------------------------------------------------------ */
 
-/** 移载单元沿 X 的占位半宽（随动台板 1000 → ±500，再留 20 装配余量） */
-const TRANSFER_UNIT_HALF_MM = 520;
-/** 板材厚度缺省值（工件占位体 Z 尺寸），mm；可由 transferPartThicknessMm 覆盖 */
-export const TRANSFER_DEFAULT_PART_THICKNESS_MM = 35;
+/** 移载线 X 向窄带条数：老王构型 3 条（不是 6 条） */
+export const TRANSFER_BELT_COUNT = 3;
+/** 单条带宽/节距 = 1/4（1200 → 100），带宽变化按节距算，不写死 */
+const TRANSFER_BELT_WIDTH_RATIO = 0.25;
+const TRANSFER_BELT_WIDTH_MIN_MM = 60;
+const TRANSFER_BELT_WIDTH_MAX_MM = 120;
+/** 窄带条数的下限带宽：3 条 60 宽 + 2 条带缝（节距 200） */
+export const TRANSFER_MIN_WIDTH_MM = 600;
+/** 移载线的线长参数区间（单元 2×unitHalf + 两端输送段，见 transferSkipReason） */
+export const TRANSFER_MIN_LENGTH_MM = 2400;
+export const TRANSFER_MAX_LENGTH_MM = 4000;
+/** 移载线默认线长：6000 → 3000（机台缩短是这一版构型的目的之一） */
+export const TRANSFER_DEFAULT_LENGTH_MM = 3000;
+/** 单元两端最小输送段 */
+export const TRANSFER_END_RUN_MIN_MM = 300;
+/** 静止位 Y 带面比 X 带面低多少（不碰板） */
+export const TRANSFER_Y_BELT_DROP_MM = 25;
+/** 每个带缝放 2 段 Y 带 */
+const TRANSFER_Y_SEGMENTS_PER_GAP = 2;
+/** Y 段端部到带缝边缘的让位：段长 = 带缝 − 2×10 */
+const TRANSFER_Y_SEGMENT_END_CLEAR_MM = 10;
+/** Y 段建议长度（带缝够宽时才做得到；1200 带宽的带缝 300 只能做 280） */
+const TRANSFER_Y_SEGMENT_MAX_MM = 420;
+const TRANSFER_Y_BELT_THICKNESS_MM = 4;
+const TRANSFER_Y_PULLEY_DIAMETER_MM = 20;
+const TRANSFER_Y_BASE_THICKNESS_MM = 8;
+const TRANSFER_Y_CHEEK_THICKNESS_MM = 12;
+const TRANSFER_Y_CHEEK_HEIGHT_MM = 22;
+/** 模块底板到回程带的让位 */
+const TRANSFER_Y_BASE_CLEAR_MM = 3;
+/** 升降架横梁 40×40：横梁顶 = 带底 − 净空 − 行程（顶升到位仍低于带底） */
+const TRANSFER_LIFT_BEAM_MM = 40;
+const TRANSFER_LIFT_CLEAR_MM = 6;
+/** 同步轴（沿 X 串起同一带缝的两段 Y 带） */
+const TRANSFER_Y_SHAFT_DIAMETER_MM = 20;
+/** 顶升气缸 / 安装板 / 吊柱 / 导向柱 */
+const TRANSFER_CYL_BODY_MM = 56;
+const TRANSFER_CYL_ROD_EXPOSED_MM = 24;
+/**
+ * 活塞杆缩回位仍插在缸体内的长度。
+ *
+ * 为什么不是「杆长 = 行程 + 露出」：那样缩回位杆尾会穿过安装板（安装板顶 = 缸体底），
+ * 装出来的是一根穿过安装板的杆（实测 8482 mm³ ×2）。真机上杆只在缸体前导套里走，
+ * 安装板上没有杆的通道 —— 所以杆尾留在缸体里，顶升到位时杆与缸体之间是**视觉上的拉开**，
+ * 与上一版（行程 70 > 缸体 56）同一口径：几何只表达「杆顶跟着升降架走」。
+ */
+const TRANSFER_CYL_ROD_EMBED_MM = 40;
+const TRANSFER_CYL_BODY_DIAMETER_MM = 80;
+const TRANSFER_CYL_ROD_DIAMETER_MM = 30;
+const TRANSFER_MOUNT_THICKNESS_MM = 12;
+const TRANSFER_HANGER_SIZE_MM = 20;
+const TRANSFER_GUIDE_DIAMETER_MM = 22;
+/** 导向柱顶面到带底的净空（柱顶不穿带面） */
+const TRANSFER_GUIDE_TOP_CLEAR_MM = 1;
 /** 侧挡边（线体两侧 3 mm 板）：下沿比带面高 1 mm，高 60 → 顶面 = 带面 + 61 */
 const SIDE_GUARD_LIFT_MM = 1;
 export const SIDE_GUARD_HEIGHT_MM = 60;
-/** 移载辊道：φ50 × 800，落在带缝中心 */
-const TRANSFER_ROLLER_DIAMETER_MM = 50;
-const TRANSFER_ROLLER_LENGTH_MM = 800;
-/** 静止位辊面比带面低 5 mm：板完全压在带上，辊道不吃力 */
-const TRANSFER_ROLLER_DROP_MM = 5;
-/**
- * 板底越过挡边顶的最小间隙：工件是沿 +Y 从挡边**上方**推出去的，不能骑在挡边顶面上。
- * 4 mm 是装配/带面下垂的可复现余量（挡边顶 911 → 板底必须 ≥ 915）。
- */
+/** 板底越过挡边顶的最小间隙（装配 + 带面下垂的可复现余量） */
 export const TRANSFER_PLATE_GUARD_CLEAR_MM = 4;
 /**
- * 顶升行程：**由挡边顶面反推**，不是照转向工位抄的 60。
- *   静止位板底 = 带面 − 5（辊面比带面低 5，板压在带上）
- *   挡边顶     = 带面 + 1 + 60 = 带面 + 61
- *   约束      板底（顶升到位）= 带面 − 5 + 行程 ≥ 挡边顶 + 4  →  行程 ≥ 5 + 1 + 60 + 4 = 70
- * 旧值 60 的后果（实测）：到位板底 905，比挡边顶 911 低 6 mm，板推出时两侧挡边各扫
- * 70 × 3 × 6 = 1260 mm³（出料口只开到 ±530 时合计 2520 mm³）。
- * 行程与带面高度无关（挡边顶与辊面都随带面平移），所以这个 70 是常数而不是参数。
+ * 顶升行程：**由挡边顶面反推**。
+ *   板底（静止）= 带面
+ *   板底（顶升）= Y 带面静止位（带面 − 25）+ 行程
+ *   约束：板底 ≥ 挡边顶 + 4 =（带面 + 1 + 60）+ 4
+ *   → 行程 ≥ 25 + 1 + 60 + 4 = 90
+ * 行程与带面高度无关（挡边顶与 Y 带面都随带面平移），所以 90 是常数。
  */
-export const TRANSFER_LIFT_STROKE_MM = TRANSFER_ROLLER_DROP_MM + SIDE_GUARD_LIFT_MM
-  + SIDE_GUARD_HEIGHT_MM + TRANSFER_PLATE_GUARD_CLEAR_MM; // 5 + 1 + 60 + 4 = 70
+export const TRANSFER_LIFT_STROKE_MM = TRANSFER_Y_BELT_DROP_MM + SIDE_GUARD_LIFT_MM
+  + SIDE_GUARD_HEIGHT_MM + TRANSFER_PLATE_GUARD_CLEAR_MM; // 25 + 1 + 60 + 4 = 90
 /** 出料口在 X 向的单边余量：开口总宽 ≥ 板长 + 2×20 = 板长 + 40 */
 const TRANSFER_OUTFEED_X_MARGIN_MM = 20;
 /** 出料口两侧剩余挡边段的下限：比这短就整段不生成（否则会出现几毫米宽的碎段） */
 const TRANSFER_OUTFEED_MIN_SEGMENT_MM = 40;
-/** 随动台板顶面到带底的最小净空（顶升到位后仍低于带底） */
-const TRANSFER_PLATE_CLEAR_MM = 60;
-const TRANSFER_PLATE_LENGTH_MM = 1000;
-/** 台板半宽上限（不能再宽：顶升后 786 < 带底 846 是硬条件，宽度只受带内边约束） */
-const TRANSFER_PLATE_MAX_HALF_WIDTH_MM = 440;
-const TRANSFER_PLATE_THICKNESS_MM = 12;
-/** 轴承立柱：从台板顶托到辊心，落在辊端外侧 */
-const TRANSFER_POST_DIAMETER_MM = 30;
-/** 辊端到立柱中心的间距（立柱不压进辊子包围盒，避免 AABB 误判成「柱穿辊」） */
-const TRANSFER_POST_OFFSET_MM = 20;
-/** 顶升气缸 */
-const TRANSFER_CYL_BODY_MM = 56;
-const TRANSFER_CYL_ROD_EXPOSED_MM = 24;
-const TRANSFER_CYL_BODY_DIAMETER_MM = 80;
-const TRANSFER_CYL_ROD_DIAMETER_MM = 30;
-/** 安装板（气缸/导柱坐在上面，吊在两侧纵梁之间） */
-const TRANSFER_MOUNT_THICKNESS_MM = 12;
-const TRANSFER_HANGER_SIZE_MM = 20;
-/** 导柱中心到台板边缘的让位 */
-const TRANSFER_GUIDE_EDGE_INSET_MM = 20;
-const TRANSFER_GUIDE_DIAMETER_MM = 22;
-/** 推板：下沿 = 顶升后辊面 + 10，高 60（覆盖板厚上部），X 向 900（覆盖移载宽度） */
-const TRANSFER_PUSH_PLATE_CLEAR_MM = 10;
-const TRANSFER_PUSH_PLATE_HEIGHT_MM = 60;
-const TRANSFER_PUSH_PLATE_THICKNESS_MM = 30;
-const TRANSFER_PUSH_PLATE_LENGTH_MM = 900;
-/** 推板静止位到板边的让位（板进站时从推板下面过） */
-const TRANSFER_PUSH_PLATE_GAP_MM = 15;
-/** 无杆气缸截面（沿 +Y 布置，行程 = 移载行程） */
-const TRANSFER_PUSH_CYL_MM = 63;
-/** 气缸体在两端的余量 */
-const TRANSFER_PUSH_CYL_END_MM = 120;
-const TRANSFER_PUSH_BEAM_MM = 40;
-const TRANSFER_PUSH_COLUMN_MM = 30;
-/** 台板半宽必须 ≥ 轴承立柱中心(420) + 柱半径(15) + 装配余量(5) = 440 */
-export const TRANSFER_PLATE_MIN_HALF_WIDTH_MM = TRANSFER_ROLLER_LENGTH_MM / 2 + TRANSFER_POST_OFFSET_MM
-  + TRANSFER_POST_DIAMETER_MM / 2 + 5;
-/** 顶升移载所需最小带宽：台板半宽 = min(440, 带宽/2 − 80 − 20) 要够托住辊道轴承立柱 */
-export const TRANSFER_MIN_WIDTH_MM = 2 * (TRANSFER_PLATE_MIN_HALF_WIDTH_MM + NARROW_BELT_WIDTH_MM + 20);
-/** 行程余量：装配 + 落料偏移 */
+/** 移载行程余量：板心到接料段带面起点之外再留的装配/落料余量 */
 export const TRANSFER_PUSH_MARGIN_MM = 120;
 /** 直线轴行程上限：与 validate.ts 的 MAX_ACTUATOR_TRAVEL_MM 同值。
  *  这里不 import validate（它会连带 plcgen，形成循环依赖），超出时由护栏直接拒建。 */
 const TRANSFER_MAX_PUSH_STROKE_MM = 2000;
-/** 对接段与主线纵梁之间的结构间隙 */
+/** 接料段与主线纵梁之间的结构间隙 */
 const TRANSFER_DOCK_GAP_MM = 5;
-/** 对接段长度 = 行程 + 余量（板整块落上去以后还有缓冲段） */
-const TRANSFER_DOCK_LENGTH_MARGIN_MM = 250;
-/** 对接段 X 向宽度 = 板长 + 200（板横着落上去，宽度要按板长给） */
+/** 接料段沿 Y 的长度余量（板整块落上去以后还有缓冲段） */
+const TRANSFER_DOCK_LENGTH_MARGIN_MM = 100;
+/** 接料段 X 向宽度 = 板长 + 200（板横着落上去，宽度要按板长给） */
 const TRANSFER_DOCK_WIDTH_MARGIN_MM = 200;
-const TRANSFER_DOCK_MIN_WIDTH_MM = 600;
+/** 接料段挡边 / 挡停 / 支腿 */
+const TRANSFER_DOCK_GUARD_LIFT_MM = 1;
+const TRANSFER_DOCK_STOP_HEIGHT_MM = 120;
+const TRANSFER_DOCK_LEG_INSET_MM = 120;
+/** 板材厚度缺省值（工件占位体 Z 尺寸），mm；可由 transferPartThicknessMm 覆盖 */
+export const TRANSFER_DEFAULT_PART_THICKNESS_MM = 35;
+
+export interface TransferYBeltModule {
+  /** 1..4 */
+  index: number;
+  /** 落在第几条带缝（0/1） */
+  gapIndex: number;
+  /** 模块中心 x（= ±节距/2） */
+  xMm: number;
+  /** 模块中心 y（= 带缝中心） */
+  yMm: number;
+}
 
 export interface TransferLayout {
-  /** 顶升行程（mm） */
+  /** 顶升行程（mm）：25 + 1 + 60 + 4 = 90 */
   strokeMm: number;
   /** 单元沿 X 的占位半宽 */
   unitHalfMm: number;
-  /** 窄带并联（辊道要从带缝穿上来） */
+  /** 单元两端剩余输送段（线长的一半减单元半宽） */
+  endRunMm: number;
+  /** X 向窄带并联 */
   beltCount: number;
   beltWidthMm: number;
   beltGapMm: number;
   beltPitchMm: number;
   beltCenterYs: number[];
-  /** 板材（移载行程与对接段宽度都从它推） */
+  beltGapCenterYs: number[];
+  /** 板材（移载行程、接料段宽度、出料口都从它推） */
   partLengthMm: number;
   partWidthMm: number;
-  /** 板材厚度（工件占位体 Z 尺寸）：rest 时底面贴带面，顶面 = 带面 + 厚度 */
   partThicknessMm: number;
-  /** 工件静止位底面 z（= 带面）：工件停在带面上，不悬空也不埋进带里 */
+  /** 工件静止位底面 z（= X 带面）：板停在带上，不悬空也不埋进带里 */
   partBottomRestZ: number;
-  /** 工件静止位顶面 z */
   partTopRestZ: number;
-  /** 工件顶升到位底面 z（= 辊面顶升到位 = 915）：板被辊道托起来 */
+  /** 工件顶升到位底面 z（= Y 带面顶升到位 = 915） */
   partBottomLiftZ: number;
-  /** 移载行程（+Y）：板宽 + 结构间隙 + 余量 */
-  pushStrokeMm: number;
-  /** 结构间隙：随动台板边缘 → 对接段起点 */
-  structuralGapMm: number;
-  /** 板尾整块落到对接段所需的最小行程 */
-  minPushStrokeMm: number;
-  /** 移载辊道 */
-  rollerDiameterMm: number;
-  rollerLengthMm: number;
-  rollerCenterZ: number;
-  rollerTopRestZ: number;
-  rollerTopLiftZ: number;
-  rollerYs: number[];
-  /** 轴承立柱（每根辊两端各一根，全部落在带缝里） */
-  postDiameterMm: number;
-  postCenters: Array<[number, number]>;
-  postBottomZ: number;
-  postTopZ: number;
-  /** 随动台板 */
-  plateLengthMm: number;
-  plateWidthMm: number;
-  plateThicknessMm: number;
-  plateCenterZ: number;
-  plateTopZ: number;
-  plateTopLiftZ: number;
+  /** Y 向短带：4 段，每段 100（X）× 280（Y） */
+  yBeltCount: number;
+  yBeltWidthMm: number;
+  yBeltLengthMm: number;
+  /** 两端的端滚筒之间那一段带的长度（= 段长 − 2×滚筒直径；带只在这段里，不包进滚筒） */
+  yBeltRunMm: number;
+  yBeltThicknessMm: number;
+  yBeltDropMm: number;
+  yBeltFaceRestZ: number;
+  yBeltFaceLiftZ: number;
+  /** 带缝边缘 → Y 段边缘的让位（= (带缝 − 段长)/2） */
+  yBeltClearanceMm: number;
+  yPulleyDiameterMm: number;
+  yPulleyCenterZ: number;
+  yReturnTopZ: number;
+  yBaseTopZ: number;
+  yBaseBottomZ: number;
+  yCheekX: number;
+  yCheekHeightMm: number;
+  yModules: TransferYBeltModule[];
+  ySyncShaftYs: number[];
+  ySyncShaftLengthMm: number;
+  ySyncShaftZ: number;
+  yDriveCenters: Array<[number, number, number]>;
+  /** 升降架 */
+  liftBeamMm: number;
+  beamTopZ: number;
+  beamBottomZ: number;
+  beamLengthMm: number;
+  beamYs: number[];
+  sideBeamX: number;
+  sideBeamSpanY: number;
+  riserHeightMm: number;
+  riserCenters: Array<[number, number]>;
   /** 顶升气缸 */
   cylBodyDiameterMm: number;
   cylBodyLengthMm: number;
   cylBodyCenterZ: number;
   cylRodDiameterMm: number;
   cylRodTopZ: number;
+  cylRodLengthMm: number;
   cylXs: number[];
   /** 安装板 */
   mountLengthMm: number;
@@ -913,32 +943,23 @@ export interface TransferLayout {
   guideCenters: Array<[number, number]>;
   guideBottomZ: number;
   guideTopZ: number;
-  /** 推板 */
-  pushPlateLengthMm: number;
-  pushPlateHeightMm: number;
-  pushPlateThicknessMm: number;
-  pushPlateRestY: number;
-  pushPlateEndY: number;
-  pushPlateCenterZ: number;
-  /** 推板驱动：无杆气缸 + 两根横梁 + 两根立柱 */
-  pushCylCenterY: number;
-  pushCylLengthMm: number;
-  pushCylCenterZ: number;
-  pushBeamLengthMm: number;
-  pushBeamCenterZ: number;
-  pushBeamY: number;
-  pushColumnX: number;
-  pushColumnHeightMm: number;
-  pushColumnCenterZ: number;
-  pushColumnY: number;
-  /** 下游对接段（+Y） */
+  /** 移载行程（+Y，板件由 Y 短带送出） */
+  pushStrokeMm: number;
+  /** 结构间隙：板心 → 接料段带面起点 */
+  structuralGapMm: number;
+  /** 板尾整块落到接料段所需的最小行程 */
+  minPushStrokeMm: number;
+  /** 下游接料段（+Y） */
   dockWidthMm: number;
   dockLengthMm: number;
   dockStartY: number;
   dockCenterY: number;
-  dockRollerLengthMm: number;
-  dockRollerYs: number[];
-  dockRollerCenterZ: number;
+  dockBeltFaceZ: number;
+  dockBeltWidthMm: number;
+  dockBeltLengthMm: number;
+  dockPulleyDiameterMm: number;
+  dockPulleyCenterZ: number;
+  dockPulleyYs: number[];
   dockRailCenterX: number;
   dockRailZ: number;
   dockLegHeightMm: number;
@@ -955,35 +976,49 @@ export interface TransferLayout {
   actionSeconds: number;
   /** 出料侧挡边（+Y）顶面 z：板底必须越过这个面 ≥ 4 mm */
   guardTopZ: number;
-  /** 顶升到位时的板底 z（= 辊面顶升到位） */
+  /** 顶升到位时的板底 z（= Y 带面顶升到位） */
   plateBottomLiftZ: number;
-  /** 板底 − 挡边顶（≥ TRANSFER_PLATE_GUARD_CLEAR_MM 才能推出） */
+  /** 板底 − 挡边顶（≥ TRANSFER_PLATE_GUARD_CLEAR_MM 才能送出） */
   plateGuardGapMm: number;
   /** 出料口 X 向半宽（开口总宽 = 2×这个值，必须 ≥ 板长 + 40） */
   outfeedOpenHalfXMm: number;
 }
 
-/** 移载行程 = 板宽 + 结构间隙 + 装配余量（三个数都来自参数，不写死）。 */
-export function transferPushStrokeMm(partWidthMm: number, structuralGapMm: number): number {
-  return Math.ceil(partWidthMm + structuralGapMm + TRANSFER_PUSH_MARGIN_MM);
+/**
+ * X 向窄带并联布局（移载专用：3 条）。
+ *
+ * 节距 = 带宽/3，单条带宽 = 节距/4（1200 → 100/400/300），带宽变化时按公式走：
+ *   1080 → 90/360/270，900 → 75/300/225，600 → 60/200/140（下限带宽）。
+ * 为什么和转向工位（6 条 80）分开算：转向要「4 折对称指位」所以条数必须偶数、轴线上是缝；
+ * 移载要的是「带缝够宽放得下 Y 段」，条数少一条带缝就宽 100 以上 —— 两套口径不能共用。
+ */
+export function transferBeltLayout(params: ConveyorParams): NarrowBeltLayout {
+  const p = normalizeParams(params);
+  const pitchMm = Math.max(1, Math.floor(p.widthMm / TRANSFER_BELT_COUNT));
+  const widthMm = Math.min(
+    TRANSFER_BELT_WIDTH_MAX_MM,
+    Math.max(TRANSFER_BELT_WIDTH_MIN_MM, Math.round(pitchMm * TRANSFER_BELT_WIDTH_RATIO))
+  );
+  const gapMm = Math.max(0, pitchMm - widthMm);
+  const centers = Array.from(
+    { length: TRANSFER_BELT_COUNT },
+    (_unused, index) => round((index - (TRANSFER_BELT_COUNT - 1) / 2) * pitchMm)
+  );
+  const gaps = centers.slice(0, -1).map((center, index) => round((center + (centers[index + 1] ?? center)) / 2));
+  return { count: TRANSFER_BELT_COUNT, widthMm, pitchMm, gapMm, centers, gaps };
 }
 
-/** 顶升 + 回落两趟：单趟 0.4 s 起停 + 行程按 100 mm/s（与转向工位同一口径）。 */
-export function transferLiftSeconds(strokeMm: number): number {
-  if (!Number.isFinite(strokeMm) || strokeMm <= 0) return 0;
-  return Math.round((0.4 + strokeMm / 100) * 2 * 10) / 10;
-}
-
-/** 移载一趟：0.4 s 起停 + 行程按 300 mm/s（辊道 + 推板同步，真机 0.2~0.4 m/s）。 */
-export function transferPushSeconds(strokeMm: number): number {
-  if (!Number.isFinite(strokeMm) || strokeMm <= 0) return 0;
-  return Math.round((0.4 + strokeMm / 300) * 10) / 10;
-}
-
-/** 一次移载的动作时间（s）= 顶升 + 移载 + 回落。 */
-export function transferActionSeconds(strokeMm: number, pushStrokeMm: number): number {
-  const total = transferLiftSeconds(strokeMm) + transferPushSeconds(pushStrokeMm);
-  return Math.round(total * 10) / 10;
+/**
+ * Y 段长度：min(建议 420, 带缝 − 2×10)。
+ *
+ * 取 min 而不是取 420 的原因写在文件头的硬约束 2：段长超过带缝，段端就伸到 X 带下方，
+ * 顶升过程中必扫带。带宽 ≥ 1440（带缝 440）时段长才吃满 420。
+ */
+export function transferYBeltLength(gapMm: number): number {
+  return Math.round(Math.min(
+    TRANSFER_Y_SEGMENT_MAX_MM,
+    Math.max(TRANSFER_Y_PULLEY_DIAMETER_MM * 3, gapMm - 2 * TRANSFER_Y_SEGMENT_END_CLEAR_MM)
+  ));
 }
 
 /**
@@ -997,39 +1032,57 @@ export function transferPartSize(params: ConveyorParams): { lengthMm: number; wi
   const requestedWidth = p.transferPartWidthMm ?? 0;
   const widthMm = Number.isFinite(requestedWidth) && requestedWidth > 0 ? requestedWidth : p.widthMm;
   const requestedLength = p.transferPartLengthMm ?? 0;
+  // 缺省板长按带宽取（1200 带宽 → 1200 板）。旧缺省是 2×带宽（2400），那是 6 m 线时代的数字：
+  // 3 m 移载线的单元半宽本身就是「板长/2 + 20」，2400 的板配 3000 的线连两端输送段都放不下，
+  // 会直接被护栏拒建（拒得对，但缺省值不该是拒建值）。
   const lengthMm = Number.isFinite(requestedLength) && requestedLength > 0
     ? requestedLength
-    : Math.max(600, p.widthMm * 2);
+    : Math.max(600, Math.round(p.widthMm));
   // 厚度不参与行程/开口的推导（只做工件占位体），但仍按参数给，缺省 35。
   const thicknessMm = p.transferPartThicknessMm ?? TRANSFER_DEFAULT_PART_THICKNESS_MM;
   return { lengthMm, widthMm, thicknessMm };
 }
 
-/** 随动台板的半宽：受带内边约束（顶升后要整块落在带缝以内）。 */
-export function transferPlateHalfWidth(params: ConveyorParams): number {
+/** 单元 X 占位半宽：板要整块落在单元上（板长/2 + 20），且要包住 Y 段外缘（节距 + 带缝/2 + 40）。 */
+export function transferUnitHalfXMm(params: ConveyorParams): number {
   const p = normalizeParams(params);
-  return Math.min(TRANSFER_PLATE_MAX_HALF_WIDTH_MM, p.widthMm / 2 - NARROW_BELT_WIDTH_MM - 20);
+  const belts = transferBeltLayout(p);
+  const part = transferPartSize(p);
+  return Math.ceil(Math.max(part.lengthMm / 2 + 20, belts.pitchMm + belts.gapMm / 2 + 40));
 }
 
-/** 结构间隙：台板边缘 → 对接段带面起点。 */
-export function transferStructuralGap(params: ConveyorParams): number {
-  const p = normalizeParams(params);
-  const railOuterY = p.widthMm / 2 + p.frameSectionMm / 2 + 15 + p.frameSectionMm / 2;
-  return Math.round(railOuterY + TRANSFER_DOCK_GAP_MM - transferPlateHalfWidth(p));
+/** 移载行程 = 板宽/2（板心到板尾）+ 板心到接料段带面起点 + 装配余量（三个数都来自参数）。 */
+export function transferPushStrokeMm(partWidthMm: number, dockStartY: number): number {
+  return Math.ceil(partWidthMm / 2 + dockStartY + TRANSFER_PUSH_MARGIN_MM);
+}
+
+/** 顶升 + 回落两趟：单趟 0.4 s 起停 + 行程按 100 mm/s（与转向工位同一口径）。 */
+export function transferLiftSeconds(strokeMm: number): number {
+  if (!Number.isFinite(strokeMm) || strokeMm <= 0) return 0;
+  return Math.round((0.4 + strokeMm / 100) * 2 * 10) / 10;
+}
+
+/** Y 短带送料一趟：0.4 s 起停 + 行程按 300 mm/s（短带线速 0.3 m/s，真机 0.2~0.4 m/s）。 */
+export function transferPushSeconds(strokeMm: number): number {
+  if (!Number.isFinite(strokeMm) || strokeMm <= 0) return 0;
+  return Math.round((0.4 + strokeMm / 300) * 10) / 10;
+}
+
+/** 一次移载的动作时间（s）= 顶升 + 送料 + 回落。 */
+export function transferActionSeconds(strokeMm: number, pushStrokeMm: number): number {
+  const total = transferLiftSeconds(strokeMm) + transferPushSeconds(pushStrokeMm);
+  return Math.round(total * 10) / 10;
 }
 
 /**
  * 出料口（+Y 侧挡边在单元处的断开）X 向半宽。
  *
  * 这是**物料出口**，开口必须让整块板横着过去：板长 1200 → 每侧 ≥ 620（总宽 1240 = 板长 + 40）。
- * 旧口径写死 `unitHalfMm + 10 = 530`，板每侧超 70 mm —— 就算把板抬到挡边顶以上，
- * 板两个角仍会撞上残留的近侧挡边段。
- *
- * 下限取单元占位 + 10：辊道（±450）和推板（±450）都在里面，挡边段不该压在单元正上方。
+ * 下限取单元占位半宽（单元件全在里面，挡边段不该压在单元正上方）。
  */
-export function transferOutfeedOpenHalfXMm(partLengthMm: number): number {
+export function transferOutfeedOpenHalfXMm(partLengthMm: number, unitHalfMm = 0): number {
   const byPart = Math.ceil(partLengthMm / 2 + TRANSFER_OUTFEED_X_MARGIN_MM);
-  return Math.max(TRANSFER_UNIT_HALF_MM + 10, byPart);
+  return Math.max(Math.ceil(unitHalfMm), byPart);
 }
 
 /**
@@ -1043,49 +1096,69 @@ export function transferSkipReason(params: ConveyorParams): string | null {
       + '只能二选一（移载本身已完成 90° 换向，不需要再旋转板件）';
   }
   if (p.layers > 1) {
-    return `立体缓存（${p.layers} 层）不加顶升移载：移载单元的顶升/推板机构与缓存升降机构都要占线体中段，空间互斥；`
+    return `立体缓存（${p.layers} 层）不加顶升移载：移载单元的顶升机构与缓存升降机构都要占线体中段，空间互斥；`
       + '移载需单独做一段移载线体';
   }
-  if (p.lengthMm - 2 * TRANSFER_UNIT_HALF_MM < 600) {
-    return `线体长 ${p.lengthMm} mm 放不下移载单元：单元占 X 向 2×${TRANSFER_UNIT_HALF_MM} = ${2 * TRANSFER_UNIT_HALF_MM} mm，`
-      + '两端还要各留 300 mm 输送段';
-  }
-  const belts = narrowBeltLayout(p);
-  if (belts.count < 2) {
-    return `带宽 ${p.widthMm} mm 放不下窄带并联：移载辊道（φ${TRANSFER_ROLLER_DIAMETER_MM}）+ 轴承立柱（φ${TRANSFER_POST_DIAMETER_MM}）`
-      + `要从带缝穿上来顶到板底，至少 2 条 ${NARROW_BELT_WIDTH_MM} mm 窄带 + ${NARROW_BELT_GAP_MIN_MM} mm 带缝`
-      + `（等节距，带宽 ≥ ${2 * (NARROW_BELT_WIDTH_MM + NARROW_BELT_GAP_MIN_MM)} mm）`;
-  }
-  const plateHalf = transferPlateHalfWidth(p);
-  if (plateHalf < TRANSFER_PLATE_MIN_HALF_WIDTH_MM) {
+  if (p.widthMm < TRANSFER_MIN_WIDTH_MM) {
     return `带宽 ${p.widthMm} mm < 顶升移载所需最小 ${TRANSFER_MIN_WIDTH_MM} mm：`
-      + `随动台板半宽 = min(${TRANSFER_PLATE_MAX_HALF_WIDTH_MM}, 带宽/2 − 窄带 ${NARROW_BELT_WIDTH_MM} − 20) = ${plateHalf} mm，`
-      + `而辊道在 X 向固定 ${TRANSFER_ROLLER_LENGTH_MM} mm（半长 ${TRANSFER_ROLLER_LENGTH_MM / 2}），两端轴承立柱中心 ±${TRANSFER_ROLLER_LENGTH_MM / 2 + TRANSFER_POST_OFFSET_MM}、`
-      + `柱半径 ${TRANSFER_POST_DIAMETER_MM / 2}、装配余量 5 → 台板半宽必须 ≥ ${TRANSFER_ROLLER_LENGTH_MM / 2 + TRANSFER_POST_OFFSET_MM + TRANSFER_POST_DIAMETER_MM / 2 + 5} mm，`
-      + `反解带宽 ≥ 2×(${TRANSFER_PLATE_MIN_HALF_WIDTH_MM} + ${NARROW_BELT_WIDTH_MM} + 20) = ${TRANSFER_MIN_WIDTH_MM} mm；`
-      + '请把线体加宽，或改用更短的移载辊道（辊长直接决定台板与最小带宽）';
+      + `${TRANSFER_BELT_COUNT} 条窄带按节距 = 带宽/${TRANSFER_BELT_COUNT} 排，带宽 ${TRANSFER_MIN_WIDTH_MM} 时段距 200、`
+      + `单条带 60、带缝 140（Y 段两侧各留 10）；再窄带缝就放不下 Y 段（段长要 ≥ 3×φ${TRANSFER_Y_PULLEY_DIAMETER_MM}）`;
+  }
+  const belts = transferBeltLayout(p);
+  if (belts.count < TRANSFER_BELT_COUNT || belts.gapMm < TRANSFER_Y_SEGMENT_END_CLEAR_MM * 2 + TRANSFER_Y_PULLEY_DIAMETER_MM * 3) {
+    return `带宽 ${p.widthMm} mm 放不下 ${TRANSFER_BELT_COUNT} 条窄带 + ${TRANSFER_Y_SEGMENTS_PER_GAP} 段 Y 带：`
+      + `按节距 ${belts.pitchMm}（= 带宽/${TRANSFER_BELT_COUNT}）算，单条带 ${belts.widthMm}、带缝 ${belts.gapMm}，`
+      + `Y 段（宽 ${belts.widthMm}、长 ≥ ${TRANSFER_Y_PULLEY_DIAMETER_MM * 3}）塞不进 ${belts.gapMm} 的带缝；`
+      + `请把带宽加到 ≥ ${TRANSFER_MIN_WIDTH_MM} mm`;
   }
   const part = transferPartSize(p);
   if (part.widthMm > p.widthMm) {
-    return `板件 Y 向 ${part.widthMm} mm 大于带宽 ${p.widthMm} mm：移载要沿 +Y 把板整块送出，板宽超过带面就压不住，`
-      + `请把带宽加到 ≥ ${part.widthMm} mm 或改用吊装/机械手移载`;
+    return `板件 Y 向 ${part.widthMm} mm 大于带宽 ${p.widthMm} mm：板要整块压在 X 带上并被 Y 段托起，`
+      + `板宽超过带面就压不住，请把带宽加到 ≥ ${part.widthMm} mm 或改用吊装/机械手移载`;
   }
-  const gap = transferStructuralGap(p);
-  const stroke = transferPushStrokeMm(part.widthMm, gap);
+  // Y 段必须在板的投影里：板宽方向要盖住带缝，板长方向要盖住 ±节距/2
+  const yBeltLength = transferYBeltLength(belts.gapMm);
+  const gapOuterY = Math.abs(belts.gaps[belts.gaps.length - 1] ?? 0) + yBeltLength / 2;
+  if (part.widthMm / 2 < gapOuterY) {
+    return `板宽 ${part.widthMm} mm 的投影盖不住 Y 段：最外带缝中心 ±${Math.abs(belts.gaps[belts.gaps.length - 1] ?? 0)}`
+      + ` + 段长/2 ${yBeltLength / 2} = ${gapOuterY} > 板半宽 ${part.widthMm / 2}，`
+      + '顶升后板只有一部分落在 Y 带上（会翘）；请换更窄的带缝布局或加大板宽';
+  }
+  const yBeltOuterX = Math.round(belts.pitchMm / 2) + belts.widthMm / 2;
+  if (part.lengthMm / 2 < yBeltOuterX + 20) {
+    return `板长 ${part.lengthMm} mm 的投影盖不住 Y 段：Y 段外缘 ±${yBeltOuterX} + 20（边距）> 板半长 ${part.lengthMm / 2}，`
+      + '顶升后板会有一半悬在 Y 带外；请加大板长或减小带宽';
+  }
+  const unitHalf = transferUnitHalfXMm(p);
+  const endRun = p.lengthMm / 2 - unitHalf;
+  if (endRun < TRANSFER_END_RUN_MIN_MM) {
+    return `线体长 ${p.lengthMm} mm 放不下移载单元 + 两端输送段：单元占 X 向 2×${unitHalf} = ${2 * unitHalf} mm，`
+      + `两端各剩 ${Math.round(endRun)} mm < ${TRANSFER_END_RUN_MIN_MM} mm；`
+      + `最短线长 = 2×(${unitHalf} + ${TRANSFER_END_RUN_MIN_MM}) = ${2 * (unitHalf + TRANSFER_END_RUN_MIN_MM)} mm`;
+  }
+  if (p.lengthMm < TRANSFER_MIN_LENGTH_MM || p.lengthMm > TRANSFER_MAX_LENGTH_MM) {
+    return `线体长 ${p.lengthMm} mm 超出移载线参数区间 ${TRANSFER_MIN_LENGTH_MM}~${TRANSFER_MAX_LENGTH_MM} mm：`
+      + `这一版构型把机台从 6000 缩到 3000（单元 2×${unitHalf} + 两端输送段），`
+      + `最短 ${2 * (unitHalf + TRANSFER_END_RUN_MIN_MM)} mm、最长 ${TRANSFER_MAX_LENGTH_MM} mm；`
+      + '超长请拆成「移载段 + 独立输送段」两台设备';
+  }
+  const railOuterY = p.widthMm / 2 + p.frameSectionMm + 15;
+  const dockStartY = railOuterY + TRANSFER_DOCK_GAP_MM;
+  const stroke = transferPushStrokeMm(part.widthMm, dockStartY);
   if (stroke > TRANSFER_MAX_PUSH_STROKE_MM) {
     return `移载行程 ${stroke} mm 超出直线轴上限 ${TRANSFER_MAX_PUSH_STROKE_MM} mm：`
-      + `行程 = 板宽 ${part.widthMm} + 结构间隙 ${gap} + 余量 ${TRANSFER_PUSH_MARGIN_MM}；`
-      + `请拆成两段移载（中间加过渡线体）或减少板宽/带宽`;
+      + `行程 = 板宽/2 ${part.widthMm / 2} + 板心到接料段 ${Math.round(dockStartY)} + 余量 ${TRANSFER_PUSH_MARGIN_MM}；`
+      + '请拆成两段移载（中间加过渡线体）或减少板宽/带宽';
   }
   const beltBottom = p.beltHeightMm - p.beltThicknessMm;
-  const plateTop = beltBottom - TRANSFER_LIFT_STROKE_MM - TRANSFER_PLATE_CLEAR_MM;
-  const mountBottom = plateTop - TRANSFER_PLATE_THICKNESS_MM - TRANSFER_CYL_ROD_EXPOSED_MM
-    - TRANSFER_CYL_BODY_MM - TRANSFER_MOUNT_THICKNESS_MM;
+  const mountTop = beltBottom - TRANSFER_LIFT_CLEAR_MM - TRANSFER_LIFT_STROKE_MM
+    - TRANSFER_LIFT_BEAM_MM - TRANSFER_CYL_ROD_EXPOSED_MM - TRANSFER_CYL_BODY_MM;
+  const mountBottom = mountTop - TRANSFER_MOUNT_THICKNESS_MM;
   if (mountBottom < 60) {
-    return `皮带面 ${p.beltHeightMm} mm 太低：移载单元安装板落到 ${mountBottom} mm，离地不足 60 mm；`
-      + `（安装板 = 带底 ${beltBottom} − 顶升 ${TRANSFER_LIFT_STROKE_MM} − 净空 ${TRANSFER_PLATE_CLEAR_MM}`
-      + ` − 台板 ${TRANSFER_PLATE_THICKNESS_MM} − 杆露出 ${TRANSFER_CYL_ROD_EXPOSED_MM}`
-      + ` − 缸体 ${TRANSFER_CYL_BODY_MM} − 安装板厚 ${TRANSFER_MOUNT_THICKNESS_MM}），请抬高皮带面`;
+    return `皮带面 ${p.beltHeightMm} mm 太低：移载单元的顶升气缸安装板落到 ${mountBottom} mm，离地不足 60 mm；`
+      + `（安装板顶 = 带底 ${beltBottom} − 净空 ${TRANSFER_LIFT_CLEAR_MM} − 行程 ${TRANSFER_LIFT_STROKE_MM}`
+      + ` − 升降架 ${TRANSFER_LIFT_BEAM_MM} − 杆露出 ${TRANSFER_CYL_ROD_EXPOSED_MM} − 缸体 ${TRANSFER_CYL_BODY_MM}），`
+      + '请抬高皮带面';
   }
   return null;
 }
@@ -1095,7 +1168,7 @@ export function transferLayout(params: ConveyorParams): TransferLayout | null {
   const p = normalizeParams(params);
   if (!p.transferPresent) return null;
   if (transferSkipReason(p) !== null) return null;
-  const belts = narrowBeltLayout(p);
+  const belts = transferBeltLayout(p);
   const part = transferPartSize(p);
   const section = p.frameSectionMm;
   const railTop = p.beltHeightMm - p.pulleyDiameterMm;
@@ -1104,129 +1177,142 @@ export function transferLayout(params: ConveyorParams): TransferLayout | null {
   const railOuterY = railCenterY + section / 2;
   const beltBottom = p.beltHeightMm - p.beltThicknessMm;
 
-  const plateHalfWidth = transferPlateHalfWidth(p);
-  const plateHalfLength = TRANSFER_PLATE_LENGTH_MM / 2;
-  const rollerYs = belts.gaps.map((gap) => round(gap));
-  const rollerTopRestZ = p.beltHeightMm - TRANSFER_ROLLER_DROP_MM;
-  const rollerCenterZ = rollerTopRestZ - TRANSFER_ROLLER_DIAMETER_MM / 2;
-
-  // 竖向下推：台板（顶升到位仍低于带底）→ 活塞杆 → 缸体 → 安装板
-  const plateTopZ = beltBottom - TRANSFER_LIFT_STROKE_MM - TRANSFER_PLATE_CLEAR_MM;
-  const plateBottomZ = plateTopZ - TRANSFER_PLATE_THICKNESS_MM;
-  const rodTopZ = plateBottomZ;
-  const cylBodyTopZ = rodTopZ - TRANSFER_CYL_ROD_EXPOSED_MM;
+  const stroke = TRANSFER_LIFT_STROKE_MM;
+  const yBeltLength = transferYBeltLength(belts.gapMm);
+  const yBeltWidth = belts.widthMm;
+  // 竖向叠层（自上而下）：Y 带面 → 带底 → 端滚筒心 → 回程 → 模块底板 → 升降架横梁 → 气缸 → 安装板
+  const yBeltFaceRestZ = p.beltHeightMm - TRANSFER_Y_BELT_DROP_MM;
+  const yBeltFaceLiftZ = yBeltFaceRestZ + stroke;
+  const yPulleyCenterZ = yBeltFaceRestZ - TRANSFER_Y_PULLEY_DIAMETER_MM / 2;
+  const yReturnTopZ = yPulleyCenterZ - TRANSFER_Y_PULLEY_DIAMETER_MM / 2;
+  const yBaseTopZ = yReturnTopZ - TRANSFER_Y_BASE_CLEAR_MM;
+  const yBaseBottomZ = yBaseTopZ - TRANSFER_Y_BASE_THICKNESS_MM;
+  const beamTopZ = beltBottom - TRANSFER_LIFT_CLEAR_MM - stroke;
+  const beamBottomZ = beamTopZ - TRANSFER_LIFT_BEAM_MM;
+  const cylRodTopZ = beamBottomZ;
+  const cylBodyTopZ = cylRodTopZ - TRANSFER_CYL_ROD_EXPOSED_MM;
   const cylBodyBottomZ = cylBodyTopZ - TRANSFER_CYL_BODY_MM;
   const mountTopZ = cylBodyBottomZ;
   const mountBottomZ = mountTopZ - TRANSFER_MOUNT_THICKNESS_MM;
 
-  // 辊子由 φ30 立柱从台板顶托到辊心（台板顶 726 低于辊心 820，中间这段只能走带缝）
-  const postXs: [number, number] = [-(TRANSFER_ROLLER_LENGTH_MM / 2 + TRANSFER_POST_OFFSET_MM),
-    TRANSFER_ROLLER_LENGTH_MM / 2 + TRANSFER_POST_OFFSET_MM];
-  const postCenters: Array<[number, number]> = [];
-  for (const y of rollerYs) {
-    postCenters.push([postXs[0], y], [postXs[1], y]);
-  }
-  const guideX = plateHalfLength - TRANSFER_GUIDE_EDGE_INSET_MM;
-  const guideY = Math.round(Math.max(...belts.gaps.map((gap) => Math.abs(gap))));
+  const unitHalfMm = transferUnitHalfXMm(p);
+  const endRunMm = Math.round(p.lengthMm / 2 - unitHalfMm);
+  const sideBeamX = round(unitHalfMm - 40);
+  const beamLengthMm = 2 * (sideBeamX - TRANSFER_LIFT_BEAM_MM / 2);
+  const beamYs = [0, ...belts.gaps.map((gap) => round(gap))];
+  const sideBeamSpanY = 2 * (Math.abs(belts.gaps[belts.gaps.length - 1] ?? 0) + TRANSFER_LIFT_BEAM_MM / 2);
 
-  const structuralGapMm = transferStructuralGap(p);
-  const pushStrokeMm = transferPushStrokeMm(part.widthMm, structuralGapMm);
-  const minPushStrokeMm = Math.ceil(railOuterY + TRANSFER_DOCK_GAP_MM + part.widthMm / 2);
-
-  // 推板：下沿在顶升后辊面之上 10 mm，静止位停在板外（板进站从推板下面过）
-  const pushPlateBottomZ = rollerTopRestZ + TRANSFER_LIFT_STROKE_MM + TRANSFER_PUSH_PLATE_CLEAR_MM;
-  const pushPlateCenterZ = pushPlateBottomZ + TRANSFER_PUSH_PLATE_HEIGHT_MM / 2;
-  const pushPlateRestY = -(part.widthMm / 2 + TRANSFER_PUSH_PLATE_GAP_MM + TRANSFER_PUSH_PLATE_THICKNESS_MM / 2);
-  const pushPlateEndY = round(pushPlateRestY + pushStrokeMm);
-  const pushCylCenterZ = pushPlateBottomZ + TRANSFER_PUSH_PLATE_HEIGHT_MM + 20 + TRANSFER_PUSH_CYL_MM / 2;
-  const pushCylLengthMm = pushStrokeMm + 2 * TRANSFER_PUSH_CYL_END_MM;
-  const pushCylCenterY = pushPlateRestY - TRANSFER_PUSH_CYL_END_MM + pushCylLengthMm / 2;
-  const pushBeamCenterZ = pushCylCenterZ;
-  const pushColumnHeightMm = pushBeamCenterZ - TRANSFER_PUSH_BEAM_MM / 2;
-  // 机架立柱的 X：既要跨过带宽（width/2 + 20），又**不能站在板的 X 投影里**——
-  // 立柱是从地面立到横梁的实体，板长 1500 时板的两个角正好在 ±620 的立柱平面上，
-  // 板进站/顶升都会被立柱挡住（板件不在几何里，检查器看不见，只能靠这条参数关系保证）。
-  const pushColumnX = Math.max(p.widthMm / 2 + 20, part.lengthMm / 2 + 40);
-  // 移载立柱的 y：推板静止位宽板时会落进纵梁带（y = 带宽/2+15 ~ +55），
-  // 立柱从地面立到 1006，正好穿过纵梁（实测 1200 宽 / 1200 板：立柱×纵梁 2 对确认干涉）。
-  // 落进纵梁带就往外让到纵梁外侧面 +20；气缸体（z ≈ 1000）本来就跨过纵梁，不受影响。
-  const railInnerFaceY = railCenterY - section / 2;
-  const inRailBand = pushPlateRestY < -railInnerFaceY && pushPlateRestY > -railOuterY;
-  const gantryYBase = inRailBand ? -(railOuterY + 20) : pushPlateRestY;
-  // 立柱还必须落在**带缝**里（与辊道/轴承立柱同一口径）：φ30 的柱子从地面直通横梁，
-  // 落在带体上就直接穿过皮带上行程（实测 1200 宽 / 600 板：静止位 y=−330 压进 belt-2，3000 mm³）。
-  // 压带就吸附到最近的带缝中心（带缝 120 > 柱 30，两侧各留 45）。
-  const columnHalf = TRANSFER_PUSH_COLUMN_MM / 2;
-  const onBelt = belts.centers.some(
-    (center) => Math.abs(gantryYBase - center) < belts.widthMm / 2 + columnHalf + 5
-  );
-  const nearestGap = belts.gaps.reduce<number | null>(
-    (best, gap) => (best === null || Math.abs(gap - gantryYBase) < Math.abs(best - gantryYBase) ? gap : best),
-    null
-  );
-  const pushGantryY = onBelt && nearestGap !== null ? nearestGap : gantryYBase;
-
-  const dockWidthMm = Math.max(TRANSFER_DOCK_MIN_WIDTH_MM, part.lengthMm + TRANSFER_DOCK_WIDTH_MARGIN_MM);
-  const dockLengthMm = pushStrokeMm + TRANSFER_DOCK_LENGTH_MARGIN_MM;
-  const dockStartY = round(railOuterY + TRANSFER_DOCK_GAP_MM);
-  const dockRailCenterX = dockWidthMm / 2 + 15 + section / 2;
-  const dockLegHeightMm = railZ - section / 2;
-  const dockRollerCount = 5;
-  const dockRollerSpanStart = dockStartY + 100;
-  const dockRollerSpanEnd = dockStartY + dockLengthMm - 100;
-  const dockRollerYs = Array.from({ length: dockRollerCount }, (_unused, index) => round(
-    dockRollerSpanStart + ((dockRollerSpanEnd - dockRollerSpanStart) * index) / (dockRollerCount - 1)
+  // Y 段：每个带缝 2 段，X 位 ±节距/2
+  const yModuleX = Math.round(belts.pitchMm / 2);
+  const yModules: TransferYBeltModule[] = [];
+  belts.gaps.forEach((gapY, gapIndex) => {
+    for (const side of [-1, 1] as const) {
+      yModules.push({ index: yModules.length + 1, gapIndex, xMm: side * yModuleX, yMm: round(gapY) });
+    }
+  });
+  const yCheekX = Math.round(yBeltWidth / 2 + TRANSFER_Y_CHEEK_THICKNESS_MM / 2);
+  // 同步轴取**每个带缝外侧**那只端滚筒：两侧对称（−330 / +330），
+  // 且离带缝边缘还有 10 mm（内侧那只离边只剩 10 mm，装配/皮带跑偏都不够）
+  const ySyncShaftYs = belts.gaps.map((gap) => round(
+    gap + Math.sign(gap) * (yBeltLength / 2 - TRANSFER_Y_PULLEY_DIAMETER_MM / 2)
   ));
-  const guardBottomZ = p.beltHeightMm + SIDE_GUARD_LIFT_MM;
-  const guardHeightMm = SIDE_GUARD_HEIGHT_MM;
+  const ySyncShaftLengthMm = 2 * (yModuleX + yBeltWidth / 2);
+  const cylXs = [-(beamLengthMm / 2 - 80), beamLengthMm / 2 - 80];
+  const riserHeightMm = yBaseBottomZ - beamTopZ;
+  const riserCenters: Array<[number, number]> = yModules.map((module) => [module.xMm, module.yMm]);
+
+  const hangerOffsetX = round(unitHalfMm - 100);
+  const guideX = round(unitHalfMm - 100);
+  const guideY = Math.round(Math.max(...belts.gaps.map((gap) => Math.abs(gap))));
+  const guideTopZ = beltBottom - TRANSFER_GUIDE_TOP_CLEAR_MM;
+  const mountWidthMm = round(2 * (Math.abs(belts.gaps[belts.gaps.length - 1] ?? 0) + yBeltLength / 2 + 60));
+
+  // 下游接料段：带面 = Y 带出料面（同高，落料无落差）
+  const dockStartY = round(railOuterY + TRANSFER_DOCK_GAP_MM);
+  const dockBeltFaceZ = yBeltFaceLiftZ;
+  const dockPulleyDiameterMm = p.pulleyDiameterMm;
+  const dockPulleyCenterZ = dockBeltFaceZ - dockPulleyDiameterMm / 2;
+  const dockRailTopZ = dockBeltFaceZ - dockPulleyDiameterMm;
+  const dockRailZ = dockRailTopZ - dockPulleyDiameterMm / 2 - section / 2;
+  const structuralGapMm = dockStartY;
+  const pushStrokeMm = transferPushStrokeMm(part.widthMm, dockStartY);
+  const minPushStrokeMm = Math.ceil(dockStartY + part.widthMm / 2);
+  const dockWidthMm = Math.ceil(part.lengthMm + TRANSFER_DOCK_WIDTH_MARGIN_MM);
+  const dockLengthMm = Math.ceil(Math.max(
+    part.widthMm + 200,
+    pushStrokeMm - dockStartY + part.widthMm / 2 + TRANSFER_DOCK_LENGTH_MARGIN_MM
+  ));
+  const dockCenterY = round(dockStartY + dockLengthMm / 2);
+  const dockRailCenterX = round(dockWidthMm / 2 + 15 + section / 2);
+  const dockLegHeightMm = dockRailZ - section / 2;
+  const dockGuardBottomZ = dockBeltFaceZ + TRANSFER_DOCK_GUARD_LIFT_MM;
   const dockSensorCenters: Array<[number, number, number]> = [
-    // 支架底面贴对接段纵梁顶（800），中心 845 → 805..885
-    [round(-dockRailCenterX), round(dockStartY + 80), railTop + 5],
-    [round(-dockRailCenterX), round(dockStartY + dockLengthMm - 160), railTop + 5]
+    // 支架底面贴接料段纵梁顶，中心 +5
+    [round(-dockRailCenterX), round(dockStartY + 80), dockRailTopZ + 5],
+    [round(-dockRailCenterX), round(dockStartY + dockLengthMm - 160), dockRailTopZ + 5]
   ];
 
+  const guardTopZ = p.beltHeightMm + SIDE_GUARD_LIFT_MM + SIDE_GUARD_HEIGHT_MM;
+
   return {
-    strokeMm: TRANSFER_LIFT_STROKE_MM,
-    unitHalfMm: TRANSFER_UNIT_HALF_MM,
+    strokeMm: stroke,
+    unitHalfMm,
+    endRunMm,
     beltCount: belts.count,
     beltWidthMm: belts.widthMm,
     beltGapMm: belts.gapMm,
     beltPitchMm: belts.pitchMm,
     beltCenterYs: belts.centers,
+    beltGapCenterYs: belts.gaps,
     partLengthMm: part.lengthMm,
     partWidthMm: part.widthMm,
     partThicknessMm: part.thicknessMm,
-    // 工件停在带面上（底面 = 带面 850）：不悬空（否则「板能推」是假的），也不埋进带里（否则 rest 就有干涉）
+    // 工件停在 X 带面上（底面 850）：不悬空（否则「板能被托起」是假的），也不埋进带里
     partBottomRestZ: p.beltHeightMm,
     partTopRestZ: p.beltHeightMm + part.thicknessMm,
-    partBottomLiftZ: rollerTopRestZ + TRANSFER_LIFT_STROKE_MM,
-    pushStrokeMm,
-    structuralGapMm,
-    minPushStrokeMm,
-    rollerDiameterMm: TRANSFER_ROLLER_DIAMETER_MM,
-    rollerLengthMm: TRANSFER_ROLLER_LENGTH_MM,
-    rollerCenterZ,
-    rollerTopRestZ,
-    rollerTopLiftZ: rollerTopRestZ + TRANSFER_LIFT_STROKE_MM,
-    rollerYs,
-    postDiameterMm: TRANSFER_POST_DIAMETER_MM,
-    postCenters,
-    postBottomZ: plateTopZ,
-    postTopZ: round(rollerCenterZ),
-    plateLengthMm: TRANSFER_PLATE_LENGTH_MM,
-    plateWidthMm: round(2 * plateHalfWidth),
-    plateThicknessMm: TRANSFER_PLATE_THICKNESS_MM,
-    plateCenterZ: plateBottomZ + TRANSFER_PLATE_THICKNESS_MM / 2,
-    plateTopZ,
-    plateTopLiftZ: plateTopZ + TRANSFER_LIFT_STROKE_MM,
+    partBottomLiftZ: yBeltFaceLiftZ,
+    yBeltCount: yModules.length,
+    yBeltWidthMm: yBeltWidth,
+    yBeltLengthMm: yBeltLength,
+    yBeltRunMm: yBeltLength - 2 * TRANSFER_Y_PULLEY_DIAMETER_MM,
+    yBeltThicknessMm: TRANSFER_Y_BELT_THICKNESS_MM,
+    yBeltDropMm: TRANSFER_Y_BELT_DROP_MM,
+    yBeltFaceRestZ,
+    yBeltFaceLiftZ,
+    yBeltClearanceMm: (belts.gapMm - yBeltLength) / 2,
+    yPulleyDiameterMm: TRANSFER_Y_PULLEY_DIAMETER_MM,
+    yPulleyCenterZ,
+    yReturnTopZ,
+    yBaseTopZ,
+    yBaseBottomZ,
+    yCheekX,
+    yCheekHeightMm: TRANSFER_Y_CHEEK_HEIGHT_MM,
+    yModules,
+    ySyncShaftYs,
+    ySyncShaftLengthMm,
+    ySyncShaftZ: yPulleyCenterZ,
+    yDriveCenters: [
+      [0, round(-(mountWidthMm / 2 - 130)), round(mountBottomZ - 75)],
+      [0, round(mountWidthMm / 2 - 130), round(mountBottomZ - 75)]
+    ],
+    liftBeamMm: TRANSFER_LIFT_BEAM_MM,
+    beamTopZ,
+    beamBottomZ,
+    beamLengthMm,
+    beamYs,
+    sideBeamX,
+    sideBeamSpanY,
+    riserHeightMm,
+    riserCenters,
     cylBodyDiameterMm: TRANSFER_CYL_BODY_DIAMETER_MM,
     cylBodyLengthMm: TRANSFER_CYL_BODY_MM,
     cylBodyCenterZ: (cylBodyBottomZ + cylBodyTopZ) / 2,
     cylRodDiameterMm: TRANSFER_CYL_ROD_DIAMETER_MM,
-    cylRodTopZ: rodTopZ,
-    cylXs: [-200, 200],
-    mountLengthMm: 2 * TRANSFER_UNIT_HALF_MM,
-    mountWidthMm: round(2 * (plateHalfWidth + 90)),
+    cylRodTopZ,
+    cylRodLengthMm: TRANSFER_CYL_ROD_EXPOSED_MM + TRANSFER_CYL_ROD_EMBED_MM,
+    cylXs,
+    mountLengthMm: 2 * unitHalfMm,
+    mountWidthMm,
     mountThicknessMm: TRANSFER_MOUNT_THICKNESS_MM,
     mountCenterZ: (mountBottomZ + mountTopZ) / 2,
     mountTopZ,
@@ -1234,7 +1320,7 @@ export function transferLayout(params: ConveyorParams): TransferLayout | null {
     hangerHeightMm: round(railTop - mountTopZ),
     hangerCenterZ: round((railTop + mountTopZ) / 2),
     hangerCenterY: round(railCenterY - section / 2 - 10),
-    hangerOffsetX: guideX,
+    hangerOffsetX,
     guideDiameterMm: TRANSFER_GUIDE_DIAMETER_MM,
     guideCenters: [
       [-guideX, -guideY],
@@ -1243,68 +1329,60 @@ export function transferLayout(params: ConveyorParams): TransferLayout | null {
       [guideX, guideY]
     ],
     guideBottomZ: mountTopZ,
-    guideTopZ: plateTopZ + TRANSFER_LIFT_STROKE_MM,
-    pushPlateLengthMm: TRANSFER_PUSH_PLATE_LENGTH_MM,
-    pushPlateHeightMm: TRANSFER_PUSH_PLATE_HEIGHT_MM,
-    pushPlateThicknessMm: TRANSFER_PUSH_PLATE_THICKNESS_MM,
-    pushPlateRestY: round(pushPlateRestY),
-    pushPlateEndY,
-    pushPlateCenterZ: round(pushPlateCenterZ),
-    pushCylCenterY: round(pushCylCenterY),
-    pushCylLengthMm,
-    pushCylCenterZ: round(pushCylCenterZ),
-    pushBeamLengthMm: round(2 * pushColumnX),
-    pushBeamCenterZ: round(pushBeamCenterZ),
-    pushBeamY: round(pushGantryY),
-    pushColumnX: round(pushColumnX),
-    pushColumnHeightMm: round(pushColumnHeightMm),
-    pushColumnCenterZ: round(pushColumnHeightMm / 2),
-    pushColumnY: round(pushGantryY),
+    guideTopZ,
+    pushStrokeMm,
+    structuralGapMm,
+    minPushStrokeMm,
     dockWidthMm,
     dockLengthMm,
     dockStartY,
-    dockCenterY: round(dockStartY + dockLengthMm / 2),
-    dockRollerLengthMm: dockWidthMm,
-    dockRollerYs,
-    dockRollerCenterZ: railTop + p.pulleyDiameterMm / 2,
-    dockRailCenterX: round(dockRailCenterX),
-    dockRailZ: railZ,
+    dockCenterY,
+    dockBeltFaceZ,
+    dockBeltWidthMm: dockWidthMm - 100,
+    dockBeltLengthMm: dockLengthMm - 100,
+    dockPulleyDiameterMm,
+    dockPulleyCenterZ,
+    dockPulleyYs: [round(dockStartY + 50), round(dockStartY + dockLengthMm - 50)],
+    dockRailCenterX,
+    dockRailZ,
     dockLegHeightMm,
     dockLegPositions: [
-      [-round(dockRailCenterX), round(dockStartY + 120)],
-      [round(dockRailCenterX), round(dockStartY + 120)],
-      [-round(dockRailCenterX), round(dockStartY + dockLengthMm - 120)],
-      [round(dockRailCenterX), round(dockStartY + dockLengthMm - 120)]
+      [-dockRailCenterX, round(dockStartY + TRANSFER_DOCK_LEG_INSET_MM)],
+      [dockRailCenterX, round(dockStartY + TRANSFER_DOCK_LEG_INSET_MM)],
+      [-dockRailCenterX, round(dockStartY + dockLengthMm - TRANSFER_DOCK_LEG_INSET_MM)],
+      [dockRailCenterX, round(dockStartY + dockLengthMm - TRANSFER_DOCK_LEG_INSET_MM)]
     ],
-    dockGuardHeightMm: guardHeightMm,
-    dockGuardBottomZ: guardBottomZ,
+    dockGuardHeightMm: SIDE_GUARD_HEIGHT_MM,
+    dockGuardBottomZ,
     dockGuardCenterX: round(dockWidthMm / 2 + 3),
     dockStopCenterY: round(dockStartY + dockLengthMm - 30),
-    dockStopHeightMm: 120,
+    dockStopHeightMm: TRANSFER_DOCK_STOP_HEIGHT_MM,
     dockSensorCenters,
-    liftSeconds: transferLiftSeconds(TRANSFER_LIFT_STROKE_MM),
+    liftSeconds: transferLiftSeconds(stroke),
     pushSeconds: transferPushSeconds(pushStrokeMm),
-    actionSeconds: transferActionSeconds(TRANSFER_LIFT_STROKE_MM, pushStrokeMm),
-    // 出料口的三个数：板底 → 挡边顶的间隙、开口半宽。全部进 layout，
-    // 让单测/评审能直接断言「板推得出去」，而不是只靠注释。
-    guardTopZ: guardBottomZ + guardHeightMm,
-    plateBottomLiftZ: rollerTopRestZ + TRANSFER_LIFT_STROKE_MM,
-    plateGuardGapMm: rollerTopRestZ + TRANSFER_LIFT_STROKE_MM - (guardBottomZ + guardHeightMm),
-    outfeedOpenHalfXMm: transferOutfeedOpenHalfXMm(part.lengthMm)
+    actionSeconds: transferActionSeconds(stroke, pushStrokeMm),
+    guardTopZ,
+    plateBottomLiftZ: yBeltFaceLiftZ,
+    plateGuardGapMm: yBeltFaceLiftZ - guardTopZ,
+    outfeedOpenHalfXMm: transferOutfeedOpenHalfXMm(part.lengthMm, unitHalfMm)
   };
 }
 
 /**
- * 顶升移载的零件：安装板 / 吊柱 / 顶升气缸 / 导柱 / 随动台板 / 移载辊道 + 轴承立柱 /
- * 推板（+ 无杆气缸 + 横梁 + 立柱）/ 下游对接段（纵梁 + 输送辊 + 支腿 + 挡边 + 挡停 + 光电）。
+ * 顶升移载的零件：安装板 / 吊柱 / 顶升气缸 / 导向柱 / 升降架（横梁 + 立柱）/ 4 段 Y 短带
+ * （带 + 回程 + 端滚筒 + 底板 + 侧颊）/ 同步轴 + 驱动电机 / 下游接料段
+ * （纵梁 + 皮带 + 滚筒 + 支腿 + 挡边 + 挡停 + 光电）。
+ *
+ * 与上一版的零件差别：辊道 + 轴承立柱 + 推板 + 无杆气缸 + 横梁 + 立柱 全部去掉，
+ * 换成「升降架 + Y 短带模块」—— 这是构型变化，不是改名。
  */
 function buildTransferParts(t: TransferLayout): ConveyorPart[] {
   const parts: ConveyorPart[] = [];
   const liftTag = 'transfer-lift';
-  const pushTag = 'transfer-push';
+  const driveTag = 'transfer-push';
   const dockTag = 'transfer-dock';
 
-  // 1) 安装板：气缸 / 导柱坐在上面，吊在两侧纵梁之间（不占带面）
+  // 1) 安装板：气缸 / 导向柱坐在上面，吊在两侧纵梁之间（不占带面）
   parts.push({
     id: 'transfer-mount-plate',
     name: '移载单元安装板',
@@ -1315,7 +1393,7 @@ function buildTransferParts(t: TransferLayout): ConveyorPart[] {
     transform: { x: 0, y: 0, z: round(t.mountCenterZ), rz: 0 }
   });
 
-  // 2) 吊柱 ×4：从纵梁内侧面吊到安装板（安装板靠它挂在机架上）
+  // 2) 吊柱 ×4：从纵梁内侧面吊到安装板
   for (const [index, x] of [-t.hangerOffsetX, t.hangerOffsetX].entries()) {
     for (const [sub, sign] of [[1, -1], [2, 1]] as const) {
       const id = `transfer-hanger-${index * 2 + sub}`;
@@ -1331,11 +1409,9 @@ function buildTransferParts(t: TransferLayout): ConveyorPart[] {
     }
   }
 
-  // 3) 顶升气缸 ×2：缸体 + 活塞杆（竖直，杆顶顶住随动台板底面）
+  // 3) 顶升气缸 ×2：缸体 + 活塞杆（竖直，杆顶顶住升降架横梁底面）
   for (const [index, x] of t.cylXs.entries()) {
-    const bodyBottomZ = t.cylBodyCenterZ - t.cylBodyLengthMm / 2;
-    const rodBottomZ = bodyBottomZ + t.cylBodyLengthMm / 2;
-    const rodHeight = t.cylRodTopZ - rodBottomZ;
+    const rodBottomZ = t.cylRodTopZ - t.cylRodLengthMm;
     parts.push({
       id: `transfer-lift-cyl-${index + 1}`,
       name: `移载顶升气缸 ${index + 1}`,
@@ -1349,16 +1425,16 @@ function buildTransferParts(t: TransferLayout): ConveyorPart[] {
           `transfer-lift-cyl-${index + 1}-rod`,
           '活塞杆',
           t.cylRodDiameterMm,
-          round(rodHeight),
+          round(t.cylRodLengthMm),
           'z',
           [0, 0, round((rodBottomZ + t.cylRodTopZ) / 2 - t.cylBodyCenterZ)]
         )
       ],
-      transform: { x, y: 0, z: round(t.cylBodyCenterZ), rz: 0 }
+      transform: { x: round(x), y: 0, z: round(t.cylBodyCenterZ), rz: 0 }
     });
   }
 
-  // 4) 导向柱 ×4：从安装板顶到台板顶（台板开 φ26 过孔滑动）
+  // 4) 导向柱 ×4：从安装板顶到带底以下（升降架导套沿它滑动，柱顶不穿带面）
   t.guideCenters.forEach(([x, y], index) => {
     const height = t.guideTopZ - t.guideBottomZ;
     parts.push({
@@ -1373,160 +1449,206 @@ function buildTransferParts(t: TransferLayout): ConveyorPart[] {
     });
   });
 
-  // 5) 随动台板：方形台板，四角开导向过孔；顶升到位仍低于带底（786 < 846）
-  parts.push({
-    id: 'transfer-lift-plate',
-    name: '移载随动台板',
-    material: 'AL6063',
-    spec: `${t.plateLengthMm} × ${Math.round(t.plateWidthMm)} × ${t.plateThicknessMm}，行程 ${t.strokeMm}`,
-    actuatorId: liftTag,
-    features: [
-      box('transfer-lift-plate-body', '台板', t.plateLengthMm, t.plateWidthMm, t.plateThicknessMm),
-      feature('transfer-lift-plate-holes', 'holes', '导向柱过孔', {
-        diameter: t.guideDiameterMm + 4,
-        positions: t.guideCenters
-      })
-    ],
-    transform: { x: 0, y: 0, z: round(t.plateCenterZ), rz: 0 }
-  });
-
-  // 6) 移载辊道：每根辊落在一条带缝中心（φ50 < 带缝 120），静止位辊面比带面低 5 mm
-  t.rollerYs.forEach((y, index) => {
+  // 5) 升降架：3 根沿 X 的横梁（0、±带缝中心）+ 2 根沿 Y 的侧梁。横梁顶 = 带底 − 净空 − 行程，
+  //    顶升到位仍低于带底（840 < 846），所以横梁可以整根跨过带体下方而不穿带。
+  t.beamYs.forEach((y, index) => {
     parts.push({
-      id: `transfer-roller-${index + 1}`,
-      name: `移载辊道辊筒 ${index + 1}`,
-      material: 'STEEL45',
-      // spec 不带本根的 y：BOM 按 name|spec 归并，带上 y 就变成 5 行 qty=1
-      spec: `φ${t.rollerDiameterMm} × ${t.rollerLengthMm}（轴向 X，落在带缝）`,
-      massOverrideKg: 1.4,
+      id: `transfer-lift-beam-x${index + 1}`,
+      name: `移载升降架横梁 ${index + 1}`,
+      material: 'AL6063',
+      spec: `${Math.round(t.beamLengthMm)} × ${t.liftBeamMm} × ${t.liftBeamMm}`,
       actuatorId: liftTag,
-      // 只有筒体：辊轴不再单独建一段——φ20 轴伸出到 ±500，正好穿进 ±420 的轴承立柱，
-      // 实测每对 AABB 重叠 22500 mm³（20×45×25）。轴颈归到轴承立柱这一件里表达。
-      features: [cylinder(`transfer-roller-${index + 1}-body`, '辊筒', t.rollerDiameterMm, t.rollerLengthMm, 'x')],
-      transform: { x: 0, y: round(y), z: round(t.rollerCenterZ), rz: 0 }
+      features: [box(`transfer-lift-beam-x${index + 1}-body`, '横梁', t.beamLengthMm, t.liftBeamMm, t.liftBeamMm)],
+      transform: { x: 0, y: round(y), z: round((t.beamTopZ + t.beamBottomZ) / 2), rz: 0 }
     });
-  });
-
-  // 7) 轴承立柱：每根辊两端各一根，φ30 立在带缝中心，从台板顶托到辊心
-  t.postCenters.forEach(([x, y], index) => {
-    parts.push({
-      id: `transfer-roller-post-${index + 1}`,
-      name: `移载辊道轴承立柱 ${index + 1}`,
-      material: 'STEEL45',
-      spec: `φ${t.postDiameterMm} × ${Math.round(t.postTopZ - t.postBottomZ)}`,
-      massOverrideKg: 0.5,
-      actuatorId: liftTag,
-      features: [
-        cylinder(`transfer-roller-post-${index + 1}-body`, '轴承立柱', t.postDiameterMm, t.postTopZ - t.postBottomZ, 'z')
-      ],
-      transform: { x: round(x), y: round(y), z: round((t.postBottomZ + t.postTopZ) / 2), rz: 0 }
-    });
-  });
-
-  // 8) 推板：沿 +Y 把板推出主线。静止位停在板外（板进站从下面过），
-  //    下沿 925 高于挡边顶 911（= 顶升后辊面 915 + 10），所以整条推出通道在带面之上
-  parts.push({
-    id: 'transfer-push-plate',
-    name: '移载推板',
-    material: 'Q235',
-    spec: `${t.pushPlateLengthMm} × ${t.pushPlateThicknessMm} × ${t.pushPlateHeightMm}，行程 ${t.pushStrokeMm}`,
-    actuatorId: pushTag,
-    features: [box('transfer-push-plate-body', '推板', t.pushPlateLengthMm, t.pushPlateThicknessMm, t.pushPlateHeightMm)],
-    transform: { x: 0, y: round(t.pushPlateRestY), z: round(t.pushPlateCenterZ), rz: 0 }
-  });
-  parts.push({
-    id: 'transfer-push-bracket',
-    name: '移载推板滑座',
-    material: 'Q235',
-    spec: '60 × 50 × 20',
-    actuatorId: pushTag,
-    features: [box('transfer-push-bracket-body', '滑座', 60, 50, 20)],
-    transform: {
-      x: 0,
-      y: round(t.pushPlateRestY),
-      z: round(t.pushPlateCenterZ + t.pushPlateHeightMm / 2 + 10),
-      rz: 0
-    }
-  });
-
-  // 9) 无杆气缸（沿 +Y）+ 两根横梁 + 两根立柱：横梁让开气缸体（±40 以外），
-  //    否则「气缸穿横梁」会被算成待复核对
-  parts.push({
-    id: 'transfer-push-cyl',
-    name: '移载无杆气缸',
-    material: 'Q235',
-    spec: `φ${TRANSFER_PUSH_CYL_MM} × ${Math.round(t.pushCylLengthMm)}，行程 ${t.pushStrokeMm}`,
-    massOverrideKg: 8.5,
-    actuatorId: pushTag,
-    features: [box('transfer-push-cyl-body', '无杆气缸', TRANSFER_PUSH_CYL_MM, t.pushCylLengthMm, TRANSFER_PUSH_CYL_MM)],
-    transform: { x: 0, y: round(t.pushCylCenterY), z: round(t.pushCylCenterZ), rz: 0 }
   });
   for (const [label, sign] of [['left', -1], ['right', 1]] as const) {
-    const half = t.pushBeamLengthMm / 2;
-    const inner = TRANSFER_PUSH_CYL_MM / 2 + 10;
     parts.push({
-      id: `transfer-push-beam-${label}`,
-      name: `移载横梁（${label === 'left' ? '操作侧' : '驱动侧'}）`,
-      material: 'Q235',
-      spec: `${Math.round(half - inner)} × ${TRANSFER_PUSH_BEAM_MM} × ${TRANSFER_PUSH_BEAM_MM}`,
-      actuatorId: pushTag,
-      features: [
-        box(`transfer-push-beam-${label}-body`, '横梁', half - inner, TRANSFER_PUSH_BEAM_MM, TRANSFER_PUSH_BEAM_MM)
-      ],
-      transform: {
-        x: round(sign * (inner + (half - inner) / 2)),
-        y: round(t.pushBeamY),
-        z: round(t.pushBeamCenterZ),
-        rz: 0
-      }
-    });
-    parts.push({
-      id: `transfer-push-column-${label}`,
-      name: `移载立柱（${label === 'left' ? '操作侧' : '驱动侧'}）`,
-      material: 'Q235',
-      spec: `${TRANSFER_PUSH_COLUMN_MM}×${TRANSFER_PUSH_COLUMN_MM} × ${Math.round(t.pushColumnHeightMm)}`,
-      actuatorId: pushTag,
-      features: [
-        box(`transfer-push-column-${label}-body`, '立柱', TRANSFER_PUSH_COLUMN_MM, TRANSFER_PUSH_COLUMN_MM, t.pushColumnHeightMm)
-      ],
-      transform: {
-        x: round(sign * t.pushColumnX),
-        y: round(t.pushColumnY),
-        z: round(t.pushColumnCenterZ),
-        rz: 0
-      }
+      id: `transfer-lift-beam-y-${label}`,
+      name: `移载升降架侧梁（${label === 'left' ? '操作侧' : '驱动侧'}）`,
+      material: 'AL6063',
+      spec: `${Math.round(t.sideBeamSpanY)} × ${t.liftBeamMm} × ${t.liftBeamMm}`,
+      actuatorId: liftTag,
+      features: [box(`transfer-lift-beam-y-${label}-body`, '侧梁', t.liftBeamMm, t.sideBeamSpanY, t.liftBeamMm)],
+      transform: { x: round(sign * t.sideBeamX), y: 0, z: round((t.beamTopZ + t.beamBottomZ) / 2), rz: 0 }
     });
   }
 
-  // 10) 下游对接段（+Y）：纵梁 + 输送辊 + 支腿 + 挡边 + 挡停 + 两只光电支架
+  // 6) 立柱（Y 短带模块 → 升降架）：每段一根，落在带缝中心（φ 与段同宽）
+  t.riserCenters.forEach(([x, y], index) => {
+    parts.push({
+      id: `transfer-lift-riser-${index + 1}`,
+      name: `移载升降架立柱 ${index + 1}`,
+      material: 'Q235',
+      spec: `${t.liftBeamMm}×${t.liftBeamMm} × ${Math.round(t.riserHeightMm)}`,
+      actuatorId: liftTag,
+      features: [box(`transfer-lift-riser-${index + 1}-body`, '立柱', t.liftBeamMm, t.liftBeamMm, t.riserHeightMm)],
+      transform: { x: round(x), y: round(y), z: round(t.beamTopZ + t.riserHeightMm / 2), rz: 0 }
+    });
+  });
+
+  // 7) Y 短带模块 ×4：带（上行程 + 回程）+ 两端滚筒 + 底板 + 两侧颊。
+  //    全部落在带缝里（Y 向 280 < 带缝 300，X 向 100 + 侧颊 12×2 < 300），
+  //    所以顶升全程不碰 X 带、不碰机架 —— 这是「静止位低 25 mm + 顶升 90」能成立的唯一前提。
+  t.yModules.forEach((module) => {
+    const tag = module.index;
+    // 带只画两只端滚筒之间那一段（段长 − 2×φ20）：包进滚筒的部分由「带×滚筒」的装配连接表达，
+    // 不画成一块盖住滚筒的板 —— 那样同步轴会从带里穿过去，AABB 一查就是待复核对。
+    parts.push({
+      id: `transfer-y-belt-${tag}`,
+      name: `移载 Y 向短带上行程 ${tag}`,
+      material: 'PVC',
+      spec: `${Math.round(t.yBeltRunMm)} × ${t.yBeltWidthMm} × ${t.yBeltThicknessMm}（沿 Y，落在带缝）`,
+      actuatorId: liftTag,
+      features: [box(`transfer-y-belt-${tag}-body`, '短带', t.yBeltWidthMm, t.yBeltRunMm, t.yBeltThicknessMm)],
+      transform: { x: round(module.xMm), y: round(module.yMm), z: round(t.yBeltFaceRestZ - t.yBeltThicknessMm / 2), rz: 0 }
+    });
+    parts.push({
+      id: `transfer-y-belt-return-${tag}`,
+      name: `移载 Y 向短带回程 ${tag}`,
+      material: 'PVC',
+      spec: `${Math.round(t.yBeltRunMm)} × ${t.yBeltWidthMm} × ${t.yBeltThicknessMm}`,
+      actuatorId: liftTag,
+      features: [box(`transfer-y-belt-return-${tag}-body`, '回程带', t.yBeltWidthMm, t.yBeltRunMm, t.yBeltThicknessMm)],
+      transform: { x: round(module.xMm), y: round(module.yMm), z: round(t.yReturnTopZ - t.yBeltThicknessMm / 2), rz: 0 }
+    });
+    for (const [side, dy] of [['in', -1], ['out', 1]] as const) {
+      parts.push({
+        id: `transfer-y-pulley-${tag}-${side}`,
+        name: `移载 Y 向短带滚筒 ${tag}（${side === 'in' ? '进料端' : '出料端'}）`,
+        material: 'STEEL45',
+        spec: `φ${t.yPulleyDiameterMm} × ${t.yBeltWidthMm}`,
+        massOverrideKg: 0.3,
+        actuatorId: liftTag,
+        features: [cylinder(
+          `transfer-y-pulley-${tag}-${side}-body`,
+          '端滚筒',
+          t.yPulleyDiameterMm,
+          t.yBeltWidthMm,
+          'x'
+        )],
+        transform: {
+          x: round(module.xMm),
+          y: round(module.yMm + dy * (t.yBeltLengthMm / 2 - t.yPulleyDiameterMm / 2)),
+          z: round(t.yPulleyCenterZ),
+          rz: 0
+        }
+      });
+    }
+    parts.push({
+      id: `transfer-y-base-${tag}`,
+      name: `移载 Y 向短带底板 ${tag}`,
+      material: 'Q235',
+      spec: `${t.yBeltWidthMm} × ${Math.round(t.yBeltLengthMm)} × ${Math.round(t.yBaseTopZ - t.yBaseBottomZ)}`,
+      actuatorId: liftTag,
+      features: [box(
+        `transfer-y-base-${tag}-body`,
+        '短带底板',
+        t.yBeltWidthMm,
+        t.yBeltLengthMm,
+        t.yBaseTopZ - t.yBaseBottomZ
+      )],
+      transform: { x: round(module.xMm), y: round(module.yMm), z: round((t.yBaseTopZ + t.yBaseBottomZ) / 2), rz: 0 }
+    });
+    for (const [label, sign] of [['left', -1], ['right', 1]] as const) {
+      parts.push({
+        id: `transfer-y-cheek-${tag}-${label}`,
+        name: `移载 Y 向短带侧颊 ${tag}（${label === 'left' ? '左' : '右'}）`,
+        material: 'AL6063',
+        spec: `${TRANSFER_Y_CHEEK_THICKNESS_MM} × ${Math.round(t.yBeltLengthMm)} × ${t.yCheekHeightMm}`,
+        actuatorId: liftTag,
+        features: [box(
+          `transfer-y-cheek-${tag}-${label}-body`,
+          '侧颊',
+          TRANSFER_Y_CHEEK_THICKNESS_MM,
+          t.yBeltLengthMm,
+          t.yCheekHeightMm
+        )],
+        transform: {
+          x: round(module.xMm + sign * t.yCheekX),
+          y: round(module.yMm),
+          z: round(t.yBaseTopZ + t.yCheekHeightMm / 2),
+          rz: 0
+        }
+      });
+    }
+  });
+
+  // 8) 同步轴 ×2：沿 X 串起同一带缝的两段 Y 带（同带缝的两段必须同速，否则板会歪）
+  t.ySyncShaftYs.forEach((y, index) => {
+    parts.push({
+      id: `transfer-y-shaft-${index + 1}`,
+      name: `移载 Y 向短带同步轴 ${index + 1}`,
+      material: 'STEEL45',
+      spec: `φ${TRANSFER_Y_SHAFT_DIAMETER_MM} × ${Math.round(t.ySyncShaftLengthMm)}`,
+      massOverrideKg: 0.8,
+      actuatorId: liftTag,
+      features: [cylinder(`transfer-y-shaft-${index + 1}-body`, '同步轴', TRANSFER_Y_SHAFT_DIAMETER_MM, t.ySyncShaftLengthMm, 'x')],
+      transform: { x: 0, y: round(y), z: round(t.ySyncShaftZ), rz: 0 }
+    });
+  });
+
+  // 9) Y 短带驱动电机 ×2：装在固定安装板下方，经伸缩万向轴把动力送到升降架上的同步轴
+  //    （电机不随升降架走：随动的电机电缆+重量在 90 mm 行程上没必要，真机也这么做）
+  t.yDriveCenters.forEach(([x, y, z], index) => {
+    parts.push({
+      id: `transfer-y-motor-${index + 1}`,
+      name: `移载 Y 向短带驱动电机 ${index + 1}`,
+      material: 'Q235',
+      spec: '0.2 kW · i=30 · 输出 60 rpm，经伸缩万向轴驱动',
+      massOverrideKg: 3.6,
+      actuatorId: driveTag,
+      features: [
+        box(`transfer-y-motor-${index + 1}-body`, '电机+减速箱', 160, 120, 140),
+        cylinder(`transfer-y-motor-${index + 1}-shaft`, '输出轴', 20, 60, 'z')
+      ],
+      transform: { x: round(x), y: round(y), z: round(z), rz: 0 }
+    });
+  });
+
+  // 10) 下游接料段（+Y）：带面与 Y 带出料面同高（落料无落差）
   for (const [label, sign] of [['left', -1], ['right', 1]] as const) {
     parts.push({
       id: `dock-rail-${label}`,
-      name: `对接段纵梁（${label === 'left' ? '操作侧' : '驱动侧'}）`,
+      name: `接料段纵梁（${label === 'left' ? '操作侧' : '驱动侧'}）`,
       material: 'AL6063',
       spec: `40×40 × ${Math.round(t.dockLengthMm)}`,
       actuatorId: dockTag,
-      // 对接段沿 +Y 走：型材长边直接给 Y（box 的 length/width/height 就是 X/Y/Z），不靠 rz 转
+      // 接料段沿 +Y 走：型材长边直接给 Y（box 的 length/width/height 就是 X/Y/Z），不靠 rz 转
       features: [box(`dock-rail-${label}-body`, '型材', 40, t.dockLengthMm, 40)],
       transform: { x: round(sign * t.dockRailCenterX), y: round(t.dockCenterY), z: round(t.dockRailZ), rz: 0 }
     });
   }
-  t.dockRollerYs.forEach((y, index) => {
+  for (const [label, z] of [
+    ['top', t.dockBeltFaceZ - t.yBeltThicknessMm / 2],
+    ['return', t.dockPulleyCenterZ - t.dockPulleyDiameterMm / 2 - t.yBeltThicknessMm / 2]
+  ] as const) {
     parts.push({
-      id: `dock-roller-${index + 1}`,
-      name: `对接段输送辊 ${index + 1}`,
-      material: 'STEEL45',
-      spec: `φ50 × ${Math.round(t.dockRollerLengthMm)}`,
-      massOverrideKg: 2.4,
+      id: `dock-belt-${label}`,
+      name: `接料段皮带（${label === 'top' ? '上行程' : '回程'}）`,
+      material: 'PVC',
+      spec: `${Math.round(t.dockBeltLengthMm)} × ${Math.round(t.dockBeltWidthMm)} × ${t.yBeltThicknessMm}`,
       actuatorId: dockTag,
-      features: [cylinder(`dock-roller-${index + 1}-body`, '辊筒', 50, t.dockRollerLengthMm, 'x')],
-      transform: { x: 0, y: round(y), z: round(t.dockRollerCenterZ), rz: 0 }
+      features: [box(`dock-belt-${label}-body`, '皮带', t.dockBeltWidthMm, t.dockBeltLengthMm, t.yBeltThicknessMm)],
+      transform: { x: 0, y: round(t.dockCenterY), z: round(z), rz: 0 }
+    });
+  }
+  t.dockPulleyYs.forEach((y, index) => {
+    parts.push({
+      id: `dock-pulley-${index + 1}`,
+      name: `接料段滚筒 ${index + 1}`,
+      material: 'STEEL45',
+      spec: `φ${t.dockPulleyDiameterMm} × ${Math.round(t.dockBeltWidthMm + 40)}`,
+      massOverrideKg: 3.2,
+      actuatorId: dockTag,
+      features: [cylinder(`dock-pulley-${index + 1}-body`, '滚筒', t.dockPulleyDiameterMm, t.dockBeltWidthMm + 40, 'x')],
+      transform: { x: 0, y: round(y), z: round(t.dockPulleyCenterZ), rz: 0 }
     });
   });
   t.dockLegPositions.forEach(([x, y], index) => {
     parts.push({
       id: `dock-leg-${index + 1}`,
-      name: `对接段支腿 ${index + 1}`,
+      name: `接料段支腿 ${index + 1}`,
       material: 'AL6063',
       spec: `40×40 × ${Math.round(t.dockLegHeightMm)}`,
       actuatorId: dockTag,
@@ -1537,7 +1659,7 @@ function buildTransferParts(t: TransferLayout): ConveyorPart[] {
   for (const [label, sign] of [['left', -1], ['right', 1]] as const) {
     parts.push({
       id: `dock-guard-${label}`,
-      name: `对接段挡边（${label === 'left' ? '左' : '右'}）`,
+      name: `接料段挡边（${label === 'left' ? '左' : '右'}）`,
       material: 'Q235',
       spec: `3 × ${t.dockGuardHeightMm} × ${Math.round(t.dockLengthMm - 60)}`,
       actuatorId: dockTag,
@@ -1552,9 +1674,9 @@ function buildTransferParts(t: TransferLayout): ConveyorPart[] {
   }
   parts.push({
     id: 'dock-stop',
-    name: '对接段挡停板',
+    name: '接料段挡停板',
     material: 'Q235',
-    spec: `${t.dockWidthMm} × 20 × ${t.dockStopHeightMm}`,
+    spec: `${Math.round(t.dockWidthMm)} × 20 × ${t.dockStopHeightMm}`,
     actuatorId: dockTag,
     features: [box('dock-stop-body', '挡停板', t.dockWidthMm, 20, t.dockStopHeightMm)],
     transform: {
@@ -1565,16 +1687,17 @@ function buildTransferParts(t: TransferLayout): ConveyorPart[] {
     }
   });
   t.dockSensorCenters.forEach(([x, y, z], index) => {
+    const tag = index === 0 ? 'inlet' : 'outlet';
     parts.push({
-      id: `dock-sensor-${index === 0 ? 'inlet' : 'outlet'}`,
-      name: `对接段${index === 0 ? '进料' : '到位'}光电支架`,
+      id: `dock-sensor-${tag}`,
+      name: `接料段${index === 0 ? '进料' : '到位'}光电支架`,
       material: 'Q235',
       spec: '40×30×80 + M12 漫反射光电',
       massOverrideKg: 0.8,
       actuatorId: dockTag,
       features: [
-        box(`dock-sensor-${index === 0 ? 'inlet' : 'outlet'}-bracket`, '支架', 40, 30, 80),
-        cylinder(`dock-sensor-${index === 0 ? 'inlet' : 'outlet'}-body`, 'M12 光电', 12, 40, 'y')
+        box(`dock-sensor-${tag}-bracket`, '支架', 40, 30, 80),
+        cylinder(`dock-sensor-${tag}-body`, 'M12 光电', 12, 40, 'y')
       ],
       transform: { x: round(x), y: round(y), z: round(z + 40), rz: 0 }
     });
@@ -1602,8 +1725,14 @@ function buildSingleLayerParts(p: ResolvedConveyorParams): ConveyorPart[] {
   const transfer = transferLayout(p);
   const unitHalfMm = turner?.unitHalfMm ?? transfer?.unitHalfMm ?? 0;
   const hasUnit = turner !== null || transfer !== null;
-  /** 窄带并联布局：只有顶升单元才把单条宽带拆成多条窄带（宽度不够时退回单条） */
-  const narrow = hasUnit ? narrowBeltLayout(p) : null;
+  /**
+   * 窄带并联布局：只有顶升单元才把单条宽带拆成多条窄带（宽度不够时退回单条）。
+   *
+   * 两套口径按机构分：转向工位要「4 折对称指位」→ 6 条 80（narrowBeltLayout）；
+   * 顶升移载要「带缝放得下 Y 短带」→ 3 条 100 / 节距 400（transferBeltLayout）。
+   * 混用会把移载的 Y 段塞进 120 的带缝里（那是 80 宽窄带的缝），几何上根本装不下。
+   */
+  const narrow = turner ? narrowBeltLayout(p) : transfer ? transferBeltLayout(p) : null;
 
   // 1) 两侧纵梁（4040 型材）
   for (const [label, sign] of [['left', -1], ['right', 1]] as const) {
@@ -1840,7 +1969,7 @@ function buildSingleLayerParts(p: ResolvedConveyorParams): ConveyorPart[] {
     }
     // 出料口：单元占位内断开，两段各自留 5 mm 装配缝
     const outerX = halfL - 30;
-    const innerX = transfer === null ? unitHalfMm + 10 : transferOutfeedOpenHalfXMm(transfer.partLengthMm);
+    const innerX = transfer === null ? unitHalfMm + 10 : transfer.outfeedOpenHalfXMm;
     const pieceLength = outerX - innerX;
     if (pieceLength < TRANSFER_OUTFEED_MIN_SEGMENT_MM) continue; // 开口盖满整侧：不留碎段
     for (const [seg, segSign] of [['in', -1], ['out', 1]] as const) {
@@ -2128,7 +2257,7 @@ function normalizeParams(params: Partial<ConveyorParams> | undefined): ResolvedC
   const transferPresent = merged.transferPresent === true || (merged.transferPartWidthMm ?? 0) > 0;
   const transferPartLengthMm = positive(merged.transferPartLengthMm ?? 0, 0);
   const transferPartWidthMm = positive(merged.transferPartWidthMm ?? 0, 0);
-  // 板厚：1–200 mm。上限 200 是为了让「板太厚顶到推板机构」能被干涉检查报出来，
+  // 板厚：1–200 mm。上限 200 是为了让「板太厚顶到接料段挡边/挡停」能被干涉检查报出来，
   // 而不是在参数层被夹成一个看不出来的数。
   const transferPartThicknessMm = clamp(
     positive(merged.transferPartThicknessMm ?? TRANSFER_DEFAULT_PART_THICKNESS_MM, TRANSFER_DEFAULT_PART_THICKNESS_MM),

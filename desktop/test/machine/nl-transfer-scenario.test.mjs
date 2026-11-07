@@ -10,7 +10,8 @@
  *   tf01 必须出移载工位 + transfer-lift(Z) + transfer-push(+Y) + 两个 DO + 两个 DI，且无 turner-*；
  *   tf02 普通输送线不得长出移载；
  *   tf03 「顶升旋转 90° 转向」必须出 turner-lift + turner-rotary（两个意图能区分）；
- *   tf04 带宽 800 < 下限 1080，必须拒建并给出算式，不得静默建成。
+ *   tf04 带宽 500 < 下限 600，必须拒建并给出算式，不得静默建成；
+ *   tf05 线长 6000 超出移载线区间 2400~4000，必须拒建并给出「缩到 3000」的理由。
  */
 
 import assert from 'node:assert/strict';
@@ -26,7 +27,8 @@ import { planTool, routeIntent } from '../../src/agent/router.ts';
 const BRIEF_TRANSFER = '转向输送机，不改变板材方向，顶升后向 90° 方向输送板材，并给下游输送机一个信号';
 const BRIEF_PLAIN = '普通皮带输送线';
 const BRIEF_TURNER = '顶升旋转 90° 转向的输送机，带宽 1200mm，线体长 6000mm';
-const BRIEF_NARROW = '加一个移载工位，带宽 800mm，线体长 6000mm';
+const BRIEF_NARROW = '加一个移载工位，带宽 500mm，线体长 3000mm';
+const BRIEF_TOO_LONG = '加一个移载工位，带宽 1200mm，线体长 6000mm';
 
 /** 模型不可用：AgentSession 按设计回落到离线规则路由（只读工具照常执行）。 */
 const offlineLlm = {
@@ -166,16 +168,26 @@ test('tf03 负向交叉：「顶升旋转 90° 转向」出转向工位，不出
   assert.ok(!config.stations.includes('移载工位'), '转向机型不应有移载工位');
 });
 
-test('tf04 负向：带宽 800 < 移载下限 1080，必须拒建并给算式', async () => {
+test('tf04 负向：带宽 500 < 移载下限 600，必须拒建并给算式', async () => {
   const { config, warnings } = await runSentence(BRIEF_NARROW);
   const ids = axisIds(config);
   assert.ok(!ids.includes('transfer-lift'), `不该静默建成顶升轴：${ids.join(',')}`);
   assert.ok(!ids.includes('transfer-push'), `不该静默建成移载轴：${ids.join(',')}`);
   assert.ok(!config.stations.includes('移载工位'), '不该静默建成移载工位');
-  // 拒建理由必须是算式（1080 = 2×(440 + 80 + 20)），不是一句「已忽略」
+  // 拒建理由必须是算式（3 条窄带按节距 = 带宽/3 排，600 宽时带缝 140），不是一句「已忽略」
   const text = warnings.join('\n');
   assert.match(text, /顶升移载/, '警告没有点名被拒的机构');
-  assert.match(text, /1080/, '拒建理由里没有最小带宽 1080');
-  assert.match(text, /440/, '拒建理由里没有台板半宽下限 440');
-  assert.match(text, /800 mm < 顶升移载所需最小 1080 mm/, `拒建文案不是带宽对比：${text}`);
+  assert.match(text, /600/, '拒建理由里没有最小带宽 600');
+  assert.match(text, /节距 = 带宽\/3/, '拒建理由里没有节距公式');
+  assert.match(text, /带宽 500 mm < 顶升移载所需最小 600 mm/, `拒建文案不是带宽对比：${text}`);
+});
+
+test('tf05 负向：线长 6000 超出移载线区间 2400~4000，必须拒建并说明缩短到 3000', async () => {
+  const { config, warnings } = await runSentence(BRIEF_TOO_LONG);
+  const ids = axisIds(config);
+  assert.ok(!ids.includes('transfer-lift'), `不该静默建成顶升轴：${ids.join(',')}`);
+  assert.ok(!config.stations.includes('移载工位'), '不该静默建成移载工位');
+  const text = warnings.join('\n');
+  assert.match(text, /线体长 6000 mm 超出移载线参数区间 2400~4000 mm/, `拒建文案不对：${text}`);
+  assert.match(text, /这一版构型把机台从 6000 缩到 3000/, '拒建理由要说明这一版构型的机台长度');
 });

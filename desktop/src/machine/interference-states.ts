@@ -14,9 +14,9 @@
  * `turnerLayout()` 按 `TURNER_LIFT_STROKE_MM` 写进 config），这里**不写死 60**。
  * 读不到可顶升轴就返回 `STATE_UNAVAILABLE`，不拿静态位姿冒充 lift。
  *
- * `push`（顶升移载的 +Y 送出）是**复合位姿**：先按顶升轴把随动台板/辊道/推板抬到行程顶，
- * 再按移载轴把推板沿 +Y 推到行程末端。真机就是这个顺序（顶起来再推），
- * 只按 +Y 平移而不顶升会得出一个不存在的位姿（推板会穿带）。没有移载轴时**不产出** push 态
+ * `push`（顶升移载的 +Y 送出）是**复合位姿**：先按顶升轴把升降架 + 4 段 Y 短带抬到行程顶
+ * （板随之离开 X 带），再按移载轴把板沿 +Y 送到行程末端。真机就是这个顺序（顶起来再送），
+ * 只按 +Y 平移而不顶升会得出一个不存在的位姿（板会从 X 带上犁过去）。没有移载轴时**不产出** push 态
  * （不退化成「等于 lift」，那正是 t05 抓到的老毛病），原因写进 `unavailable.push`，整次检查仍算成功
  * —— 否则给一台转向机做四态评审会整条降级成 N/A。
  */
@@ -149,7 +149,7 @@ export interface PushWorstStep {
  * push 是**扫掠态**，不是端点态。
  *
  * 为什么必须扫：板沿 +Y 穿过出料口挡边（挡边是沿 X 的一段墙，板要横穿它）。
- * 端点（y = 1140）板已经在挡边外侧，开口够不够宽根本看不出来 —— 上一轮那个
+ * 端点（y = 1180）板已经在挡边外侧，开口够不够宽根本看不出来 —— 上一轮那个
  * 「挡边扫切板角 2520 mm³」正是只在**中途**才发生。只查端点等于又回到「看起来对」。
  *
  * 为什么**不**把每一点都摊开返回：114 个位姿的完整 summary 会把工具结果顶过 10 KB 上限，
@@ -167,7 +167,7 @@ export interface PushStateSummary extends InterferenceStateSummary {
   hitRange: [number, number] | null;
   /** 最严重的一步；全程干净时为 null */
   worst: PushWorstStep | null;
-  /** 有几个位姿「工件与机构贴面」（板在场证据：板被辊道托着推进） */
+  /** 有几个位姿「工件与机构贴面」（板在场证据：板被 Y 短带托着送出去） */
   workpieceTouchingSamples?: number;
 }
 
@@ -214,7 +214,7 @@ export interface InterferenceWorkpieceInfo {
   name: string;
   /** 长×宽×厚（mm），来自机床参数（缺省 1200×800×35） */
   sizeMm: Vec3;
-  /** rest / lift 两态的工件底面 z（mm）：rest 贴带面，lift 抬到辊面；push = lift 位姿再沿 +Y 平移 */
+  /** rest / lift 两态的工件底面 z（mm）：rest 贴 X 带面，lift 抬到 Y 短带面；push = lift 位姿再沿 +Y 平移 */
   bottomZ: { rest: number; lift: number | null };
   /** push 态沿 +Y 的平移量（mm）；没有移载轴时为 null */
   pushTravelMm: number | null;
@@ -527,7 +527,7 @@ export function shiftParts(
 export function resolvePushAxis(config: unknown, geometry: unknown): LiftAxisInfo | null {
   const actuators = isRecord(config) && Array.isArray(config.actuators) ? config.actuators : [];
   // 先认 id：顶升轴的名字里也带「移载」（移载工位顶升台），只按名字找会把 +Y 轴认成顶升轴，
-  // 于是 push 态变成「顶两次升」——实测 rollers 被抬到 915 撞上推板 400000 mm³。
+  // 于是 push 态变成「顶两次升」——上一版实测 rollers 被抬到 915 撞上推板 400000 mm³。
   const candidates = actuators.filter((item): item is Record<string, unknown> => (
     isRecord(item) && typeof item.id === 'string' && item.kind !== 'rotary' && Number(item.travelMm) > 0
   ));

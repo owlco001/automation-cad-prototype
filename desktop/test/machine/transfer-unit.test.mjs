@@ -1,27 +1,36 @@
-// 顶升移载（直角移载 / right-angle transfer）= 顶升 + 横向辊道 + 推板 + 下游对接段：
-// 需求解析 → 参数化几何 → 两条运动轴 → 四个联锁信号 → 护栏 → 三态+push 干涉 的整链验收。
+// 顶升移载（Y 向短带式直角移载）的整链验收：
+// 需求解析 → 参数化几何（3 条 X 窄带 + 4 段 Y 短带 + 升降架 + 下游接料输送机）→ 两条运动轴 →
+// 四个联锁信号 → 护栏 → 四态（rest/lift/sweep/push）干涉。
 //
-// 口径与 conveyor-turner.test.mjs 一致：这里断言「按尺寸能推出来的东西」，
-// 干涉用 runInterferenceStates（AABB 初筛 + 解析式确认）在 four 个位姿上真跑，
-// 真实 B-Rep 布尔仍由 build123d 内核在 E2E 里做。
+// 构型口径（这一版与上一版的差别）：
+//   上一版：6 条 80 窄带 + 带缝里的辊道 + 推板 + 无杆气缸，线长 6000；
+//   这一版：3 条 100 窄带（节距 400、带缝 300）+ 每个带缝 2 段短 Y 带 + 顶升后 Y 带转动送料，
+//           线长 3000（参数区间 2400~4000）。
+// 干涉口径与 conveyor-turner.test.mjs 一致：AABB 初筛 + 解析式确认，在四个位姿上真跑；
+// 真实 B-Rep 布尔由 build123d 内核在 E2E 里做。
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   SIDE_GUARD_HEIGHT_MM,
+  TRANSFER_BELT_COUNT,
   TRANSFER_LIFT_STROKE_MM,
+  TRANSFER_MAX_LENGTH_MM,
+  TRANSFER_MIN_LENGTH_MM,
+  TRANSFER_MIN_WIDTH_MM,
   TRANSFER_PLATE_GUARD_CLEAR_MM,
+  TRANSFER_Y_BELT_DROP_MM,
   buildConveyorParts,
   conveyorAssembly,
   conveyorBom,
   conveyorEnvelope,
   transferActionSeconds,
+  transferBeltLayout,
   transferLayout,
   transferOutfeedOpenHalfXMm,
-  transferPlateHalfWidth,
   transferPushSeconds,
   transferPushStrokeMm,
   transferSkipReason,
-  transferStructuralGap
+  transferYBeltLength
 } from '../../src/machine/conveyor-assembly.ts';
 import { detectTransfer, parseMachineBrief, detectTurner } from '../../src/machine/spec.ts';
 import { synthMachine } from '../../src/machine/synth.ts';
@@ -36,9 +45,9 @@ import { screenInterference } from '../../src/machine/interference.ts';
 import { resolveMachineGeometry } from '../../src/machine/machine-geometry.ts';
 import { validateFeatures } from '../../src/parametric/features.ts';
 
-/** 主线：6000 × 1200，皮带面 850（与转向工位同一台线体的参数，方便横向对比） */
+/** 主线：3000 × 1200（这一版构型的默认线长），皮带面 850，板 1200×800 */
 const LINE = {
-  lengthMm: 6000,
+  lengthMm: 3000,
   widthMm: 1200,
   beltHeightMm: 850,
   pulleyDiameterMm: 50,
@@ -49,25 +58,24 @@ const LINE = {
   transferPartLengthMm: 1200,
   transferPartWidthMm: 800
 };
-const BRIEF = '光伏板加工输送机：输送 1200×800mm 光伏板，线体长 6000mm、带宽 1200mm，'
+const BRIEF = '光伏板加工输送机：输送 1200×800mm 光伏板，线体长 3000mm、带宽 1200mm，'
   + '需要顶升移载沿 90° 方向把板子送到下游输送线，节拍 6 件/分钟';
 const BELT_FACE = LINE.beltHeightMm; // 850
 const BELT_BOTTOM = LINE.beltHeightMm - LINE.beltThicknessMm; // 846
-const GUARD_TOP = LINE.beltHeightMm + 1 + 60; // 911（挡边下沿 = 带面+1，高 60）
-/** 顶升行程：板底 845+70 = 915 ≥ 挡边顶 911 + 4（旧值 60 时板底 905 比挡边顶低 6 mm） */
-const LIFT_STROKE = 70;
-/** 顶升到位时的板底（= 辊面）；板就压在这上面 */
-const PLATE_BOTTOM_LIFT = BELT_FACE - 5 + LIFT_STROKE; // 915
-const PLATE_TOP_LIFT = 786; // 台板顶 = 带底 846 − 行程 70 − 净空 60 = 716，顶升到位 716+70
+const GUARD_TOP = LINE.beltHeightMm + 1 + SIDE_GUARD_HEIGHT_MM; // 911（挡边下沿 = 带面+1，高 60）
+/** 顶升行程：静止位 Y 带面比 X 带面低 25，板底要越过挡边顶 911 至少 4 → 25+1+60+4 = 90 */
+const LIFT_STROKE = 90;
+/** 顶升到位时的板底（= Y 带面顶升到位 = 挡边顶 + 4） */
+const PLATE_BOTTOM_LIFT = 915;
+/** 升降架横梁顶（静止位）：带底 846 − 净空 6 − 行程 90 */
+const BEAM_TOP = 750;
 
 const layout = transferLayout(LINE);
 const parts = buildConveyorParts(LINE);
-// 关掉移载要同时清掉板宽：板宽 > 0 就是「要移载」（参数化生成器只吃数字参数，
-// 用它当开关，见 model-builders.ts 的 transferPartWidthMm）
+// 关掉移载要同时清掉板宽：板宽 > 0 就是「要移载」（参数化生成器只吃数字参数）
 const plain = buildConveyorParts({ ...LINE, transferPresent: false, transferPartWidthMm: 0, transferPartLengthMm: 0 });
 const byId = (id, list = parts) => list.find((part) => part.id === id);
 const heightOf = (part) => Number(part.features[0].params.height);
-const halfOf = (part) => heightOf(part) / 2;
 
 /** 把移载工位做成 active 机型 config（与 synth.ts 同一套轴/点位），用于位姿化干涉 */
 function transferConfig() {
@@ -110,7 +118,6 @@ test('需求解析：移载意图进结构化字段，且「移载 + 转向」�
   const brief = parseMachineBrief(BRIEF);
   assert.equal(brief.process, 'conveyor');
   assert.deepEqual(brief.transfer, { present: true });
-  // 互斥：同一句话里既有「移载」又有「转向」，只能有一套机构，转向必须被压掉
   assert.equal(brief.turner, undefined, '移载与转向互斥，brief 里不该同时出现 turner');
   const both = parseMachineBrief('顶升移载，直角转向，把板子转 90 度送走');
   assert.deepEqual(both.transfer, { present: true });
@@ -118,167 +125,234 @@ test('需求解析：移载意图进结构化字段，且「移载 + 转向」�
   assert.ok(detectTurner('需要把光伏板旋转 90° 改变方向'), '转向识别本身不能被改坏');
 });
 
-test('几何：窄带并联整条连续（上行不断开），回程在移载单元处让位', () => {
+test('构型①：X 向只 3 条窄带（100 / 节距 400 / 带缝 300），上行整条连续，回程在单元处让位', () => {
   assert.ok(layout);
-  assert.equal(layout.beltCount, 6, '1200 宽 = 6 条 80 窄带（与转向工位同一布局函数）');
-  assert.equal(layout.beltGapMm, 120);
-  assert.equal(layout.unitHalfMm, 520);
-  for (let index = 1; index <= 6; index += 1) {
+  assert.equal(layout.beltCount, 3, '老王构型是 3 条窄带，不是上一版的 6 条');
+  assert.equal(layout.beltWidthMm, 100, '1200 带宽 → 单条 100（节距/4）');
+  assert.equal(layout.beltPitchMm, 400, '节距 = 带宽/3 = 400');
+  assert.equal(layout.beltGapMm, 300, '带缝 = 节距 − 带宽 = 300');
+  assert.deepEqual(layout.beltCenterYs, [-400, 0, 400]);
+  assert.deepEqual(layout.beltGapCenterYs, [-200, 200]);
+  // 带宽变化时按公式算，不写死
+  assert.deepEqual(transferBeltLayout({ ...LINE, widthMm: 1080 }), {
+    count: 3, widthMm: 90, pitchMm: 360, gapMm: 270, centers: [-360, 0, 360], gaps: [-180, 180]
+  });
+  assert.equal(TRANSFER_BELT_COUNT, 3);
+
+  for (let index = 1; index <= 3; index += 1) {
     const top = byId(`belt-${index}`);
     assert.ok(top, `缺少 belt-${index}`);
     assert.equal(Number(top.features[0].params.length), LINE.lengthMm - 40, '上行程必须整条（不为移载断开）');
     assert.equal(top.transform.x, 0);
+    // 三条带必须正好落在 layout 给的带中心上（节距 400）
+    assert.equal(top.transform.y, layout.beltCenterYs[index - 1]);
   }
-  assert.equal(byId('belt-top'), undefined, '移载也走窄带并联，不再用 belt-top');
-  // 回程：单元处让开 2×(520+10)
+  assert.equal(byId('belt-top'), undefined, '移载走 3 条窄带，不再用单条宽带 belt-top');
+  // 每带一套主动/从动滚筒
+  for (let index = 1; index <= 3; index += 1) {
+    assert.ok(byId(`pulley-drive-${index}`) && byId(`pulley-idle-${index}`), `第 ${index} 条带缺滚筒`);
+  }
+  // 回程：单元处让开 2×(620+10)
   const pieceLength = (LINE.lengthMm / 2 - 20) - (layout.unitHalfMm + 10);
   const ret = byId('belt-return-1-in');
   assert.ok(ret, '回程应拆成进出两段');
   assert.equal(Number(ret.features[0].params.length), pieceLength);
-  assert.equal(byId('belt-return-1'), undefined, '回程不能在单元处整条横穿（顶升台板会顶穿它）');
+  assert.equal(byId('belt-return-1'), undefined, '回程不能在单元处整条横穿（升降架会顶穿它）');
 });
 
-test('几何：竖向叠层严格自下而上（安装板→缸体→活塞杆→随动台板），台板顶升后仍低于带底', () => {
+test('构型②：带缝里 4 段短 Y 带（每缝 2 段），段长受带缝限制，静止位带面低 25 mm 不碰板', () => {
   assert.ok(layout);
-  const mount = byId('transfer-mount-plate');
-  const cyl = byId('transfer-lift-cyl-1');
-  const plate = byId('transfer-lift-plate');
-  assert.ok(mount && cyl && plate);
-  const bottom = (part) => part.transform.z - halfOf(part);
-  const top = (part) => part.transform.z + halfOf(part);
+  assert.equal(layout.yBeltCount, 4, '两个带缝 × 每缝 2 段 = 4 段');
+  const perGap = layout.yModules.filter((module) => module.gapIndex === 0);
+  assert.equal(perGap.length, 2, '每个带缝 2 段');
+  assert.deepEqual(layout.yModules.map((module) => [module.xMm, module.yMm]),
+    [[-200, -200], [200, -200], [-200, 200], [200, 200]], '两段分在带缝两侧（±节距/2），落在带缝中心');
+  // 段长 = 带缝 − 2×10 让位；建议值 420 在 300 的带缝里放不下（会伸到 X 带下方，顶升必扫带）
+  assert.equal(layout.yBeltLengthMm, 280);
+  assert.equal(layout.yBeltLengthMm, transferYBeltLength(layout.beltGapMm));
+  assert.equal(layout.yBeltLengthMm, layout.beltGapMm - 20);
+  assert.equal(layout.yBeltClearanceMm, 10, '段端到带缝边缘各留 10 mm');
+  assert.ok(layout.yBeltLengthMm <= layout.beltGapMm,
+    `段长 ${layout.yBeltLengthMm} 必须 ≤ 带缝 ${layout.beltGapMm}：段一旦伸到 X 带下方，顶升 90 时必扫带`);
+  // 带缝够宽时段长才吃满建议值 420
+  assert.equal(transferYBeltLength(440), 420);
+  assert.equal(transferYBeltLength(300), 280);
 
-  assert.equal(top(mount), bottom(cyl), '气缸法兰坐在安装板上（面贴合）');
-  assert.equal(bottom(plate), top(cyl) + 24, '活塞杆露出 24 mm 顶住台板底面');
-  assert.equal(top(plate), 716);
-  assert.equal(layout.plateTopLiftZ, PLATE_TOP_LIFT);
-  assert.ok(layout.plateTopLiftZ < BELT_BOTTOM,
-    `顶升到位台板顶 ${layout.plateTopLiftZ} 必须低于带底 ${BELT_BOTTOM}：整块板升到带面里会顶穿每一条带`);
-  // 导柱：从安装板顶到台板顶，台板开过孔，杆顶不脱出导向
-  assert.equal(layout.guideBottomZ, layout.mountTopZ);
-  assert.equal(layout.guideTopZ, layout.plateTopLiftZ, '导柱顶端 = 台板顶升到位的顶面（仍有整段配合）');
-  const holes = plate.features.find((node) => node.type === 'holes');
-  assert.equal(holes?.params.positions.length, 4);
-  const holeSet = new Set(holes.params.positions.map(([x, y]) => `${x},${y}`));
-  for (const [x, y] of layout.guideCenters) {
-    assert.ok(holeSet.has(`${x},${y}`), `导向柱 (${x},${y}) 没有对应过孔`);
+  // 静止位：Y 带面比 X 带面低 25（板完全压在 X 带上，Y 带不吃力）
+  assert.equal(layout.yBeltFaceRestZ, BELT_FACE - TRANSFER_Y_BELT_DROP_MM);
+  assert.equal(layout.yBeltFaceRestZ, 825);
+  assert.equal(TRANSFER_Y_BELT_DROP_MM, 25);
+  assert.equal(layout.yBeltDropMm, 25);
+
+  // 4 段都在几何里，各段 X 宽 100、Y 长 280，且整段落在带缝里
+  for (const module of layout.yModules) {
+    const belt = byId(`transfer-y-belt-${module.index}`);
+    assert.ok(belt, `缺少 transfer-y-belt-${module.index}`);
+    assert.equal(Number(belt.features[0].params.length), layout.yBeltWidthMm, '短带 X 向宽 = 带缝里的带宽');
+    assert.equal(Number(belt.features[0].params.width), layout.yBeltRunMm, '短带只画两端滚筒之间那段（280 − 2×20 = 240）');
+    assert.equal(belt.transform.y, module.yMm);
+    // 段的 Y 向包络必须留在带缝里：带缝中心 ±150，段 ±140
+    const outer = Math.abs(module.yMm) + layout.yBeltLengthMm / 2;
+    assert.ok(outer <= Math.abs(module.yMm) + layout.beltGapMm / 2,
+      `段 ${module.index} 的 Y 包络 ${outer} 超出带缝`);
+    // 每段两端各一只滚筒 + 底板 + 两侧颊 + 回程
+    assert.ok(byId(`transfer-y-pulley-${module.index}-in`), `第 ${module.index} 段缺进料端滚筒`);
+    assert.ok(byId(`transfer-y-pulley-${module.index}-out`), `第 ${module.index} 段缺出料端滚筒`);
+    assert.ok(byId(`transfer-y-belt-return-${module.index}`), `第 ${module.index} 段缺回程`);
+    assert.ok(byId(`transfer-y-base-${module.index}`), `第 ${module.index} 段缺底板`);
+    assert.ok(byId(`transfer-y-cheek-${module.index}-left`) && byId(`transfer-y-cheek-${module.index}-right`),
+      `第 ${module.index} 段缺侧颊`);
+  }
+  // 同一带缝的两段共一根同步轴（同速，否则板会歪）
+  assert.equal(layout.ySyncShaftYs.length, 2);
+  assert.deepEqual([...layout.ySyncShaftYs].sort((a, b) => a - b), [-330, 330], '两个带缝各一根，取外侧那只端滚筒（对称）');
+  for (const [index, y] of layout.ySyncShaftYs.entries()) {
+    const shaft = byId(`transfer-y-shaft-${index + 1}`);
+    assert.ok(shaft, `缺同步轴 ${index + 1}`);
+    assert.equal(shaft.features[0].params.axis, 'x', '同步轴沿 X 串起同一带缝的两段');
+    assert.equal(shaft.transform.y, y);
+  }
+  // 四段都在同一个升降架上（随顶升轴一起动）
+  assert.equal(layout.riserCenters.length, 4);
+  for (const module of layout.yModules) {
+    assert.equal(byId(`transfer-lift-riser-${module.index}`).transform.x, module.xMm);
+    assert.equal(byId(`transfer-lift-riser-${module.index}`).transform.y, module.yMm);
   }
 });
 
-test('几何：移载辊道全部落在带缝中心，静止位低于带面、顶升后托起板件', () => {
+test('顶升③：行程 90 由挡边顶反推，升降架顶升到位仍低于带底，板底正好在挡边顶 + 4', () => {
   assert.ok(layout);
-  assert.equal(layout.rollerYs.length, layout.beltCount - 1, '每条带缝一根辊，条数 = 带数 − 1');
-  assert.deepEqual(layout.rollerYs, [-400, -200, 0, 200, 400]);
-  assert.equal(layout.rollerDiameterMm, 50);
-  assert.ok(layout.rollerDiameterMm < layout.beltGapMm, `辊径 ${layout.rollerDiameterMm} 必须小于带缝 ${layout.beltGapMm}，否则穿不上来`);
-  assert.equal(layout.rollerTopRestZ, BELT_FACE - 5, '静止位辊面比带面低 5 mm（板完全压在带上）');
-  assert.equal(layout.rollerTopLiftZ, BELT_FACE + 65, '顶升 70 后辊面 915（板底离开带面 65）');
-  assert.equal(layout.rollerTopLiftZ, PLATE_BOTTOM_LIFT);
-  assert.ok(layout.rollerTopLiftZ > BELT_FACE, '顶升后辊面必须在带面之上，否则推不动板');
-  // 辊底也必须在带面之上：辊道要能平移出单元，不能扫带
-  assert.ok(layout.rollerCenterZ + layout.strokeMm - layout.rollerDiameterMm / 2 > BELT_FACE,
-    `顶升到位辊底 ${layout.rollerCenterZ + layout.strokeMm - 25} 必须高于带面 ${BELT_FACE}`);
-  // 每根辊两端各一根轴承立柱，立柱同样落在带缝中心
-  assert.equal(layout.postCenters.length, layout.rollerYs.length * 2);
-  assert.ok(layout.postDiameterMm < layout.beltGapMm, '轴承立柱 φ30 也必须塞进带缝');
-  for (const [, y] of layout.postCenters) {
-    assert.ok(layout.rollerYs.includes(y), `立柱 y=${y} 必须在带缝中心`);
+  // 算式逐项独立复算（不拿 layout 自证）
+  assert.equal(LIFT_STROKE, TRANSFER_Y_BELT_DROP_MM + 1 + SIDE_GUARD_HEIGHT_MM + TRANSFER_PLATE_GUARD_CLEAR_MM);
+  assert.equal(TRANSFER_LIFT_STROKE_MM, 90);
+  assert.equal(layout.strokeMm, 90);
+  assert.equal(layout.yBeltFaceLiftZ, layout.yBeltFaceRestZ + 90, 'Y 带面 825 + 90 = 915');
+  assert.equal(layout.yBeltFaceLiftZ, PLATE_BOTTOM_LIFT);
+  assert.equal(layout.partBottomLiftZ, PLATE_BOTTOM_LIFT, '板底 = Y 带面顶升到位（板由 Y 带托着）');
+  assert.equal(layout.guardTopZ, GUARD_TOP);
+  assert.equal(layout.plateBottomLiftZ, layout.guardTopZ + TRANSFER_PLATE_GUARD_CLEAR_MM);
+  assert.equal(layout.plateGuardGapMm, 4);
+  // 顶升后 Y 带面高于 X 带面（板真的离开了 X 带）
+  assert.ok(layout.yBeltFaceLiftZ > BELT_FACE + 60,
+    `顶升后 Y 带面 ${layout.yBeltFaceLiftZ} 必须明显高于 X 带面 ${BELT_FACE}（板脱开 X 带 65）`);
+  assert.equal(layout.yBeltFaceLiftZ - BELT_FACE, 65, '板离开 X 带 65 = 行程 90 − 静止位低 25');
+  // 升降架：横梁顶 = 带底 − 净空 6 − 行程 90 → 顶升到位仍低于带底 6 mm，全程不穿带
+  assert.equal(layout.beamTopZ, BEAM_TOP);
+  assert.equal(layout.beamTopZ, BELT_BOTTOM - 6 - 90);
+  assert.ok(layout.beamTopZ + layout.strokeMm < BELT_BOTTOM,
+    `横梁顶升到位 ${layout.beamTopZ + layout.strokeMm} 必须 < 带底 ${BELT_BOTTOM}`);
+  assert.equal(layout.beamTopZ + layout.strokeMm, 840);
+  // 导向柱顶不穿带面
+  assert.ok(layout.guideTopZ < BELT_BOTTOM, `导向柱顶 ${layout.guideTopZ} 必须低于带底 ${BELT_BOTTOM}`);
+  assert.equal(layout.guideTopZ, 845);
+  // 台架自下而上：安装板 → 缸体 → 活塞杆 → 升降架
+  assert.ok(layout.mountBottomZ >= 60, `安装板底 ${layout.mountBottomZ} 离地不足 60`);
+  assert.equal(layout.mountTopZ, layout.cylBodyCenterZ - layout.cylBodyLengthMm / 2);
+  assert.equal(layout.cylRodTopZ, layout.beamBottomZ, '活塞杆顶住升降架横梁底面（推力面）');
+});
+
+test('顶升④：四态真跑 —— Y 模块顶升全程不碰 X 带与机架（板块内 90 mm 全行程 0 命中）', () => {
+  // 这一条是「构型②」的结构性前提的数值化验证：Y 段与升降架都落在带缝里，
+  // 顶升 90 时它们扫过的空间里没有 X 带、没有纵梁、没有挡边。
+  const result = runInterferenceStates({ states: ['rest', 'lift', 'sweep'], config: transferConfig() });
+  assert.equal(result.ok, true, JSON.stringify(result).slice(0, 300));
+  const sweep = result.states.sweep;
+  assert.equal(sweep.steps.length, 10, '90 / 10 = 9 步 + 起点 = 10 步');
+  assert.equal(sweep.steps.at(-1).z, 90, 'sweep 必须扫到行程末端 90');
+  assert.equal(sweep.hitSamples ?? 0, 0, `顶升途中有命中位姿：${JSON.stringify(sweep.items.slice(0, 4))}`);
+  for (const step of sweep.steps) {
+    assert.equal(step.confirmedHits, 0, `z=${step.z} 有确认干涉：${JSON.stringify(sweep.items.slice(0, 3))}`);
+    assert.equal(step.screenHits, 0, `z=${step.z} 有待复核对：${JSON.stringify(sweep.items.slice(0, 3))}`);
   }
-  const roller = byId('transfer-roller-1');
-  assert.ok(roller);
-  assert.equal(roller.features[0].params.axis, 'x', '辊轴沿 X（物料沿 +Y 走，轴线必须垂直于行走方向）');
-  assert.equal(Number(roller.features[0].params.diameter), 50);
+  assert.equal(sweep.confirmedHits, 0);
+  assert.equal(sweep.screenHits, 0);
+  // 顶升到位时板底 = Y 带面，板不再压在 X 带上
+  assert.equal(result.workpiece.bottomZ.lift, PLATE_BOTTOM_LIFT);
 });
 
-test('几何：推板在下料侧、下沿高过挡边顶，静止位停在板外', () => {
-  assert.ok(layout);
-  const push = byId('transfer-push-plate');
-  assert.ok(push);
-  const bottomZ = push.transform.z - halfOf(push);
-  const topZ = push.transform.z + halfOf(push);
-  assert.equal(bottomZ, layout.rollerTopRestZ + LIFT_STROKE + 10, '推板下沿 = 顶升后辊面 915 + 10 = 925');
-  assert.ok(bottomZ > GUARD_TOP, `推板下沿 ${bottomZ} 必须高过挡边顶 ${GUARD_TOP}，否则推出时会撞挡边`);
-  assert.ok(topZ > bottomZ);
-  // 静止位：停在板外，板进站（板顶 885）从推板下面过
-  const boardEdge = LINE.transferPartWidthMm / 2;
-  assert.ok(layout.pushPlateRestY < -boardEdge, `推板静止位 ${layout.pushPlateRestY} 必须在板边 −${boardEdge} 之外`);
-  assert.equal(layout.pushPlateEndY, layout.pushPlateRestY + layout.pushStrokeMm);
-  // 行程下限：板尾要整块落到对接段
-  assert.ok(layout.pushStrokeMm >= layout.minPushStrokeMm,
-    `行程 ${layout.pushStrokeMm} 必须 ≥ 板尾离移所需 ${layout.minPushStrokeMm}`);
-  assert.equal(layout.pushStrokeMm, transferPushStrokeMm(layout.partWidthMm, layout.structuralGapMm));
-  assert.equal(layout.pushStrokeMm, 800 + 220 + 120, '行程 = 板宽 + 结构间隙 + 余量 = 1140');
-});
-
-test('几何：下游对接段在 +Y 侧，起点贴纵梁外侧，宽度按板长给', () => {
+test('下游接料⑤：+Y 侧短输送机，带面 = Y 带出料面（915），接口与挡边开口都从参数算', () => {
   assert.ok(layout);
   const railOuterY = LINE.widthMm / 2 + LINE.frameSectionMm + 15; // 655
-  assert.equal(layout.dockStartY, railOuterY + 5, '对接段起点 = 主线纵梁外侧面 + 5 mm 结构间隙');
-  assert.ok(layout.dockStartY > LINE.widthMm / 2, '对接段必须在主线外侧');
-  assert.equal(layout.dockWidthMm, LINE.transferPartLengthMm + 200, '对接段宽度按板长 + 200（板是横着落上去的）');
-  assert.ok(layout.dockWidthMm > LINE.widthMm, '对接段比主线宽（板长 1200 > 带宽 1200 时靠这条保证落料）');
-  assert.ok(layout.dockLengthMm > layout.pushStrokeMm, '对接段要比行程长，留出缓冲');
-  for (const [label] of [['left'], ['right']]) {
-    assert.ok(byId(`dock-rail-${label}`), `缺少 dock-rail-${label}`);
-    assert.ok(byId(`dock-guard-${label}`), `缺少 dock-guard-${label}`);
-  }
-  assert.ok(byId('dock-stop'), '缺挡停板（板会冲出对接段）');
-  assert.ok(byId('dock-sensor-inlet') && byId('dock-sensor-outlet'), '缺传感器支架');
-  assert.equal(parts.filter((part) => /^dock-roller-\d+$/.test(part.id)).length, layout.dockRollerYs.length);
-  // 对接段带面与主线同高（否则落差处会卡板）
-  assert.equal(layout.dockRollerCenterZ + 25, BELT_FACE);
-});
-
-test('几何：出料侧挡边在单元处断开，开口宽度从板长推（≥ 板长 + 40），进料侧整条不断', () => {
+  assert.equal(layout.dockStartY, railOuterY + 5, '接料段起点 = 主线纵梁外侧面 + 5 mm 结构间隙');
+  assert.ok(layout.dockStartY > LINE.widthMm / 2, '接料段必须在主线外侧');
+  // 带面同高：落料无落差（这是「板从 Y 带出料面直接滑到接料段」的唯一前提）
+  assert.equal(layout.dockBeltFaceZ, layout.yBeltFaceLiftZ, '接料段带面必须 = Y 带出料面');
+  assert.equal(layout.dockBeltFaceZ, PLATE_BOTTOM_LIFT);
+  assert.equal(layout.dockPulleyCenterZ + layout.dockPulleyDiameterMm / 2, layout.dockBeltFaceZ);
+  const beltTop = byId('dock-belt-top');
+  assert.ok(beltTop);
+  assert.equal(beltTop.transform.z + Number(beltTop.features[0].params.height) / 2, layout.dockBeltFaceZ);
+  assert.equal(Number(beltTop.features[0].params.width), layout.dockBeltLengthMm);
+  // 宽度按板长给（板是横着过去的），长度要盖住板 + 缓冲
+  assert.equal(layout.dockWidthMm, LINE.transferPartLengthMm + 200);
+  assert.ok(layout.dockLengthMm >= LINE.transferPartWidthMm + 200);
+  assert.ok(layout.dockLengthMm > layout.pushStrokeMm - layout.dockStartY + LINE.transferPartWidthMm / 2,
+    '接料段要长到板能整块落上去');
+  assert.ok(byId('dock-rail-left') && byId('dock-rail-right'), '缺接料段纵梁');
+  assert.equal(parts.filter((part) => /^dock-leg-\d+$/.test(part.id)).length, 4, '接料段 4 条支腿');
+  assert.ok(byId('dock-guard-left') && byId('dock-guard-right'), '缺接料段挡边（板会掉下去）');
+  assert.ok(byId('dock-stop'), '缺挡停板（板会冲出接料段）');
+  assert.ok(byId('dock-sensor-inlet') && byId('dock-sensor-outlet'), '缺到位光电支架');
+  assert.equal(layout.dockPulleyYs.length, 2);
+  // 出料口（+Y 挡边开口）宽度从板长推
+  assert.equal(layout.outfeedOpenHalfXMm, transferOutfeedOpenHalfXMm(LINE.transferPartLengthMm, layout.unitHalfMm));
+  assert.equal(layout.outfeedOpenHalfXMm, LINE.transferPartLengthMm / 2 + 20);
+  assert.ok(layout.outfeedOpenHalfXMm * 2 >= LINE.transferPartLengthMm + 40,
+    `开口总宽 ${layout.outfeedOpenHalfXMm * 2} 必须 ≥ 板长 ${LINE.transferPartLengthMm} + 40`);
   const right = byId('guard-right');
-  assert.equal(right, undefined, '+Y 挡边必须在单元处断开：板要从这条边整块横着出去');
+  assert.equal(right, undefined, '+Y 挡边必须在单元处断开：板要从这条边整块出去');
   assert.ok(byId('guard-right-in') && byId('guard-right-out'), '出料侧挡边应拆成进出两段');
-  const left = byId('guard-left');
-  assert.ok(left, '−Y 侧挡边不该断（板不从这边出去）');
-  assert.equal(Number(left.features[0].params.length), LINE.lengthMm - 60, '−Y 挡边整条');
-
-  // 开口宽度：旧口径写死 ±(unitHalf+10)=±530，板长 1200 每侧差 70 → 板角扫挡边 2520 mm³
-  const openHalf = layout.outfeedOpenHalfXMm;
-  assert.equal(openHalf, LINE.transferPartLengthMm / 2 + 20, '开口半宽 = 板长/2 + 20（总宽 = 板长 + 40）');
-  assert.ok(openHalf * 2 >= LINE.transferPartLengthMm + 40,
-    `开口总宽 ${openHalf * 2} 必须 ≥ 板长 ${LINE.transferPartLengthMm} + 40`);
   const seg = byId('guard-right-in');
   const segLen = Number(seg.features[0].params.length);
-  const segInnerEdge = Math.abs(seg.transform.x) - segLen / 2; // 挡边段的近侧起点
-  assert.equal(segInnerEdge, openHalf, `挡边段必须从 x=±${openHalf} 起，实际 ${segInnerEdge}`);
-  const segOuterEdge = Math.abs(seg.transform.x) + segLen / 2;
-  assert.equal(segOuterEdge, LINE.lengthMm / 2 - 30, '挡边段外端仍是线体端部 −30');
-  // 挡边顶面：板底必须越过它（竖向账见下一条用例）
-  assert.equal(seg.transform.z + Number(seg.features[0].params.height) / 2, GUARD_TOP);
+  assert.equal(Math.abs(seg.transform.x) - segLen / 2, layout.outfeedOpenHalfXMm, '挡边段近侧起点 = 开口边界');
+  assert.ok(byId('guard-left'), '−Y 侧挡边不该断（板不从这边出去）');
+  // 移载行程：板心 → 接料段带面起点 + 余量；下限 = 板尾整块落到接料段
+  assert.equal(layout.pushStrokeMm, transferPushStrokeMm(LINE.transferPartWidthMm, layout.dockStartY));
+  assert.equal(layout.pushStrokeMm, 400 + 660 + 120);
+  assert.equal(layout.minPushStrokeMm, 1060);
+  assert.ok(layout.pushStrokeMm >= layout.minPushStrokeMm);
+  assert.equal(layout.structuralGapMm, layout.dockStartY);
 });
 
-test('运动轴：顶升 Z 70 mm + 移载 +Y 1140 mm，行程/方向都从参数推出来', () => {
+test('运动轴⑥：两条轴（顶升 90 / 移载 1180），零旋转轴，移载轴只搬料不动机构', () => {
   const design = synthMachine(parseMachineBrief(BRIEF));
   assert.deepEqual(design.config.stations, ['工位1', '移载工位']);
   const lift = design.config.actuators.find((actuator) => actuator.id === 'transfer-lift');
   const push = design.config.actuators.find((actuator) => actuator.id === 'transfer-push');
   assert.ok(lift, '缺少 transfer-lift 顶升轴');
   assert.ok(push, '缺少 transfer-push 移载轴');
-  assert.equal(lift.station, '移载工位');
-  assert.equal(push.station, '移载工位');
-  assert.equal(lift.travelMm, LIFT_STROKE, '顶升行程 70：板底 915 要越过挡边顶 911 至少 4 mm');
-  assert.equal(lift.travelMm, layout.strokeMm, 'config 的 travelMm 必须就是几何用的那个行程（一处改一处忘 = 位姿错）');
-  assert.equal(lift.durationMs, 2200, '举升 + 回落两趟共 2.2 s（0.4 + 70/100，再×2）');
+  assert.equal(lift.travelMm, LIFT_STROKE, '顶升 90：板底 915 要越过挡边顶 911 至少 4 mm');
+  assert.equal(lift.travelMm, layout.strokeMm, 'config 的 travelMm 必须就是几何用的那个行程');
+  assert.equal(lift.durationMs, 2600, '举升 + 回落两趟共 2.6 s（0.4 + 90/100，再×2）');
   assert.deepEqual(lift.position, [0, 0, 0.05], '顶升是 Z 向（向上）');
-  assert.equal(push.travelMm, 1140, '移载行程 = 板宽 800 + 结构间隙 220 + 余量 120');
+  assert.equal(push.travelMm, 1180, '移载行程 = 板宽/2 400 + 板心到接料段 660 + 余量 120');
   assert.ok((push.position?.[1] ?? 0) > 0, '移载是 +Y 向');
   assert.equal(push.position?.[0], 0);
   assert.equal(push.kind, 'cylinder', '本域只有 cylinder/gripper/rotary，直线移载借 cylinder 表达');
-  assert.equal(push.durationMs, Math.round(transferPushSeconds(1140) * 1000));
-  // config 里必须带上移载参数，否则整机几何只能回落到普通输送线
-  assert.equal(design.config.conveyor?.transferPresent, true);
-  assert.equal(design.config.conveyor?.transferPartWidthMm, 800);
-  assert.ok(design.assumptions.some((text) => /借用 cylinder 表达直线移载/.test(text)),
-    '借 cylinder 表达直线移载必须在 assumptions 里写明（行程/方向见 travelMm+position）');
-  assert.ok(design.assumptions.some((text) => /移载行程 1140 mm = 板宽 800/.test(text)), '行程算式要写进 assumptions');
-  assert.ok(design.assumptions.length <= 20, `assumptions ${design.assumptions.length} 条超过 20，方案卡会被裁成对象`);
+  // 「板不转」的硬约束：整台机器一条旋转轴都不能有
+  assert.equal(design.config.actuators.filter((actuator) => actuator.kind === 'rotary').length, 0);
+  // 几何里两条轴的动件：顶升带整组升降架 + 4 段短带；移载只带工件（带的转动不改机构位姿）
+  const resolved = resolveMachineGeometry(design.config);
+  const axes = resolved.geometry.moving.filter((axis) => /^transfer-/.test(axis.actuatorId));
+  const liftAxis = axes.find((axis) => axis.actuatorId === 'transfer-lift');
+  const pushAxis = axes.find((axis) => axis.actuatorId === 'transfer-push');
+  assert.ok(liftAxis && pushAxis, `移载两条轴都要进 moving：${axes.map((a) => a.actuatorId).join(',')}`);
+  assert.equal(liftAxis.strokeMm, LIFT_STROKE);
+  for (const module of layout.yModules) {
+    assert.ok(liftAxis.partIds.includes(`transfer-y-belt-${module.index}`), `第 ${module.index} 段短带必须随顶升走`);
+    assert.ok(liftAxis.partIds.includes(`transfer-y-base-${module.index}`));
+  }
+  assert.ok(liftAxis.partIds.includes('transfer-lift-beam-x1'), '升降架随顶升走');
+  assert.equal(liftAxis.partPickupGapMm?.['workpiece-plate'], 25,
+    '拾取空行程 25：Y 带面静止位 825 比带面低 25，板要等带面贴上来才动');
+  assert.deepEqual(pushAxis.axis, [0, 1, 0]);
+  assert.equal(pushAxis.strokeMm, layout.pushStrokeMm);
+  // 这一版移载没有平移机构：轴上只有工件（Y 短带转动搬料）
+  assert.deepEqual(pushAxis.partIds, ['workpiece-plate'],
+    `移载轴不该再带动任何机构件（上一版是推板 + 滑座）：${pushAxis.partIds.join(',')}`);
 });
 
-test('联锁信号：四个信号存在且绑定正确，DO 是扩展点位，PLC 预检 blocked=0', () => {
+test('联锁⑦：四个信号存在且绑定正确，DO 是扩展点位，PLC 预检 blocked=0', () => {
   const design = synthMachine(parseMachineBrief(BRIEF));
   const bound = (point) => design.config.sensors.find((sensor) => sensor.point === point)?.part;
   assert.equal(bound('DI-TRANSFER-END'), 'transfer-push', '移载到位必须绑 transfer-push');
@@ -309,64 +383,60 @@ test('联锁信号：四个信号存在且绑定正确，DO 是扩展点位，PL
   assert.deepEqual(pre.errors, [], `PLC 预检必须 0 错，实际：${JSON.stringify(pre.errors)}`);
 });
 
-test('护栏：带宽不够 / 线体太短 / 行程超限 / 与转向互斥 都拒建并给出数字理由', () => {
-  // 带宽 1000：台板半宽 400 < 440（辊长 800 → 轴承立柱中心 ±420 + 柱半径 15 + 余量 5）
-  const narrow = { ...LINE, widthMm: 1000 };
-  const narrowReason = String(transferSkipReason(narrow));
-  assert.match(narrowReason, /带宽 1000 mm < 顶升移载所需最小 1080 mm/);
-  assert.match(narrowReason, /台板半宽 = min\(440, 带宽\/2 − 窄带 80 − 20\) = 400 mm/);
-  assert.match(narrowReason, /台板半宽必须 ≥ 440 mm/);
-  assert.equal(transferLayout(narrow), null);
-  // 1200 宽是合法的（台板半宽 440 = 上限，正好托住立柱）
+test('护栏⑧：带宽 / 线长（2400~4000）/ 两端输送段 / 行程 / 互斥 都拒建并给数', () => {
+  // 带宽不够：< 600 塞不下 3 条窄带 + 带缝
+  assert.match(String(transferSkipReason({ ...LINE, widthMm: 500 })), /带宽 500 mm < 顶升移载所需最小 600 mm/);
+  assert.equal(TRANSFER_MIN_WIDTH_MM, 600);
+  assert.equal(transferLayout({ ...LINE, widthMm: 500 }), null);
+  // 1200 宽是合法的
   assert.equal(transferSkipReason(LINE), null);
-  // 300 宽连窄带并联都放不下
-  assert.match(String(transferSkipReason({ ...LINE, widthMm: 300 })), /放不下窄带并联/);
-
-  // 线体太短：单元占 X 向 1040，两端各留 300
-  assert.match(String(transferSkipReason({ ...LINE, lengthMm: 1200 })), /放不下移载单元/);
-  assert.equal(transferLayout({ ...LINE, lengthMm: 1200 }), null);
-
-  // 行程上限：板宽 1180（带宽 1200 能压住）→ 1180 + 220 + 120 = 1520，仍合法
-  assert.equal(transferPushStrokeMm(1180, transferStructuralGap(LINE)), 1520);
-  assert.equal(transferSkipReason({ ...LINE, transferPartWidthMm: 1180 }), null);
-  // 更宽的板（1700）在 1200 带宽上本来就压不住 → 先被「板宽 > 带宽」拦下
-  assert.match(String(transferSkipReason({ ...LINE, transferPartWidthMm: 1700 })), /大于带宽/);
-  // 行程护栏是「带宽上限放宽以后」的兜底：当前带宽夹紧在 ≤1200，板宽 ≤1200 →
-  // 行程 ≤ 1200 + 220 + 120 = 1540 < 2000，所以这一条现在打不到；但公式必须能自证边界。
-  assert.equal(transferPushStrokeMm(1200, transferStructuralGap(LINE)), 1540);
-  assert.ok(1540 < 2000, '现有参数范围内行程不会越过直线轴上限');
-  // 1150 的板在 1200 带宽上仍是合法的（行程 1490），护栏不该误伤
-  assert.equal(transferSkipReason({ ...LINE, transferPartWidthMm: 1150 }), null);
-
-  // 与转向互斥
-  const both = { ...LINE, turnerAngleDeg: 90 };
-  assert.match(String(transferSkipReason(both)), /与顶升移载互斥/);
-  assert.equal(transferLayout(both), null);
-  // 立体缓存不加移载
+  // 线长区间：这一版构型把机台缩到 3000，区间 2400~4000
+  assert.equal(TRANSFER_MIN_LENGTH_MM, 2400);
+  assert.equal(TRANSFER_MAX_LENGTH_MM, 4000);
+  assert.match(String(transferSkipReason({ ...LINE, lengthMm: 6000 })), /超出移载线参数区间 2400~4000 mm/);
+  assert.match(String(transferSkipReason({ ...LINE, lengthMm: 6000 })), /这一版构型把机台从 6000 缩到 3000/);
+  assert.match(String(transferSkipReason({ ...LINE, lengthMm: 2000 })), /超出移载线参数区间/);
+  assert.equal(transferLayout({ ...LINE, lengthMm: 6000 }), null);
+  // 区间内两端都合法
+  assert.equal(transferSkipReason({ ...LINE, lengthMm: 2400 }), null);
+  assert.equal(transferSkipReason({ ...LINE, lengthMm: 4000 }), null);
+  // 两端输送段：单元 2×620 + 两端各 ≥300 → 最短 1840（先于区间报出来的是更具体的那条）
+  const tooShort = { ...LINE, lengthMm: 1200 };
+  assert.match(String(transferSkipReason(tooShort)), /放不下移载单元 \+ 两端输送段/);
+  assert.match(String(transferSkipReason(tooShort)), /两端各剩 -20 mm < 300 mm/);
+  assert.equal(transferLayout(tooShort), null);
+  // 板宽超过带宽 → 压不住（先于其它护栏）
+  assert.match(String(transferSkipReason({ ...LINE, transferPartWidthMm: 1300 })), /大于带宽/);
+  // 板太小盖不住 Y 段 → 顶升后板会翘
+  assert.match(String(transferSkipReason({ ...LINE, transferPartWidthMm: 300 })), /投影盖不住 Y 段/);
+  assert.match(String(transferSkipReason({ ...LINE, transferPartLengthMm: 500 })), /投影盖不住 Y 段/);
+  // 与转向互斥 / 立体缓存不加移载
+  assert.match(String(transferSkipReason({ ...LINE, turnerAngleDeg: 90 })), /与顶升移载互斥/);
   assert.match(String(transferSkipReason({ ...LINE, layers: 3 })), /立体缓存/);
-  // 没要求就没有理由（两种开法都认：transferPresent=true 或 板宽>0，见 normalizeParams）
+  // 没要求就没有理由；只给板宽（参数化生成器那条路）也算要移载
   const off = { ...LINE, transferPresent: false, transferPartWidthMm: 0, transferPartLengthMm: 0 };
   assert.equal(transferSkipReason(off), null);
   assert.equal(transferLayout(off), null);
   assert.equal(buildConveyorParts(off).some((part) => part.id.startsWith('transfer-')), false);
-  // 只给板宽（参数化生成器那条路）也算要移载
   assert.ok(transferLayout({ ...LINE, transferPresent: false, transferPartWidthMm: 800 }));
-  // 拒建时警告里必须带算式，不能静默退化成普通输送线
+
+  // 拒建时 warning 必须带算式，不能静默退化成普通输送线
   const design = synthMachine({
     ...parseMachineBrief(BRIEF),
-    conveyor: { lengthMm: 6000, widthMm: 1000, speedMps: null, layers: null, loadKg: null, turner: null }
+    conveyor: { lengthMm: 6000, widthMm: 1200, speedMps: null, layers: null, loadKg: null, turner: null }
   });
   assert.equal(design.config.stations.includes('移载工位'), false);
-  assert.ok(design.warnings.some((text) => /需求要求顶升移载，但本方案不做：带宽 1000 mm/.test(text)),
+  assert.ok(design.warnings.some((text) => /需求要求顶升移载，但本方案不做：线体长 6000 mm 超出移载线参数区间/.test(text)),
     `拒建必须给数字理由，实际 warnings=${JSON.stringify(design.warnings)}`);
 });
 
-test('四态干涉：rest / lift / sweep / push 全部 confirmed=0', () => {
+test('四态⑨：rest / lift / sweep / push 全部 confirmed=0 且待复核=0', () => {
   const result = runInterferenceStates({ states: ['rest', 'lift', 'sweep', 'push'], config: transferConfig() });
   assert.equal(result.ok, true, JSON.stringify(result).slice(0, 300));
   assert.equal(result.geometrySource, 'conveyor-assembly');
+  assert.equal(result.reviewStatus, 'pass');
   assert.equal(result.lift?.actuatorId, 'transfer-lift');
-  assert.equal(result.lift?.strokeMm, LIFT_STROKE, 'lift 态按 config travelMm 平移（70），不是写死的 60');
+  assert.equal(result.lift?.strokeMm, LIFT_STROKE, 'lift 态按 config travelMm 平移（90）');
   assert.equal(result.push?.actuatorId, 'transfer-push', 'push 态必须认移载轴，不能退化成顶升轴');
   assert.equal(result.push?.strokeMm, layout.pushStrokeMm);
   assert.deepEqual(result.push?.direction, [0, 1, 0]);
@@ -378,73 +448,44 @@ test('四态干涉：rest / lift / sweep / push 全部 confirmed=0', () => {
     assert.equal(entry.screenHits, 0, `${name} 态有待复核对：${JSON.stringify(entry.items.slice(0, 4))}`);
     assert.equal(entry.reviewStatus, 'pass', `${name} 态判定应为 pass`);
   }
-  // push 是**复合位姿 + 沿 +Y 扫掠**（先顶升、再逐点推出），不能是「又顶了一次」也不能等于 lift。
-  // 这里用同一个 poseForState 复算，与工具给的数字逐项对齐（扫掠态的 pairs 取单步最大）。
+  // push 是**复合位姿 + 沿 +Y 扫掠**（先顶升、再逐点送出），不是「又顶了一次」
   const geometry = resolveMachineGeometry(transferConfig()).geometry;
   const liftPose = poseForState({ geometry, state: 'lift', lift: result.lift, push: result.push });
   assert.equal(result.states.lift.pairs, screenInterference(liftPose).count, 'lift 态应等于「只顶升」的位姿');
-  const pushEndPose = poseForState({ geometry, state: 'push', lift: result.lift, push: result.push });
-  assert.ok(result.states.push.pairs >= screenInterference(pushEndPose).count,
-    'push 的 pairs 是全程单点最大，必然 ≥ 端点那一手的对数');
-  assert.equal(result.states.push.samples >= 100, true,
-    `push 必须逐点扫过 1140 行程（≥100 点，实际 ${result.states.push.samples}）：只查端点看不出出料口够不够宽`);
+  assert.ok(result.states.push.samples >= 100, `push 必须逐点扫过 1180 行程（实际 ${result.states.push.samples} 点）`);
+  assert.equal(result.states.push.samples, Math.round(layout.pushStrokeMm / 10) + 1);
   assert.equal(result.states.push.hitSamples, 0);
   assert.equal(result.states.push.worst, null);
-  assert.ok(result.push.partIds.includes('transfer-push-plate'), 'push 轴必须包含推板');
-  assert.ok(result.states.sweep.steps.length >= 8, 'sweep 应按 10 mm 逐步扫描 0..70（8 步）');
-  assert.equal(result.states.sweep.steps.at(-1).z, LIFT_STROKE, 'sweep 必须扫到行程末端（70）');
-  // 敏感性对照：push 与 lift 的零件对数相同（推板全程都碰不到东西，这正是设计目标），
-  // 所以必须证明「这套检查确实会因 +Y 平移而报警」，否则 confirmed=0 可能只是「什么都没动」。
-  // 拿一根轴承立柱按同样的 +Y 行程推过去：它会撞进对接段（实测 post × dock-roller）。
-  const wrongPose = shiftParts(liftPose, ['transfer-roller-post-1'], [0, 1, 0], result.push.strokeMm);
+  // 敏感性对照：把 Y 短带模块按 +Y 推出，必须撞到接料段 —— 证明 push 真的在动，不是复制位姿
+  const wrongPose = shiftParts(liftPose, ['transfer-y-belt-1'], [0, 1, 0], result.push.strokeMm);
   const wrongHits = screenInterference(wrongPose).pairs.filter((pair) => pair.classification === 'suspect');
   assert.ok(wrongHits.length > 0,
-    '把轴承立柱按 +Y 推出 1140 必须撞到对接段；撞不到说明 push 态根本没在平移（检查退化成复制位姿）');
-  assert.ok(wrongHits.some((pair) => /^dock-/.test(String(pair.a)) || /^dock-/.test(String(pair.b))),
-    `对照组的命中应落在对接段上：${JSON.stringify(wrongHits.slice(0, 3))}`);
+    '把 Y 短带按 +Y 推出 1180 必须撞到接料段；撞不到说明 push 态根本没在平移');
 });
 
-
-test('多组板宽/带宽都过四态：不是只对 1200/800 这一组调出来的', () => {
-  // 这组参数是踩出来的：1200 宽 / 1200 板（≈板宽=带宽，也是「没给板宽」时的缺省）会把
-  // 推板立柱送进纵梁带 y∈(−655,−615)，立柱×纵梁 2 对确认干涉。修法是把立柱让到纵梁外侧。
+test('多组参数⑩：不同带宽/板尺寸都过四态（不是只对 1200/800 这一组调出来的）', () => {
   const cases = [
-    { widthMm: 1200, partLengthMm: 1200, partWidthMm: 800 },
-    { widthMm: 1200, partLengthMm: 2000, partWidthMm: 1100 },
-    { widthMm: 1200, partLengthMm: 0, partWidthMm: 0 }, // 缺省：板宽=带宽=1200
-    { widthMm: 1100, partLengthMm: 1100, partWidthMm: 700 },
-    { widthMm: 1080, partLengthMm: 1000, partWidthMm: 600 }
+    { lengthMm: 3000, widthMm: 1200, partLengthMm: 1200, partWidthMm: 800 },
+    { lengthMm: 2400, widthMm: 1200, partLengthMm: 1200, partWidthMm: 800 },
+    { lengthMm: 4000, widthMm: 1200, partLengthMm: 1200, partWidthMm: 800 },
+    { lengthMm: 3000, widthMm: 1200, partLengthMm: 1500, partWidthMm: 900 },
+    { lengthMm: 3000, widthMm: 1100, partLengthMm: 1100, partWidthMm: 700 },
+    { lengthMm: 3000, widthMm: 1080, partLengthMm: 1000, partWidthMm: 700 }
   ];
   for (const item of cases) {
-    const params = {
-      lengthMm: 6000,
-      widthMm: item.widthMm,
-      beltHeightMm: 850,
-      pulleyDiameterMm: 50,
-      beltThicknessMm: 4,
-      frameSectionMm: 40,
-      layers: 1,
-      transferPresent: true,
-      transferPartLengthMm: item.partLengthMm,
-      transferPartWidthMm: item.partWidthMm
-    };
+    const params = { ...LINE, ...item, transferPartLengthMm: item.partLengthMm, transferPartWidthMm: item.partWidthMm };
     assert.equal(transferSkipReason(params), null, `${item.widthMm}/${item.partWidthMm} 应可建`);
     const plan = transferLayout(params);
     assert.ok(plan, `${item.widthMm}/${item.partWidthMm} 缺 layout`);
-    // 立柱不能落进纵梁带（会让立柱从地面穿到 1006 直接穿纵梁）
-    const railInner = item.widthMm / 2 + 15;
-    const railOuter = railInner + 40;
-    const gantryY = plan.pushColumnY;
-    const inRailBand = gantryY < -railInner && gantryY > -railOuter;
-    assert.equal(inRailBand, false, `${item.widthMm}/${item.partWidthMm} 立柱 y=${gantryY} 落进纵梁带 (${-railOuter}, ${-railInner})`);
+    // 3 条带 + 4 段短带是常量，带宽只改变尺寸
+    assert.equal(plan.beltCount, 3);
+    assert.equal(plan.yBeltCount, 4);
+    assert.ok(plan.yBeltLengthMm <= plan.beltGapMm);
     const config = {
       ...transferConfig(),
       conveyor: {
-        lengthMm: 6000,
-        widthMm: item.widthMm,
-        transferPresent: true,
-        transferPartLengthMm: item.partLengthMm,
-        transferPartWidthMm: item.partWidthMm
+        lengthMm: item.lengthMm, widthMm: item.widthMm, transferPresent: true,
+        transferPartLengthMm: item.partLengthMm, transferPartWidthMm: item.partWidthMm
       },
       actuators: transferConfig().actuators.map((actuator) => (
         actuator.id === 'transfer-push' ? { ...actuator, travelMm: plan.pushStrokeMm } : actuator
@@ -461,54 +502,62 @@ test('多组板宽/带宽都过四态：不是只对 1200/800 这一组调出来
   }
 });
 
-test('BOM：移载关键件各自成行，数量按几何算', () => {
+test('BOM⑪：移载/接料关键件各自成行，数量按几何算，材质齐全', () => {
   const bom = conveyorBom(parts, {});
   const row = (name) => bom.find((entry) => entry.name === name);
   assert.ok(row('移载单元安装板'), '缺安装板行');
   assert.equal(row('移载顶升气缸')?.qty, 2);
   assert.equal(row('移载导向柱')?.qty, 4);
-  assert.ok(row('移载随动台板'));
-  assert.equal(row('移载辊道辊筒')?.qty, layout.rollerYs.length, '5 根辊归并成一行');
-  assert.equal(row('移载辊道轴承立柱')?.qty, layout.postCenters.length, '10 根立柱归并成一行');
-  assert.ok(row('移载推板'));
-  assert.ok(row('移载无杆气缸'));
-  assert.ok(row('对接段输送辊'));
-  assert.ok(row('对接段挡边') || row('对接段挡边（左）'), '缺对接段挡边行');
-  assert.equal(row('移载单元吊柱')?.qty, 4);
+  assert.ok(row('移载升降架横梁'), '缺升降架横梁行');
+  assert.equal(row('移载 Y 向短带上行程')?.qty, 4, '4 段短带归并成一行');
+  assert.equal(row('移载 Y 向短带上行程')?.qty, layout.yBeltCount);
+  assert.equal(row('移载 Y 向短带滚筒')?.qty, 8, '每段两端各一只');
+  assert.equal(row('移载 Y 向短带同步轴')?.qty, 2);
+  assert.equal(row('移载 Y 向短带驱动电机')?.qty, 2);
+  assert.equal(row('接料段皮带')?.qty, 2, '接料段上行程 + 回程归并成一行（qty 2）');
+  assert.equal(row('接料段挡边')?.qty, 2, '接料段两侧挡边');
+  assert.equal(row('接料段纵梁')?.qty, 2);
+  // 上一版的零件不能再出现在 BOM 里（构型换了，不是改名）
+  for (const gone of ['移载辊道辊筒', '移载辊道轴承立柱', '移载推板', '移载无杆气缸', '移载随动台板']) {
+    assert.equal(row(gone), undefined, `${gone} 属于上一版辊道+推板构型，这一版不该再有`);
+  }
+  // 每件都带 material 与 actuatorId（BOM/排错要能顺着件号找到机构）
+  const unitIds = parts.filter((part) => part.id.startsWith('transfer-') || part.id.startsWith('dock-'));
+  for (const part of unitIds) {
+    assert.ok(['AL6063', 'Q235', 'PVC', 'STEEL45'].includes(part.material), `${part.id} 材质缺失：${part.material}`);
+    assert.match(String(part.actuatorId), /^transfer-(lift|push|dock)$/, `${part.id} 缺 actuatorId`);
+  }
 
   const design = synthMachine(parseMachineBrief(BRIEF));
   const names = design.bomDraft.items.map((item) => item.name).join('|');
   assert.match(names, /移载单元安装板/);
-  assert.match(names, /移载顶升气缸 φ80×56（行程 70）/);
-  assert.match(names, /移载辊道 φ50×800/);
-  assert.match(names, /移载无杆气缸 φ63×1380（行程 1140）/);
-  assert.match(names, /下游对接段辊道 1400×1390/);
+  assert.match(names, /移载顶升气缸 φ80×56（行程 90）/);
+  assert.match(names, /移载 Y 向短带 280×100（4 段，PVC）/);
+  assert.match(names, /下游接料段 1400×1020（带面 915）/);
   assert.match(names, /DO-TRANSFER-READY/);
 });
 
-test('零件数稳定：移载单元件数只随带宽变化，线体加长只加横撑', () => {
-  const transferIds = parts.filter((part) => part.id.startsWith('transfer-') || part.id.startsWith('dock-'));
-  assert.equal(transferIds.length, 50, `移载单元件数应为 50，实际 ${transferIds.length}`);
-  // 每件都带 material 与 actuatorId（BOM/排错要能顺着件号找到机构）
-  for (const part of transferIds) {
-    assert.ok(['AL6063', 'Q235', 'PVC', 'STEEL45'].includes(part.material), `${part.id} 材质缺失：${part.material}`);
-    assert.match(String(part.actuatorId), /^transfer-(lift|push|dock)$/, `${part.id} 缺 actuatorId`);
-  }
-  // 线体加长：只影响横撑/皮带/挡边，移载单元件数不变
-  const longer = buildConveyorParts({ ...LINE, lengthMm: 8000 });
+test('零件数⑫：移载单元件数只随带宽/板尺寸变，线体加长只加横撑', () => {
+  const unitIds = parts.filter((part) => part.id.startsWith('transfer-') || part.id.startsWith('dock-'));
+  assert.equal(unitIds.length, 67, `移载单元 + 接料段件数应为 67，实际 ${unitIds.length}`);
+  assert.equal(layout.yBeltCount * 7, 28, '4 段 × 7 件（带/回程/2 滚筒/底板/2 侧颊）');
+  // 线体加长（区间内）：单元件数不变
+  const longer = buildConveyorParts({ ...LINE, lengthMm: 4000 });
   const longerIds = longer.filter((part) => part.id.startsWith('transfer-') || part.id.startsWith('dock-'));
-  assert.equal(longerIds.length, transferIds.length, '移载单元件数不该随线体长度变化');
+  assert.equal(longerIds.length, unitIds.length, '移载单元件数不该随线体长度变化');
+  assert.ok(longer.length > parts.length, '线体加长只增加横撑');
   assert.ok(parts.length > plain.length, '移载机型零件数必须多于普通线');
   // 特征树合法（交给 build123d 内核前必须过）
   assert.deepEqual(validateFeatures(conveyorAssembly(parts)), []);
-  // 包络：长度不变、+Y 侧多出对接段
+  // 包络：长度不变、+Y 侧多出接料段
   const [len, width, height] = conveyorEnvelope(parts);
-  assert.equal(len, conveyorEnvelope(plain)[0], '移载单元在中段，不把线体拉长');
-  assert.ok(width > conveyorEnvelope(plain)[1] + 1000, `包络宽度 ${width} 应包含 +Y 对接段`);
-  assert.ok(height >= 1058, `包络高度 ${height} 应覆盖推板机架（1058）`);
+  assert.equal(len, LINE.lengthMm, '移载单元在中段，不把线体拉长');
+  assert.equal(len, conveyorEnvelope(plain)[0]);
+  assert.ok(width > conveyorEnvelope(plain)[1] + 1000, `包络宽度 ${width} 应包含 +Y 接料段`);
+  assert.ok(height >= 1000, `包络高度 ${height} 应覆盖接料段挡边/挡停（1036）`);
 });
 
-test('3D：不同材质不同颜色（视口里能分出铝件 / Q235 / 45# 钢 / PVC）', () => {
+test('3D⑬：不同材质不同颜色（视口里能分出铝件 / Q235 / 45# 钢 / PVC）', () => {
   const resolved = resolveMachineGeometry(transferConfig());
   assert.equal(resolved.source, 'conveyor-assembly');
   assert.equal(resolved.assemblyPartCount, parts.length);
@@ -524,262 +573,56 @@ test('3D：不同材质不同颜色（视口里能分出铝件 / Q235 / 45# 钢 
   }
   const allColors = [...byMaterial.values()].map((set) => [...set][0]);
   assert.equal(new Set(allColors).size, allColors.length, '不同材质必须给不同颜色');
-  // 移载两条轴都进了 moving（3D 联动才能动）
-  const axes = resolved.geometry.moving.filter((axis) => /^transfer-/.test(axis.actuatorId));
-  const liftAxis = axes.find((axis) => axis.actuatorId === 'transfer-lift');
-  const pushAxis = axes.find((axis) => axis.actuatorId === 'transfer-push');
-  assert.ok(liftAxis && pushAxis, `移载两条轴都要进 moving：${axes.map((a) => a.actuatorId).join(',')}`);
-  assert.deepEqual(pushAxis.axis, [0, 1, 0]);
-  assert.equal(pushAxis.strokeMm, layout.pushStrokeMm);
-  assert.ok(pushAxis.partIds.includes('transfer-push-plate'));
-  assert.ok(liftAxis.partIds.includes('transfer-lift-plate'));
-  assert.ok(liftAxis.partIds.some((id) => /^transfer-roller-\d+$/.test(id)), '辊道随台板升降');
 });
 
-test('动作时间：顶升 2.2 s + 移载 4.2 s，节拍按工位封顶而不是按线速', () => {
-  assert.equal(transferActionSeconds(60, 1140), 6.2, '纯函数口径不变：给 60 就按 60 算');
-  assert.equal(transferPushSeconds(1140), 4.2, '0.4 起停 + 1140/300');
+test('动作时间⑭：顶升 2.6 s + 送料 4.3 s，节拍按工位封顶而不是按线速', () => {
+  assert.equal(transferActionSeconds(60, 1180), 6.3, '纯函数口径不变：给 60 就按 60 算（2.0 + 4.3）');
+  assert.equal(transferPushSeconds(1180), 4.3, '0.4 起停 + 1180/300');
+  assert.equal(layout.liftSeconds, 2.6);
+  assert.equal(layout.pushSeconds, 4.3);
+  assert.equal(layout.actionSeconds, 6.9);
   const design = synthMachine(parseMachineBrief(BRIEF));
-  // 顶升 70：单趟 0.4 + 70/100 = 1.1 s，往返 2.2 s；+ 移载 4.2 = 6.4 s（旧值 60 → 6.2 s）
-  assert.equal(design.cycle.slowestActionSeconds, 6.4);
-  // 线速 0.2 m/s ÷ 间距 1200 = 10 件/分；移载 60/6.4 = 9.38 件/分 → 取小值
-  assert.equal(design.cycle.throughputPerMin, 9.38);
-  assert.match(design.cycle.bottleneck, /移载工位每件 6\.4 s/);
+  assert.equal(design.cycle.slowestActionSeconds, 6.9);
+  // 线速 0.2 m/s ÷ 间距 1200 = 10 件/分；移载 60/6.9 = 8.7 件/分 → 取小值
+  assert.equal(design.cycle.throughputPerMin, 8.7);
+  assert.match(design.cycle.bottleneck, /移载工位每件 6\.9 s/);
+  assert.ok(design.assumptions.length <= 20, `assumptions ${design.assumptions.length} 条超过 20，方案卡会被裁`);
+  assert.ok(design.assumptions.some((text) => /行程 1180 mm = 板宽\/2 400/.test(text)), '行程算式要写进 assumptions');
+  assert.ok(design.assumptions.some((text) => /Y 短带/.test(text)), '构型要写进 assumptions');
 });
 
 
 // ——————————————————————————————————————————————————————————————
-// 出料口 / 顶升行程（缺陷 1 的回归）：板必须真的能沿 +Y 推出去。
-//
-// 工件（板 1200×800×35）现在是**产品几何的一部分**（machine-geometry 的工件占位体），
-// 随两条移载轴走，四态（rest/lift/sweep/push）都由 runInterferenceStates 真跑。
-// 下面不再往几何里注入任何盒子 —— 注入只能证明「测试会算」，证明不了「产品会查」。
+// 工件（板 1200×800×35）随动：板是**产品几何**的一部分，
+// 四个位姿都由 runInterferenceStates 真跑，不靠测试注入盒子。
 // ——————————————————————————————————————————————————————————————
-
 const WORKPIECE = 'workpiece-plate';
-/** 产品几何里的工件（没有就炸：这台机型必须有板，否则本段断言全是空转） */
-function workpieceOf(geometry) {
-  const part = geometry.parts.find((entry) => entry.role === 'workpiece');
-  assert.ok(part, '产品几何里没有工件占位体：板又回到「只有单测才看得见」的状态');
-  return part;
-}
 
-/** 把指定零件沿坐标轴平移（负向对照用） */
-function shiftById(geometry, ids, delta) {
-  return {
-    ...geometry,
-    parts: geometry.parts.map((part) => (ids.includes(part.id)
-      ? { ...part, center: [part.center[0] + delta[0], part.center[1] + delta[1], part.center[2] + delta[2]] }
-      : part))
-  };
-}
-
-/** 把 +Y 侧挡边两段朝内挪 delta（模拟「出料口开窄了」） */
-function narrowOutfeed(geometry, delta) {
-  return {
-    ...geometry,
-    parts: geometry.parts.map((part) => (part.id === 'guard-right-in' || part.id === 'guard-right-out'
-      ? { ...part, center: [part.center[0] + (part.center[0] < 0 ? delta : -delta), part.center[1], part.center[2]] }
-      : part))
-  };
-}
-
-/** 去掉工件（含两轴的随动登记）：用来证明「新增的板确实在起作用」，不是数字巧合 */
-function withoutWorkpiece(geometry) {
-  return {
-    ...geometry,
-    parts: geometry.parts.filter((part) => part.role !== 'workpiece'),
-    moving: geometry.moving.map((axis) => ({
-      ...axis,
-      partIds: axis.partIds.filter((id) => id !== WORKPIECE),
-      ...(axis.partPickupGapMm ? { partPickupGapMm: {} } : {})
-    }))
-  };
-}
-
-/** 带不同顶升行程的 config（负向对照要能改行程，不改几何） */
-function configWithLiftStroke(strokeMm) {
-  return {
-    ...transferConfig(),
-    actuators: transferConfig().actuators.map((actuator) => (
-      actuator.id === 'transfer-lift' ? { ...actuator, travelMm: strokeMm } : actuator))
-  };
-}
-
-/** push 扫掠里最严重的一步：返回 { at, pairs, mm3, detail }；全程无命中返回 null */
-function worstPushStep(entry) {
-  if (!entry.worst) return null;
-  return {
-    y: entry.worst.at,
-    pairs: entry.worst.confirmedHits,
-    mm3: entry.worst.mm3Confirmed,
-    detail: entry.items.filter((item) => item.kind === 'suspect')
-      .map((item) => `${item.a}×${item.b}=${item.exactOverlapMm3}mm³`)
-  };
-}
-
-test('行程 70 是从挡边顶反推的：板底 915 ≥ 挡边顶 911 + 4，且台板顶/辊底都还在带面正确一侧', () => {
-  assert.ok(layout);
-  // 三个数各自独立算一遍，避免「layout 自己跟自己对」的自证循环
-  assert.equal(layout.guardTopZ, LINE.beltHeightMm + 1 + SIDE_GUARD_HEIGHT_MM, '挡边顶 = 带面 + 1 + 60 = 911');
-  assert.equal(layout.guardTopZ, GUARD_TOP);
-  assert.equal(layout.plateBottomLiftZ, BELT_FACE - 5 + LIFT_STROKE, '板底 = 辊面静止位 845 + 行程 70 = 915');
-  assert.equal(layout.plateBottomLiftZ, PLATE_BOTTOM_LIFT);
-  assert.ok(layout.plateGuardGapMm >= TRANSFER_PLATE_GUARD_CLEAR_MM,
-    `板底 ${layout.plateBottomLiftZ} 与挡边顶 ${layout.guardTopZ} 的间隙 ${layout.plateGuardGapMm} 必须 ≥ ${TRANSFER_PLATE_GUARD_CLEAR_MM}`);
-  assert.equal(layout.plateGuardGapMm, 4);
-  // 行程 = 5（辊面低于带面）+ 1（挡边下沿离带面）+ 60（挡边高）+ 4（间隙）
-  assert.equal(TRANSFER_LIFT_STROKE_MM, 70);
-  assert.equal(layout.strokeMm, TRANSFER_LIFT_STROKE_MM);
-  assert.equal(LIFT_STROKE, TRANSFER_LIFT_STROKE_MM, '测试里的 70 必须等于产品常数（否则测试只是自说自话）');
-  // 旧值 60 时板底 905 < 挡边顶 911，正是这次修的缺陷
-  assert.ok(BELT_FACE - 5 + 60 < GUARD_TOP, '旧行程 60：板底 905 比挡边顶 911 低 6 mm（缺陷复现口径）');
-  // 行程加大后两条硬约束仍成立：台板顶仍低于带底、辊底仍高于带面
-  assert.ok(layout.plateTopLiftZ < BELT_BOTTOM,
-    `台板顶升到位 ${layout.plateTopLiftZ} 必须仍 < 带底 ${BELT_BOTTOM}`);
-  assert.ok(layout.rollerCenterZ + LIFT_STROKE - layout.rollerDiameterMm / 2 > BELT_FACE,
-    `顶升到位辊底 ${layout.rollerCenterZ + LIFT_STROKE - 25} 必须 > 带面 ${BELT_FACE}`);
-});
-
-test('出料口宽度从板长推：800×600 / 1200×800 / 1500×1000 三种板都 ≥ 板长 + 40', () => {
-  for (const [partLengthMm, partWidthMm] of [[800, 600], [1200, 800], [1500, 1000]]) {
-    const params = { ...LINE, transferPartLengthMm: partLengthMm, transferPartWidthMm: partWidthMm };
-    assert.equal(transferSkipReason(params), null, `${partLengthMm}×${partWidthMm} 应可建`);
-    const plan = transferLayout(params);
-    assert.ok(plan, `${partLengthMm}×${partWidthMm} 缺 layout`);
-    // 开口半宽 = 板长/2 + 20（且不小于单元占位 +10：挡边段不该压在单元正上方）
-    assert.equal(plan.outfeedOpenHalfXMm, Math.max(520 + 10, partLengthMm / 2 + 20),
-      `${partLengthMm} 长的板，开口半宽应为 ${Math.max(530, partLengthMm / 2 + 20)}`);
-    assert.equal(plan.outfeedOpenHalfXMm, transferOutfeedOpenHalfXMm(partLengthMm));
-    assert.ok(plan.outfeedOpenHalfXMm * 2 >= partLengthMm + 40,
-      `开口总宽 ${plan.outfeedOpenHalfXMm * 2} 必须 ≥ 板长 ${partLengthMm} + 40`);
-    // 几何里挡边段的近侧起点必须正好落在开口边界上
-    const segParts = buildConveyorParts(params).filter((part) => /^guard-right-(in|out)$/.test(part.id));
-    assert.equal(segParts.length, 2, `${partLengthMm}×${partWidthMm} 出料侧应断成两段`);
-    for (const seg of segParts) {
-      const segLen = Number(seg.features[0].params.length);
-      assert.equal(Math.abs(seg.transform.x) - segLen / 2, plan.outfeedOpenHalfXMm,
-        `${seg.id} 的近侧起点应 = ±${plan.outfeedOpenHalfXMm}`);
-      assert.ok(segLen > 0, `${seg.id} 长度必须为正`);
-    }
-  }
-});
-
-test('三种板尺寸（800×600 / 1200×800 / 1500×1000）四态 confirmed=0 且待复核=0', () => {
-  for (const [partLengthMm, partWidthMm] of [[800, 600], [1200, 800], [1500, 1000]]) {
-    const params = { ...LINE, transferPartLengthMm: partLengthMm, transferPartWidthMm: partWidthMm };
-    const plan = transferLayout(params);
-    const config = {
-      ...transferConfig(),
-      conveyor: {
-        lengthMm: LINE.lengthMm, widthMm: LINE.widthMm, transferPresent: true,
-        transferPartLengthMm: partLengthMm, transferPartWidthMm: partWidthMm
-      },
-      actuators: transferConfig().actuators.map((actuator) => (
-        actuator.id === 'transfer-push' ? { ...actuator, travelMm: plan.pushStrokeMm } : actuator))
-    };
-    const result = runInterferenceStates({ states: ['rest', 'lift', 'sweep', 'push'], config });
-    assert.equal(result.ok, true, `${partLengthMm}×${partWidthMm} 四态检查失败：${JSON.stringify(result).slice(0, 200)}`);
-    // 机架立柱必须站在板的 X 投影之外（板长 1500 > 2×620 时旧口径立柱正在板的两个角上）
-    assert.ok(plan.pushColumnX >= partLengthMm / 2 + 40,
-      `立柱 X ${plan.pushColumnX} 必须 ≥ 板长/2 + 40 = ${partLengthMm / 2 + 40}`);
-    // 立柱还必须落在带缝里：地板→横梁的实体穿过皮带上行程就是 3000 mm³ 级干涉
-    const beltHalf = plan.beltWidthMm / 2 + 15;
-    for (const center of plan.beltCenterYs) {
-      assert.ok(Math.abs(plan.pushColumnY - center) >= beltHalf,
-        `立柱 y=${plan.pushColumnY} 压在带体 y=${center} 上（带半宽 ${plan.beltWidthMm / 2} + 柱半 15）`);
-    }
-    for (const name of ['rest', 'lift', 'sweep', 'push']) {
-      const entry = result.states[name];
-      assert.ok(entry, `${partLengthMm}×${partWidthMm} 缺 ${name} 态`);
-      assert.equal(entry.confirmedHits, 0,
-        `${partLengthMm}×${partWidthMm} ${name} 态确认干涉：${JSON.stringify(entry.items.slice(0, 3))}`);
-      assert.equal(entry.screenHits, 0,
-        `${partLengthMm}×${partWidthMm} ${name} 态待复核：${JSON.stringify(entry.items.slice(0, 3))}`);
-    }
-  }
-});
-
-test('板沿 +Y 全行程扫过全部机构：0 命中（板真的推得出去，不是「推到末端才不撞」）', () => {
-  const config = transferConfig();
-  const result = runInterferenceStates({ states: ['push'], config });
+test('工件随动⑮：板沿 +Y 全行程扫掠 0 命中，且每个位姿都「板在场」', () => {
+  const result = runInterferenceStates({ states: ['push'], config: transferConfig() });
   assert.equal(result.ok, true);
   const push = result.states.push;
-  // 全程 115 点（0..1140 每 10 mm + 末端），逐步都要 0：端点 0 不等于全程 0
   assert.ok(push.samples >= 100, `push 只查了 ${push.samples} 点，扫不过全程`);
-  assert.equal(push.confirmedHits, 0, `板在推出途中撞了：${JSON.stringify(push.items.slice(0, 4))}`);
+  assert.equal(push.confirmedHits, 0, `板在送出途中撞了：${JSON.stringify(push.items.slice(0, 4))}`);
   assert.equal(push.mm3Confirmed, 0);
   assert.equal(push.hitSamples, 0, `有命中的位姿 ${push.hitSamples} 个（${JSON.stringify(push.hitRange)}）`);
   assert.equal(push.worst, null);
-  assert.equal(push.reviewStatus, 'pass');
-  // 「0 命中」必须配上「板真的在场」，否则可能只是没查板
-  assert.ok((push.workpieceTouchingSamples ?? 0) >= 40,
-    `push 全程只有 ${push.workpieceTouchingSamples} 个位姿「板与机构贴面」，说明板没跟着推`);
-});
-
-test('负向对照①：行程 60 + 出料口收窄到 ±530 → 单步 2520 mm³（旧缺陷原样复现）', () => {
+  assert.equal(push.workpieceTouchingSamples, push.samples,
+    `push 全程 ${push.samples} 个位姿里应有同样多的「板与机构贴面」（实际 ${push.workpieceTouchingSamples}）：板坐在 Y 带/接料段带上`);
+  assert.equal(result.workpiece.pushTravelMm, 1180);
+  // 负向对照：把 Y 短带模块整体抬高 40（模拟「静止位没让开」）→ rest 位板压在 Y 带上，必须报出来
   const geometry = resolveMachineGeometry(transferConfig()).geometry;
-  const oldOpen = narrowOutfeed(geometry, 90); // ±620 → ±530（旧 innerX = unitHalf + 10）
-  const result = runInterferenceStates({ states: ['push'], config: configWithLiftStroke(60), geometry: oldOpen });
-  assert.equal(result.ok, true);
-  assert.equal(result.workpiece.bottomZ.lift, 905, '行程 60 时板底只能到 905（比挡边顶 911 低 6 mm）');
-  const worst = worstPushStep(result.states.push);
-  assert.ok(worst, '旧口径必须撞出数字：撞不到说明这套检查看不见板，本用例的 confirmed=0 也不可信');
-  assert.equal(worst.mm3, 2520,
-    `旧口径应为 2×(530..600)=70 × 3（挡边厚）× 6（911−905） = 2520 mm³，实际 ${JSON.stringify(worst)}`);
-  assert.equal(worst.pairs, 2, '两侧挡边各扫一对');
-  assert.equal(worst.detail.filter((text) => /guard-right/.test(text)).length, 2, `命中应落在出料口挡边上：${worst.detail}`);
-  // 可读的 partId + mm³ 必须逐对给出来（这是「错误也要能报」的最小要求）
-  assert.match(worst.detail[0], /guard-right-(in|out)×workpiece-plate=1260mm³/);
-});
-
-test('负向对照②：单参数 40 mm 偏移，检查器都能报 —— 而 4 mm 竖向余量/20 mm 横向余量单独都能顶住', () => {
-  const geometry = resolveMachineGeometry(transferConfig()).geometry;
-  // (a) 只把开口收窄 40/侧（±580）：板底 915 仍在挡边顶 911 之上 4 mm → 0
-  const narrow = narrowOutfeed(geometry, 40);
-  const narrowed = runInterferenceStates({ states: ['rest', 'lift', 'sweep', 'push'], config: transferConfig(), geometry: narrow });
-  assert.equal(narrowed.ok, true);
-  for (const name of ['rest', 'lift', 'sweep', 'push']) {
-    assert.equal(narrowed.states[name].confirmedHits, 0,
-      `只收窄开口 40 mm 时 ${name} 应为 0（4 mm 竖向余量该顶住）：${JSON.stringify(narrowed.states[name].items.slice(0, 3))}`);
-  }
-  // (b) 只把板往下沉 40（875）：板沉进辊道/立柱 → 必须报出 mm³
-  const dropped = shiftById(geometry, [WORKPIECE], [0, 0, -40]);
-  const droppedResult = runInterferenceStates({ states: ['lift'], config: transferConfig(), geometry: dropped });
-  const liftEntry = droppedResult.states.lift;
-  assert.ok(liftEntry.confirmedHits > 0, '板低 40 mm 必须被报出来');
-  assert.ok(liftEntry.mm3Confirmed > 1000, `板低 40 mm 的实体重叠应 >1000 mm³，实际 ${liftEntry.mm3Confirmed}`);
-  assert.ok(liftEntry.items.some((item) => /transfer-roller|post/.test(`${item.a}${item.b}`)),
-    `板下沉应当压在辊道/轴承立柱上：${JSON.stringify(liftEntry.items.slice(0, 3))}`);
-  // (c) 机构件对照（与独立审计同口径）：gearmotor 沿 +Y 偏 40 → 260600 mm³
-  const moved = shiftById(geometry, ['gearmotor'], [0, 40, 0]);
-  const gmHits = screenInterference(moved).pairs.filter((pair) => pair.classification === 'suspect'
-    && pair.confirmation === 'exact');
-  const gmMm3 = gmHits.reduce((sum, pair) => sum + (pair.exactOverlapMm3 ?? 0), 0);
-  assert.equal(gmHits.length, 3, `gearmotor +40Y 应报 3 对，实际 ${gmHits.length}`);
-  assert.equal(gmMm3, 260600, `gearmotor +40Y 应为 260600 mm³，实际 ${gmMm3}`);
-  // (d) 去掉工件后同一组负向对照必须**全部归零**：证明上面的数字来自新增的板，不是机构自己撞自己
-  const stripped = withoutWorkpiece(narrowed.ok ? narrow : geometry);
-  const strippedResult = runInterferenceStates({ states: ['push'], config: configWithLiftStroke(60), geometry: stripped });
-  assert.equal(strippedResult.workpiece, null, '去掉工件后不该再报 workpiece');
-  assert.equal(strippedResult.states.push.confirmedHits, 0, '没有工件时「板扫挡边」不该出现（旧口径看不见板）');
-});
-
-test('行程同步：config.travelMm / 几何轴 strokeMm / layout.strokeMm 三处必须一致（70）', () => {
-  const design = synthMachine(parseMachineBrief(BRIEF));
-  const lift = design.config.actuators.find((actuator) => actuator.id === 'transfer-lift');
-  assert.equal(lift.travelMm, TRANSFER_LIFT_STROKE_MM, 'config 的顶升行程必须取产品常数');
-  const resolved = resolveMachineGeometry(design.config);
-  const axis = resolved.geometry.moving.find((item) => item.actuatorId === 'transfer-lift');
-  assert.equal(axis.strokeMm, TRANSFER_LIFT_STROKE_MM, '几何轴 strokeMm 必须与 config 一致');
-  // 位姿检查真按 70 走：lift 态 = 把动件抬 70 后的位姿
-  const geometry = resolved.geometry;
-  const result = runInterferenceStates({ states: ['lift', 'sweep'], config: design.config });
-  assert.equal(result.lift.strokeMm, 70);
-  const lifted = poseForState({ geometry, state: 'lift', lift: result.lift, push: result.push });
-  assert.equal(result.states.lift.pairs, screenInterference(lifted).count, 'lift 态必须等于「抬 70」的位姿');
-  assert.equal(result.states.sweep.steps.at(-1).z, 70, 'sweep 必须扫到 70（行程末端）');
-  // 三处任一处忘改，板就会被扫：这条断言就是「一处改一处忘」的探针
-  assert.equal(lift.travelMm, axis.strokeMm);
-  assert.equal(axis.strokeMm, transferLayout(LINE).strokeMm);
+  const lifted = {
+    ...geometry,
+    parts: geometry.parts.map((part) => (part.id.startsWith('transfer-y-') && !part.id.startsWith('transfer-y-motor')
+      ? { ...part, center: [part.center[0], part.center[1], part.center[2] + 40] }
+      : part))
+  };
+  const broken = runInterferenceStates({ states: ['rest'], config: transferConfig(), geometry: lifted });
+  assert.ok(broken.states.rest.confirmedHits > 0,
+    'Y 带面抬到 865（高于带面 850）时板必须被判成压在 Y 带上 —— 这说明「静止位低 25」是被检查的，不是注释');
+  assert.ok(broken.states.rest.mm3Confirmed > 1000,
+    `实体重叠应 > 1000 mm³，实际 ${broken.states.rest.mm3Confirmed}`);
+  assert.ok(broken.states.rest.items.some((item) => /workpiece-plate/.test(`${item.a}${item.b}`)),
+    `命中必须落在工件上：${JSON.stringify(broken.states.rest.items.slice(0, 3))}`);
 });

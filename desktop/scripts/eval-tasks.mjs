@@ -65,7 +65,7 @@ const BRIEF_PV =
   '光伏板加工输送机：输送 2000mm 光伏板，线体长 6000mm、带宽 1200mm，需要把光伏板旋转 90° 改变方向，节拍 6 件/分钟';
 /** 顶升移载（直角移载）：t13 的主体——板不转，顶升后沿 +Y 送到下游线并给下游信号。 */
 const BRIEF_TRANSFER =
-  '光伏板加工输送机：输送 1200×800mm 光伏板，线体长 6000mm、带宽 1200mm，'
+  '光伏板加工输送机：输送 1200×800mm 光伏板，线体长 3000mm、带宽 1200mm，'
   + '需要顶升移载沿 90° 方向把板子送到下游输送线，节拍 6 件/分钟';
 /** 移载与下游的四个握手信号（io-map 里必须逐个能看到）。 */
 const TRANSFER_SIGNALS = ['DO-TRANSFER-READY', 'DO-TRANSFER-DONE', 'DI-DOWNSTREAM-ALLOW', 'DI-TRANSFER-END'];
@@ -1337,7 +1337,7 @@ async function caseTransferUnit() {
   const stored = readStoredMachineDesign(h.root, applied.machineId);
   check.eq('落盘机型 id', stored?.id ?? stored?.config?.id, applied.machineId);
 
-  // —— 末态 2：真实参数化整机装配件数（110 = 主线 60 + 移载单元 50）——
+  // —— 末态 2：真实参数化整机装配件数（106 = 3 条窄带主线 39 + 移载单元 52 + 接料段 15）——
   const brief = parseMachineBrief(BRIEF_TRANSFER);
   const conveyorParams = {
     ...conveyorParamsFromBrief(brief.conveyor),
@@ -1348,7 +1348,7 @@ async function caseTransferUnit() {
     transferPartWidthMm: brief.workpiece?.widthMm ?? 0
   };
   const assemblyParts = buildConveyorParts(conveyorParams).length;
-  check.eq('参数化整机零件数 parts', assemblyParts, 110);
+  check.eq('参数化整机零件数 parts', assemblyParts, 106);
 
   // —— 末态 3：io-map 四个握手信号 ——
   const ioMapPath = join(h.root, 'exports', 'plc', applied.machineId, 'io-map.csv');

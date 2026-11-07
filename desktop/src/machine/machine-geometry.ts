@@ -248,28 +248,30 @@ const COLORS = {
 /**
  * 材质 → 颜色：3D 里**不同材质必须不同色**，否则铝型材机架、Q235 加工件、45# 钢导柱
  * 在视口里是同一种灰，看图上分不出「哪件是外购钢件、哪件是铝件」。
- * 取色原则：铝浅（银灰）、Q235 深（钢灰偏蓝）、45# 更亮（亮钢）、PVC 绿（皮带一眼可辨）。
+ * 取色原则：**标识色**——四种材质必须在屏幕上能一眼分开。真实涂装里铝与钢都是灰的，
+ * 那样「不同材质不同颜色」就等于没做（旧色板 AL6063 #b9c4cc 与 STEEL45 #e3eaf0 的
+ * CIE76 色差只有 13.9，肉眼分不出）。改用四组不同色相：铝蓝 / 防锈红棕 / 镀锌黄 / 皮带绿，
+ * 任意两色 ΔE76 ≥ 55（`machine-geometry-colors.test.mjs` 锁死这条下限）。
  * 与 `ConveyorMaterial` 一一对应，新增材质必须在这里给色，否则 type 检查会失败。
  */
-const MATERIAL_COLORS: Record<string, string> = {
-  AL6063: '#b9c4cc',
-  Q235: '#6d7784',
+export const MATERIAL_COLORS: Record<string, string> = {
+  AL6063: '#7fb2e5',
+  Q235: '#b0553a',
   PVC: '#2f7d4f',
-  STEEL45: '#e3eaf0'
+  STEEL45: '#d9c24a'
 };
 
 const SEMANTICS: Array<{ test: RegExp; role: GeomRole; bomGroup: GeomBomGroup; color: string }> = [
   { test: /^dock-sensor-/, role: 'sensor', bomGroup: 'sensor:photoelectric', color: COLORS.sensor },
   { test: /^sensor-|^layer-sensor-/, role: 'sensor', bomGroup: 'sensor:photoelectric', color: COLORS.sensor },
-  // 顶升移载：气缸/推板驱动是执行机构，辊道与轴承立柱是传动件，台板/安装板是结构件
-  { test: /^transfer-lift-cyl-|^transfer-push-cyl$/, role: 'actuator', bomGroup: 'actuator:cylinder', color: COLORS.actuator },
-  { test: /^transfer-roller-|^dock-roller-/, role: 'transfer', bomGroup: 'structure', color: COLORS.transfer },
-  { test: /^transfer-push-plate$|^transfer-push-bracket$/, role: 'fixture', bomGroup: 'structure', color: COLORS.fixture },
+  // 顶升移载：气缸/短带电机是执行机构，Y 短带与接料段皮带/滚筒是传动件，升降架/安装板是结构件
+  { test: /^transfer-lift-cyl-|^transfer-y-motor-/, role: 'actuator', bomGroup: 'actuator:cylinder', color: COLORS.actuator },
+  { test: /^transfer-y-(belt|belt-return|pulley|cheek|shaft)|^dock(?!-sensor)-/, role: 'transfer', bomGroup: 'structure', color: COLORS.transfer },
+  { test: /^transfer-y-base-/, role: 'frame', bomGroup: 'structure', color: COLORS.frame },
   { test: /^turner-lift-cyl-/, role: 'actuator', bomGroup: 'actuator:cylinder', color: COLORS.actuator },
   { test: /^turner-motor$|^gearmotor$|^lift-motor$/, role: 'actuator', bomGroup: 'actuator:rotary', color: COLORS.actuator },
   { test: /^belt-|^pulley-|^tray-roller-/, role: 'transfer', bomGroup: 'structure', color: COLORS.transfer },
-  { test: /^transfer-mount-plate$|^transfer-lift-plate$|^transfer-push-beam-|^transfer-push-column-/, role: 'frame', bomGroup: 'structure', color: COLORS.frame },
-  { test: /^dock-rail-|^dock-leg-/, role: 'frame', bomGroup: 'structure', color: COLORS.frame },
+  { test: /^transfer-mount-plate$|^transfer-lift-beam-|^transfer-lift-riser-|^transfer-hanger-/, role: 'frame', bomGroup: 'structure', color: COLORS.frame },
   { test: /^turner-finger-|^turner-table$|^turner-ring$|^turner-lift-plate$/, role: 'fixture', bomGroup: 'structure', color: COLORS.fixture },
   { test: /^rail-|^leg-|^cross-|^endplate-|^foot-/, role: 'frame', bomGroup: 'structure', color: COLORS.frame },
   { test: /^guard-/, role: 'safety', bomGroup: 'structure', color: COLORS.structure }
@@ -300,32 +302,42 @@ function rotaryPartIds(parts: readonly ConveyorPart[]): string[] {
   return parts.map((part) => part.id).filter((id) => /^turner-table$|^turner-ring$|^turner-finger-\d+$/.test(id));
 }
 
-/** 顶升随动件（移载）：随动台板 + 移载辊道 + 轴承立柱 + 活塞杆。 */
+/** 顶升随动件（移载）：升降架（横梁/侧梁/立柱）+ 4 段 Y 短带（带/回程/端滚筒/底板/侧颊）+ 同步轴 + 活塞杆。 */
 function transferLiftPartIds(parts: readonly ConveyorPart[]): string[] {
   return parts
     .map((part) => part.id)
-    .filter((id) => /^transfer-lift-plate$|^transfer-roller-\d+$|^transfer-roller-post-\d+$|^transfer-lift-cyl-\d+$/.test(id))
+    // 升降架上的一切都随顶升轴走：横梁/侧梁/立柱 + 4 段 Y 短带（带/回程/端滚筒/底板/侧颊）+ 同步轴 + 活塞杆
+    .filter((id) => /^transfer-lift-(beam-x\d+|beam-y-(left|right)|riser-\d+|cyl-\d+)$/.test(id)
+      || /^transfer-y-(belt|belt-return|base)-\d+$/.test(id)
+      || /^transfer-y-pulley-\d+-(in|out)$/.test(id)
+      || /^transfer-y-cheek-\d+-(left|right)$/.test(id)
+      || /^transfer-y-shaft-\d+$/.test(id))
     // 气缸只取活塞杆（拆件后的 `<件号>-rod`）：缸体固定在安装板上
     .flatMap((id) => (/^transfer-lift-cyl-\d+$/.test(id) ? [`${id}-rod`] : [id]));
 }
 
-/** 移载随动件（+Y）：推板与它的小滑座。辊道只转不平移，所以不在这条轴里。 */
-function transferPushPartIds(parts: readonly ConveyorPart[]): string[] {
-  return parts.map((part) => part.id).filter((id) => /^transfer-push-plate$|^transfer-push-bracket$/.test(id));
+/**
+ * 移载随动件（+Y）：这一版移载**没有平移机构** —— 板是被 4 段 Y 短带的摩擦力搬走的，
+ * 带的转动不改变任何机台零件的位姿。所以这条轴在几何里只带工件本身
+ * （工件由 conveyorMovingAxes 补进去，见下方 push 轴的注释）。
+ * 留这个函数是为了「哪天加了平移机构，只改这里」有唯一落点。
+ */
+function transferPushPartIds(_parts: readonly ConveyorPart[]): string[] {
+  return [];
 }
 
 /**
  * 工件（板）占位体：**只进几何/干涉模型**，不进 BOM、不进成本、不进装配件数。
  *
- * 为什么必须有：以前 `push` 态只比推板/滑座/辊道之间的碰撞，所以「板能不能从出料口推出去」
+ * 为什么必须有：以前 `push` 态只比机构件之间的碰撞，所以「板能不能从出料口送出去」
  * 这件事在产品检查里根本看不见 —— 只能靠单测手工注入一个 1200×800×35 的盒子才发现
  * 「板角扫切挡边 2520 mm³」。要让它成为产品级可验证项，工件就必须是一个普通零件：
  * 同一套 AABB 初筛 + 解析式确认，出现在所有碰撞对里，不写任何专用判定。
  *
  * 位姿（由下面的两条移载轴给出，见 conveyorMovingAxes）：
- * - rest： 底面 = 带面（850），顶面 885；
- * - lift： 随顶升台抬 70 → 底面 915（= 辊面），顶面 950；
- * - push： 在 lift 位姿上再沿 +Y 平移 1140；
+ * - rest： 底面 = X 带面（850），顶面 885；
+ * - lift： 随升降架抬 90（前 25 mm 是拾取空行程）→ 底面 915（= Y 短带面），顶面 950；
+ * - push： 在 lift 位姿上再沿 +Y 平移 1180（落到 +Y 接料段，带面同为 915）；
  * - sweep：顶升全程都带着工件（per step 平移）。
  *
  * 口径（写进报告，不许含糊）：`partCount`（几何刚体数）+1，`assemblyPartCount`（BOM/STEP 口径）不变。
@@ -363,22 +375,22 @@ function conveyorMovingAxes(
   const axes: GeomMovingAxis[] = [];
   if (!turner && !transfer) return axes;
   if (transfer) {
-    // 移载两条轴：顶升（Z）+ 移载（+Y）。3D 里先按顶升挂组、再由推板组覆盖推板两件
+    // 移载两条轴：顶升（Z）+ 移载（+Y）。3D 里先按顶升挂组（升降架 + Y 短带）
     //（buildThreeMachine 里同一件只能挂一个运动组，后写的胜出，与转向工位同一约定）。
-    // 工件两条轴都要挂：先随台板抬起、再随推板沿 +Y 移出。它不属于任何 ConveyorPart，
+    // 工件两条轴都要挂：先随 Y 短带抬起、再沿 +Y 送出。它不属于任何 ConveyorPart，
     // 所以在这里按 id 补进去（否则工件会永远停在 rest 位姿，push 态等于没查板）。
     const lift = [...transferLiftPartIds(parts), WORKPIECE_PART_ID];
     if (lift.length > 0) {
-      // 工件的拾取空行程：板压在带面（850），辊面静止位 845，先走 5 mm 才贴到板底。
-      // 于是板在顶升轴上的位移是「轴位移 − 5」（行程 70 → 板升 65，850 → 915 = 顶升后的辊面）。
-      const workpiecePickupGapMm = Math.max(0, Math.round(transfer.partBottomRestZ - transfer.rollerTopRestZ));
+      // 工件的拾取空行程：板压在 X 带面（850），Y 带面静止位比带面低 25，先走 25 mm 才贴到板底。
+      // 于是板在顶升轴上的位移是「轴位移 − 25」（行程 90 → 板升 65，850 → 915 = 顶升后的 Y 带面）。
+      const workpiecePickupGapMm = Math.max(0, Math.round(transfer.partBottomRestZ - transfer.yBeltFaceRestZ));
       axes.push({
         actuatorId: 'transfer-lift',
         stationId,
         kind: 'linear',
         partIds: lift,
         axis: [0, 0, 1],
-        pivot: [0, 0, transfer.plateCenterZ],
+        pivot: [0, 0, transfer.beamBottomZ],
         strokeMm: transfer.strokeMm,
         rangeDeg: 0,
         home: 'retracted',
@@ -396,9 +408,12 @@ function conveyorMovingAxes(
         stationId,
         kind: 'linear',
         partIds: push,
-        // 移载方向固定 +Y（板不转，整块平移到下游对接段）
+        // 移载方向固定 +Y（板不转，整块被 Y 短带送进下游接料段）。
+        // 这一版移载**没有平移机构**：Y 短带的转动只搬工件、不动任何机台零件，
+        // 所以这条轴的 partIds 只有工件本身。轴本身仍是真轴（行程/时长/点位都在 config 里，
+        // PLC 的 step2「移载台伸出」按它生成），只是它的「动件」是料，不是机构。
         axis: [0, 1, 0],
-        pivot: [0, transfer.pushPlateRestY, transfer.pushPlateCenterZ],
+        pivot: [0, 0, transfer.partBottomLiftZ],
         strokeMm: transfer.pushStrokeMm,
         rangeDeg: 0,
         home: 'retracted',
@@ -462,17 +477,20 @@ const ID = {
   transferMount: /^transfer-mount-plate$/,
   transferHanger: /^transfer-hanger-\d+$/,
   transferCyl: /^transfer-lift-cyl-\d+$/,
+  transferCylRod: /^transfer-lift-cyl-\d+-rod$/,
   transferGuide: /^transfer-guide-post-\d+$/,
   transferPlate: /^transfer-lift-plate$/,
-  transferRoller: /^transfer-roller-\d+$/,
-  transferPost: /^transfer-roller-post-\d+$/,
-  transferPushPlate: /^transfer-push-plate$/,
-  transferPushBracket: /^transfer-push-bracket$/,
-  transferPushCyl: /^transfer-push-cyl$/,
-  transferPushBeam: /^transfer-push-beam-(left|right)$/,
-  transferPushColumn: /^transfer-push-column-(left|right)$/,
+  transferLiftBeam: /^transfer-lift-(beam-x\d+|beam-y-(left|right))$/,
+  transferRiser: /^transfer-lift-riser-\d+$/,
+  transferYBelt: /^transfer-y-(belt|belt-return)-\d+$/,
+  transferYPulley: /^transfer-y-pulley-\d+-(in|out)$/,
+  transferYBase: /^transfer-y-base-\d+$/,
+  transferYCheek: /^transfer-y-cheek-\d+-(left|right)$/,
+  transferYShaft: /^transfer-y-shaft-\d+$/,
+  transferYMotor: /^transfer-y-motor-\d+$/,
   dockRail: /^dock-rail-(left|right)$/,
-  dockRoller: /^dock-roller-\d+$/,
+  dockBelt: /^dock-belt-(top|return)$/,
+  dockPulley: /^dock-pulley-\d+$/,
   dockLeg: /^dock-leg-\d+$/,
   dockGuard: /^dock-guard-(left|right)$/,
   dockStop: /^dock-stop$/,
@@ -563,20 +581,26 @@ const JOINT_RULES: readonly JointRule[] = [
   { a: ID.turnerTable, b: ID.turnerFinger, reason: '支撑指立柱装在转台盘上（4 折对称，穿带缝升降）' },
   { a: ID.turnerPlate, b: ID.turnerFinger, reason: '支撑指立柱穿过台板定位孔，随台板一起升降' },
   { a: ID.turnerMotor, b: ID.turnerTable, reason: '转向电机输出轴与转台盘同轴（齿轮/联轴器传动）' },
-  // ── 顶升移载：安装板 / 气缸 / 导柱 / 台板 / 辊道 / 推板 / 对接段 ──
+  // ── 顶升移载：安装板 / 气缸 / 导柱 / 升降架 / Y 短带 / 同步轴 / 接料段 ──
   { a: ID.transferMount, b: ID.transferHanger, reason: '吊柱下端与安装板焊接（安装板吊在纵梁之间）' },
   { a: ID.transferHanger, b: ID.rail, reason: '吊柱上端挂在纵梁内侧面（角件固定）' },
   { a: ID.transferMount, b: ID.transferCyl, reason: '顶升气缸法兰坐在安装板上（螺栓固定）' },
+  { a: ID.transferMount, b: ID.transferCylRod, reason: '活塞杆穿过安装板中心导套（滑动配合；杆尾缩回时插在缸体内）' },
   { a: ID.transferMount, b: ID.transferGuide, reason: '导向柱下端装在安装板上' },
-  { a: ID.transferCyl, b: ID.transferPlate, reason: '顶升气缸活塞杆顶住随动台板底面（推力面）' },
-  { a: ID.transferGuide, b: ID.transferPlate, reason: '导向柱穿过随动台板 φ26 过孔（滑动配合，孔径比柱径大 4 mm）' },
-  { a: ID.transferPlate, b: ID.transferPost, reason: '轴承立柱立在随动台板顶面（螺栓固定），把辊道托到辊心高度' },
-  { a: ID.transferPost, b: ID.transferRoller, reason: '移载辊的轴颈装在轴承立柱上（辊只转不平移）' },
-  { a: ID.transferPushPlate, b: ID.transferPushBracket, reason: '推板焊在滑座前端（滑座跟着无杆气缸的滑块走）' },
-  { a: ID.transferPushBracket, b: ID.transferPushCyl, reason: '滑座与无杆气缸滑块刚性连接' },
-  { a: ID.transferPushCyl, b: ID.transferPushBeam, reason: '无杆气缸两端法兰抱在两侧横梁上' },
-  { a: ID.transferPushBeam, b: ID.transferPushColumn, reason: '横梁坐在立柱顶面（螺栓固定）' },
-  { a: ID.dockRail, b: ID.dockRoller, reason: '对接段输送辊的轴承座装在两侧纵梁上' },
+  { a: ID.transferCyl, b: ID.transferLiftBeam, reason: '顶升气缸活塞杆顶住升降架横梁底面（推力面，两缸同步）' },
+  { a: ID.transferGuide, b: ID.transferLiftBeam, reason: '导向柱穿过升降架横梁导套（滑动配合，全程抗偏载）' },
+  { a: ID.transferLiftBeam, b: ID.transferRiser, reason: '立柱（Y 短带模块支座）立在升降架横梁上（螺栓固定）' },
+  { a: ID.transferRiser, b: ID.transferYBase, reason: 'Y 短带底板坐在立柱顶面（同一条升降架上，四段同步升降）' },
+  { a: ID.transferYBase, b: ID.transferYBelt, reason: 'Y 短带绕在底板两端的端滚筒上（带上行程/回程）' },
+  { a: ID.transferYBase, b: ID.transferYPulley, reason: '端滚筒轴承座装在短带底板上' },
+  { a: ID.transferYBase, b: ID.transferYCheek, reason: '侧颊用螺栓固定在短带底板两侧（挡住皮带跑偏）' },
+  { a: ID.transferYBelt, b: ID.transferYPulley, reason: '短带绕包端滚筒（包角处切向接触）' },
+  { a: ID.transferYShaft, b: ID.transferYPulley, reason: '同一带缝的两段短带共用同步轴（同速，否则板会歪）' },
+  { a: ID.transferYShaft, b: ID.transferYCheek, reason: '同步轴穿过侧颊上的轴承孔（两端各一只轴承座）' },
+  { a: ID.transferYMotor, b: ID.transferMount, reason: '短带驱动电机挂在安装板下方（经伸缩万向轴驱动同步轴）' },
+  { a: ID.dockRail, b: ID.dockPulley, reason: '接料段滚筒的轴承座装在两侧纵梁上' },
+  { a: ID.dockRail, b: ID.dockBelt, reason: '接料段皮带绕包两端滚筒（包角处切向接触）' },
+  { a: ID.dockBelt, b: ID.dockPulley, reason: '接料段皮带绕包两端滚筒（包角处切向接触）' },
   { a: ID.dockRail, b: ID.dockLeg, reason: '对接段支腿顶板与纵梁底面贴合' },
   { a: ID.dockRail, b: ID.dockGuard, reason: '对接段挡边支架固定在纵梁上沿' },
   { a: ID.dockGuard, b: ID.dockStop, reason: '挡停板两端与挡边螺栓连接（同一端部安装节点）' },
@@ -865,7 +889,7 @@ function actuatorOfPart(id: string): string | undefined {
   if (/^gearmotor$/.test(id)) return 'conveyor-drive';
   if (/^turner-motor$|^lift-motor$/.test(id)) return 'lift-motor';
   if (/^turner-lift-cyl-/.test(id)) return 'turner-lift';
-  // 移载：气缸固定件与推板驱动归到对应轴（随动件在上面按 id 集单独判定，优先）
+  // 移载：气缸固定件与 Y 短带驱动电机归到对应轴（随动件在上面按 id 集单独判定，优先）
   if (/^transfer-lift-cyl-/.test(id)) return 'transfer-lift';
   if (/^transfer-push-/.test(id)) return 'transfer-push';
   return undefined;

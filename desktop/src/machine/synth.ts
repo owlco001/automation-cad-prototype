@@ -30,8 +30,10 @@ import { TEMPLATES, templateFor, templateKinds } from './templates.ts';
 import { conveyorParamsFromBrief, refineConveyor } from './conveyor-synth.ts';
 import {
   DEFAULT_CONVEYOR,
+  SIDE_GUARD_HEIGHT_MM,
+  TRANSFER_PUSH_MARGIN_MM,
+  TRANSFER_DEFAULT_LENGTH_MM,
   TRANSFER_MIN_WIDTH_MM,
-  TRANSFER_PLATE_MIN_HALF_WIDTH_MM,
   transferActionSeconds,
   transferLayout,
   transferSkipReason,
@@ -652,65 +654,62 @@ function applyConveyorRefinement(
         kind: 'actuator',
         name: `移载单元安装板 ${Math.round(t.mountLengthMm)}×${Math.round(t.mountWidthMm)}×${t.mountThicknessMm} + 4 吊柱`,
         qty: 1,
-        note: '自制加工件：顶升气缸/导向柱的安装基面，吊在两侧纵梁之间（不占带面）',
+        note: '自制加工件：顶升气缸/导向柱/Y 短带电机的安装基面，吊在两侧纵梁之间（不占带面）',
         role: 'other'
       },
       {
         kind: 'actuator',
         name: `移载顶升气缸 φ${t.cylBodyDiameterMm}×${t.cylBodyLengthMm}（行程 ${t.strokeMm}）`,
-        qty: 2,
-        note: `竖直直线轴 transfer-lift：顶升 ${t.strokeMm} mm，两缸同步，带磁性开关（上/下两个到位点）`,
+        qty: t.cylXs.length,
+        note: `竖直直线轴 transfer-lift：顶升 ${t.strokeMm} mm，两缸同步，带磁性开关（上/下两个到位点）；`
+          + `行程 = ${t.yBeltDropMm}（静止位 Y 带面比带面低）+ 1 + ${SIDE_GUARD_HEIGHT_MM}（挡边）+ 4（间隙）`,
         role: 'other'
       },
       {
         kind: 'actuator',
         name: `移载导向柱 φ${t.guideDiameterMm}×${Math.round(t.guideTopZ - t.guideBottomZ)}`,
-        qty: 4,
-        note: '外购成品件：45# 镀铬光轴 + 自润滑导套，四角布置，抗偏载',
+        qty: t.guideCenters.length,
+        note: '外购成品件：45# 镀铬光轴 + 自润滑导套，四角布置，抗偏载（柱顶低于带底，不穿带面）',
         role: 'other'
       },
       {
         kind: 'actuator',
-        name: `移载随动台板 ${t.plateLengthMm}×${Math.round(t.plateWidthMm)}×${t.plateThicknessMm}`,
+        name: `移载升降架 ${Math.round(t.beamLengthMm)}×${Math.round(t.sideBeamSpanY)}（3 横梁 + 2 侧梁）`,
         qty: 1,
-        note: `自制加工件：四角开 φ${t.guideDiameterMm + 4} 导向过孔；顶升到位台板顶 ${t.plateTopLiftZ} 仍低于带底，不穿带面`,
+        note: `自制加工件：横梁顶 ${t.beamTopZ}，顶升 ${t.strokeMm} 后 ${t.beamTopZ + t.strokeMm} 仍低于带底，`
+          + '所以横梁可以整根跨过带体下方而不穿带',
         role: 'other'
       },
       {
         kind: 'actuator',
-        name: `移载辊道 φ${t.rollerDiameterMm}×${t.rollerLengthMm}`,
-        qty: t.rollerYs.length,
-        note: `外购成品件：${t.rollerYs.length} 根辊全部落在带缝中心（φ${t.rollerDiameterMm} < 带缝 ${Math.round(t.beltGapMm)}），`
-          + `静止位辊面 ${t.rollerTopRestZ} 比带面低 5 mm，顶升 ${t.strokeMm} mm 后辊面 ${t.rollerTopLiftZ} 把板托起并沿 +Y 送出`,
+        name: `移载 Y 向短带 ${t.yBeltLengthMm}×${t.yBeltWidthMm}（${t.yBeltCount} 段，PVC）`,
+        qty: t.yBeltCount,
+        note: `外购成品件：每个带缝 ${t.yBeltCount / t.beltGapCenterYs.length} 段，段长 = 带缝 ${Math.round(t.beltGapMm)} − 2×10 让位，`
+          + `静止位带面 ${t.yBeltFaceRestZ} 比 X 带面低 ${t.yBeltDropMm} mm（不碰板），顶升后带面 ${t.yBeltFaceLiftZ}`,
         role: 'other'
       },
       {
         kind: 'actuator',
-        name: `移载辊道轴承立柱 φ${t.postDiameterMm}×${Math.round(t.postTopZ - t.postBottomZ)}`,
-        qty: t.postCenters.length,
-        note: '自制加工件：从随动台板顶托到辊心，同样落在带缝中心（长向梁会扫过带体，所以做成点状支撑）',
+        name: `移载 Y 向短带滚筒 φ${t.yPulleyDiameterMm}×${t.yBeltWidthMm}`,
+        qty: t.yBeltCount * 2,
+        note: '外购成品件：每段两端各一只，同带缝两段共用同步轴（同速，否则板会歪）',
         role: 'other'
       },
       {
         kind: 'actuator',
-        name: `移载推板 ${t.pushPlateLengthMm}×${t.pushPlateThicknessMm}×${t.pushPlateHeightMm}`,
-        qty: 1,
-        note: `自制加工件：下沿 ${t.pushPlateCenterZ - t.pushPlateHeightMm / 2} 高于挡边顶 ${t.guardTopZ}（板底 ${t.plateBottomLiftZ}，间隙 ${t.plateGuardGapMm} mm），沿 +Y 推出 ${t.pushStrokeMm} mm；静止位停在板外，板进站从下面过`,
-        role: 'other'
-      },
-      {
-        kind: 'actuator',
-        name: `移载无杆气缸 φ63×${Math.round(t.pushCylLengthMm)}（行程 ${t.pushStrokeMm}）`,
-        qty: 1,
-        note: `直线移载轴 transfer-push：沿 +Y 行程 ${t.pushStrokeMm} mm，动作 ${t.pushSeconds} s；装在两根立柱 + 横梁上`,
+        name: `移载 Y 向短带驱动电机 ${Math.round(t.yDriveCenters.length)} 套（0.2 kW + 伸缩万向轴）`,
+        qty: t.yDriveCenters.length,
+        note: `直线移载轴 transfer-push 的执行件：Y 短带转动把板沿 +Y 送 ${t.pushStrokeMm} mm 进接料段，`
+          + `动作 ${t.pushSeconds} s；电机装在固定安装板上，不随升降架走`,
         role: 'other',
-        ratedW: 120
+        ratedW: 200
       },
       {
         kind: 'actuator',
-        name: `下游对接段辊道 ${Math.round(t.dockWidthMm)}×${Math.round(t.dockLengthMm)}（${t.dockRollerYs.length} 辊）`,
+        name: `下游接料段 ${Math.round(t.dockWidthMm)}×${Math.round(t.dockLengthMm)}（带面 ${t.dockBeltFaceZ}）`,
         qty: 1,
-        note: `自制/集成件：+Y 侧短对接段，起点 y=${t.dockStartY}，带两侧挡边、末端挡停与两只到位光电；宽度按板长 ${t.partLengthMm} + 200 取`,
+        note: `自制/集成件：+Y 侧短输送机，带面 ${t.dockBeltFaceZ} 与 Y 带出料面同高（落料无落差），起点 y=${t.dockStartY}，`
+          + `两侧挡边 + 末端挡停 + 两只到位光电；宽度按板长 ${t.partLengthMm} + 200 取`,
         role: 'other'
       },
       {
@@ -730,7 +729,7 @@ function applyConveyorRefinement(
       turnerAxis
         ? '窄带并联线体 + 顶升旋转单元（底座框架/下沉框架/2 顶升气缸/4 导向柱/台板/回转支承/转台盘/9 支撑指/转向电机）'
         : transferPlan
-          ? '窄带并联线体 + 顶升移载单元（安装板/4 吊柱/2 顶升气缸/4 导向柱/随动台板/5 移载辊/10 轴承立柱/推板/无杆气缸）+ 下游对接段'
+          ? '3 条窄带线体 + 顶升移载单元（安装板/4 吊柱/2 顶升气缸/4 导向柱/升降架/4 段 Y 短带/同步轴/2 驱动电机）+ 下游接料输送机'
           : '单段线体'
     }；` +
       `零件总数随线体长度变化（横撑数 = 长度/500+1），以建模回传为准），由 build123d 内核布尔求并并导出 STEP/STL。`
@@ -752,19 +751,23 @@ function applyConveyorRefinement(
 }
 
 /**
- * 顶升移载的带宽缺省：需求没写带宽时，缺省机型（2000×300）根本放不下移载辊道——
- * 移载单元的下限是 TRANSFER_MIN_WIDTH_MM = 1080 mm（台板半宽要托住辊道轴承立柱）。
+ * 顶升移载的带宽缺省：需求没写带宽时，缺省机型（2000×300）根本放不下 3 条窄带 + 带缝——
+ * 移载单元的下限是 TRANSFER_MIN_WIDTH_MM = 600 mm（3 条窄带 + 2 条带缝按节距 = 带宽/3 排）。
  * 这里只补**未写**的带宽；用户写了的（哪怕 800 mm 不够）原样保留，交给 transferSkipReason
  * 拒建并给算式，绝不把「带宽不够」悄悄改成「按 1200 的板移载」。
  */
 export function withTransferConveyorDefaults(brief: MachineBrief): MachineBrief {
   if (brief.process !== 'conveyor' || brief.transfer?.present !== true) return brief;
-  if (brief.conveyor?.widthMm != null) return brief;
+  const conveyor = brief.conveyor ?? { lengthMm: null, widthMm: null, speedMps: null, loadKg: null, layers: null };
+  if (conveyor.widthMm != null && conveyor.lengthMm != null) return brief;
   return {
     ...brief,
     conveyor: {
-      ...(brief.conveyor ?? { lengthMm: null, widthMm: null, speedMps: null, loadKg: null, layers: null }),
-      widthMm: TRANSFER_DEFAULT_WIDTH_MM
+      ...conveyor,
+      // 线长缺省：移载线按 3000 给（参数区间 2400~4000）。上一版默认吃 6000 的普通线缺省，
+      // 结果机台中段凭空多出 3 m 空跑段 —— 这一版构型的目的之一就是把机台缩到 3 m。
+      ...(conveyor.lengthMm == null ? { lengthMm: TRANSFER_DEFAULT_LENGTH_MM } : {}),
+      ...(conveyor.widthMm == null ? { widthMm: TRANSFER_DEFAULT_WIDTH_MM } : {})
     }
   };
 }
@@ -981,7 +984,7 @@ export function synthMachine(rawBrief: MachineBrief, options: SynthOptions = {})
   if (transferPlan) stationNames.push(TRANSFER_STATION_NAME);
   if (transferWidthDefaulted && transferPlan) {
     assumptions.push(
-      `带宽未写：移载单元下限 ${TRANSFER_MIN_WIDTH_MM} mm（台板半宽 ${TRANSFER_PLATE_MIN_HALF_WIDTH_MM} + 窄带 + 装配余量），` +
+      `带宽未写：移载单元下限 ${TRANSFER_MIN_WIDTH_MM} mm（3 条窄带 + 2 条带缝按节距 = 带宽/3 排，带缝要放得下 Y 短带），` +
         `按常用档 ${TRANSFER_DEFAULT_WIDTH_MM} mm 取；如实际带宽更窄请显式写出，届时会被拒建并给出所需宽度。`
     );
   }
@@ -1107,9 +1110,10 @@ export function synthMachine(rawBrief: MachineBrief, options: SynthOptions = {})
   //
   // kind 只有 cylinder/gripper/rotary 三种，这里两条轴都借 cylinder 表达**直线轴**：
   //   transfer-lift → position [0,0,0.05]（向上），travelMm = 顶升行程；
-  //   transfer-push → position [0,0.05,0]（+Y），travelMm = 移载行程 = 板宽 + 结构间隙 + 余量。
+  //   transfer-push → position [0,0.05,0]（+Y），travelMm = 移载行程 = 板宽/2 + 板心到接料段 + 余量。
   // 这不是「有两个气缸」的意思，借用的口径写在 assumptions 里（见下）。
   if (transferPlan) {
+    const t = transferPlan;
     actuators.push({
       id: 'transfer-lift',
       name: `${TRANSFER_STATION_NAME}顶升台`,
@@ -1166,29 +1170,31 @@ export function synthMachine(rawBrief: MachineBrief, options: SynthOptions = {})
     // 三条 assumption 装下「机构 + 行程账 + 联锁」：trim.ts 会把 >20 条的 assumptions
     // 裁成 {items,total,truncated}，而方案卡要求它是字符串数组——超了「应用到工程」会被拒。
     assumptions.push(
-      `顶升移载：线体中段加直角移载单元（随动台板 ${transferPlan.plateLengthMm}×${Math.round(transferPlan.plateWidthMm)}`
-        + ` + ${transferPlan.rollerYs.length} 根 φ${transferPlan.rollerDiameterMm} 移载辊 + ${transferPlan.postCenters.length} 根轴承立柱 + 推板），`
-        + `顶升 ${transferPlan.strokeMm} mm → 沿 +Y 移出 ${transferPlan.pushStrokeMm} mm → 回落；`
+      `顶升移载（Y 向短带式）：线体中段加直角移载单元（${t.yBeltCount} 段短 Y 带 ${t.yBeltLengthMm}×${t.yBeltWidthMm}`
+        + ` + 升降架 ${Math.round(t.beamLengthMm)}×${Math.round(t.sideBeamSpanY)} + 2 顶升气缸，φ${t.cylBodyDiameterMm} 行程 ${t.strokeMm}），`
+        + `顶升 ${t.strokeMm} mm（板底 ${t.partBottomLiftZ} = 挡边顶 ${t.guardTopZ} + ${t.plateGuardGapMm}）`
+        + ` → Y 短带转动把板沿 +Y 送出 ${t.pushStrokeMm} mm → 回落；`
         + `两条轴 transfer-lift（点位 ${TRANSFER_LIFT_POINT}）/ transfer-push（点位 ${TRANSFER_PUSH_POINT}），`
-        + `合计 ${transferPlan.actionSeconds} s/件 = 顶升回落 ${transferPlan.liftSeconds} + 移载 ${transferPlan.pushSeconds}，已计入工位时间。`
-        + `输送面 ${transferPlan.beltCount} 条 ${transferPlan.beltWidthMm} mm 窄带并联（带缝 ${Math.round(transferPlan.beltGapMm)} mm）整条连续、不为移载断开：`
-        + `辊与立柱全部落在带缝中心（φ${transferPlan.rollerDiameterMm}/φ${transferPlan.postDiameterMm} < 带缝），`
-        + `因为任何沿 Y 延伸的长向梁在顶升过程中都必然扫过带体所在的 846~850；出料侧（+Y）挡边在单元占位内断开，那是物料出口。`
+        + `合计 ${t.actionSeconds} s/件 = 顶升回落 ${t.liftSeconds} + 送料 ${t.pushSeconds}，已计入工位时间。`
+        + `输送面 ${t.beltCount} 条 ${t.beltWidthMm} mm 窄带（节距 ${t.beltPitchMm}、带缝 ${Math.round(t.beltGapMm)}）整条连续、不为移载断开：`
+        + `Y 短带与同步轴全部落在带缝中心，段长 ${t.yBeltLengthMm} = 带缝 − 2×10（段长再长就伸到 X 带下方，顶升时必扫带）。`
     );
     assumptions.push(
-      `借用 cylinder 表达直线移载：本域执行机构只有 cylinder/gripper/rotary，`
-        + `transfer-push 用 kind=cylinder + travelMm=${transferPlan.pushStrokeMm} + position=[0,0.05,0]（+Y）表示「板沿 +Y 平移」这条直线轴，`
-        + `不是气缸实体；实际执行件是辊道（转动）+ 推板（直线），行程/方向见 travelMm + position。`
-        + `移载行程 ${transferPlan.pushStrokeMm} mm = 板宽 ${transferPlan.partWidthMm} + 结构间隙 ${transferPlan.structuralGapMm}`
-        + `（随动台板边缘 y=${Math.round(transferPlan.plateWidthMm / 2)} → 对接段带面起点 y=${transferPlan.dockStartY}）+ 装配余量 120；`
-        + `下限校验：板尾整块落到对接段需 ≥ ${transferPlan.minPushStrokeMm} mm（对接段起点 ${transferPlan.dockStartY} + 板宽/2 ${transferPlan.partWidthMm / 2}）。`
+      `借用 cylinder 表达移载轴：本域执行机构只有 cylinder/gripper/rotary，`
+        + `transfer-push 用 kind=cylinder + travelMm=${t.pushStrokeMm} + position=[0,0.05,0]（+Y）表示「板沿 +Y 被 Y 短带送走」这条直线轴，`
+        + `不是气缸实体；执行件是 ${t.yBeltCount} 段 Y 短带（转动），不改变任何机台零件的位姿，所以几何里这条轴的动件只有工件本身。`
+        + `行程 ${t.pushStrokeMm} mm = 板宽/2 ${t.partWidthMm / 2} + 板心到接料段带面起点 ${t.structuralGapMm}`
+        + `（纵梁外侧面 + 5） + 装配余量 ${TRANSFER_PUSH_MARGIN_MM}；`
+        + `下限校验：板尾整块落到接料段需 ≥ ${t.minPushStrokeMm} mm。`
     );
     assumptions.push(
-      `下游对接段：+Y 侧独立短辊道段 ${Math.round(transferPlan.dockWidthMm)}（X）×${Math.round(transferPlan.dockLengthMm)}（Y）mm，`
-        + `带面高与主线一致（${transferPlan.dockRollerCenterZ + 25} mm），起点 y=${transferPlan.dockStartY}（主线纵梁外侧 +5 mm），`
-        + `带两侧挡边、末端挡停板与两只到位光电；宽度按板长 ${transferPlan.partLengthMm} + 200 给（比主线宽——板是横着落上去的）。`
+      `下游接料段：+Y 侧独立短输送机 ${Math.round(t.dockWidthMm)}（X）×${Math.round(t.dockLengthMm)}（Y）mm，`
+        + `带面 ${t.dockBeltFaceZ} 与 Y 带出料面同高（落料无落差），起点 y=${t.dockStartY}（主线纵梁外侧 +5 mm），`
+        + `带两侧挡边、末端挡停板与两只到位光电；宽度按板长 ${t.partLengthMm} + 200 给（比主线宽——板是横着过去的），`
+        + `出料口（+Y 挡边开口）半宽 ${t.outfeedOpenHalfXMm} mm = 板长/2 + 20。`
+        + `线长 ${t.unitHalfMm * 2}（单元）+ 2×${t.endRunMm}（两端输送段）= ${t.unitHalfMm * 2 + 2 * t.endRunMm} mm。`
         + `移载工位联锁：输出 DO-TRANSFER-READY（本机就绪）/ DO-TRANSFER-DONE（移载完成），`
-        + `输入 DI-DOWNSTREAM-ALLOW（下游允许接收，绑工位）/ DI-TRANSFER-END（移载 ${transferPlan.pushStrokeMm} mm 到位，绑 transfer-push）；`
+        + `输入 DI-DOWNSTREAM-ALLOW（下游允许接收，绑工位）/ DI-TRANSFER-END（移载 ${t.pushStrokeMm} mm 到位，绑 transfer-push）；`
         + `到位信号 ST-TRANSFER-LIFT-UP / ST-TRANSFER-LIFT-DOWN 绑 transfer-lift；`
         + `安全回路：急停 ${transferSafety[0][0]}、安全门 ${transferSafety[1][0]}（最小安全集，非安全等级认证回路）。`
     );
