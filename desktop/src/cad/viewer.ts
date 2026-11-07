@@ -147,11 +147,16 @@ export class CadViewer {
     this.scene.add(this.ghostGroup);
     this.parametricOverlayGroup.name = 'parametric-overlay';
     this.scene.add(this.parametricOverlayGroup);
-    this.scene.add(new THREE.HemisphereLight(0xf1f5f9, 0x2a2d31, 1.35));
-    const key = new THREE.DirectionalLight(0xffffff, 2.1);
+    // 灯光按「看得出色相」定标（不是按「够亮」）：
+    // 旧配置 hemi 1.35 + 2.1 + 0.65 把受光面推到过曝（ACES 之前就 clip 到白），
+    // 实测四色方块受光面 ΔE76 20~27、截图里 #7fb2e5 被洗成 #c8d8d8 这种近白。
+    // 现在改成 环境 0.75 + 主光 1.9 + 补光 0.45：形状仍靠主光的方向性表达，
+    // 但各朝向的亮度落在本色 ±25 ΔE 内（标定见 docs/desktop 里的色闸门）。
+    this.scene.add(new THREE.AmbientLight(0xffffff, 0.75));
+    const key = new THREE.DirectionalLight(0xffffff, 1.9);
     key.position.set(1, -1.4, 2);
     this.scene.add(key);
-    const fill = new THREE.DirectionalLight(0xb9c6d2, 0.65);
+    const fill = new THREE.DirectionalLight(0xb9c6d2, 0.45);
     fill.position.set(-1.4, 1, 0.7);
     this.scene.add(fill);
 

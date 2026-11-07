@@ -3,6 +3,7 @@ import CadImportWorker from './cad/importer.worker?worker&inline';
 import wasmAssetUrl from 'occt-import-js/dist/occt-import-js.wasm?url';
 import { occtFormatForFile, parseOcctBuffer } from './cad/step';
 import { parseStandardCadBuffer, parseStandardCadBuffers } from './cad/loaders';
+import { hexToLinear, machineMaterialColor } from './cad/machine-colors.ts';
 import { CadViewer } from './cad/viewer';
 import { describeSuggestions } from './cad/kinematics-auto';
 import {
@@ -1119,7 +1120,7 @@ interface ProjectMenuRecord {
   envelope: [number, number, number] | null;
   createdAt: string;
   /** 零件清单（外壳结构树用） */
-  partsList?: Array<{ file: string; name: string; path?: string[] }>;
+  partsList?: Array<{ file: string; name: string; path?: string[]; color?: string }>;
   /** 机型参数（生成电气图用） */
   params?: Record<string, number>;
   /** 存在时表示由五步设计向导保存；其 STL 是概念估算占位几何，不是型号级实体。 */
@@ -1765,10 +1766,11 @@ function projectMenuRecordOf(record: DesktopProjectRecordLike, parts: number): P
     envelope: record.envelope,
     createdAt: record.createdAt,
     // path（装配层级）必须带上：丢了结构树就只能按名字前缀分组，层级信息白解析了
-    partsList: (record.partsList ?? []).map((item: { file: string; name: string; path?: string[] }) => ({
+    partsList: (record.partsList ?? []).map((item: { file: string; name: string; path?: string[]; color?: string }) => ({
       file: item.file,
       name: item.name,
-      ...(Array.isArray(item.path) && item.path.length > 0 ? { path: item.path } : {})
+      ...(Array.isArray(item.path) && item.path.length > 0 ? { path: item.path } : {}),
+      ...(typeof item.color === 'string' ? { color: item.color } : {})
     })),
     params: record.params ?? {},
     ...(record.process !== undefined && typeof record.process === 'string' ? { process: record.process } : {}),
@@ -1918,10 +1920,12 @@ async function openSavedProject(id: string): Promise<ProjectMenuRecord | null> {
     return null;
   }
   try {
-    const buffers: Array<{ buffer: ArrayBuffer; name: string }> = [];
+    const buffers: Array<{ buffer: ArrayBuffer; name: string; color?: [number, number, number] }> = [];
     for (const item of items) {
       const bytes = await window.desktop.readFileBuffer(item.path);
-      buffers.push({ buffer: toArrayBuffer(bytes), name: item.name });
+      // 工程里存了材质标识色（'#rrggbb'）就还原成线性色：否则重新打开整机又变回灰色默认色板
+      const color = item.color ? hexToLinear(item.color) : undefined;
+      buffers.push({ buffer: toArrayBuffer(bytes), name: item.name, ...(color ? { color } : {}) });
     }
     const merged = await parseStandardCadBuffers(buffers, 'STL');
     // 把工程记录里的装配层级补回网格：STL 本身不带路径，不补的话 3D 左栏只能显示「未分层」
@@ -2159,7 +2163,7 @@ async function saveProjectToLibrary(input: {
   material: string[];
   stepPath: string | null;
   stlPath: string | null;
-  partPaths: Array<{ name: string; path: string }>;
+  partPaths: Array<{ name: string; path: string; color?: string }>;
 }): Promise<{ ok: boolean; message?: string; record?: DesktopProjectRecordLike }> {
   if (!window.desktop?.projects) return { ok: false, message: '工程库接口不可用' };
   try {
@@ -2501,14 +2505,29 @@ async function buildMachineModel(input: unknown): Promise<Record<string, unknown
   const perPart = (built.files?.parts ?? []) as Array<{ id: string; name: string; stl?: { path?: string; bytes?: number } }>;
   let loadedParts = 0;
   let loadMessage: string | undefined;
+  let coloredParts = 0;
+  // STL 不带颜色：视口的材质标识色只能在导入时按「件 → 材质」补。
+  // 不补这一步，整机在 CadViewer 里就是**灰色默认色板**（这是 3D 截图全灰的真因：
+  // 之前的四色只存在于 buildThreeMachine 那条链，跟 CadViewer 无关）。
+  const colorByPartId = new Map<string, { hex: string; linear: [number, number, number] }>();
+  for (const part of parts) {
+    const color = machineMaterialColor(part.material);
+    if (color) colorByPartId.set(part.id, { hex: color.hex, linear: color.linear });
+  }
   if (request.load !== false && perPart.length > 0) {
     try {
-      const buffers: Array<{ buffer: ArrayBuffer; name: string }> = [];
+      const buffers: Array<{ buffer: ArrayBuffer; name: string; color?: [number, number, number] }> = [];
       for (const item of perPart) {
         const path = item.stl?.path;
         if (!path) continue;
         const bytes = await window.desktop.readFileBuffer(path);
-        buffers.push({ buffer: toArrayBuffer(bytes), name: item.name });
+        const color = colorByPartId.get(item.id);
+        if (color) coloredParts += 1;
+        buffers.push({
+          buffer: toArrayBuffer(bytes),
+          name: item.name,
+          ...(color ? { color: color.linear } : {})
+        });
       }
       const merged = await parseStandardCadBuffers(buffers, 'STL');
       const label = `${modelLabel}（${merged.meshes.length} 件）`;
@@ -2547,7 +2566,14 @@ async function buildMachineModel(input: unknown): Promise<Record<string, unknown
     stepPath: (built.files?.step as { path?: string } | undefined)?.path ?? null,
     stlPath: (built.files?.stl as { path?: string } | undefined)?.path ?? null,
     partPaths: perPart
-      .map((item) => ({ name: item.name, path: item.stl?.path ?? '' }))
+      .map((item) => {
+        const color = colorByPartId.get(item.id);
+        return {
+          name: item.name,
+          path: item.stl?.path ?? '',
+          ...(color ? { color: color.hex } : {})
+        };
+      })
       .filter((item) => item.path.length > 0)
   });
 
@@ -2563,6 +2589,8 @@ async function buildMachineModel(input: unknown): Promise<Record<string, unknown
     project: savedProject.ok ? { name: modelLabel, saved: true } : { name: modelLabel, saved: false, message: savedProject.message },
     parts: parts.length,
     loadedParts,
+    /** 视口里带上材质标识色的零件数（STL 无颜色，靠「件 → 材质」补；0 = 颜色链路断了） */
+    coloredParts,
     solids: built.stats?.solids ?? null,
     volumeMm3: built.stats?.volumeMm3 ?? null,
     envelope: conveyorEnvelope(parts),

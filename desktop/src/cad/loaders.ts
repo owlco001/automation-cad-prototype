@@ -87,9 +87,13 @@ async function parseGltf(buffer: ArrayBuffer, name: string): Promise<THREE.Objec
  * 零件树、干涉检查、运动学标注都按「零件」看待。
  *
  * 参数化内核逐件导出的 28 个 STL 就走这里装配成整机。
+ *
+ * `color` 是调用方按「件 → 材质」查出来的材质标识色（线性 RGB）。STL 没有颜色通道，
+ * 不在这里喂进来的话，视口和 GLB 导出都只能退回灰色默认色板
+ * （`load-candidate` 的 DEFAULT_COLORS），整机看起来就是一坨灰。
  */
 export async function parseStandardCadBuffers(
-  items: ReadonlyArray<{ buffer: ArrayBuffer; name: string }>,
+  items: ReadonlyArray<{ buffer: ArrayBuffer; name: string; color?: [number, number, number] }>,
   formatLabel = 'STL'
 ): Promise<CadImportResult> {
   const started = performance.now();
@@ -100,7 +104,11 @@ export async function parseStandardCadBuffers(
     const probe = /\.[a-z0-9]{1,5}$/i.test(item.name) ? item.name : `${item.name}.stl`;
     const single = await parseStandardCadBuffer(item.buffer, probe);
     for (const mesh of single.meshes) {
-      meshes.push({ ...mesh, name: item.name });
+      meshes.push({
+        ...mesh,
+        name: item.name,
+        ...(item.color ? { color: [...item.color] as [number, number, number] } : {})
+      });
     }
     triangleCount += single.stats.triangleCount;
   }

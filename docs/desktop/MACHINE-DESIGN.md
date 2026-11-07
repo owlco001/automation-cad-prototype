@@ -381,6 +381,25 @@ buildClarify(brief: MachineBrief): { needs: ('process'|'stations'|'cycle')[]; qu
 - 输出：`parts[]`（唯一 `[a-z0-9-]` id、形状、中心、绕 Z 角、材质、`bomGroup`、归属、`moving`）、`moving[]`（`axis / pivot / strokeMm / rangeDeg / home / points / jaws`）、`stations[]`（含旋转矩形 `footprint`，`footprintsOverlap` 用分离轴判定）、`envelope / bounds`、`structureBom`（结构件，与 `bomDraft` 分开）。`geometryComponentCounts` 与 `bomDraft` 逐项对账。
 - 导出：`geometry-export.ts` 网格 → STL / glTF；`geometryToSidecarAssemblies` 盒体 → `box`，竖直圆柱 → 内接种子方块 + `cylinder`（精确），水平圆柱 → 等截面方棒（列入 `approximated`）；`buildMachineSolids` 逐块实体化、任一块失败整体回退。
 - 渲染：`geometry-three.ts` 与导出共用网格；`createScene3D` 不再画占位方块，`stats()` 增加 `geometryParts / envelopeMm / layout`，`parts` 口径与标注驱动优先级不变。
+
+### 6.1 材质标识色：两条渲染链 + 像素闸门
+
+整机 3D 有两条互不相干的渲染链，改颜色时不能只改一条：
+
+1. **联调 3D / 设计向导**：`buildThreeMachine(geometry)`（`geometry-three.ts:72`）直接读 `GeomPart.color`，材质在内存里就是四色。
+2. **CAD 视口**（`#cadEntryButton` 打开的那个，`docs/desktop/screenshots/23-pv-0*.png` 截的就是它）：`build_machine_model` 把参数化内核逐件导出的 **STL** 装配进 `CadViewer`（`extension.ts:2513` → `parseStandardCadBuffers` → `load-candidate.ts:27`）。STL 没有颜色通道，**颜色必须在导入边界按「件 → 材质」补**（`cad/machine-colors.ts`：`MATERIAL_COLORS` 作单一色源 → 线性 RGB；`loaders.ts:96` 的 `color` 参数），否则 `stageCadLoad` 只能退回 `DEFAULT_COLORS` 的六个低饱和灰，屏幕上一片灰——「几何里有四色、截图全灰」就是这么来的。
+
+同一份色值还写进工程的 `partsList[].color`（`electron/projects.ts`），重新打开工程时按它还原，避免「刚建完有色、关了再开变灰」。GLB 导出（`viewer.getExportRoot()` → `GLTFExporter`）复用的就是视口这批材质，所以「视口有色」与「GLB 有 ≥4 个 material」是同一条链路的两端；GLTFExporter 对纯白会**省略** `baseColorFactor`，因此「无 baseColorFactor」本身就是「这件没上色」的硬证据。
+
+灯光也按「看得出色相」定标（`viewer.ts:150`）：环境 0.75 + 主光 1.9 + 补光 0.45。旧的 hemi 1.35 + 2.1 + 0.65 把受光面直接推到过曝，`#7fb2e5` 洗成 `#c8d8d8`。
+
+闸门（像素级，不读内存材质）：
+
+- `machine:e2e` 第 14 步截完 `23-pv-04-transfer-3d.png` **立即**统计 3D 画布矩形内四种色相的像素（CIE76 ΔE < 25）；任一材质低于门槛、或四色合计 < 25000 px，该步失败（`scripts/lib/material-gate.mjs`）。
+- 第 6 步导出 GLB 后立即查 material 数与 `baseColorFactor`（`scripts/lib/glb-inspect.mjs`），单白色材质会红。
+- 同一实现可单独跑：`npm run gate:materials -- ../docs/desktop/screenshots/23-pv-04-transfer-3d.png [--rect x,y,w,h] [--min N]`；CI 的 Electron job 也跑这一步。
+
+门槛：AL6063 / Q235 / PVC 各 ≥ 3000 px；**STEEL45 ≥ 1200 px**。理由是本机型 45# 件（滚筒 / 移载导向柱 / 同步轴）全装在机架内部：在 889×908 的 3D 画布上扫 12 个机位（方位 ±600px、俯仰 ±240px、缩放 ±700），STEEL45 命中像素最高 2209、默认机位 1660——要 3000 只能把镜头怼进移载单元，那就不再是「整机 3D」。若以后几何把 45# 件露出来，把门槛与 `test/scripts/material-gate.test.mjs` 一起抬回 3000。
 - **工位身份与几何平移持久化**：设计向导在 `MachineDesign.stationIdentities` 中按 `config.stations` 同序保存每站不可变 ID；`stationGeometryLayout` v2 以 `{ stationIdentity, stationName, xMm, yMm }` 存偏移，`stationName` 仅用于追溯，不参与匹配。手动排序只改变当前几何的 `stN`，偏移仍跟随同一 ID；改名会更新追溯名称；删站只清掉该 ID 的偏移，新站零偏移。候选切换/需求重算产生新身份，不跨方案猜测迁移。
 - **旧数据兼容**：没有偏移的旧 `MachineDesign` 仍可读，并为当前快照建立身份；旧 `stationGeometryLayout` v1 只存 `stationId/index/name`，无法证明实体连续性，因此不导入这些偏移、按零偏移读取并附 `stationGeometryWarning`。草稿重开若身份映射无法与工位列表一一对应，也保留工位编辑、清掉不可信偏移并在向导中告警；不会用名称或序号猜配。v2 中已删除/失效 ID 只丢弃对应孤儿偏移，其余仍有效的身份偏移保留。
 - **校核联动**：稳定身份映射和偏移都纳入 review source signature；几何或身份映射改变后旧校核不再有效。生成器几何、运动轴、工位原点/工作点、bounds/envelope、Three.js 与保存工程/逐件 STL 使用同一套偏移；尺寸、形状与运动行程不被偏移修改。

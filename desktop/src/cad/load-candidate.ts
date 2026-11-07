@@ -48,13 +48,19 @@ export function stageCadLoad(result: CadImportResult, wireframe: boolean): CadLo
       const colorKey = data.color ? data.color.map((value) => value.toFixed(3)).join(',') : 'default';
       let material = materials.get(colorKey);
       if (!material) {
+        // 有标识色的网格 = 整机模型的「材质」着色（铝/Q235/45#/PVC）：
+        // - metalness 压到 0.06：金属高光会把色相洗成白灰（实测 ΔE76 > 40，屏幕上看不出蓝/红/黄/绿）；
+        // - roughness 0.78：留一点高光方向感，避免像塑料贴纸；
+        // - emissive = 本色 × 0.08：把背光面从近黑提回本色附近，形状仍由明暗表达。
+        // 没有颜色的（用户自己导入的 STEP/STL）保持原来的中性参数，不改既有观感。
         const color = data.color
           ? new THREE.Color(data.color[0], data.color[1], data.color[2])
           : new THREE.Color(DEFAULT_COLORS[index % DEFAULT_COLORS.length]!);
         material = new THREE.MeshStandardMaterial({
           color,
-          metalness: 0.2,
-          roughness: 0.62,
+          metalness: data.color ? 0.06 : 0.2,
+          roughness: data.color ? 0.78 : 0.62,
+          ...(data.color ? { emissive: color.clone().multiplyScalar(0.08) } : {}),
           wireframe,
           side: THREE.DoubleSide
         });

@@ -917,6 +917,15 @@ jobs:
       - name: 机型全流程截图（含去重校验）
         timeout-minutes: 10
         run: npm run screenshots:machine
+      # 3D 材质色闸门（像素级，不是「材质对象里有什么」）：
+      # 历史事故——`resolveMachineGeometry` / `buildThreeMachine` 里四色齐全，CadViewer 截图却全灰，
+      # 因为 STL 逐件导入把「件 → 材质色」丢了，而当时没有任何断言会红。
+      # 判定：四种材质标识色（AL6063/Q235/STEEL45/PVC）在截图里各达下限（ΔE76 < 25，单位 px）：
+      #   AL6063 ≥3000 / Q235 ≥3000 / PVC ≥3000 / STEEL45 ≥1200 —— 45# 件（导向柱、同步轴）
+      #   在本机型里被侧梁与皮带包住，整机机位实测上限 2209，3000 不可能达成；几何外露后应抬回 3000。
+      # 与 machine:e2e 第 14 步用的是同一实现（desktop/scripts/lib/material-gate.mjs）。
+      - name: 3D 材质色像素闸门
+        run: npm run gate:materials -- ../docs/desktop/screenshots/23-pv-04-transfer-3d.png
       # 外部客户端契约（MCP/JSON-RPC）：401、tools/list、resources、-32602/-32601、只读调用
       - name: 外部客户端冒烟（MCP/JSON-RPC）
         timeout-minutes: 8

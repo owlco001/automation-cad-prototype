@@ -30,6 +30,8 @@ import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkGlbMaterials, describeGlbMaterials } from './lib/glb-inspect.mjs';
+import { checkMaterialPixels, describeMaterialPixels } from './lib/material-gate.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(here, '..');
@@ -644,6 +646,20 @@ async function main() {
       if (glb.bytes <= 0) throw new Error(`glb 为空：${glb.path}`);
       console.log(`MACHINE_E2E_EXPORT_GLB path=${glb.path} bytes=${glb.bytes}`);
 
+      // 硬闸门：导出的 GLB 必须真的带四种材质色。
+      // 之前这里只有「文件 > 0 字节」——于是「1 个 material、无 baseColorFactor（= 白色）」
+      // 的 GLB 照样绿，视口全灰也照样绿。GLTFExporter 对纯白会省略 baseColorFactor
+      // （three/examples/jsm/exporters/GLTFExporter.js:1669），所以「没有 baseColorFactor」
+      // 本身就是「这件材质没上色」的硬证据。
+      const glbGate = checkGlbMaterials(readFileSync(glb.path));
+      console.log(`MACHINE_E2E_GLB_MATERIALS ${describeGlbMaterials(glbGate)} path=${glb.path}`);
+      for (const material of glbGate.materials) {
+        console.log(`MACHINE_E2E_GLB_MATERIAL #${material.index} name=${material.name ?? '(无名)'} hex=${material.hex ?? '(无)'} baseColorFactor=${JSON.stringify(material.baseColorFactor)} metal=${material.metallicFactor} rough=${material.roughnessFactor}`);
+      }
+      if (!glbGate.ok) {
+        throw new Error(`GLB 材质不足：${glbGate.failures.join('；')}（实际 ${glbGate.materials.length} 个 material）`);
+      }
+
       // run_plc_generate 的真实 ZIP
       const zips = [];
       const walkZip = (dir) => {
@@ -973,13 +989,16 @@ async function main() {
       if (payload?.ok === false) throw new Error(`build_machine_model 失败：${payload.message ?? payload.code}`);
       const items = Number(body?.parts ?? 0);
       const loaded = Number(body?.loadedParts ?? 0);
+      const colored = Number(body?.coloredParts ?? 0);
       if (items < 100) throw new Error(`移载机型零件数 ${items} < 100（3 条窄带主线 39 件 + 移载单元 52 件 + 接料段 15 件）`);
       if (loaded < 100) throw new Error(`视口只装配了 ${loaded} 件（期望 ≥100）`);
+      // 颜色链路：STL 无颜色，件→材质映射必须在导入时补上（否则视口退回灰色默认色板）
+      if (colored < 100) throw new Error(`视口只有 ${colored} 件带材质色（期望 ≥100）：STL 导入没拿到件→材质色映射`);
       const bomRaw = body?.bom;
       const bomRows = Array.isArray(bomRaw) ? bomRaw : Array.isArray(bomRaw?.items) ? bomRaw.items : [];
       const rows = bomRows.filter((row) => /移载|对接段/.test(String(row?.name ?? '')));
       if (rows.length < 6) throw new Error(`结构 BOM 里移载件不足：${rows.map((row) => row.name).join('/')}`);
-      return `parts=${items} loaded=${loaded} bomRows=${bomRows.length} transferRows=${rows.length} (${rows.slice(0, 5).map((row) => row.name).join(' / ')})`;
+      return `parts=${items} loaded=${loaded} colored=${colored} bomRows=${bomRows.length} transferRows=${rows.length} (${rows.slice(0, 5).map((row) => row.name).join(' / ')})`;
     });
 
     const transferPlc = await step(12, 'transfer-plc', async () => {
@@ -1108,15 +1127,50 @@ async function main() {
         await wait(250);
         document.querySelector('#cadEntryButton')?.click();
         await wait(900);
+        // 运动学标注抽屉默认是展开的，会吃掉 393px 画布（1600 窗口里画布只剩 496px，
+        // 整机在画面里被裁掉两头）。截图要的是整机 3D，先把抽屉收起来再 fit。
+        document.querySelector('[data-kin-close]')?.click();
+        await wait(400);
         document.querySelector('[data-cad-action="fit"]')?.click();
         await wait(1200);
         return true;
       })()`);
       await cdp.waitFor(`Boolean(document.querySelector('#automationCadOverlay') && !document.querySelector('#automationCadOverlay').hidden)`, 'CAD 覆盖层可见', 20_000);
       await cdp.waitFor(`(Number(document.getElementById('cadPartCount')?.textContent || 0) >= 100)`, '3D 视口里装着 ≥100 件', 30_000);
+      // 诊断（不是断言）：视口里每个零件的材质色，确认「渲染的就是这份着色」
+      const sceneColors = await cdp.evaluate(`(() => {
+        const scene = window.AutomationCadViewer?.describeScene?.();
+        if (!scene) return { error: 'describeScene 不可用' };
+        const histogram = {};
+        for (const part of scene.parts ?? []) histogram[part.color ?? '(null)'] = (histogram[part.color ?? '(null)'] ?? 0) + 1;
+        return {
+          parts: (scene.parts ?? []).length,
+          histogram,
+          lights: scene.lights,
+          hidden: scene.hiddenParts,
+          batches: (scene.batches ?? []).length
+        };
+      })()`);
+      console.log(`MACHINE_E2E_SCENE_COLORS ${JSON.stringify(sceneColors)}`);
       const name = await capture(cdp, '23-pv-04-transfer-3d.png', '顶升移载整机 3D（3 条 X 窄带 + 带缝里 4 段 Y 短带 + +Y 接料输送机）');
       const partCount = await cdp.evaluate(`Number(document.getElementById('cadPartCount').textContent || 0)`);
-      return `shot=${name} parts=${partCount}`;
+
+      // 硬闸门：从**刚截下来的这张 PNG** 里数四种材质色的像素。
+      // 只读内存材质是查不出「颜色链路断了」的（几何/材质都对、画面全灰就是这么漏掉的）。
+      // 只统计 3D 画布矩形：UI 的青绿/琥珀强调色也落在 ΔE25 半径内，数全图会误判为通过。
+      const rect = await cdp.evaluate(`(() => {
+        const canvas = document.querySelector('#automationCadOverlay .cad-canvas') ?? document.querySelector('.cad-canvas');
+        if (!canvas) return null;
+        const box = canvas.getBoundingClientRect();
+        return { x: box.x, y: box.y, width: box.width, height: box.height };
+      })()`);
+      if (!rect || rect.width < 100 || rect.height < 100) throw new Error(`3D 画布矩形无效：${JSON.stringify(rect)}`);
+      const gate = checkMaterialPixels(readFileSync(join(shotDir, name)), rect);
+      console.log(`MACHINE_E2E_MATERIAL_PX ${describeMaterialPixels(gate)} shot=${name} parts=${partCount}`);
+      if (!gate.ok) {
+        throw new Error(`3D 截图缺材质色：${gate.failures.join('；')}`);
+      }
+      return `shot=${name} parts=${partCount} colors=${gate.rows.map((row) => `${row.material}:${row.pixels}px`).join('/')}`;
     });
 
     const shotsCheck = checkShotHashes();

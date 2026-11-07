@@ -30,8 +30,12 @@ export interface ProjectRecord {
   envelope: [number, number, number] | null;
   material: string[];
   createdAt: string;
-  /** 单件网格：file 是 parts/ 下的文件名，name 是零件名（零件树显示用） */
-  partsList: Array<{ file: string; name: string }>;
+  /**
+   * 单件网格：file 是 parts/ 下的文件名，name 是零件名（零件树显示用）。
+   * `color` 是材质标识色（'#rrggbb'）：STL 不带颜色，重新打开工程时靠它把四色装配回去，
+   * 否则「刚建完有色、关了再开变灰」。
+   */
+  partsList: Array<{ file: string; name: string; color?: string }>;
   hasStep: boolean;
   hasStl: boolean;
   design?: unknown;
@@ -49,7 +53,7 @@ export interface ProjectSaveInput {
   material?: string[];
   stepPath?: string | null;
   stlPath?: string | null;
-  partPaths?: Array<{ name: string; path: string }>;
+  partPaths?: Array<{ name: string; path: string; color?: string }>;
   design?: unknown;
   config?: unknown;
   geometryReview?: ProjectGeometryReview;
@@ -191,13 +195,15 @@ export function saveProject(userDataDir: string, input: ProjectSaveInput): { ok:
     for (const file of readdirSync(join(dir, 'parts'))) rmSync(join(dir, 'parts', file), { force: true });
     for (const item of stagedParts) renameSync(join(temporaryParts, item.file), join(dir, 'parts', item.file));
     rmSync(temporaryParts, { recursive: true, force: true });
-    const partsList: Array<{ file: string; name: string; path?: string[] }> = [];
+    const partsList: Array<{ file: string; name: string; path?: string[]; color?: string }> = [];
     for (const item of input.partPaths ?? []) {
       if (!item?.path || !existsSync(item.path)) continue;
       const safe = sanitizeId(basename(item.path).replace(/\.stl$/i, ''));
       const target = join(dir, 'parts', `${safe}.stl`);
       copyFileSync(item.path, target);
-      partsList.push({ file: `${safe}.stl`, name: String(item.name ?? safe) });
+      // 颜色只收 '#rrggbb'：脏数据（旧版工程没有这一项）就不写，读回来按默认色板处理
+      const color = typeof item.color === 'string' && /^#[0-9a-f]{6}$/i.test(item.color) ? item.color.toLowerCase() : undefined;
+      partsList.push({ file: `${safe}.stl`, name: String(item.name ?? safe), ...(color ? { color } : {}) });
     }
     for (const item of input.partData ?? []) {
       if (!(item.data instanceof Uint8Array) || item.data.byteLength === 0) return { ok: false, message: `零件 ${item.name} STL 数据无效` };
@@ -266,12 +272,12 @@ export function openProject(userDataDir: string, id: string): ProjectOpenResult 
   const record = readRecord(dir);
   if (!record) return { ok: false, message: `工程「${id}」不存在或已损坏` };
   const partsDir = join(dir, 'parts');
-  const partPaths: Array<{ name: string; path: string }> = [];
+  const partPaths: Array<{ name: string; path: string; color?: string }> = [];
   // partsList 的顺序就是零件序，名字来自保存时记录（零件树要显示中文名）
   for (const entry of record.partsList ?? []) {
     const path = join(partsDir, entry.file);
     if (!existsSync(path)) continue;
-    partPaths.push({ name: entry.name, path });
+    partPaths.push({ name: entry.name, path, ...(entry.color ? { color: entry.color } : {}) });
   }
   const stepPath = join(dir, 'model.step');
   const layout = readProjectLayoutSnapshot(dir);
