@@ -1,7 +1,16 @@
 name: windows-build
 on:
-  # 仅手动触发：gh workflow run windows-build --ref main
+  # 手动触发：gh workflow run windows-build --ref main（打未签名的预览包）
   workflow_dispatch:
+  # 推 v* tag 自动发版：打包 → 签名/渠道前置检查 → 产物校验 → GitHub Release 上传。
+  # 没有 CSC_LINK/CSC_KEY_PASSWORD 时前置检查会直接失败，这是发布门禁，不是漏配。
+  push:
+    tags:
+      - 'v*'
+# 同一个 ref 只跑一条：tag 重推会取消（不并跑）旧的那条，避免两个 job 同时写同一个 Release。
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
   build:
     runs-on: windows-latest
@@ -140,6 +149,26 @@ jobs:
       # 打出来的包就没有 DWG 导入能力 —— 所以发布包必须装。
       - name: 安装 DWG 转换模块（仅打包需要）
         run: npm i --no-save @mlightcad/libredwg-web@0.8.3
+
+      # 发布闸门之一：tag 必须打在 main 已合入的提交上。
+      # 否则「某个分支上的临时提交」也能打 tag 发正式版，用户收到的更新就绕过了 main 的 CI 门禁。
+      - name: 校验 tag 指向 main 上的提交（仅 tag）
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = $env:GITHUB_REPOSITORY
+          $sha = $env:GITHUB_SHA
+          $json = gh api "repos/$repo/compare/$sha...main" 2>$null
+          if ($LASTEXITCODE -ne 0) { throw "查询 $sha 与 main 的关系失败（gh api exit $LASTEXITCODE）" }
+          $cmp = (@($json) -join '') | ConvertFrom-Json
+          Write-Host "TAG_GUARD sha=$sha status=$($cmp.status) ahead_by=$($cmp.ahead_by) behind_by=$($cmp.behind_by)"
+          # compare base...head：head(main) 相对 base(sha) 为 ahead/identical 时，sha 才是 main 的祖先。
+          if ($cmp.status -notin @('ahead', 'identical')) {
+            throw "tag $($env:GITHUB_REF_NAME) 指向的提交不在 main 上（compare status=$($cmp.status)）：请从 main 的提交打 tag"
+          }
 
       - name: 发行签名与渠道前置检查
         id: release-preflight
