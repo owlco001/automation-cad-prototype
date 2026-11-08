@@ -13,7 +13,9 @@ Windows NSIS 安装版可从工具栏“软件更新”入口选择稳定版 `st
 - 稳定版使用单调递增的 `X.Y.Z` 版本、GitHub Release 正式版与 `latest.yml`。
 - 测试版使用 `X.Y.Z-beta.N` 版本、GitHub Release prerelease 与 `beta.yml`。
 - Windows workflow 的 tag 发行入口要求 tag 与 `desktop/package.json` 版本完全一致；只接受以上两种格式。
-- workflow 为 electron-builder 指定 `--publish never`，因此打包阶段不会创建 GitHub Release。只有 tag workflow 后续的显式 GitHub Release 步骤上传安装包、`.blockmap` 和 `.yml` 清单。当前任务未运行 tag workflow、未创建 Release。
+- 推 `v*` tag 会自动触发 `windows-build`（也可以在 tag 上手跑 `gh workflow run windows-build --ref v0.6.6`）。tag 触发的 job 先校验 tag 指向的提交在 `main` 上（`/compare` API 返回 `ahead` 或 `identical` 才放行），再执行签名/渠道前置检查；缺签名凭据或 tag 不在 `main` 上都会直接失败，不产出 Release。
+- 手动 dispatch（`--ref main`）只打未签名预览包：不上传 Release、不产 `latest.yml`/`beta.yml`，因此预览包的用户收不到应用内更新。
+- workflow 为 electron-builder 指定 `--publish never`，因此打包阶段不会创建 GitHub Release。只有 tag workflow 后续的显式 GitHub Release 步骤上传安装包、`.blockmap` 和 `.yml` 清单。
 - 发行环境必须配置 `CSC_LINK`（PFX/P12 文件或受支持的签名凭据引用）和 `CSC_KEY_PASSWORD`。生产 tag 构建还会启用 `forceCodeSigning`，并在 Release 步骤前验证 `win-unpacked/resources/app-update.yml` 有真实 `publisherName`、清单含版本/SHA-512、安装包和 blockmap 都存在。没有签名凭据时流程失败，不会发布未签名更新。
 - 更新源固定为 HTTPS GitHub Releases：`owlco001/automation-cad-prototype`。发布凭据不写入客户端。
 
