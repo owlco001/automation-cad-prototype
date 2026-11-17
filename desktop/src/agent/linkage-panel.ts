@@ -90,6 +90,8 @@ export interface LinkagePose {
 export interface LinkagePlaybackFrame {
   tMs?: number | undefined;
   stepNo?: number | undefined;
+  /** 当前同时执行的步号；保留 stepNo 兼容旧帧。 */
+  activeStepNos?: number[] | undefined;
   offsets?: Record<string, number[]> | undefined;
   rotZDeg?: Record<string, number> | undefined;
   pose?: LinkagePose | undefined;
@@ -100,6 +102,8 @@ export interface LinkageFrameSample {
   tMs: number;
   /** 当前高亮的步号：取已开始的最后一帧，和时钟口径一致 */
   stepNo: number | undefined;
+  /** 已开始的当前帧中同时执行的步号。 */
+  activeStepNos?: number[] | undefined;
   /** 插值后的位姿；末帧精确等于目标帧 */
   pose: LinkagePose;
 }
@@ -130,8 +134,12 @@ export interface LinkagePlayback {
   readonly finished: boolean;
 }
 
-const isNumberArray = (value: unknown): value is number[] =>
-  Array.isArray(value) && value.every((item) => typeof item === 'number' && Number.isFinite(item));
+const isOffset = (value: unknown): value is number[] =>
+  Array.isArray(value) && value.length === 3
+  && [0, 1, 2].every((index) => typeof value[index] === 'number' && Number.isFinite(value[index]));
+
+const isFiniteNumber = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value);
 
 /** 统一两种帧形状；没有位姿时给空对象，别让调用方判 undefined */
 export function resolveLinkagePose(frame: LinkagePlaybackFrame | undefined): LinkagePose {
@@ -179,6 +187,7 @@ function warnWrappedAngle(part: string, from: number, to: number): void {
 
 /**
  * 线性混合两帧位姿：offsets 逐分量、rotZDeg 逐零件。
+ * 快照省略的位移/转角为零（场景安装基准）；位移只接受有限的三坐标数组。
  * alpha<=0 返回源帧、alpha>=1 返回目标帧**本体数值**（不是 a+(b-a)*1 的浮点近似）。
  *
  * 转角约定（重要）：**输入必须是未回绕的连续角度**（例如 0°→90°→180°，而不是
@@ -200,13 +209,11 @@ export function blendLinkagePose(from: LinkagePose, to: LinkagePose, alpha: numb
     for (const key of offsetKeys) {
       const a = from.offsets?.[key];
       const b = to.offsets?.[key];
-      if (isNumberArray(a) && isNumberArray(b) && a.length === b.length) {
-        offsets[key] = b.map((value, index) => lerp(a[index] ?? 0, value, alpha));
-      } else {
-        // 只有一侧有时不去“淡出”，直接跟着出现/保留，避免零件被拉到 0
-        const single = isNumberArray(a) ? a : isNumberArray(b) ? b : undefined;
-        if (single) offsets[key] = [...single];
-      }
+      const validA = isOffset(a);
+      const validB = isOffset(b);
+      if (!validA && !validB) continue;
+      // 位姿是完整快照：省略的零件位于安装基准，单侧位移应从/向零插值。
+      offsets[key] = [0, 1, 2].map((index) => lerp(validA ? a[index]! : 0, validB ? b[index]! : 0, alpha));
     }
     if (Object.keys(offsets).length > 0) out.offsets = offsets;
   }
@@ -215,16 +222,14 @@ export function blendLinkagePose(from: LinkagePose, to: LinkagePose, alpha: numb
   if (rotKeys.size > 0) {
     const rotZDeg: Record<string, number> = {};
     for (const key of rotKeys) {
-      const a = from.rotZDeg?.[key];
-      const b = to.rotZDeg?.[key];
-      if (typeof a === 'number' && typeof b === 'number') {
-        // 不做最短弧归一化：输入约定是未回绕的连续角度，误用只在开发态告警
-        warnWrappedAngle(key, a, b);
-        rotZDeg[key] = lerp(a, b, alpha);
-      } else {
-        const single = typeof a === 'number' ? a : typeof b === 'number' ? b : undefined;
-        if (typeof single === 'number') rotZDeg[key] = single;
-      }
+      const fromAngle = from.rotZDeg?.[key];
+      const toAngle = to.rotZDeg?.[key];
+      if (!isFiniteNumber(fromAngle) && !isFiniteNumber(toAngle)) continue;
+      const a = isFiniteNumber(fromAngle) ? fromAngle : 0;
+      const b = isFiniteNumber(toAngle) ? toAngle : 0;
+      // 不做最短弧归一化：输入约定是未回绕的连续角度，误用只在开发态告警
+      warnWrappedAngle(key, a, b);
+      rotZDeg[key] = lerp(a, b, alpha);
     }
     if (Object.keys(rotZDeg).length > 0) out.rotZDeg = rotZDeg;
   }
@@ -246,13 +251,13 @@ export function sampleLinkageFrame(
 ): LinkageFrameSample {
   const first = timeline[0];
   if (!first) return { tMs, stepNo: undefined, pose: {} };
-  if (timeline.length === 1) return { tMs, stepNo: first.frame.stepNo, pose: resolveLinkagePose(first.frame) };
+  if (timeline.length === 1) return { tMs, stepNo: first.frame.stepNo, activeStepNos: first.frame.activeStepNos, pose: resolveLinkagePose(first.frame) };
 
   let index = 0;
   while (index + 1 < timeline.length && (timeline[index + 1] as LinkageTimelineEntry).tMs <= tMs) index += 1;
   const from = timeline[index] as LinkageTimelineEntry;
   const to = timeline[index + 1];
-  if (!to) return { tMs, stepNo: from.frame.stepNo, pose: resolveLinkagePose(from.frame) };
+  if (!to) return { tMs, stepNo: from.frame.stepNo, activeStepNos: from.frame.activeStepNos, pose: resolveLinkagePose(from.frame) };
 
   const gap = to.tMs - from.tMs;
   const span = Math.min(blendMs, gap);
@@ -260,6 +265,7 @@ export function sampleLinkageFrame(
   return {
     tMs,
     stepNo: from.frame.stepNo,
+    activeStepNos: from.frame.activeStepNos,
     pose: blendLinkagePose(resolveLinkagePose(from.frame), resolveLinkagePose(to.frame), alpha)
   };
 }

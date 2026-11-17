@@ -96,6 +96,7 @@ import { exportPackage, importPackage, listLibrary, loadFromLibrary, removeFromL
 import { downloadMachine, listMachineSources } from '../src/machine/library-remote.ts';
 import { machineLibraryFailure, validateLibraryId } from '../src/machine/library-ipc.ts';
 import { deleteProject, listProjects, openProject, saveProject, saveProjectLayout } from './projects.ts';
+import { readProjectSession, saveProjectSession, readLastProjectSession, rememberLastProjectSession, repairProjectSession } from './project-session-store.ts';
 import { clearDesignDraft, readDesignDraft, writeDesignDraft } from '../src/design/draft-store.ts';
 import { validateMachineDesign } from '../src/machine/store.ts';
 import { readMachinePricing } from './pricing.ts';
@@ -683,6 +684,23 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : String(error) };
     }
+  });
+  handle('projects:session-read', (_event, id: unknown) => {
+    if (typeof id !== 'string') return { ok: false, revision: null, message: '工程 id 无效' };
+    return readProjectSession(context.userDataDir, id);
+  });
+  handle('projects:session-save', (_event, id: unknown, payload: unknown) => {
+    if (typeof id !== 'string' || !isRecord(payload)) return { ok: false, message: '工程恢复数据无效' };
+    return saveProjectSession(context.userDataDir, id, payload as Parameters<typeof saveProjectSession>[2]);
+  });
+  handle('projects:session-repair', (_event, id: unknown, revision: unknown) => {
+    if (typeof id !== 'string' || typeof revision !== 'string') return { ok: false, revision: null, message: '工程恢复参数无效' };
+    return repairProjectSession(context.userDataDir, id, revision);
+  });
+  handle('projects:session-last', () => readLastProjectSession(context.userDataDir));
+  handle('projects:session-remember', (_event, id: unknown) => {
+    if (typeof id !== 'string') return { ok: false, message: '工程 id 无效' };
+    return rememberLastProjectSession(context.userDataDir, id);
   });
   handle('projects:list', () => listProjects(context.userDataDir));
   handle('projects:save', (_event, payload: unknown) => {
@@ -1510,7 +1528,7 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
   // 几何联动（Electron 端）：与 Qt 同源，数据全部由 desktop 纯函数算
   handle('machine:linkage', async (_event, brief: string) => {
     try {
-      const linkage = await loadMachineLinkage(app.getAppPath(), String(brief ?? ''), 120);
+      const linkage = await loadMachineLinkage(app.getAppPath(), String(brief ?? ''), 120, { isPackaged: app.isPackaged, resourcesPath: process.resourcesPath });
       return { ok: true, linkage };
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : String(error), linkage: null };
@@ -1520,7 +1538,7 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
   // PLC 体检：缺口 / 最小补齐 / 步序 / 程序↔3D 对账
   handle('machine:plc-audit', async (_event, brief: string) => {
     try {
-      const audit = await loadPlcAudit(app.getAppPath(), String(brief ?? ''));
+      const audit = await loadPlcAudit(app.getAppPath(), String(brief ?? ''), { isPackaged: app.isPackaged, resourcesPath: process.resourcesPath });
       return { ok: true, audit };
     } catch (error) {
       return { ok: false, message: error instanceof Error ? error.message : String(error), audit: null };

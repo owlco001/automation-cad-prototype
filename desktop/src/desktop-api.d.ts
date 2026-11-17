@@ -929,6 +929,7 @@ interface DesktopDesignProjectSaveInput {
   stlData?: Uint8Array;
   partData?: Array<{ name: string; data: Uint8Array; path?: string[] }>;
   placements?: unknown[];
+  workspace?: import('./project-session/snapshot.ts').ProjectSnapshot;
 }
 
 interface DesktopDesignProjectRecord {
@@ -1100,9 +1101,14 @@ interface Window {
     projects: {
       list(): Promise<DesktopDesignProjectRecord[]>;
       save(payload: DesktopDesignProjectSaveInput): Promise<{ ok: boolean; record?: DesktopDesignProjectRecord; message?: string }>;
-      open(id: string): Promise<{ ok: boolean; record?: DesktopDesignProjectRecord; placements?: DesktopProjectLayoutPlacement[]; layoutEditable?: boolean; layoutFingerprint?: string; layoutMessage?: string; partPaths?: Array<{ name: string; path: string; color?: string }>; stepPath?: string | null; message?: string }>;
+      open(id: string): Promise<{ ok: boolean; record?: DesktopDesignProjectRecord; workspace?: import('./project-session/snapshot.ts').ProjectSnapshot; workspaceMessage?: string; placements?: DesktopProjectLayoutPlacement[]; layoutEditable?: boolean; layoutFingerprint?: string; layoutMessage?: string; partPaths?: Array<{ name: string; path: string; color?: string }>; stepPath?: string | null; message?: string }>;
       saveLayout(payload: { id: string; fingerprint: string; placements: DesktopProjectLayoutPlacement[] }): Promise<{ ok: boolean; conflict?: boolean; fingerprint?: string; message?: string }>;
       remove(id: string): Promise<{ ok: boolean; message?: string }>;
+      session(id: string): Promise<{ ok: boolean; snapshot?: import('./project-session/snapshot.ts').ProjectSnapshot; revision: string | null; savedAt?: string; message?: string }>;
+      saveSession(id: string, payload: { snapshot: import('./project-session/snapshot.ts').ProjectSnapshot; expectedRevision: string | null }): Promise<{ ok: boolean; revision?: string | null; message?: string; conflict?: boolean }>;
+      lastSession(): Promise<{ ok: boolean; id?: string; snapshot?: import('./project-session/snapshot.ts').ProjectSnapshot; revision: string | null; savedAt?: string; message?: string }>;
+      rememberSession(id: string): Promise<{ ok: boolean; message?: string }>;
+      repairSession(id: string, revision: string): Promise<{ ok: boolean; revision: string | null; savedAt?: string; message?: string; conflict?: boolean }>;
     };
     projectArchive: {
       exportProject(snapshot: DesktopProjectExportSnapshot): Promise<DesktopProjectArchiveResult<{

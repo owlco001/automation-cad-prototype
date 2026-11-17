@@ -39,6 +39,7 @@ export interface LinkageStep {
   io: string[];
   /** 动作幅度：气缸/气爪为 mm，旋转为 deg */
   amount: number;
+  direction?: 'extend' | 'retract' | 'grip' | 'release' | 'rotate';
 }
 
 export interface Linkage {
@@ -66,14 +67,19 @@ export interface Pose {
 const DEFAULT_DURATION_MS = 400;
 
 const ioOf = (axis: MovingAxis): string[] => Object.values(axis.points ?? {}).filter((value) => typeof value === 'string');
+const durationOf = (axis: MovingAxis): number => {
+  if (axis.durationMs === undefined || axis.durationMs === null) return DEFAULT_DURATION_MS;
+  if (!Number.isFinite(axis.durationMs) || axis.durationMs <= 0) throw new Error(`运动轴 ${axis.actuatorId} 时长必须是正有限数`);
+  return axis.durationMs;
+};
 
 /**
  * 把轴排成一条循环时间线。
  *
  * 排法：同一工位内的轴**顺序执行**（气爪→气缸→旋转这类），
  * 不同工位按索引错开相同间隔（流水线节拍），于是整机看起来是连续流动的。
- * 这是「示意级联动」：不是伺服曲线，也不做加减速，只保证
- * 时长、行程、IO 三件事和几何/PLC 对得上。
+ * 这是「示意级联动」：不是伺服曲线，也不做加减速。
+ * PLC 编译必须单独验证方向、等待、互斥和并行能力，不能据此宣称时序等价。
  */
 export function buildLinkage(geometry: any, options: { cycleMs?: number } = {}): Linkage {
   const axes: MovingAxis[] = Array.isArray(geometry?.moving) ? geometry.moving : [];
@@ -95,7 +101,7 @@ export function buildLinkage(geometry: any, options: { cycleMs?: number } = {}):
   }
   const stationSpan = new Map<string, number>();
   for (const [stationId, list] of perStation) {
-    const span = list.reduce((sum, axis) => sum + (Number(axis.durationMs) || DEFAULT_DURATION_MS), 0);
+    const span = list.reduce((sum, axis) => sum + durationOf(axis), 0);
     stationSpan.set(stationId, span);
   }
   const stationCount = Math.max(1, stationOrder.size);
@@ -108,23 +114,33 @@ export function buildLinkage(geometry: any, options: { cycleMs?: number } = {}):
   // 每站在循环里占据的窗口：[offset, offset + span]
   const spanSlots = [...stationSpan.entries()].sort((a, b) => (stationOrder.get(a[0]) ?? 0) - (stationOrder.get(b[0]) ?? 0));
   const maxSpan = Math.max(1, ...spanSlots.map(([, span]) => span));
+  if (axes.length > 0 && cycleMs < maxSpan) throw new Error(`目标循环 ${cycleMs} ms 短于工位动作所需 ${maxSpan} ms，无法生成完整联动`);
   const steps: LinkageStep[] = [];
   spanSlots.forEach(([stationId, span], slotIndex) => {
     // 站错开：让最后一站的结束正好落在循环末尾
     const offset = cycleMs > maxSpan ? ((cycleMs - span) * slotIndex) / Math.max(1, spanSlots.length - 1) : 0;
     let cursor = offset;
     for (const axis of perStation.get(stationId) ?? []) {
-      const duration = Number(axis.durationMs) || DEFAULT_DURATION_MS;
+      const duration = durationOf(axis);
       const amount = axis.kind === 'rotary' ? Number(axis.rangeDeg) || 0 : Number(axis.strokeMm) || 0;
-      steps.push({
-        stepNo: 0,   // 排序后再编号，避免站间错开导致编号乱序
+      const forward = axis.points?.extend;
+      const reverse = axis.points?.retract;
+      const phases = forward && reverse && axis.kind !== 'rotary'
+        ? [
+            { start: cursor, end: cursor + duration / 2, io: [forward], direction: 'extend' as const },
+            { start: cursor + duration / 2, end: cursor + duration, io: [reverse], direction: 'retract' as const }
+          ]
+        : [{ start: cursor, end: cursor + duration, io: ioOf(axis), direction: undefined }];
+      for (const phase of phases) steps.push({
+        stepNo: 0,
         actuatorId: axis.actuatorId,
         stationId,
         kind: axis.kind,
-        startMs: Math.round(cursor),
-        endMs: Math.round(cursor + duration),
-        io: ioOf(axis),
-        amount
+        startMs: Math.round(phase.start),
+        endMs: Math.round(phase.end),
+        io: phase.io,
+        amount,
+        ...(phase.direction ? { direction: phase.direction } : {})
       });
       cursor += duration;
     }
@@ -155,12 +171,15 @@ const progressOf = (step: LinkageStep, tMs: number): number => {
  */
 const travelProfile = (step: LinkageStep, tMs: number): number => {
   const progress = progressOf(step, tMs);
+  if (step.direction === 'extend' || step.direction === 'grip') return progress;
+  if (step.direction === 'retract' || step.direction === 'release') return 1 - progress;
   if (step.kind === 'rotary') return progress;
   return progress <= 0.5 ? progress * 2 : (1 - progress) * 2;
 };
 
 export function poseAt(linkage: Linkage, tMs: number): Pose {
-  const time = ((tMs % linkage.cycleMs) + linkage.cycleMs) % linkage.cycleMs;
+  const time = linkage.cycleMs > 0 ? ((tMs % linkage.cycleMs) + linkage.cycleMs) % linkage.cycleMs : 0;
+  const axesById = new Map(linkage.axes.map((axis) => [axis.actuatorId, axis]));
   const offsets: Record<string, Vec3> = {};
   const rotZDeg: Record<string, number> = {};
   const activeIO = new Set<string>();
@@ -172,9 +191,10 @@ export function poseAt(linkage: Linkage, tMs: number): Pose {
       for (const point of step.io) activeIO.add(point);
       activeSteps.push(`${step.actuatorId}#${index}`);
     }
+    if (step.direction && (time < step.startMs || time >= step.endMs)) return;
     const amount = travelProfile(step, time);
     if (amount <= 0) return;
-    const axis = linkage.axes.find((item) => item.actuatorId === step.actuatorId);
+    const axis = axesById.get(step.actuatorId);
     if (!axis) return;
     if (step.kind === 'rotary') {
       // 分度台绕自身轴转：零件中心跟着绕 pivot 走（不是原地自转，否则扫掠检测会低估）

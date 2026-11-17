@@ -118,6 +118,8 @@ export interface CommandResult {
   ok: boolean;
   data?: unknown;
   error?: CommandError;
+  /** Cancellation arrived after a successful run: effects remain committed and undo is retained. */
+  cancellation?: { state: 'committed'; message: string };
   /**
    * 写后自动验证结论（由 session.ts 机制层附加；命令实现一律不设置）。
    * 与本结果的 ok 相互独立：验证没过不代表写操作失败。
@@ -426,16 +428,10 @@ export class CommandBus {
     try {
       result = await command.run(args, this.context, signal);
     } catch (error) {
-      if (signal?.aborted) {
-        this.record(name, false, summarizeCommandResult(name, args, { ok: false }));
-        return failed('CANCELLED', '已取消，未执行该命令');
-      }
+      // A thrown error does not prove no effects occurred. Commands own compensation;
+      // preserve their actual failure instead of claiming cancellation prevented execution.
       this.record(name, false, summarizeCommandResult(name, args, { ok: false }));
       return errorResult(error);
-    }
-    if (signal?.aborted) {
-      this.record(name, false, summarizeCommandResult(name, args, { ok: false }));
-      return failed('CANCELLED', '已取消');
     }
 
     const ok = result.ok === true;
@@ -452,7 +448,15 @@ export class CommandBus {
     }
     return {
       ok: true,
-      ...(result.data !== undefined ? { data: result.data } : {})
+      ...(result.data !== undefined ? { data: result.data } : {}),
+      ...(signal?.aborted ? {
+        cancellation: {
+          state: 'committed' as const,
+          message: command.undo && result.undoToken !== undefined
+            ? '取消请求到达时命令已完成，更改已保留；可使用撤销恢复'
+            : '取消请求到达时命令已完成，结果已保留'
+        }
+      } : {})
     };
   }
 
@@ -1756,6 +1760,9 @@ function registerBuildMachineModelCommand(bus: CommandBus): void {
 }
 
 function registerMachineApplyCommand(bus: CommandBus): void {
+  // Per renderer/bus lifetime: a CSV on disk does not prove the in-memory draft
+  // exists (the app may have restarted), and identical options can be enriched.
+  const appliedBomBatches = new Set<string>();
   bus.register({
     name: 'apply_machine_design',
     async run(args, ctx) {
@@ -1850,39 +1857,8 @@ function registerMachineApplyCommand(bus: CommandBus): void {
           `机型方案已存在：${machineId}；如需覆盖请显式传入 overwrite=true`
         );
       }
-      if (idempotent) {
-        // 相同方案重复应用：不重写文件、不追加 BOM、不动 appliedAt；只确保当前渲染层已切到该方案。
-        let sceneRefreshed = false;
-        try {
-          const refreshed = await ctx.bridge.call<{ ok?: boolean; message?: string }>('applyMachineConfig', machineScenePayload(
-            normalized.config,
-            { machineId, name: normalized.config.name, layout: normalized.form?.geometry?.kind ?? null, design: machineElecDesign(normalized) }
-          ));
-          sceneRefreshed = refreshed?.ok !== false;
-        } catch (error) {
-          recordDiagnosticError('MACHINE_SCENE_REFRESH_FAILED', error, { machineId, phase: 'idempotent-apply' });
-        }
-        const bomRows = buildMachineBomRows(normalized);
-        return {
-          ok: true,
-          data: {
-            machineId,
-            name: normalized.config.name,
-            stations: normalized.config.stations.length,
-            actuators: normalized.config.actuators.length,
-            sensors: normalized.config.sensors.length,
-            warnings: [...normalized.warnings],
-            activePath: activeMachinePath(ctx.userDataRoot),
-            designPath: machineFile,
-            sceneRefreshed,
-            idempotent: true,
-            ...(withBom ? {
-              bomPath: machineBomDraftPath(ctx.userDataRoot, machineId),
-              bom: { count: bomRows.length, added: 0, source: 'machine-design' }
-            } : {})
-          }
-        };
-      }
+      // Identical content still selects this machine and fulfills requested outputs.
+      // Keep its stored bytes/appliedAt; the active pointer records this selection.
 
       const now = ctx.now?.() ?? new Date();
       const appliedAt = now.toISOString();
@@ -1902,226 +1878,263 @@ function registerMachineApplyCommand(bus: CommandBus): void {
         appliedAt
       };
 
-      try {
-        writeText(machineFile, `${JSON.stringify(stored, null, 2)}\n`);
-        writeActivePointer(ctx.userDataRoot, {
-          schemaVersion: 1,
-          machineId,
-          name: stored.name,
-          file: `machine/${machineId}.json`,
-          appliedAt
-        });
-      } catch (error) {
-        throw new CommandFailure(
-          'WRITE_FAILED',
-          `机型方案写入失败：${error instanceof Error ? error.message : String(error)}`
-        );
-      }
-
       const warnings = [...normalized.warnings];
       const bomRows: MachineBomRow[] = buildMachineBomRows(normalized);
       const batchId = `machine-${machineId}-${designHash}`;
       let bomPath: string | undefined;
       let bomText: string | null | undefined;
       let bomAdded = 0;
-      if (withBom) {
-        bomPath = machineBomDraftPath(ctx.userDataRoot, machineId);
-        bomText = readTextIfExists(bomPath);
-        try {
-          writeText(bomPath, renderMachineBomCsv(bomRows));
-        } catch (error) {
-          warnings.push(`BOM 草稿写入失败：${error instanceof Error ? error.message : String(error)}`);
-        }
-        if (bomRows.length > 0) {
-          try {
-            const appended = await ctx.bridge.call<{ ok?: boolean; added?: number; message?: string }>(
-              'appendMachineBomRows',
-              {
-                batchId,
-                source: 'machine-design',
-                rows: bomRows.map((row, index) => ({
-                  no: index + 1,
-                  name: row.name,
-                  spec: row.model,
-                  qty: row.qty,
-                  mat: '—',
-                  category: row.category,
-                  source: row.source,
-                  ...(row.note ? { note: row.note } : {})
-                }))
-              }
-            );
-            if (appended?.ok === false) {
-              warnings.push(`BOM 草稿追加失败：${appended.message ?? '渲染层未返回原因'}`);
-            } else {
-              bomAdded = Number(appended?.added ?? bomRows.length);
-            }
-          } catch (error) {
-            warnings.push(`BOM 草稿追加失败：${error instanceof Error ? error.message : String(error)}`);
-          }
-        }
-      }
-
       let plcPath: string | undefined;
       let plcText: string | null | undefined;
       let plcPoints = 0;
-      if (withPlc) {
-        const exportsRoot = ctx.exportsRoot ?? join(ctx.userDataRoot, 'exports');
-        plcPath = join(exportsRoot, 'plc', machineId, 'io-map.csv');
-        plcText = readTextIfExists(plcPath);
+      const geometryFiles: { path: string; previous: string | null }[] = [];
+      const changedFiles: { path: string; previous: string | null }[] = [];
+      const snapshotText = (path: string, previous: string | null): void => {
+        if (existsSync(path) && (!statSync(path).isFile() || previous === null)) {
+          throw new CommandFailure('WRITE_FAILED', `无法读取原文件快照：${path}`);
+        }
+        changedFiles.push({ path, previous });
+      };
+
+      try {
+        // Preflight both primary targets before the first write. Snapshot before each
+        // write also covers an operation that truncates a file before throwing.
+        if (!idempotent) snapshotText(machineFile, designText);
+        snapshotText(activeFile, activeText);
         try {
-          const ioMap = buildMachineIoMap(normalized.config);
-          plcPoints = ioMap.rows.length;
-          writeText(plcPath, ioMap.csv);
+          if (!idempotent) writeText(machineFile, `${JSON.stringify(stored, null, 2)}\n`);
+          writeActivePointer(ctx.userDataRoot, {
+            schemaVersion: 1,
+            machineId,
+            name: stored.name,
+            file: `machine/${machineId}.json`,
+            appliedAt
+          });
         } catch (error) {
           throw new CommandFailure(
             'WRITE_FAILED',
-            `PLC 点位映射写入失败：${error instanceof Error ? error.message : String(error)}`
+            `机型方案写入失败：${error instanceof Error ? error.message : String(error)}`
           );
         }
-      }
 
-      const geometryFiles: { path: string; previous: string | null }[] = [];
-      let geometryResult: Record<string, unknown> | undefined;
-      if (withGeometry) {
-        const paths = machineGeometryPaths(ctx.userDataRoot, machineId);
-        const snapshot = (path: string): void => {
-          if (!geometryFiles.some((entry) => entry.path === path)) {
-            geometryFiles.push({ path, previous: readBase64IfExists(path) });
+        if (withBom) {
+          bomPath = machineBomDraftPath(ctx.userDataRoot, machineId);
+          bomText = readTextIfExists(bomPath);
+          snapshotText(bomPath, bomText);
+          writeText(bomPath, renderMachineBomCsv(bomRows));
+          if (bomRows.length > 0 && !appliedBomBatches.has(batchId)) {
+            try {
+              const appended = await ctx.bridge.call<{ ok?: boolean; added?: number; message?: string }>(
+                'appendMachineBomRows',
+                {
+                  batchId,
+                  source: 'machine-design',
+                  rows: bomRows.map((row, index) => ({
+                    no: index + 1,
+                    name: row.name,
+                    spec: row.model,
+                    qty: row.qty,
+                    mat: '—',
+                    category: row.category,
+                    source: row.source,
+                    ...(row.note ? { note: row.note } : {})
+                  }))
+                }
+              );
+              if (appended?.ok === false) {
+                warnings.push(`BOM 草稿追加失败：${appended.message ?? '渲染层未返回原因'}`);
+              } else {
+                bomAdded = Number(appended?.added ?? bomRows.length);
+                appliedBomBatches.add(batchId);
+              }
+            } catch (error) {
+              warnings.push(`BOM 草稿追加失败：${error instanceof Error ? error.message : String(error)}`);
+            }
+          }
+        }
+
+        if (withPlc) {
+          const exportsRoot = ctx.exportsRoot ?? join(ctx.userDataRoot, 'exports');
+          plcPath = join(exportsRoot, 'plc', machineId, 'io-map.csv');
+          plcText = readTextIfExists(plcPath);
+          snapshotText(plcPath, plcText);
+          const ioMap = buildMachineIoMap(normalized.config);
+          plcPoints = ioMap.rows.length;
+          writeText(plcPath, ioMap.csv);
+        }
+
+        let geometryResult: Record<string, unknown> | undefined;
+        if (withGeometry) {
+          const paths = machineGeometryPaths(ctx.userDataRoot, machineId);
+          const snapshot = (path: string): void => {
+            if (!geometryFiles.some((entry) => entry.path === path)) {
+              if (existsSync(path) && !statSync(path).isFile()) {
+                throw new CommandFailure('WRITE_FAILED', `目标不是普通文件：${path}`);
+              }
+              geometryFiles.push({ path, previous: readBase64IfExists(path) });
+            }
+          };
+          try {
+            const generatedGeometry = resolveMachineGeometry(normalized).geometry;
+            const geometry = generatedGeometry.stations.length > 0
+              ? applyStationGeometryLayout(
+                generatedGeometry,
+                normalized.stationGeometryLayout,
+                stationIdentitiesFor(normalized.config.id, normalized.config.stations.length, normalized.stationIdentities)
+              )
+              // 参数化整机没有工位底板（stations 为空），工位平移布局对它无意义，直接原样用
+              : generatedGeometry;
+            const bundle = geometryToSidecarAssemblies(geometry, { updatedAt: appliedAt });
+            for (const path of [paths.json, paths.stl, paths.gltf, paths.sidecar]) snapshot(path);
+            writeText(paths.json, `${JSON.stringify(geometry, null, 2)}\n`);
+            const stl = geometryToStl(geometry);
+            writeBytes(paths.stl, stl);
+            writeText(paths.gltf, JSON.stringify(geometryToGltf(geometry)));
+            writeText(paths.sidecar, `${JSON.stringify(bundle, null, 2)}\n`);
+            const summary = summarizeGeometry(geometry);
+            let solids: Record<string, unknown> | undefined;
+            if (withSolids) {
+              const report = await buildMachineSolids(bundle, ctx.buildSolids);
+              const stepPaths: string[] = [];
+              if (report.mode === 'solids') {
+                // 上一次 apply 可能留下更多分块的 part-N.step：先全部入撤销快照再清掉，
+                // 避免旧 STEP 混进本次整机（撤销时按快照逐个恢复）。
+                const stale = existsSync(paths.solidsDir)
+                  ? readdirSync(paths.solidsDir).filter((name) => /^part-\d+\.step$/.test(name))
+                  : [];
+                for (const name of stale) {
+                  const stalePath = join(paths.solidsDir, name);
+                  snapshot(stalePath);
+                  rmSync(stalePath, { force: true });
+                }
+                report.stepFiles.forEach((source, index) => {
+                  const target = join(paths.solidsDir, `part-${index + 1}.step`);
+                  try {
+                    const bytes = readFileSync(source);
+                    snapshot(target);
+                    writeBytes(target, bytes);
+                    stepPaths.push(target);
+                  } catch (error) {
+                    throw new CommandFailure('WRITE_FAILED', `STEP 文件复制失败：${error instanceof Error ? error.message : String(error)}`);
+                  }
+                });
+                if (bundle.approximated.length > 0) {
+                  const names = bundle.approximated.slice(0, 8).map((id) => geometry.parts.find((part) => part.id === id)?.name ?? id);
+                  warnings.push(
+                    `STEP 实体化把 ${bundle.approximated.length} 个水平圆柱按等截面方棒近似（${names.join('、')}${bundle.approximated.length > 8 ? ' 等' : ''}）；STL/glTF 网格不受影响`
+                  );
+                }
+              } else {
+                warnings.push(report.message);
+              }
+              solids = { mode: report.mode, chunks: report.chunks, built: report.built, stepPaths, message: report.message };
+            }
+            geometryResult = {
+              ...summary,
+              stlBytes: stl.byteLength,
+              sidecarChunks: bundle.chunks.length,
+              approximated: bundle.approximated.length,
+              approximatedIds: bundle.approximated,
+              jsonPath: paths.json,
+              stlPath: paths.stl,
+              gltfPath: paths.gltf,
+              sidecarPath: paths.sidecar,
+              ...(solids ? { solids } : {})
+            };
+            warnings.push(...geometry.warnings);
+          } catch (error) {
+            throw new CommandFailure('WRITE_FAILED', `参数化几何生成失败：${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+
+        let sceneRefreshed = false;
+        try {
+          const refreshed = await ctx.bridge.call<{ ok?: boolean; message?: string }>('applyMachineConfig', machineScenePayload(
+            normalized.config,
+            { machineId, name: stored.name, layout: normalized.form?.geometry?.kind ?? null, design: machineElecDesign(normalized) }
+          ));
+          if (refreshed?.ok === false) {
+            warnings.push(`3D 联调视图刷新失败：${refreshed.message ?? '渲染层未返回原因'}`);
+          } else {
+            sceneRefreshed = true;
+          }
+        } catch (error) {
+          warnings.push(`3D 联调视图刷新失败：${error instanceof Error ? error.message : String(error)}`);
+        }
+
+        const undoToken: MachineApplyUndoToken = {
+          machineId,
+          machineFile,
+          activeFile,
+          activeText,
+          designText,
+          previousConfig: previousDesign?.config ?? null,
+          previousLayout: previousDesign?.form?.geometry?.kind ?? null,
+          previousElec: machineElecDesign(previousDesign),
+          batchId,
+          // Renderer deduplicates stable batches. Only undo rows added by this run.
+          withBom: bomAdded > 0,
+          ...(bomPath !== undefined ? { bomPath } : {}),
+          ...(withBom ? { bomText: bomText ?? null } : {}),
+          ...(plcPath !== undefined ? { plcPath } : {}),
+          ...(withPlc ? { plcText: plcText ?? null } : {}),
+          ...(geometryFiles.length > 0 ? { geometryFiles } : {})
+        };
+
+        return {
+          ok: true,
+          data: {
+            machineId,
+            name: stored.name,
+            stations: normalized.config.stations.length,
+            actuators: normalized.config.actuators.length,
+            sensors: normalized.config.sensors.length,
+            warnings,
+            activePath: activeFile,
+            designPath: machineFile,
+            sceneRefreshed,
+            ...(idempotent ? { idempotent: true } : {}),
+            ...(withBom ? {
+              bomPath,
+              bom: { count: bomRows.length, added: bomAdded, source: 'machine-design' }
+            } : {}),
+            ...(withPlc ? {
+              plcPath,
+              plc: { points: plcPoints }
+            } : {}),
+            ...(geometryResult ? { geometry: geometryResult } : {})
+          },
+          undoToken
+        };
+      } catch (error) {
+        // Attempt every compensation even if one target cannot be restored. Never
+        // turn an incomplete rollback into a claim that nothing changed.
+        const compensationErrors: string[] = [];
+        const restore = (action: () => void): void => {
+          try { action(); } catch (failure) {
+            compensationErrors.push(failure instanceof Error ? failure.message : String(failure));
           }
         };
-        try {
-          const generatedGeometry = resolveMachineGeometry(normalized).geometry;
-          const geometry = generatedGeometry.stations.length > 0
-            ? applyStationGeometryLayout(
-              generatedGeometry,
-              normalized.stationGeometryLayout,
-              stationIdentitiesFor(normalized.config.id, normalized.config.stations.length, normalized.stationIdentities)
-            )
-            // 参数化整机没有工位底板（stations 为空），工位平移布局对它无意义，直接原样用
-            : generatedGeometry;
-          const bundle = geometryToSidecarAssemblies(geometry, { updatedAt: appliedAt });
-          for (const path of [paths.json, paths.stl, paths.gltf, paths.sidecar]) snapshot(path);
-          writeText(paths.json, `${JSON.stringify(geometry, null, 2)}\n`);
-          const stl = geometryToStl(geometry);
-          writeBytes(paths.stl, stl);
-          writeText(paths.gltf, JSON.stringify(geometryToGltf(geometry)));
-          writeText(paths.sidecar, `${JSON.stringify(bundle, null, 2)}\n`);
-          const summary = summarizeGeometry(geometry);
-          let solids: Record<string, unknown> | undefined;
-          if (withSolids) {
-            const report = await buildMachineSolids(bundle, ctx.buildSolids);
-            const stepPaths: string[] = [];
-            if (report.mode === 'solids') {
-              // 上一次 apply 可能留下更多分块的 part-N.step：先全部入撤销快照再清掉，
-              // 避免旧 STEP 混进本次整机（撤销时按快照逐个恢复）。
-              const stale = existsSync(paths.solidsDir)
-                ? readdirSync(paths.solidsDir).filter((name) => /^part-\d+\.step$/.test(name))
-                : [];
-              for (const name of stale) {
-                const stalePath = join(paths.solidsDir, name);
-                snapshot(stalePath);
-                rmSync(stalePath, { force: true });
-              }
-              report.stepFiles.forEach((source, index) => {
-                const target = join(paths.solidsDir, `part-${index + 1}.step`);
-                try {
-                  const bytes = readFileSync(source);
-                  snapshot(target);
-                  writeBytes(target, bytes);
-                  stepPaths.push(target);
-                } catch (error) {
-                  warnings.push(`STEP 文件复制失败：${error instanceof Error ? error.message : String(error)}`);
-                }
-              });
-              if (bundle.approximated.length > 0) {
-                const names = bundle.approximated.slice(0, 8).map((id) => geometry.parts.find((part) => part.id === id)?.name ?? id);
-                warnings.push(
-                  `STEP 实体化把 ${bundle.approximated.length} 个水平圆柱按等截面方棒近似（${names.join('、')}${bundle.approximated.length > 8 ? ' 等' : ''}）；STL/glTF 网格不受影响`
-                );
-              }
-            } else {
-              warnings.push(report.message);
-            }
-            solids = { mode: report.mode, chunks: report.chunks, built: report.built, stepPaths, message: report.message };
+        for (const entry of [...geometryFiles].reverse()) {
+          if (entry.previous !== null || existsSync(entry.path)) restore(() => restoreBase64(entry.path, entry.previous));
+        }
+        for (const entry of [...changedFiles].reverse()) {
+          if (entry.previous !== null || existsSync(entry.path)) restore(() => restoreText(entry.path, entry.previous));
+        }
+        if (bomAdded > 0) {
+          try {
+            const removed = await ctx.bridge.call<{ ok?: boolean; message?: string }>('removeMachineBomRows', { batchId });
+            if (removed?.ok === false) compensationErrors.push(removed.message ?? 'BOM 恢复失败');
+            else appliedBomBatches.delete(batchId);
+          } catch (failure) {
+            compensationErrors.push(failure instanceof Error ? failure.message : String(failure));
           }
-          geometryResult = {
-            ...summary,
-            stlBytes: stl.byteLength,
-            sidecarChunks: bundle.chunks.length,
-            approximated: bundle.approximated.length,
-            approximatedIds: bundle.approximated,
-            jsonPath: paths.json,
-            stlPath: paths.stl,
-            gltfPath: paths.gltf,
-            sidecarPath: paths.sidecar,
-            ...(solids ? { solids } : {})
-          };
-          warnings.push(...geometry.warnings);
-        } catch (error) {
-          for (const entry of geometryFiles) restoreBase64(entry.path, entry.previous);
-          geometryFiles.length = 0;
-          warnings.push(`参数化几何生成失败：${error instanceof Error ? error.message : String(error)}`);
         }
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new CommandFailure('WRITE_FAILED', compensationErrors.length > 0
+          ? `${detail}；部分状态恢复失败：${compensationErrors.join('；')}`
+          : `${detail}；已恢复本次写入前的状态`);
       }
-
-      let sceneRefreshed = false;
-      try {
-        const refreshed = await ctx.bridge.call<{ ok?: boolean; message?: string }>('applyMachineConfig', machineScenePayload(
-          normalized.config,
-          { machineId, name: stored.name, layout: normalized.form?.geometry?.kind ?? null, design: machineElecDesign(normalized) }
-        ));
-        if (refreshed?.ok === false) {
-          warnings.push(`3D 联调视图刷新失败：${refreshed.message ?? '渲染层未返回原因'}`);
-        } else {
-          sceneRefreshed = true;
-        }
-      } catch (error) {
-        warnings.push(`3D 联调视图刷新失败：${error instanceof Error ? error.message : String(error)}`);
-      }
-
-      const undoToken: MachineApplyUndoToken = {
-        machineId,
-        machineFile,
-        activeFile,
-        activeText,
-        designText,
-        previousConfig: previousDesign?.config ?? null,
-        previousLayout: previousDesign?.form?.geometry?.kind ?? null,
-        previousElec: machineElecDesign(previousDesign),
-        batchId,
-        withBom,
-        ...(bomPath !== undefined ? { bomPath } : {}),
-        ...(withBom ? { bomText: bomText ?? null } : {}),
-        ...(plcPath !== undefined ? { plcPath } : {}),
-        ...(withPlc ? { plcText: plcText ?? null } : {}),
-        ...(geometryFiles.length > 0 ? { geometryFiles } : {})
-      };
-
-      return {
-        ok: true,
-        data: {
-          machineId,
-          name: stored.name,
-          stations: normalized.config.stations.length,
-          actuators: normalized.config.actuators.length,
-          sensors: normalized.config.sensors.length,
-          warnings,
-          activePath: activeFile,
-          designPath: machineFile,
-          sceneRefreshed,
-          ...(withBom ? {
-            bomPath,
-            bom: { count: bomRows.length, added: bomAdded, source: 'machine-design' }
-          } : {}),
-          ...(withPlc ? {
-            plcPath,
-            plc: { points: plcPoints }
-          } : {}),
-          ...(geometryResult ? { geometry: geometryResult } : {})
-        },
-        undoToken
-      };
     },
     async undo(token, ctx) {
       const undo = token as MachineApplyUndoToken;
@@ -2135,7 +2148,8 @@ function registerMachineApplyCommand(bus: CommandBus): void {
       for (const entry of undo.geometryFiles ?? []) restoreBase64(entry.path, entry.previous);
       if (undo.withBom) {
         try {
-          await ctx.bridge.call('removeMachineBomRows', { batchId: undo.batchId });
+          const removed = await ctx.bridge.call<{ ok?: boolean }>('removeMachineBomRows', { batchId: undo.batchId });
+          if (removed?.ok !== false) appliedBomBatches.delete(undo.batchId);
         } catch (error) {
           // BOM 行是内存草稿；撤销文件与 active 指针优先，渲染层不可用时不阻断。
           recordDiagnosticError('MACHINE_BOM_UNDO_FAILED', error, { machineId: undo.machineId });

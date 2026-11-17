@@ -990,6 +990,18 @@ export class CadViewer {
     };
   }
 
+  applyPortableViewState(state: CadPortableViewState): void {
+    if (!this.controls || this.degraded) return;
+    this.camera.position.set(...state.position);
+    this.controls.target.set(...state.target);
+    this.camera.up.set(...state.up);
+    this.camera.fov = state.fovDeg;
+    this.camera.updateProjectionMatrix();
+    if (this.wireframe !== state.wireframe) this.toggleWireframe();
+    this.controls.update();
+    this.planDirty = true;
+  }
+
   /** 运动学标注网格树的数据源；id 使用 parts 索引。 */
   getKinematicsMeshes(): CadKinematicsMesh[] {
     if (this.parts.length === 0 && this.importedResult) {

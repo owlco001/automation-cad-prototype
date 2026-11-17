@@ -1,0 +1,24 @@
+slices:
+  - id: plc-contract
+    status: done
+    scope: [desktop/src/plcgen/linkage-program.ts, desktop/test/plcgen]
+    deletion_targets: [automatic wait coverage from stepUsage, bare SafeStop token evidence, silent parallel-to-serial conversion]
+    verification: node --test test/plcgen/linkage-program*.test.mjs
+  - id: command-consistency
+    status: done
+    scope: [desktop/src/agent/commands.ts, desktop/src/agent/tools.ts, desktop/test/agent/command-consistency.test.mjs]
+    deletion_targets: [blanket idempotent early return, late cancellation undo loss]
+    verification: node --test test/agent/command-consistency.test.mjs
+  - id: runtime-bridge
+    status: done
+    scope: [desktop/electron/machine-linkage.ts, desktop/electron/ipc.ts, desktop/electron/main.ts]
+    verification: node --test test/electron/machine-linkage.test.mjs
+  - id: final-geometry-playback
+    status: done
+    scope: [desktop/scripts/machine-design-cli.mjs, desktop/src/machine/linkage.ts, desktop/src/agent/linkage-panel.ts, desktop/src/agent/ui.ts]
+    deletion_targets: [pre-mutation derived checks, repeated linkage/motion calculation, sparse pose hold/snap]
+    verification: node --test test/machine/pipeline-finalization.test.mjs test/machine/linkage-contract.test.mjs test/agent/linkage-panel-playback.test.mjs
+  - id: convergence
+    status: done
+    dependencies: [plc-contract, command-consistency, runtime-bridge, final-geometry-playback]
+    verification: npm test && npm run build:ext && node scripts/build-pipeline.mjs && node scripts/project-session-smoke.mjs

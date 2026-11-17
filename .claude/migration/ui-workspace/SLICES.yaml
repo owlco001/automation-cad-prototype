@@ -1,0 +1,18 @@
+slices:
+  - id: navigation
+    status: done
+    scope: [desktop/src/ui/tool-menu.ts, desktop/src/ui/workspace-nav.ts, desktop/test/ui/tool-menu.test.mjs, desktop/test/ui/workspace-nav.test.mjs]
+    verification: node --test test/ui/tool-menu.test.mjs test/ui/workspace-nav.test.mjs
+  - id: project-context
+    status: done
+    scope: [desktop/src/ui/project-status.ts, desktop/src/extension.ts, desktop/test/ui/project-status.test.mjs]
+    verification: node scripts/project-session-smoke.mjs
+  - id: inspector
+    status: done
+    scope: [desktop/src/ui/cad-inspector.ts, desktop/test/ui/cad-inspector.test.mjs, desktop/src/ui/workspace.css]
+    verification: node --test test/ui/cad-inspector.test.mjs
+  - id: convergence
+    status: done
+    dependencies: [navigation, project-context, inspector]
+    verification: npm test && npm run build:ext && node scripts/project-session-smoke.mjs
+    cleanup: [retain old mode access, no root prototype edits, no generated baseline screenshots]

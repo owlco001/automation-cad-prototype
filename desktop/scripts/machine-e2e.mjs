@@ -991,7 +991,7 @@ async function main() {
       const loaded = Number(body?.loadedParts ?? 0);
       const colored = Number(body?.coloredParts ?? 0);
       if (items < 100) throw new Error(`移载机型零件数 ${items} < 100（3 条窄带主线 39 件 + 移载单元 52 件 + 接料段 15 件）`);
-      if (loaded < 100) throw new Error(`视口只装配了 ${loaded} 件（期望 ≥100）`);
+      if (loaded < 100) throw new Error(`视口只装配了 ${loaded} 件（期望 ≥100）：${body?.loadMessage ?? JSON.stringify(body)}`);
       // 颜色链路：STL 无颜色，件→材质映射必须在导入时补上（否则视口退回灰色默认色板）
       if (colored < 100) throw new Error(`视口只有 ${colored} 件带材质色（期望 ≥100）：STL 导入没拿到件→材质色映射`);
       const bomRaw = body?.bom;

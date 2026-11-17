@@ -852,10 +852,11 @@ async function openMachineLinkage(callId: string): Promise<void> {
       startLinkagePlayback({
         frames,
         cycleMs: total,
-        onSample: ({ tMs, stepNo, pose }) => {
+        onSample: ({ tMs, stepNo, activeStepNos, pose }) => {
           clock.textContent = `${Math.round(tMs)} / ${total} ms`;
+          const active = new Set(activeStepNos ?? (stepNo === undefined ? [] : [stepNo]));
           slot.querySelectorAll<HTMLElement>('[data-linkage-step]').forEach((row) => {
-            row.classList.toggle('is-active', Number(row.dataset.linkageStep) === Number(stepNo));
+            row.classList.toggle('is-active', active.has(Number(row.dataset.linkageStep)));
           });
           // 3D 视口挂上了就套位姿；没挂上就只走时间轴，不假装动过
           const apply = (window as any).__cadApplyLinkagePose;

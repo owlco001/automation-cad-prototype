@@ -3257,7 +3257,7 @@ function createWindow(): BrowserWindow {
 
         // 几何联动（Electron 端与 Qt 同源）：时间线 + 帧 + 运动包络
         try {
-          const linkage = await loadMachineLinkage(app.getAppPath(), '六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅', 120);
+          const linkage = await loadMachineLinkage(app.getAppPath(), '六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅', 120, { isPackaged: app.isPackaged, resourcesPath: process.resourcesPath });
           const io = linkage.io ?? {};
           const motion = linkage.motion ?? {};
           if (!linkage.steps?.length || !linkage.frames?.length) {

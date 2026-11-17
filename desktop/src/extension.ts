@@ -43,6 +43,7 @@ import { initCommissionPanel, type CommissionPanelHandle } from './commission/ui
 import { initMachineLibraryPanel, type MachineLibraryUiHandle } from './commission/machine-library-drawer.ts';
 import type { MachineConfig } from './commission/machine-config';
 import type { StoredMachineDesign } from './machine/store';
+import { validateMachineDesign } from './machine/design-validation.ts';
 import { buildOptionalSyncPlcPayload } from './sync/plc.ts';
 import { initSyncPanel } from './sync/ui';
 import { initAgentPanel, setAgentResumeModuleEnabled } from './agent/ui';
@@ -85,6 +86,10 @@ import { detectBufferLayers, detectConveyorSpec, detectTransfer, detectTurner, d
 import { buildEntryButton as buildPanelEntryButton, createDrawer } from './ui/panels';
 import { qtExitNotice, qtLaunchNotice, type QtExitPayload, type QtLaunchReply } from './ui/qt-exit-notice.ts';
 import { syncToolMenu } from './ui/tool-menu.ts';
+import { installProjectStatus } from './ui/project-status.ts';
+import { installWorkspaceNav } from './ui/workspace-nav.ts';
+import { installCadInspector } from './ui/cad-inspector.ts';
+import workspaceStyles from './ui/workspace.css?inline';
 import { assertCadFileSize } from './shared/input-limits';
 import { recordDiagnosticError, setDiagnosticOperation } from './shared/diagnostics';
 import { identifyCadModelObjects, type CadModelObjectIdentity, type CadProjectIdentity } from './project-archive/identity';
@@ -101,6 +106,11 @@ import { normalizeGraph } from './canvas/graph.ts';
 import { unionEnvelope } from './cad/stl-export.ts';
 import { buildPartsCsv, partsCsvFileName } from './cad/parts-csv.ts';
 import type { MachineGraph } from './canvas/types.ts';
+import { parseProjectSnapshot, type ProjectSnapshot } from './project-session/snapshot.ts';
+import { ProjectAutosave } from './project-session/autosave.ts';
+import { projectMeshSignature } from './project-session/mesh-signature.ts';
+import { deserializeDoc } from './parametric/model.ts';
+import { deserializeAnnotation } from './cad/kinematics-ui.ts';
 
 const ICONS = {
   cube: '<svg viewBox="0 0 16 16"><path d="M8 1.9l5.4 3.1v6L8 14.1 2.6 11V5z"/><path d="M8 8.1l5.4-3.1M8 8.1L2.6 5M8 8.1V14"/></svg>',
@@ -1041,6 +1051,16 @@ function openOverlay(): void {
   if (!root) return;
   overlayOpen = true;
   root.hidden = false;
+  mountProjectContext(root);
+  if (!cadInspector) cadInspector = installCadInspector({
+    root,
+    isParametricEnabled: () => parametricImportModuleEnabled,
+    onSelect: (key) => {
+      if (key === 'parametric') { ensureKinematicsUi().close(); ensureParametricUi().open(); }
+      else if (key === 'kinematics') { parametric?.close(); ensureKinematicsUi().open(); }
+    }
+  });
+  cadInspector.refresh();
   // 同一屏不要两套零件列表：覆盖层打开时把经典结构树藏起来（覆盖层左栏自带分组与搜索），
   // 关掉覆盖层再还原，避免用户在两处搜索里来回切。
   document.body.classList.add('cad-overlay-open');
@@ -1049,12 +1069,13 @@ function openOverlay(): void {
   void refreshProjectMenu();
   ensureViewer().setActive(true);
   if (parametric?.isOpen()) kinematics?.close();
-  else ensureKinematicsUi().open();
+  cadInspector?.refresh();
   document.getElementById(CAD_ENTRY)?.classList.add('is-active');
 }
 
 function closeOverlay(options: { restoreCanvas?: boolean } = {}): void {
   overlayOpen = false;
+  mountProjectContext();
   document.body.classList.remove('cad-overlay-open');
   if (root) root.hidden = true;
   toggleExportMenu(false);
@@ -1106,6 +1127,7 @@ function fileNameFromPath(path: string): string {
 }
 
 function displayFileInfo(name: string): void {
+  refreshProjectContext();
   const info = document.getElementById('cadFileInfo');
   if (info) info.textContent = name;
 }
@@ -1753,6 +1775,102 @@ function showElecDrawing(drawing: ElecDrawing, index: number): void {
 
 /** 最近打开的工程：外壳冷启动时恢复卡片用 */
 let lastOpenedProject: ProjectMenuRecord | null = null;
+let activeSessionDesign: StoredMachineDesign | null = null;
+let sessionMeshSignature = '';
+let sessionBindingId = '';
+let sessionSourceName = '';
+let projectTransition = 0;
+let sessionOpening = false;
+let retainedFeatureTreeJson: string | null = null;
+let autosavePoll: ReturnType<typeof setInterval> | null = null;
+let pendingSessionRepair: { id: string; revision: string | null } | null = null;
+let projectSaveText = '存为工程后启用自动保存';
+let projectSaveError = false;
+let projectStatusBar: ReturnType<typeof installProjectStatus> | null = null;
+let workspaceNav: ReturnType<typeof installWorkspaceNav> | null = null;
+let cadInspector: ReturnType<typeof installCadInspector> | null = null;
+
+function refreshProjectContext(): void {
+  projectStatusBar?.refresh();
+}
+
+function mountProjectContext(host?: HTMLElement): void {
+  if (!projectStatusBar) projectStatusBar = installProjectStatus({
+    read: () => ({
+      name: lastOpenedProject?.name ?? currentFileName ?? '',
+      stage: lastOpenedProject ? 'project' : currentFileName ? 'import' : 'empty',
+      geometry: currentFileName && currentSceneSource !== 'empty' ? currentSceneSource : 'none',
+      saveText: projectSaveText, saveError: projectSaveError
+    }),
+    onSave: () => { void saveSceneAsProject(); },
+    onNavigate: () => { if (overlayOpen) closeOverlay({ restoreCanvas: false }); }
+  });
+  const target = host ?? document.getElementById('app');
+  if (target) projectStatusBar.mount(target);
+}
+
+
+function captureProjectSession(): ProjectSnapshot {
+  return parseProjectSnapshot({
+    schemaVersion: 1, projectId: sessionBindingId, sourceName: sessionSourceName,
+    meshSignature: sessionMeshSignature,
+    machineConfig: commission?.getMachineConfig() ?? null,
+    machineDesign: activeSessionDesign,
+    ioPoints: commission?.getIoPoints() ?? null,
+    featureTreeJson: parametricImportModuleEnabled && parametric
+      ? serializeDoc(parametric.getDoc()) : retainedFeatureTreeJson,
+    kinematicsJson: kinematics ? serializeAnnotation(kinematics.getAnnotation()) : null,
+    viewState: viewer?.getPortableViewState() ?? null
+  });
+}
+
+function setSessionStatus(text: string, error = false): void {
+  projectSaveText = text;
+  projectSaveError = error;
+  const node = document.getElementById('projectSessionStatus');
+  if (node) {
+    node.textContent = pendingSessionRepair ? '备份可恢复，点击修复工程自动保存' : text;
+    node.dataset.error = String(error || pendingSessionRepair !== null);
+  }
+  refreshProjectContext();
+}
+
+const projectAutosave = new ProjectAutosave<ProjectSnapshot>({
+  capture: captureProjectSession,
+  save: async (id, snapshot, revision) => {
+    const api = window.desktop?.projects;
+    if (!api) return { ok: false, message: '工程存储接口不可用' };
+    return api.saveSession(id, { snapshot, expectedRevision: revision });
+  },
+  onStatus: (state) => {
+    const labels = { idle: '尚未启用自动保存', dirty: '有待保存修改', saving: '正在自动保存…', saved: '已自动保存', error: '自动保存失败，点击重试', conflict: '工程已变化，请重新打开' };
+    setSessionStatus(state.message ? `${labels[state.status]}：${state.message}` : labels[state.status], state.status === 'error' || state.status === 'conflict');
+  }
+});
+
+function activateProjectAutosave(id: string, revision: string | null, baseline: ProjectSnapshot = captureProjectSession()): void {
+  pendingSessionRepair = null;
+  projectAutosave.activate(id, revision, baseline);
+  projectAutosave.checkForChanges();
+  if (autosavePoll) clearInterval(autosavePoll);
+  // Capture only lightweight document state; compare before dirtying and writing.
+  autosavePoll = setInterval(() => { if (!sessionOpening) projectAutosave.checkForChanges(); }, 1500);
+  void window.desktop?.projects.rememberSession(id);
+}
+
+async function leaveProjectSession(): Promise<boolean> {
+  if (autosavePoll && sessionBindingId) projectAutosave.checkForChanges();
+  if (autosavePoll && sessionBindingId && projectAutosave.isDirty()) {
+    if (!(await projectAutosave.flush())) {
+      showNotice(`当前工程尚未保存成功，请先处理自动保存状态：${document.getElementById('projectSessionStatus')?.textContent ?? ''}`, true);
+      return false;
+    }
+  }
+  // Keep the current binding alive until a replacement successfully commits.
+  // Cancelled dialogs or failed parsing must leave the previous autosave active.
+  return true;
+}
+
 
 type DesktopProjectRecordLike = NonNullable<Awaited<ReturnType<NonNullable<NonNullable<Window['desktop']>['projects']>['open']>>['record']>;
 
@@ -1784,6 +1902,7 @@ function projectMenuRecordOf(record: DesktopProjectRecordLike, parts: number): P
 /** 工程成为当前工程，也成为最新的电气数据源 */
 function setCurrentProject(project: ProjectMenuRecord): void {
   lastOpenedProject = project;
+  refreshProjectContext();
   syncShellProjectTitle(project.name);
   elecSources.useProject(project);
   elecSourceChanged();
@@ -1877,6 +1996,28 @@ function mountHomeScreen(): void {
     button.addEventListener('click', () => homeHandle?.open());
     left.appendChild(button);
   }
+  if (left && !document.getElementById('projectSessionStatus')) {
+    const status = document.createElement('button');
+    status.id = 'projectSessionStatus';
+    status.type = 'button';
+    status.textContent = '存为工程后启用自动保存';
+    status.setAttribute('aria-live', 'polite');
+    status.title = '保存参数、运动学、IO 与视角；点击立即保存或重试';
+    status.addEventListener('click', () => {
+      const repair = pendingSessionRepair;
+      if (repair && window.confirm('将校验通过的备份恢复为当前保存版本？损坏原件会保留供排查。')) {
+        if (!repair.revision) return;
+        void window.desktop?.projects.repairSession(repair.id, repair.revision).then((result) => {
+          if (!result.ok) { showNotice(result.message ?? '恢复保存失败', true); return; }
+          pendingSessionRepair = null;
+          activateProjectAutosave(repair.id, result.revision);
+          projectAutosave.markDirty();
+          void projectAutosave.flush();
+        });
+      } else if (!repair) { projectAutosave.markDirty(); void projectAutosave.flush(); }
+    });
+    left.appendChild(status);
+  }
   if (left && !document.getElementById('saveAsProjectButton')) {
     const saveButton = document.createElement('button');
     saveButton.type = 'button';
@@ -1906,6 +2047,19 @@ function mountHomeScreen(): void {
 
 async function openSavedProject(id: string): Promise<ProjectMenuRecord | null> {
   if (!window.desktop?.projects) return null;
+  if (sessionOpening) { showNotice('正在打开工程，请稍候'); return null; }
+  if (!(await leaveProjectSession())) return null;
+  const transition = ++projectTransition;
+  sessionOpening = true;
+  try {
+    return await restoreSavedProject(id, transition);
+  } finally {
+    sessionOpening = false;
+  }
+}
+
+async function restoreSavedProject(id: string, transition: number): Promise<ProjectMenuRecord | null> {
+  if (!window.desktop?.projects) return null;
   const result = await window.desktop.projects.open(id);
   if (!result.ok || !result.record) {
     showNotice(result.message ?? '打开工程失败', true);
@@ -1928,6 +2082,17 @@ async function openSavedProject(id: string): Promise<ProjectMenuRecord | null> {
       buffers.push({ buffer: toArrayBuffer(bytes), name: item.name, ...(color ? { color } : {}) });
     }
     const merged = await parseStandardCadBuffers(buffers, 'STL');
+    const signature = await projectMeshSignature(buffers.map((item) => ({ name: item.name, data: new Uint8Array(item.buffer) })));
+    const recovered = await window.desktop.projects.session(id);
+    const snapshot = recovered.ok && recovered.snapshot ? parseProjectSnapshot(recovered.snapshot) : null;
+    if (!recovered.ok) throw new Error(`工程恢复状态不可读取：${recovered.message ?? '未知原因'}。原工程保持不变，请从工程目录备份或修复文件。`);
+    if (snapshot && snapshot.meshSignature !== signature) throw new Error('工程几何与恢复状态不匹配，未应用候选状态');
+    const featureDoc = snapshot?.featureTreeJson ? deserializeDoc(snapshot.featureTreeJson) : null;
+    const annotation = snapshot?.kinematicsJson ? deserializeAnnotation(snapshot.kinematicsJson) : null;
+    if (annotation?.annotation?.parts.some((part) => part.meshIds.some((index) => index < 0 || index >= merged.meshes.length))) {
+      throw new Error('工程运动学引用超出当前零件范围');
+    }
+    if (transition !== projectTransition) return null;
     // 把工程记录里的装配层级补回网格：STL 本身不带路径，不补的话 3D 左栏只能显示「未分层」
     const pathByName = new Map<string, string[]>();
     for (const item of (result.record.partsList ?? []) as Array<{ name: string; path?: string[] }>) {
@@ -1943,6 +2108,30 @@ async function openSavedProject(id: string): Promise<ProjectMenuRecord | null> {
     openOverlay();
     const currentViewer = ensureViewer();
     currentViewer.load(merged, label);
+    projectAutosave.suspend();
+    if (autosavePoll) clearInterval(autosavePoll);
+    autosavePoll = null;
+    // Library STL is a new local binding, never reuse an unrelated imported CAD identity.
+    currentProjectIdentity = null;
+    currentModelObjectIdentities = [];
+    currentProjectStorageKey = `library:${id}`;
+    sessionMeshSignature = signature;
+    sessionBindingId = snapshot?.projectId ?? `library:${id}`;
+    pendingSessionRepair = null;
+    lastCadSourcePath = null;
+    sessionSourceName = snapshot?.sourceName || result.record.name;
+    activeSessionDesign = snapshot?.machineDesign ?? null;
+    retainedFeatureTreeJson = snapshot?.featureTreeJson ?? null;
+    commission?.setMachineConfig(snapshot?.machineConfig ?? null);
+    commission?.restoreIoPoints(snapshot?.ioPoints ?? []);
+    ensureKinematicsUi().setSource(sessionSourceName, currentViewer.getKinematicsMeshes(), undefined, currentProjectStorageKey);
+    if (annotation?.annotation) ensureKinematicsUi().restoreAnnotation(annotation.annotation);
+    if (parametricImportModuleEnabled) {
+      ensureParametricUi().setSource(sessionSourceName, undefined, currentProjectStorageKey);
+      if (featureDoc?.ok && featureDoc.doc) ensureParametricUi().setDoc(featureDoc.doc);
+    }
+    if (snapshot?.viewState) currentViewer.applyPortableViewState(snapshot.viewState);
+    refreshProjectArchiveControls();
     const scenePartCount = currentViewer.getSceneParts().length;
     currentSceneSource = result.record.design !== undefined ? 'concept-placeholder' : 'saved-model';
     currentSceneMassKg = result.record.massKg ?? null;
@@ -1966,8 +2155,19 @@ async function openSavedProject(id: string): Promise<ProjectMenuRecord | null> {
     (window as unknown as { __applyProjectStage?: (record: unknown) => void }).__applyProjectStage?.(result.record);
     const project = projectMenuRecordOf(result.record, merged.meshes.length);
     setCurrentProject(project);
+    projectAutosave.suspend();
+    if (autosavePoll) clearInterval(autosavePoll);
+    autosavePoll = null;
     // 右侧属性面板改由工程数据驱动（否则仍显示原型里的演示气缸）
     attachProjectPanel(toPanelInfo(result.record));
+    if (activeSessionDesign && commission) { elecSources.useMachine(commission.getMachineConfig(), activeSessionDesign); elecSourceChanged(); }
+    if (!recovered.message?.startsWith('Recovered previous session backup')) activateProjectAutosave(id, recovered.revision, snapshot ?? captureProjectSession());
+    else if (recovered.ok && recovered.snapshot) {
+      setSessionStatus('已从备份恢复，点击修复自动保存', true);
+      pendingSessionRepair = { id, revision: recovered.revision };
+    }
+    else setSessionStatus(`恢复数据不可用：${recovered.message ?? result.workspaceMessage ?? '未知原因'}；未启用自动保存`, true);
+    if (!snapshot) showNotice('旧工程已载入，未保存的参数、运动学和视角无法追溯；后续修改将开始自动保存。');
     if (scenePartCount === 0) {
       const reason = webglFallback
         ? '当前环境不支持 WebGL，仅显示解析统计，不能进行 3D 校核'
@@ -1993,6 +2193,7 @@ async function openSavedProject(id: string): Promise<ProjectMenuRecord | null> {
  */
 function showImportedModelStage(name: string, result: CadImportResult): void {
   lastOpenedProject = null;
+  refreshProjectContext();
   const title = document.getElementById('spTitle');
   if (title) title.textContent = name;
   const envelope = unionEnvelope(
@@ -2087,9 +2288,12 @@ async function saveSceneAsProject(input?: unknown): Promise<Record<string, unkno
   if (requested.name !== undefined && (typeof requested.name !== 'string' || !requested.name.trim())) {
     return { ok: false, code: 'INVALID_ARGUMENT', message: 'name 必须是非空字符串' };
   }
+  if (sessionOpening) return { ok: false, code: 'BUSY', message: '正在打开工程，暂不能另存' };
   if (!window.desktop?.projects?.save) {
     return { ok: false, code: 'UNAVAILABLE', message: '工程库接口不可用，无法保存' };
   }
+  if (!(await leaveProjectSession())) return { ok: false, code: 'UNSAVED', message: '当前工程未保存成功' };
+  const transition = ++projectTransition;
   let viewer;
   try {
     viewer = ensureViewer();
@@ -2113,9 +2317,19 @@ async function saveSceneAsProject(input?: unknown): Promise<Record<string, unkno
     .trim()
     .slice(0, 40) || '导入模型';
   const name = typeof requested.name === 'string' ? requested.name.trim() : `${base}（导入）`;
+  const previousBinding = { id: sessionBindingId, signature: sessionMeshSignature, source: sessionSourceName };
+  sessionOpening = true;
+  let savedBinding = false;
   try {
+    if (transition !== projectTransition) return { ok: false, code: 'STALE', message: '工程状态已切换，已取消保存' };
+    const signature = await projectMeshSignature(parts);
+    sessionMeshSignature = signature;
+    sessionBindingId = sessionBindingId || `local:${crypto.randomUUID()}`;
+    sessionSourceName = currentFileName || name;
+    const workspace = captureProjectSession();
     const saved = await window.desktop.projects.save({
       name,
+      workspace,
       process: currentSceneSource === 'saved-model' ? 'cad-scene' : 'cad-import',
       params: { parts: parts.length, triangles, imported: 1 },
       parts: parts.length,
@@ -2133,6 +2347,8 @@ async function saveSceneAsProject(input?: unknown): Promise<Record<string, unkno
     (window as unknown as { __applyProjectStage?: (record: unknown) => void }).__applyProjectStage?.(saved.record);
     attachProjectPanel(toPanelInfo(saved.record));
     setCurrentProject(projectMenuRecordOf(saved.record, parts.length));
+    activateProjectAutosave(saved.record.id, null, workspace);
+    savedBinding = true;
     const size = envelope ? `${envelope[0]}×${envelope[1]}×${envelope[2]} mm` : '包络未知';
     showNotice(`已存为工程「${saved.record.name}」：${parts.length} 件 · ${triangles} 三角面 · ${size}（质量未称重，未计入）`);
     return {
@@ -2149,6 +2365,13 @@ async function saveSceneAsProject(input?: unknown): Promise<Record<string, unkno
     const message = error instanceof Error ? error.message : String(error);
     showNotice(`存为工程失败：${message}`, true);
     return { ok: false, code: 'SAVE_FAILED', message };
+  } finally {
+    if (!savedBinding) {
+      sessionBindingId = previousBinding.id;
+      sessionMeshSignature = previousBinding.signature;
+      sessionSourceName = previousBinding.source;
+    }
+    sessionOpening = false;
   }
 }
 
@@ -2252,9 +2475,10 @@ async function inspectPath(path: string): Promise<CadImportResult['stats']> {
 
 async function loadCadBuffer(buffer: ArrayBuffer, name: string): Promise<CadImportResult> {
   assertCadFileSize(name, buffer.byteLength);
-  if (busy) {
-    throw new Error('已有文件正在解析，请稍候');
+  if (busy || sessionOpening) {
+    throw new Error('已有文件正在解析或恢复，请稍候');
   }
+  if (!(await leaveProjectSession())) throw new Error('当前工程尚未完成保存；已取消导入');
   openOverlay();
   setBusy(true, `正在解析 ${name}…`);
   setEmptyVisible(false);
@@ -2297,6 +2521,15 @@ async function loadCadBuffer(buffer: ArrayBuffer, name: string): Promise<CadImpo
     currentSceneSource = 'imported-model';
     currentSceneMassKg = null;
     currentSceneGeneration += 1;
+    projectAutosave.suspend();
+    if (autosavePoll) clearInterval(autosavePoll);
+    autosavePoll = null;
+    sessionBindingId = '';
+    sessionMeshSignature = '';
+    sessionSourceName = name;
+    retainedFeatureTreeJson = null;
+    activeSessionDesign = null;
+    projectTransition += 1;
     currentProjectIdentity = nextIdentity;
     currentProjectStorageKey = nextStorageKey;
     currentModelObjectIdentities = nextModelObjectIdentities;
@@ -2533,7 +2766,22 @@ async function buildMachineModel(input: unknown): Promise<Record<string, unknown
       const label = `${modelLabel}（${merged.meshes.length} 件）`;
       // 必须走 ensureViewer()：视口是懒创建的，直接访问 viewer 变量会静默不加载
       openOverlay();
+      if (sessionOpening || !(await leaveProjectSession())) throw new Error(`当前工程尚未完成保存，未替换视口：${document.getElementById('projectSessionStatus')?.textContent ?? ''}`);
       ensureViewer().load(merged, label);
+      projectAutosave.suspend();
+      if (autosavePoll) clearInterval(autosavePoll);
+      autosavePoll = null;
+      sessionBindingId = '';
+      sessionMeshSignature = '';
+      retainedFeatureTreeJson = null;
+      activeSessionDesign = null;
+      currentProjectIdentity = null;
+      currentModelObjectIdentities = [];
+      currentProjectStorageKey = `generated:${crypto.randomUUID()}`;
+      ensureKinematicsUi().setSource(modelLabel, ensureViewer().getKinematicsMeshes(), undefined, currentProjectStorageKey);
+      parametric?.setSource(modelLabel, undefined, currentProjectStorageKey);
+      refreshProjectArchiveControls();
+      projectTransition += 1;
       currentFileName = label;
       currentSceneSource = 'saved-model';
       currentSceneMassKg = massKg;
@@ -2580,6 +2828,12 @@ async function buildMachineModel(input: unknown): Promise<Record<string, unknown
   // 视口里已换成这台整机且已入库：它就是当前工程，电气图跟着换（否则电气域还停在上一个工程/方案）
   if (loadedParts > 0 && savedProject.ok && savedProject.record) {
     setCurrentProject(projectMenuRecordOf(savedProject.record, loadedParts));
+    await openSavedProject(savedProject.record.id);
+    if (parametricImportModuleEnabled) {
+      ensureParametricUi().setDoc(doc);
+      projectAutosave.checkForChanges();
+      await projectAutosave.flush();
+    }
   }
 
   return {
@@ -2677,6 +2931,8 @@ async function importDroppedFile(file: File): Promise<void> {
 }
 
 async function chooseAndImport(): Promise<void> {
+  if (sessionOpening) { showNotice('正在恢复工程，请稍候'); return; }
+  if (!(await leaveProjectSession())) return;
   if (!window.desktop) {
     showNotice('桌面文件对话框不可用，请直接拖入文件。', true);
     return;
@@ -3190,6 +3446,8 @@ function initAgentBridge(): void {
           ? source.layout
           : null;
         commission.setMachineConfig(source.config ? source.config as MachineConfig : null, layout);
+        activeSessionDesign = source.design && typeof source.design === 'object'
+          ? { ...validateMachineDesign({ ...source.design as Record<string, unknown>, config: commission.getMachineConfig() }), schemaVersion: 1, kind: 'machine-design', id: commission.getMachineConfig().id, name: commission.getMachineConfig().name, appliedAt: new Date().toISOString() } : null;
         const config = commission.getMachineConfig();
         // 电气图要完整方案（BOM 草稿 + 功率），只有 config 时按缺省出图并在图上注明；
         // config 为空 = 撤销到“没有方案”，退回最近打开的工程
@@ -3775,6 +4033,9 @@ function bindWindowEvents(): void {
     unsubscribeQtExit = null;
     disposeCadWorker('pagehide');
     window.clearTimeout(noticeTimer);
+    cadInspector?.dispose();
+    workspaceNav?.dispose();
+    projectStatusBar?.dispose();
     viewer?.dispose();
     viewer = null;
     commission?.dispose();
@@ -3784,6 +4045,11 @@ function bindWindowEvents(): void {
 
 function init(): void {
   injectStyles();
+  const workspaceStyle = document.createElement('style');
+  workspaceStyle.id = 'automationcad-workspace-styles';
+  workspaceStyle.textContent = workspaceStyles;
+  document.head.appendChild(workspaceStyle);
+  document.body.classList.add('desktop-workspace');
   const appearanceReady = window.desktop?.appearance?.get()
     .then((config) => applyAppearance(config))
     .catch((error: unknown) => {
@@ -3924,6 +4190,8 @@ function init(): void {
       parametric?.close();
       console.error('[modules] 参数化模块状态同步失败；参数化功能保持关闭', error);
     }
+    cadInspector?.refresh();
+    workspaceNav?.refresh();
   };
   const publishDrawingsState = (states: ModuleStatus[]): void => {
     const desired = states.find((module) => module.id === 'drawings.techdraw')?.enabled === true;
@@ -4272,11 +4540,39 @@ function init(): void {
   initAgentBridge();
   initElecSourceWiring();
   mountHomeScreen();
+  mountProjectContext();
+  workspaceNav = installWorkspaceNav({ onWorkspaceChange: () => {
+    if (overlayOpen) closeOverlay({ restoreCanvas: false });
+    refreshProjectContext();
+  } });
+  const startupTransition = projectTransition;
+  void window.desktop?.projects.lastSession().then((candidate) => {
+    if (!candidate.ok || !candidate.id || projectTransition !== startupTransition) return;
+    const recovery = document.createElement('button');
+    recovery.id = 'recoverLastProject';
+    recovery.type = 'button';
+    recovery.textContent = `恢复上次工程${candidate.savedAt ? `（${formatProjectTime(candidate.savedAt)}）` : ''}`;
+    recovery.title = '恢复已保存的模型、参数、运动学、IO 与视角；不会自动连接 PLC';
+    recovery.addEventListener('click', () => { recovery.disabled = true; void openSavedProject(candidate.id!).then((opened) => { if (opened) recovery.remove(); else recovery.disabled = false; }); });
+    document.getElementById('saveAsProjectButton')?.parentElement?.appendChild(recovery);
+    refreshProjectContext();
+  }).catch((error: unknown) => console.warn('[project-session] 无法读取恢复入口', error));
+  window.addEventListener('beforeunload', (event) => {
+    if (!sessionBindingId) return;
+    projectAutosave.checkForChanges();
+    if (projectAutosave.isDirty()) {
+      event.preventDefault();
+      event.returnValue = '';
+      void projectAutosave.flush().then((ok) => { if (ok) window.close(); });
+    }
+  });
   void window.desktop?.machine?.active?.().then((result) => {
+    if (sessionOpening || sessionBindingId || projectTransition !== startupTransition) return;
     if (!result?.ok || !result.design || typeof result.design !== 'object') return;
     const config = (result.design as Record<string, unknown>).config;
     if (config && typeof config === 'object' && commission) {
       commission.setMachineConfig(config as MachineConfig);
+      activeSessionDesign = result.design as StoredMachineDesign;
       // 启动恢复 active 方案：电气图同样用完整方案（只在启动期间还没打开别的工程/方案时）
       if (elecSources.restoreMachine(commission.getMachineConfig(), result.design)) elecSourceChanged();
     }

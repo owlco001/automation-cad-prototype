@@ -20,17 +20,20 @@ export interface LinkageStepLike {
   endMs: number;
   io: string[];
   amount: number;
+  action?: string;
+  direction?: string;
   /**
    * 本步的到位判据（可选）。
-   * 给了就只用它；没给才回落到「该执行机构绑定的全部传感器」。
-   * 联动时间线本身不带方向信息，双传感器（伸出/缩回两条）靠它区分——
-   * 否则 wait 会被拼成「伸出到位 AND 缩回到位」，永远等不到。
+   * 给了就只用它；没给只接受唯一绑定传感器或唯一方向匹配传感器。
+   * 多条传感器无法确认方向时拒绝转换，避免把伸出/缩回到位拼成 AND。
    */
   waitPoints?: readonly string[];
 }
 
 export interface LinkageLike {
   cycleMs: number;
+  /** Conversion preserves event order only; PLC transitions use sensors, not timeline timestamps. */
+  execution?: 'serial' | 'parallel';
   steps: LinkageStepLike[];
 }
 
@@ -57,33 +60,86 @@ const sensorPointsOf = (config: PlcGenConfig, actuatorId: string, actuatorName?:
   return points;
 };
 
-/** 把联动时间线翻成 PLC 联调步序（按时间顺序；一步一个动作，不合并） */
-export function buildSequenceFromLinkage(linkage: LinkageLike, config: PlcGenConfig): PlcSequenceStep[] {
-  const steps: PlcSequenceStep[] = [];
+function directionOf(value?: string): 'extend' | 'retract' | undefined {
+  const text = value?.trim().toLowerCase();
+  if (['extend', 'extended', 'grip', 'gripped', 'close', 'closed', 'forward', 'rotate'].includes(text ?? '')) return 'extend';
+  if (['retract', 'retracted', 'release', 'released', 'open', 'opened', 'reverse'].includes(text ?? '')) return 'retract';
+  return undefined;
+}
+
+function waitsForStep(config: PlcGenConfig, step: LinkageStepLike, name?: string, direction?: string): string[] {
+  if (step.waitPoints !== undefined) return [...new Set(step.waitPoints.map(p => p.trim()).filter(Boolean))];
+  const all = sensorPointsOf(config, step.actuatorId, name);
+  if (all.length === 0) return [];
+  if (all.length === 1) {
+    const sensor = (config.sensors ?? []).find(s => s.point === all[0]) as { role?: string; direction?: string } | undefined;
+    const sensorDirection = directionOf(sensor?.direction ?? sensor?.role);
+    // A labelled opposite limit is not this action's completion signal.
+    return sensorDirection && direction && sensorDirection !== direction ? [] : all;
+  }
+  const matches = (config.sensors ?? []).filter(raw => {
+    const sensor = raw as { part?: string; point?: string; role?: string; direction?: string };
+    return (sensor.part === step.actuatorId || sensor.part === name)
+      && directionOf(sensor.direction ?? sensor.role) === direction && direction !== undefined;
+  }).map(sensor => sensor.point).filter((p): p is string => Boolean(p));
+  if (matches.length === 1) return matches;
+  throw new Error(`Ambiguous wait sensors for ${step.actuatorId}; supply direction-specific waitPoints`);
+}
+
+/** Event-driven serial conversion, not a clock-equivalent timeline scheduler. Overlaps are unsupported. */
+export function buildSequenceFromLinkage(
+  linkage: LinkageLike,
+  config: PlcGenConfig,
+  _options: { execution?: 'serial' } = {}
+): PlcSequenceStep[] {
   const ordered = [...linkage.steps].sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
-
-  ordered.forEach((step, index) => {
-    const actuator = (config.actuators ?? []).find((item) => item.id === step.actuatorId);
+  let endMs = -Infinity;
+  for (const step of ordered) {
+    if (!Number.isFinite(step.startMs) || !Number.isFinite(step.endMs) || step.startMs < 0 || step.endMs <= step.startMs) {
+      throw new Error(`Invalid linkage interval for ${step.actuatorId}`);
+    }
+    if (step.startMs < endMs) throw new Error('Overlapping linkage timeline requires a parallel scheduler; serial PLC conversion is unsupported');
+    endMs = step.endMs;
+  }
+  return ordered.map((step, index) => {
+    const actuator = (config.actuators ?? []).find(item => item.id === step.actuatorId);
     const name = actuator?.name ?? step.actuatorId;
-    const duration = Math.max(1, step.endMs - step.startMs);
-    // 有显式到位判据就用它；没有才回落到该执行机构绑定的全部传感器（不伪造等待点）。
-    const waits = step.waitPoints === undefined
-      ? sensorPointsOf(config, step.actuatorId, actuator?.name)
-      : step.waitPoints.map((point) => String(point).trim()).filter((point) => point.length > 0);
+    const actionDirection = directionOf(step.action);
+    const explicitDirection = directionOf(step.direction);
+    if (step.direction && !explicitDirection) throw new Error(`Unsupported direction ${step.direction}`);
+    if (actionDirection && explicitDirection && actionDirection !== explicitDirection) throw new Error(`Contradictory action/direction for ${step.actuatorId}`);
+    let direction = explicitDirection ?? actionDirection;
+    const drive = actuator as { extendPoint?: string; retractPoint?: string; gripPoint?: string } | undefined;
+    const forward = drive?.extendPoint ?? drive?.gripPoint;
+    const reverse = drive?.retractPoint;
+    const io = [...new Set(step.io.map(p => p.trim()).filter(Boolean))];
+    let sets = io;
+    const resets: string[] = [];
+    if (forward && reverse && forward === reverse) throw new Error(`Ambiguous opposed output configuration for ${step.actuatorId}`);
+    if (io.length > 1) {
+      if (!direction || !forward || !reverse || io.some(p => p !== forward && p !== reverse)) {
+        throw new Error(`Ambiguous linkage outputs for ${step.actuatorId}; supply direction and known opposed outputs`);
+      }
+      sets = [direction === 'extend' ? forward : reverse];
+    }
+    if (sets.length !== 1) throw new Error(`Ambiguous linkage outputs for ${step.actuatorId}; exactly one drive output is required`);
+    const selected = sets[0];
+    if (forward && reverse && (selected === forward || selected === reverse)) {
+      const selectedDirection = selected === forward ? 'extend' : 'retract';
+      if (direction && direction !== selectedDirection) throw new Error(`Contradictory direction and output for ${step.actuatorId}`);
+      direction = selectedDirection;
+      resets.push(selected === forward ? reverse : forward);
+    }
+    const waits = waitsForStep(config, step, actuator?.name, direction);
     const amount = Math.round(step.amount);
-    const label = `${name}${ACTION_LABEL[step.kind] ?? '动作'}${amount ? ` ${amount}${ACTION_UNIT[step.kind] ?? 'mm'}` : ''}`;
-    steps.push({
-      id: `S${index + 1}`,
-      name: label,
-      action: step.kind === 'gripper' ? 'grip' : step.kind === 'rotary' ? 'rotate' : 'extend',
-      points: step.io,
-      sets: step.io,
-      waits,
-      timeoutMs: Math.max(1000, Math.round(duration * 2))
-    });
+    const label = `${name}${step.action ?? direction ?? ACTION_LABEL[step.kind] ?? '动作'}${amount ? ` ${amount}${ACTION_UNIT[step.kind] ?? 'mm'}` : ''}`;
+    return {
+      id: `S${index + 1}`, name: label,
+      action: step.action ?? direction ?? (step.kind === 'gripper' ? 'grip' : step.kind === 'rotary' ? 'rotate' : 'extend'),
+      points: sets, sets, resets, waits,
+      timeoutMs: Math.max(1000, Math.round((step.endMs - step.startMs) * 2))
+    };
   });
-
-  return steps;
 }
 
 /** 执行机构上「单点驱动」的点位：一步只能置一个线圈，双线圈（伸出/缩回）不猜方向。 */
@@ -99,7 +155,7 @@ export interface LinkageDerivation {
   usedActuators: string[];
   /** 拿不到驱动点位、因此没有进步序的执行机构（如实列出，不静默） */
   skipped: Array<{ actuatorId: string; name: string; reason: string }>;
-  /** 有驱动点位却没有到位传感器的执行机构（步序里没有 wait，靠超时兜底） */
+  /** 有驱动点位却没有唯一到位判据的执行机构；空 wait 会立即转移，审计必须报缺口。 */
   withoutSensor: string[];
 }
 
@@ -114,8 +170,9 @@ export interface LinkageDerivation {
  *   - 只收有单点驱动（`actuator.point`）的执行机构；只有 extend/retract/grip 多线圈的
  *     旧式执行机构不猜方向，列进 `skipped`；
  *   - 步序按 config.actuators 顺序串行，时长取 `durationMs`（缺省 400 ms）；
- *   - wait 取该执行机构在 config.sensors 里绑定的第一条非安全传感器（synth 对顶升/
- *     移载/气缸先写动作侧），双传感器不会被拼成「伸出 AND 缩回」。
+ *   - wait 取唯一动作方向传感器（extend/extended 等语义角色），或唯一无反向标记的绑定传感器；
+ *     多个限位无唯一方向匹配时留空并报告缺口。
+ *   - 这是传感器事件步序，时间线时长只用于超时，不保证相同节拍或驻留时间。
  */
 export function linkageFromConfig(
   config: PlcGenConfig,
@@ -145,20 +202,33 @@ export function linkageFromConfig(
       continue;
     }
     const sensors = sensorPointsOf(config, actuator.id, actuator.name);
+    // This derivation's explicit contract is one forward action per single-point actuator.
+    // Match semantic roles, never sensor order, point spelling or display names.
+    const forwardSensors = (config.sensors ?? []).filter(raw => {
+      const sensor = raw as { part?: string; point?: string; role?: string; direction?: string };
+      return (sensor.part === actuator.id || sensor.part === actuator.name)
+        && directionOf(sensor.direction ?? sensor.role) === 'extend';
+    }).map(s => s.point).filter((p): p is string => Boolean(p));
+    const uniqueSensor = sensors.length === 1
+      ? (config.sensors ?? []).find(s => s.point === sensors[0]) as { role?: string; direction?: string } | undefined
+      : undefined;
+    const waits = forwardSensors.length === 1 ? forwardSensors
+      : sensors.length === 1 && directionOf(uniqueSensor?.direction ?? uniqueSensor?.role) !== 'retract' ? sensors : [];
     const duration = Number.isFinite(actuator.durationMs) && Number(actuator.durationMs) > 0
       ? Number(actuator.durationMs)
       : defaultDuration;
     const kind = String(actuator.kind ?? 'cylinder');
-    if (sensors.length === 0) withoutSensor.push(actuator.id);
+    if (waits.length === 0) withoutSensor.push(actuator.id);
     const step: LinkageStepLike = {
       actuatorId: actuator.id,
       stationId: String(actuator.station ?? '未指定'),
       kind,
+      direction: 'extend',
       startMs: cursor,
       endMs: cursor + duration,
       io: [drivePoint],
       amount: kind === 'rotary' ? Math.round(Number((actuator as { rotationRangeDeg?: number }).rotationRangeDeg) || 0) : Math.round(Number((actuator as { travelMm?: number }).travelMm) || 0),
-      waitPoints: sensors.length > 0 ? [sensors[0] as string] : []
+      waitPoints: waits
     };
     steps.push(step);
     usedActuators.push(actuator.id);
@@ -176,6 +246,28 @@ export interface LinkageProgramGap {
   detail: string;
 }
 
+export interface LinkageAuditPoint {
+  point: string;
+  address?: string;
+  variable?: string;
+  stepUsage?: readonly (string | { stepNo: number; usage: 'set' | 'reset' | 'condition' })[];
+}
+
+export interface LinkageAuditStep {
+  stepNo?: number;
+  sets?: readonly string[];
+  resets?: readonly string[];
+  waits?: readonly string[];
+  condition?: string;
+}
+
+export interface LinkageAuditOptions {
+  programStepCount?: number;
+  sequence?: readonly LinkageAuditStep[];
+  /** Trusted generator evidence, supplied by the caller; reset coverage is still checked. */
+  safety?: { verified: boolean; resetPoints: readonly string[] };
+}
+
 export interface LinkageProgramAudit {
   ok: boolean;
   linkageSteps: number;
@@ -185,6 +277,8 @@ export interface LinkageProgramAudit {
   pointsDriven: number;
   pointsWithWait: number;
   safetyGate: boolean;
+  safetyVerification: 'structured' | 'generated-assignments' | 'unverified';
+  limitations: string[];
   gaps: LinkageProgramGap[];
 }
 
@@ -195,16 +289,28 @@ export interface LinkageProgramAudit {
  */
 export function auditLinkageVsProgram(
   linkage: LinkageLike,
-  plcPoints: Array<{ point: string; address?: string; variable?: string; stepUsage?: string[] }>,
+  plcPoints: readonly LinkageAuditPoint[],
   programText: string,
-  programStepCount = 0
+  countOrOptions: number | LinkageAuditOptions = 0,
+  metadata?: readonly LinkageAuditStep[] | LinkageAuditOptions
 ): LinkageProgramAudit {
-  type Entry = { point: string; address?: string; variable?: string; stepUsage?: string[] };
-  const pointByName = new Map<string, Entry>();
-  const pointByAddress = new Map<string, Entry>();
+  const extra: LinkageAuditOptions = Array.isArray(metadata)
+    ? { sequence: metadata }
+    : (metadata as LinkageAuditOptions | undefined) ?? {};
+  const options: LinkageAuditOptions = typeof countOrOptions === 'number'
+    ? { ...extra, programStepCount: countOrOptions }
+    : { ...extra, ...countOrOptions };
+  const sequence = options.sequence;
+  const programStepCount = options.programStepCount ?? sequence?.length ?? 0;
+  // Comments cannot establish references, drive assignments, or safety behavior.
+  const source = programText.replace(/\(\*[\s\S]*?\*\)/g, '').replace(/\/\/[^\n\r]*/g, '');
+  const key = (value: string) => value.trim().replace(/^%/, '').toUpperCase();
+  const pointByName = new Map<string, LinkageAuditPoint>();
+  const pointByAddress = new Map<string, LinkageAuditPoint>();
   for (const entry of plcPoints) {
-    pointByName.set(entry.point, entry);
-    if (entry.address) pointByAddress.set(entry.address, entry);
+    pointByName.set(key(entry.point), entry);
+    if (entry.variable) pointByName.set(key(entry.variable), entry);
+    if (entry.address) pointByAddress.set(key(entry.address), entry);
   }
 
   const gaps: LinkageProgramGap[] = [];
@@ -218,34 +324,63 @@ export function auditLinkageVsProgram(
   let pointsWithWait = 0;
 
   for (const [point, actuatorId] of used) {
-    const entry = pointByName.get(point) ?? pointByAddress.get(point);
+    const entry = pointByName.get(key(point)) ?? pointByAddress.get(key(point));
     if (!entry) {
       gaps.push({ kind: 'point-missing-in-plc', point, actuatorId, detail: `联动用了点位 ${point}，但 PLC 表里没有这个点` });
       continue;
     }
     pointsInPlcTable += 1;
+    const aliases = [entry.point, entry.variable, entry.address].filter((p): p is string => Boolean(p)).map(key);
+    const includesPoint = (values: readonly string[] | undefined) => values?.some(p => aliases.includes(key(p))) ?? false;
     const usage = entry.stepUsage ?? [];
-    if (usage.length === 0) {
-      gaps.push({ kind: 'point-not-driven', point, actuatorId, detail: `点位 ${point} 在 PLC 表里，但没有任何步序驱动它（3D 会动、PLC 不动）` });
+    const setUsage = usage.filter(u => typeof u === 'string' || u.usage === 'set');
+    const drivingSteps = sequence?.filter(s => includesPoint(s.sets) && !includesPoint(s.resets));
+    const driven = sequence === undefined ? setUsage.length > 0 : (drivingSteps?.length ?? 0) > 0;
+    if (!driven) {
+      gaps.push({ kind: 'point-not-driven', point, actuatorId, detail: `点位 ${point} 没有已验证的步序置位；condition/reset 引用不算驱动` });
     } else {
       pointsDriven += 1;
-      pointsWithWait += 1;   // 步序生成时每个动作都带了 wait（无传感器时 waits 为空，见下）
+      // A wait is evidence only when it belongs to every step that actually energizes this output.
+      const withWait = drivingSteps && drivingSteps.length > 0 && drivingSteps.every(s =>
+        (s.waits?.some(p => p.trim().length > 0) ?? false)
+        && !/^(?:TRUE|1)$/i.test(s.condition?.trim() ?? '')
+      );
+      if (withWait) pointsWithWait += 1;
+      else gaps.push({ kind: 'no-wait', point, actuatorId, detail: sequence === undefined
+        ? `点位 ${point} 缺少生成步序元数据，到位等待未验证`
+        : `点位 ${point} 至少一个驱动步没有实际到位等待（立即转移或仅条件引用不算 wait）` });
     }
-    // ST 里引用的是变量名（中文符号名），不是点位编号；两者都对不上才算没引用
-    const referenced = (entry.variable && programText.includes(entry.variable))
-      || programText.includes(point)
-      || (entry.address ? programText.includes(entry.address) : false);
+    const referenced = (entry.variable && source.includes(entry.variable))
+      || source.includes(point)
+      || (entry.address ? source.includes(entry.address) : false);
     if (!referenced) {
       gaps.push({ kind: 'point-missing-in-plc', point, actuatorId, detail: `点位 ${point} 在程序文本里找不到引用` });
     }
   }
 
-  const safetyGate = /SafeStop/.test(programText);
+  const resetReferences = new Set<string>();
+  // Recognize only the generator's flat unconditional reset block, never nested/conditional assignments.
+  for (const block of source.matchAll(/\bIF\s+SafeStop\s+THEN\s+([\s\S]*?)\bEND_IF\s*;/gi)) {
+    const body = block[1] ?? '';
+    const assignment = /(?:"DB_IO"\.)?([A-Za-z_\u4e00-\u9fff][A-Za-z0-9_.\u4e00-\u9fff]*)\s*:=\s*FALSE\s*;/gi;
+    const references = [...body.matchAll(assignment)].map(m => key(m[1] ?? ''));
+    if (references.length > 0 && body.replace(assignment, '').trim() === '') {
+      for (const reference of references) resetReferences.add(reference);
+    }
+  }
+  const covers = (references: ReadonlySet<string>) => used.size > 0 && [...used.keys()].every(point => {
+    const entry = pointByName.get(key(point)) ?? pointByAddress.get(key(point));
+    return entry && [entry.point, entry.address, entry.variable].some(p => p && references.has(key(p)));
+  });
+  const structured = options.safety?.verified === true && covers(new Set(options.safety.resetPoints.map(key)));
+  const assignments = covers(resetReferences);
+  const safetyGate = structured || assignments;
+  const safetyVerification = structured ? 'structured' : assignments ? 'generated-assignments' : 'unverified';
   if (!safetyGate) {
-    gaps.push({ kind: 'no-safety-gate', detail: '生成的程序里没有引用 SafeStop（安全门/急停不会切断输出）' });
+    gaps.push({ kind: 'no-safety-gate', detail: '安全输出切断未验证：缺少结构化复位覆盖或严格的 SafeStop 输出复位赋值；注释/声明不构成安全门证据' });
   }
 
-  if (programStepCount > 0 && programStepCount !== linkage.steps.length) {
+  if (programStepCount !== linkage.steps.length || (sequence !== undefined && sequence.length !== programStepCount)) {
     gaps.push({
       kind: 'step-count-mismatch',
       detail: `联动有 ${linkage.steps.length} 个动作，PLC 步序有 ${programStepCount} 步（应一一对应）`
@@ -261,6 +396,10 @@ export function auditLinkageVsProgram(
     pointsDriven,
     pointsWithWait,
     safetyGate,
+    safetyVerification,
+    limitations: ['PLC conversion is event-driven; timeline timestamps, dwell times and cycle duration are not verified.',
+      ...(sequence === undefined ? ['Generated sequence metadata missing: waits cannot be verified.'] : []),
+      'Safety reset coverage is a static check, not verification of wiring, scan call order or a certified safety system.'],
     gaps
   };
 }

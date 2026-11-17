@@ -18,30 +18,24 @@ interface ToolGroup {
 
 const GROUPS: ReadonlyArray<ToolGroup> = [
   {
-    title: '设计',
-    keys: ['designWizardEntry', 'assemblyEntryButton', 'drawingEntryButton', 'agentEntryButton']
+    title: '设计装配',
+    keys: ['designWizardEntry', 'assemblyEntryButton', 'machineLibraryEntryButton', 'canvasWorkbenchEntryButton', 'qtWorkbenchEntry', 'agentEntryButton']
   },
   {
-    title: '电气',
-    keys: ['elecLibEntryButton', 'elecCheckEntryButton', 'plcGenEntryButton']
+    title: '电气设计',
+    keys: ['elecLibEntryButton', 'enclosureEntryButton']
   },
   {
-    title: '模块',
-    keys: [
-      'factoryEntryButton',
-      'commissionEntryButton',
-      'machineLibraryEntryButton',
-      'packEntryButton',
-      'canvasWorkbenchEntryButton',
-      'enclosureEntryButton',
-      'costEntryButton',
-      'syncEntryButton',
-      'moduleSettingsEntryButton'
-    ]
+    title: 'PLC与联调',
+    keys: ['plcGenEntryButton', 'commissionEntryButton', 'factoryEntryButton', 'syncEntryButton']
   },
   {
-    title: '视图与帮助',
-    keys: ['measure', 'display', 'automationCadUpdateButton', 'help']
+    title: '校核与交付',
+    keys: ['elecCheckEntryButton', 'drawingEntryButton', 'costEntryButton', 'packEntryButton', 'measure']
+  },
+  {
+    title: '设置与帮助',
+    keys: ['moduleSettingsEntryButton', 'display', 'automationCadUpdateButton', 'help']
   }
 ];
 

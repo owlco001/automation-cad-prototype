@@ -101,6 +101,8 @@ export interface CommissionPanelHandle {
   open(): void;
   getReport(): CommissionReport;
   getMachineConfig(): MachineConfig;
+  getIoPoints(): PlcPoint[];
+  restoreIoPoints(points: PlcPoint[]): void;
   /** 切换到新的机型配置；传 null 恢复内置 4 工位样机。 */
   setMachineConfig(config: MachineConfig | null, layout?: GeomLayout | null): void;
   setKinematics(annotation: KinematicsAnnotation | null): void;
@@ -789,12 +791,16 @@ async function forcePoint(id: string): Promise<void> {
   }
 }
 
+let ioRestoreGeneration = 0;
+
 async function loadSavedConfig(): Promise<void> {
   const api = desktop();
   if (!api || !elements || loaded) return;
   loaded = true;
   try {
+    const generation = ioRestoreGeneration;
     const result = await api.plc.getConfig();
+    if (generation !== ioRestoreGeneration) return;
     if (result.ok && result.data) {
       const config = result.data as unknown as PlcConfig;
       if (Array.isArray(config.points) && config.points.length > 0) points = config.points.map((point) => ({ ...point }));
@@ -1060,6 +1066,17 @@ export function initCommissionPanel(options: PanelOptions): CommissionPanelHandl
     },
     getReport,
     getMachineConfig: (): MachineConfig => machineConfig,
+    getIoPoints: (): PlcPoint[] => points.map((point) => ({ ...point })),
+    restoreIoPoints(next: PlcPoint[]): void {
+      // Recover editable addresses only. Never reconnect or replay live values.
+      loaded = true;
+      ioRestoreGeneration += 1;
+      points = next.map((point) => ({ ...point }));
+      values.clear();
+      renderPoints();
+      renderPowerSteps();
+      renderCases();
+    },
     setMachineConfig: applyMachineConfig,
     setKinematics,
     runPowerUp,

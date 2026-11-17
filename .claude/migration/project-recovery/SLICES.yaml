@@ -1,0 +1,29 @@
+slices:
+  - id: atomic-project-save
+    status: done
+    dependencies: []
+    scope: [desktop/electron/projects.ts, desktop/test/electron/projects-storage.test.mjs]
+    deletion_targets: [destructive partial-save sequence, duplicate copying]
+    verification: node --test test/electron/projects*.test.mjs
+  - id: session-contract-store
+    status: done
+    dependencies: [atomic-project-save]
+    scope: [desktop/src/project-session/snapshot.ts, desktop/electron/project-session-store.ts, desktop/src/machine/design-validation.ts, desktop/src/machine/store.ts]
+    deletion_targets: [validation runtime dependency on Node file storage]
+    verification: node --test test/project-session/snapshot.test.mjs test/project-session/store.test.mjs
+  - id: autosave-controller
+    status: done
+    dependencies: []
+    scope: [desktop/src/project-session/autosave.ts, desktop/test/project-session/autosave.test.mjs]
+    verification: node --test test/project-session/autosave.test.mjs
+  - id: renderer-recovery
+    status: done
+    dependencies: [session-contract-store, autosave-controller]
+    scope: [desktop/src/extension.ts, desktop/src/cad, desktop/src/commission/ui.ts, desktop/electron/ipc.ts, desktop/electron/preload.ts, desktop/src/desktop-api.d.ts]
+    verification: node scripts/project-session-smoke.mjs
+  - id: convergence
+    status: done
+    dependencies: [renderer-recovery]
+    scope: [README.md, desktop/src/project-session/MODULE.md, .claude/migration/project-recovery]
+    deletion_targets: [unrelated generated screenshots]
+    verification: npm test && npm run build:ext && node scripts/check-ipc-boundaries.mjs

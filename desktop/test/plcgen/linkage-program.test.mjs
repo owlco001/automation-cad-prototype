@@ -119,13 +119,13 @@ test('整机端到端：三工位 —— 5 处缺口全部可补、PLC 工程 11
   assert.equal(audit.audit.ok, true);
 });
 
-test('整机端到端：六工位 —— 8 处缺口、12 步、12/12 点位被驱动、0 处对账缺口', () => {
+test('整机端到端：六工位并行联动不被静默编译成串行 PLC', () => {
   const audit = runAudit('六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅');
   assert.equal(audit.gapsFound, 8);
   assert.equal(audit.applied.length, 8);
-  assert.equal(audit.sequenceSteps, 12);
-  assert.equal(audit.plcPoints, 27);
-  assert.equal(audit.audit.pointsInPlcTable, 12);
-  assert.equal(audit.audit.pointsDriven, 12);
-  assert.equal(audit.audit.gaps.length, 0, JSON.stringify(audit.audit.gaps));
+  assert.equal(audit.sequenceSteps, 0);
+  assert.equal(audit.generated, false);
+  assert.equal(audit.generateErrors[0].code, 'UNSUPPORTED_LINKAGE_CONVERSION');
+  assert.match(audit.generateErrors[0].message, /overlap|并行|重叠/i);
+  assert.match(audit.conversionSemantics, /event-driven/);
 });

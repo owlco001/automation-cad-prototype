@@ -86,7 +86,12 @@ const desktopApi = {
     save: (payload: unknown) => ipcRenderer.invoke('projects:save', payload),
     open: (id: string) => ipcRenderer.invoke('projects:open', id),
     saveLayout: (payload: unknown) => ipcRenderer.invoke('projects:layout-save', payload),
-    remove: (id: string) => ipcRenderer.invoke('projects:delete', id)
+    remove: (id: string) => ipcRenderer.invoke('projects:delete', id),
+    session: (id: string) => ipcRenderer.invoke('projects:session-read', id),
+    saveSession: (id: string, payload: unknown) => ipcRenderer.invoke('projects:session-save', id, payload),
+    lastSession: () => ipcRenderer.invoke('projects:session-last'),
+    rememberSession: (id: string) => ipcRenderer.invoke('projects:session-remember', id),
+    repairSession: (id: string, revision: string | null) => ipcRenderer.invoke('projects:session-repair', id, revision)
   },
   exportReport: (payload: { html: string; projectName?: string; page?: { size?: 'A3' | 'A4'; landscape?: boolean } }) => ipcRenderer.invoke('export:report', payload),
   brepInterference: (payload: { stepPath: string; timeoutMs?: number; maxParts?: number }) =>

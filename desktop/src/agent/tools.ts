@@ -510,6 +510,7 @@ function commandSuccess(result: CommandResult): Record<string, unknown> {
   if (!result.ok) return commandFailure(result);
   return {
     ok: true,
+    ...(result.cancellation ? { cancellation: result.cancellation } : {}),
     ...(isRecord(result.data) ? result.data : result.data === undefined ? {} : { data: result.data })
   };
 }

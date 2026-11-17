@@ -24,11 +24,14 @@ const ALL = [
   'help'
 ];
 
-test('全部入口：四组且组内按声明顺序，不出现空的「其他」', () => {
+test('全部入口：按五个工作流程分组，交付和设置入口各归其位', () => {
   const plan = planToolMenu(ALL);
-  assert.deepEqual(plan.map((group) => group.title), ['设计', '电气', '模块', '视图与帮助']);
-  assert.deepEqual(plan[0].keys, ['designWizardEntry', 'assemblyEntryButton', 'drawingEntryButton', 'agentEntryButton']);
-  assert.deepEqual(plan[3].keys, ['measure', 'display', 'automationCadUpdateButton', 'help']);
+  assert.deepEqual(plan.map((group) => group.title), ['设计装配', '电气设计', 'PLC与联调', '校核与交付', '设置与帮助']);
+  assert.deepEqual(plan[0].keys, ['designWizardEntry', 'assemblyEntryButton', 'canvasWorkbenchEntryButton', 'agentEntryButton']);
+  assert.deepEqual(plan[2].keys, ['plcGenEntryButton', 'commissionEntryButton', 'factoryEntryButton', 'syncEntryButton']);
+  assert.deepEqual(plan[3].keys, ['elecCheckEntryButton', 'drawingEntryButton', 'costEntryButton', 'packEntryButton', 'measure']);
+  assert.deepEqual(plan[4].keys, ['moduleSettingsEntryButton', 'display', 'automationCadUpdateButton', 'help']);
+  assert.deepEqual(plan.flatMap((group) => group.keys).sort(), [...ALL].sort());
 });
 
 test('注册顺序打乱也不影响菜单顺序（不跟着注册顺序漂）', () => {
@@ -37,22 +40,22 @@ test('注册顺序打乱也不影响菜单顺序（不跟着注册顺序漂）',
 });
 
 test('模块开关关掉的入口不注册 → 该组整组消失，不留空标题', () => {
-  const only = ['elecLibEntryButton', 'elecCheckEntryButton'];
+  const only = ['elecLibEntryButton', 'enclosureEntryButton'];
   const plan = planToolMenu(only);
-  assert.deepEqual(plan.map((group) => group.title), ['电气']);
+  assert.deepEqual(plan.map((group) => group.title), ['电气设计']);
   assert.deepEqual(plan[0].keys, only);
 });
 
 test('未登记的新入口进「其他」，不丢失', () => {
   const plan = planToolMenu(['elecCheckEntryButton', 'futureModuleEntry']);
-  assert.deepEqual(plan.map((group) => group.title), ['电气', '其他']);
+  assert.deepEqual(plan.map((group) => group.title), ['校核与交付', '其他']);
   assert.deepEqual(plan[1].keys, ['futureModuleEntry']);
 });
 
 test('重复 key 只出现一次', () => {
   const plan = planToolMenu(['measure', 'measure', 'help']);
-  assert.equal(plan.length, 1);
-  assert.deepEqual(plan[0].keys, ['measure', 'help']);
+  assert.equal(plan.length, 2);
+  assert.deepEqual(plan.flatMap((group) => group.keys), ['measure', 'help']);
 });
 
 test('空输入：没有任何分组', () => {

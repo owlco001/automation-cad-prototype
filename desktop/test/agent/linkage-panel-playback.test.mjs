@@ -10,12 +10,15 @@ import vm from 'node:vm';
 import {
   LINKAGE_FRAME_BLEND_MS,
   abortLinkagePlayback,
+  blendLinkagePose,
   createLinkagePlayback,
   hasActiveLinkagePlayback,
   resetLinkagePose,
+  sampleLinkageFrame,
   setLinkagePoseResetter,
   startLinkagePlayback
 } from '../../src/agent/linkage-panel.ts';
+import { buildLinkage, poseAt } from '../../src/machine/linkage.ts';
 
 const panelSource = () => readFileSync(new URL('../../src/agent/linkage-panel.ts', import.meta.url), 'utf8');
 
@@ -222,6 +225,86 @@ test('间隔大于 300ms 时先到位再保持，段中不漂移', () => {
   assert.deepEqual(atEnd?.pose.offsets?.['p'], [100, 0, 0]);
 });
 
+test('真实 poseAt 稀疏快照：气缸从零起步并平滑回安装位，旋转也能回零', () => {
+  const linkage = buildLinkage({
+    stations: [{ id: 'station' }],
+    moving: [
+      { actuatorId: 'cylinder', stationId: 'station', kind: 'cylinder', partIds: ['slide'], strokeMm: 40, durationMs: 400, axis: [0, 0, 1] },
+      { actuatorId: 'rotary', stationId: 'station', kind: 'rotary', partIds: ['table'], rangeDeg: 90, durationMs: 400 }
+    ]
+  }, { cycleMs: 800 });
+  const baseline = poseAt(linkage, 0);
+  const extended = poseAt(linkage, 200);
+  const returned = poseAt(linkage, 400);
+  assert.deepEqual(baseline.offsets, {}, 'poseAt 的安装位快照省略零位移');
+  assert.deepEqual(extended.offsets.slide, [0, 0, 40]);
+  assert.deepEqual(returned.offsets, {}, '气缸返回后省略该零件，而不是提供显式零');
+  const timeline = [baseline, extended, returned].map((pose, index) => ({
+    frame: { tMs: index * 200, pose }, index, tMs: index * 200
+  }));
+  assert.deepEqual(sampleLinkageFrame(timeline, 0).pose.offsets, {});
+  assert.deepEqual(sampleLinkageFrame(timeline, 100).pose.offsets.slide, [0, 0, 20], '缺失源位移应从零开始');
+  assert.deepEqual(sampleLinkageFrame(timeline, 200).pose.offsets.slide, [0, 0, 40]);
+  assert.deepEqual(sampleLinkageFrame(timeline, 300).pose.offsets.slide, [0, 0, 20], '缺失目标位移应返回零');
+  assert.deepEqual(sampleLinkageFrame(timeline, 400).pose.offsets, {}, '段末精确保留稀疏目标快照');
+
+  const rotated = poseAt(linkage, 600);
+  assert.equal(rotated.rotZDeg.table, 45);
+  assert.deepEqual(baseline.rotZDeg, {});
+  assert.equal(blendLinkagePose(baseline, rotated, 0.5).rotZDeg.table, 22.5);
+  assert.equal(blendLinkagePose(rotated, baseline, 0.5).rotZDeg.table, 22.5);
+  assert.deepEqual(blendLinkagePose(rotated, baseline, 1), { offsets: {}, rotZDeg: {} }, '复位末帧精确等于安装位');
+});
+
+test('稀疏插值只接受有限的三坐标位移与有限转角', () => {
+  const holes = new Array(3);
+  const invalid = { offsets: { short: [1, 2], long: [1, 2, 3, 4], holes, nan: [0, NaN, 0], infinite: [0, 0, Infinity] }, rotZDeg: { nan: NaN, infinite: Infinity } };
+  assert.deepEqual(blendLinkagePose(invalid, {}, 0.5), {});
+  const mixed = blendLinkagePose(
+    { offsets: { p: [1, 2] }, rotZDeg: { r: NaN } },
+    { offsets: { p: [12, -8, 4] }, rotZDeg: { r: 60 } },
+    0.5
+  );
+  assert.deepEqual(mixed, { offsets: { p: [6, -4, 2] }, rotZDeg: { r: 30 } }, '无效的一侧按安装基准处理');
+});
+
+test('并发高亮来自当前帧：段内不提前切换，单帧、末帧和旧 stepNo 仍可采样', () => {
+  const concurrentFrames = [
+    { tMs: 0, stepNo: 1, activeStepNos: [1, 2], pose: {} },
+    { tMs: 1000, stepNo: 3, activeStepNos: [3], pose: {} },
+    { tMs: 1200, activeStepNos: [], pose: {} }
+  ];
+  const timeline = concurrentFrames.map((frame, index) => ({ frame, index, tMs: frame.tMs }));
+  for (const tMs of [0, 150, 950]) {
+    const sample = sampleLinkageFrame(timeline, tMs);
+    assert.deepEqual(sample.activeStepNos, [1, 2], '即使位姿已混合到下一帧，高亮仍来自当前帧');
+    assert.equal(sample.stepNo, 1);
+  }
+  assert.deepEqual(sampleLinkageFrame(timeline, 1000).activeStepNos, [3]);
+  assert.equal(sampleLinkageFrame(timeline, 1000).stepNo, 3);
+  assert.deepEqual(sampleLinkageFrame(timeline, 1200).activeStepNos, [], '空数组明确清除所有高亮');
+  assert.deepEqual(sampleLinkageFrame(timeline.slice(0, 1), 0).activeStepNos, [1, 2]);
+  const legacy = sampleLinkageFrame([{ frame: frames[0], index: 0, tMs: 0 }], 0);
+  assert.equal(legacy.stepNo, 1);
+  assert.equal(legacy.activeStepNos, undefined, '旧帧继续提供 stepNo，调用方可自行回退');
+  assert.equal(sampleLinkageFrame([], 0).activeStepNos, undefined);
+
+  const clock = fakeClock();
+  const samples = [];
+  createLinkagePlayback({
+    frames: concurrentFrames, now: clock.now, raf: clock.raf, cancelRaf: clock.cancelRaf,
+    onSample: (sample) => samples.push(sample)
+  });
+  clock.flush();
+  clock.advance(1000);
+  clock.flush();
+  clock.advance(200);
+  clock.flush();
+  assert.deepEqual(samples.map((sample) => sample.activeStepNos), [[1, 2], [3], []], '播放回调完整传递并发步号');
+  assert.deepEqual(samples.map((sample) => sample.stepNo), [1, 3, undefined]);
+  assert.equal(clock.pending(), 0);
+});
+
 test('没有帧时不假装播放：立即结束并回调 onDone', () => {
   const clock = fakeClock();
   const reasons = [];
@@ -425,7 +508,7 @@ test('无 process 的上下文里播放照样跑通（编译产物跑两帧 + �
     { offsets: { p: [40, 0, 20] }, rotZDeg: { 'st1-rotary-1': 30 } },
     0.25
   );
-  assert.deepEqual(mixed.offsets.p, [10, 0, 5]);
+  assert.deepEqual(Array.from(mixed.offsets.p), [10, 0, 5]);
   assert.equal(mixed.rotZDeg['st1-rotary-1'], 15);
   assert.doesNotMatch(vm.runInContext('typeof process', context), /object/,
     '全程都不得出现 process（跑完仍未定义）');

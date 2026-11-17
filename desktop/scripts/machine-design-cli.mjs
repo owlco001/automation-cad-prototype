@@ -4,6 +4,7 @@
 // 输出：stdout 只有 JSON（machine-case，schemaVersion=1）；日志走 stderr，方便客户端直接 JSON.parse。
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 import { buildMachineCase } from '../src/machine/case.ts';
 import { generateMachineGeometry } from '../src/machine/geometry.ts';
 import { screenInterference, partBounds } from '../src/machine/interference.ts';
@@ -61,7 +62,7 @@ if (clearanceIndex >= 0) {
 }
 const flag = (name, fallback) => {
   const index = args.indexOf(name);
-  return index >= 0 && index + 1 < args.size ? args.at(index + 1) : fallback;
+  return index >= 0 && index + 1 < args.length ? args.at(index + 1) : fallback;
 };
 
 const briefIndex = args.indexOf('--brief');
@@ -162,18 +163,6 @@ if (withGeometry) {
     process.stderr.write('--ignore-pairs 只对 --layout-compliance 生效\n');
     process.exit(2);
   }
-  const recheckIndex = args.indexOf('--boolean-recheck');
-  if (recheckIndex >= 0) {
-    const url = args[recheckIndex + 1];
-    if (!url || url.startsWith('--')) {
-      process.stderr.write('--boolean-recheck 需要 sidecar 地址（如 http://127.0.0.1:18151）\n');
-      process.exit(2);
-    }
-    const screen = screenInterference(caseData.geometry);
-    const suspects = screen.pairs.filter((pair) => pair.kind === 'suspect').map((pair) => ({ a: pair.a, b: pair.b }));
-    // 复核失败也必须落盘：要能看出「没复核」和「复核过没问题」的区别
-    caseData.geometry.booleanRecheck = { suspects: suspects.length, ...(await recheckPairs(caseData.geometry.parts, suspects, { buildUrl: url })) };
-  }
   const wideningIndex = args.indexOf('--min-widening');
   if (wideningIndex >= 0) {
     const target = Number(args[wideningIndex + 1]);
@@ -187,6 +176,25 @@ if (withGeometry) {
     // 二分找「还能排开的最大间距」，口径与排布合规一致
     const feasible = maxFeasibleClearance(caseData.geometry, { minMm: 5, maxMm: 60 });
     caseData.geometry.maxClearance = feasible;
+  }
+  const clearanceResolveIndex = args.indexOf('--resolve-clearance');
+  if (clearanceResolveIndex >= 0) {
+    const threshold = Number(args[clearanceResolveIndex + 1]);
+    if (!Number.isFinite(threshold) || threshold <= 0) {
+      process.stderr.write('--resolve-clearance 需要一个正数（mm）\n');
+      process.exit(2);
+    }
+    const resolved = resolveClearance(caseData.geometry, { thresholdMm: threshold });
+    caseData.geometry.parts = resolved.parts;
+    caseData.geometry.clearanceResolution = {
+      thresholdMm: resolved.thresholdMm,
+      before: resolved.before,
+      after: resolved.after,
+      moves: resolved.moves,
+      iterations: resolved.iterations,
+      converged: resolved.converged,
+      ...(resolved.stopReason ? { stopReason: resolved.stopReason } : {})
+    };
   }
   const layoutIndex = args.indexOf('--layout-compliance');
   if (layoutIndex >= 0) {
@@ -222,12 +230,30 @@ if (withGeometry) {
         : {})
     };
   }
+  const recheckIndex = args.indexOf('--boolean-recheck');
+  if (recheckIndex >= 0) {
+    const url = args[recheckIndex + 1];
+    if (!url || url.startsWith('--')) {
+      process.stderr.write('--boolean-recheck 需要 sidecar 地址（如 http://127.0.0.1:18151）\n');
+      process.exit(2);
+    }
+    const screen = screenInterference(caseData.geometry);
+    const suspects = screen.pairs.filter((pair) => pair.kind === 'suspect').map((pair) => ({ a: pair.a, b: pair.b }));
+    // 复核失败也必须落盘：要能看出「没复核」和「复核过没问题」的区别
+    caseData.geometry.booleanRecheck = { suspects: suspects.length, ...(await recheckPairs(caseData.geometry.parts, suspects, { buildUrl: url })) };
+  }
+  const geometryRevision = createHash('sha256').update(JSON.stringify({parts: caseData.geometry.parts, moving: caseData.geometry.moving})).digest('hex');
+  caseData.geometry.revision = geometryRevision;
+  let preparedLinkage;
+  const finalLinkage = () => preparedLinkage ??= buildLinkage(caseData.geometry, cycleMsFromThroughput(Number(caseData.cycleAnalysis?.throughputPerMin ?? 0)) ? {cycleMs: cycleMsFromThroughput(Number(caseData.cycleAnalysis?.throughputPerMin ?? 0))} : {});
+  let preparedMotion;
+  const finalMotion = () => preparedMotion ??= checkMotionEnvelope(caseData.geometry, finalLinkage());
   // 3D 联动调试：把几何里的运动轴排成时间线，并把 IO 点位与 PLC IO 表对账
   const linkageIndex = args.indexOf('--linkage');
   if (linkageIndex >= 0) {
     const throughput = Number(caseData.cycleAnalysis?.throughputPerMin ?? 0);
     const cycleMs = cycleMsFromThroughput(throughput) ?? undefined;
-    const linkage = buildLinkage(caseData.geometry, cycleMs ? { cycleMs } : {});
+    const linkage = finalLinkage();
     const ioRows = Array.isArray(caseData.ioMap?.rows) ? caseData.ioMap.rows : [];
     const ioPoints = new Set(ioRows.map((row) => String(row.point)));
     const used = [...new Set(linkage.steps.flatMap((step) => step.io))];
@@ -238,11 +264,12 @@ if (withGeometry) {
     for (let i = 0; i < frameCount; i += 1) {
       const t = Math.round((linkage.cycleMs * i) / frameCount);
       const pose = poseAt(linkage, t);
-      frames.push({ tMs: t, offsets: pose.offsets, rotZDeg: pose.rotZDeg, activeIO: pose.activeIO, activeSteps: pose.activeSteps });
+      frames.push({ tMs: t, activeStepNos: linkage.steps.filter(step => t >= step.startMs && t < step.endMs).map(step => step.stepNo), offsets: pose.offsets, rotZDeg: pose.rotZDeg, activeIO: pose.activeIO, activeSteps: pose.activeSteps });
     }
     const motionWanted = args.indexOf('--motion-check') >= 0;
     caseData.linkage = {
-      ...(motionWanted ? { motion: checkMotionEnvelope(caseData.geometry, linkage) } : {}),
+      ...(motionWanted ? { motion: finalMotion() } : {}),
+      geometryRevision,
       cycleMs: linkage.cycleMs,
       cycleMsSource: cycleMs ? 'cycleAnalysis.throughputPerMin' : 'computed-from-axis-durations',
       axisCount: linkage.axes.length,
@@ -265,13 +292,20 @@ if (withGeometry) {
     }
     const throughput = Number(caseData.cycleAnalysis?.throughputPerMin ?? 0);
     const linkageCycle = cycleMsFromThroughput(throughput) ?? undefined;
-    const linkage = buildLinkage(caseData.geometry, linkageCycle ? { cycleMs: linkageCycle } : {});
+    const linkage = finalLinkage();
     const plan = planPlcGaps(caseData.design.config);
     const repair = repairPlcConfig(caseData.design.config, plan);
-    const sequence = buildSequenceFromLinkage(linkage, repair.config);
+    let sequence = [];
+    let conversionError = null;
+    try { sequence = buildSequenceFromLinkage(linkage, repair.config); }
+    catch (error) { conversionError = error instanceof Error ? error.message : String(error); }
     const configWithSequence = { ...repair.config, sequence };
-    const generated = generateProject({ config: configWithSequence, namePrefix: 'audit' });
+    const generated = conversionError
+      ? { ok: false, errors: [{ code: 'UNSUPPORTED_LINKAGE_CONVERSION', message: conversionError }] }
+      : generateProject({ config: configWithSequence, namePrefix: 'audit' });
     const auditBlock = {
+      geometryRevision,
+      conversionSemantics: 'event-driven; timed parallel preview is not an equivalent PLC program',
       gapsFound: plan.errors.length,
       autoFixable: plan.autoFixable,
       fixes: plan.errors.map((gap) => ({ code: gap.code, message: gap.message, fix: gap.fix?.detail ?? null })),
@@ -287,7 +321,7 @@ if (withGeometry) {
         .filter((file) => file.path === 'src/FC_AutoSequence.st' || file.path === 'src/FC_Safety.st')
         .map((file) => file.content)
         .join('\n');
-      const audit = auditLinkageVsProgram(linkage, mapping.points ?? [], programText, sequence.length);
+      const audit = auditLinkageVsProgram(linkage, mapping.points ?? [], programText, sequence.length, mapping.sequence ?? sequence);
       Object.assign(auditBlock, {
         files: generated.files.length,
         plcPoints: (mapping.points ?? []).length,
@@ -298,13 +332,14 @@ if (withGeometry) {
 
     // 调试时序表：每个点位在循环里的 ON 区间，现场调试/示波器对点用
     const timingIndex = args.indexOf('--linkage-timing-csv');
-    if (timingIndex >= 0 && generated.ok) {
+    if (timingIndex >= 0) {
       const targetPath = args[timingIndex + 1];
       if (!targetPath) {
         process.stderr.write('--linkage-timing-csv 需要输出路径\n');
         process.exit(2);
       }
-      const mapping = JSON.parse(generated.files.find((file) => file.path === 'mapping.json').content);
+      const timingProject = generated.ok ? generated : generateProject({ config: { ...repair.config, sequence: [] }, namePrefix: 'preview' });
+      const mapping = timingProject.ok ? JSON.parse(timingProject.files.find((file) => file.path === 'mapping.json').content) : { points: [] };
       const byPoint = new Map((mapping.points ?? []).map((point) => [point.point, point]));
       const header = ['步号', '执行机构', '点位', '地址', '变量', '开始ms', '结束ms', '时长ms'];
       const rows = [];
@@ -326,6 +361,8 @@ if (withGeometry) {
       const csv = '\uFEFF' + [header, ...rows].map((row) => row.join(',')).join('\r\n') + '\r\n';
       writeFileSync(targetPath, csv, 'utf8');
       caseData.linkageTiming = {
+        semantics: 'preview-timeline; not PLC execution timing',
+        plcGenerated: generated.ok,
         path: targetPath,
         rows: rows.length,
         steps: linkage.steps.length,
@@ -339,9 +376,9 @@ if (withGeometry) {
   if (args.indexOf('--motion-check') >= 0) {
     const throughput = Number(caseData.cycleAnalysis?.throughputPerMin ?? 0);
     const cycleMs = cycleMsFromThroughput(throughput) ?? undefined;
-    const linkage = buildLinkage(caseData.geometry, cycleMs ? { cycleMs } : {});
-    const result = checkMotionEnvelope(caseData.geometry, linkage);
-    caseData.motionCheck = { cycleMs: linkage.cycleMs, ...result };
+    const linkage = finalLinkage();
+    const result = finalMotion();
+    caseData.motionCheck = { geometryRevision, cycleMs: linkage.cycleMs, ...result };
   }
 
   const linkageAtIndex = args.indexOf('--linkage-at');
@@ -353,29 +390,10 @@ if (withGeometry) {
     }
     const throughput = Number(caseData.cycleAnalysis?.throughputPerMin ?? 0);
     const cycleMs = cycleMsFromThroughput(throughput) ?? undefined;
-    const linkage = buildLinkage(caseData.geometry, cycleMs ? { cycleMs } : {});
+    const linkage = finalLinkage();
     caseData.linkagePose = { atMs, ...poseAt(linkage, atMs) };
   }
 
-  const clearanceResolveIndex = args.indexOf('--resolve-clearance');
-  if (clearanceResolveIndex >= 0) {
-    const threshold = Number(args[clearanceResolveIndex + 1]);
-    if (!Number.isFinite(threshold) || threshold <= 0) {
-      process.stderr.write('--resolve-clearance 需要一个正数（mm）\n');
-      process.exit(2);
-    }
-    const resolved = resolveClearance(caseData.geometry, { thresholdMm: threshold });
-    caseData.geometry.parts = resolved.parts;
-    caseData.geometry.clearanceResolution = {
-      thresholdMm: resolved.thresholdMm,
-      before: resolved.before,
-      after: resolved.after,
-      moves: resolved.moves,
-      iterations: resolved.iterations,
-      converged: resolved.converged,
-      ...(resolved.stopReason ? { stopReason: resolved.stopReason } : {})
-    };
-  }
   if (clearanceThreshold !== null) {
     caseData.geometry.clearance = screenClearance(caseData.geometry, { thresholdMm: clearanceThreshold });
   }

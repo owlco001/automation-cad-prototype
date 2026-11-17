@@ -40,8 +40,8 @@ const transferConfig = (overrides = {}) => ({
     }
   ],
   sensors: [
-    { point: 'ST-TRANSFER-LIFT-UP', station: '移载工位', part: 'transfer-lift' },
-    { point: 'ST-TRANSFER-LIFT-DOWN', station: '移载工位', part: 'transfer-lift' },
+    { point: 'ST-TRANSFER-LIFT-UP', station: '移载工位', part: 'transfer-lift', role: 'extended' },
+    { point: 'ST-TRANSFER-LIFT-DOWN', station: '移载工位', part: 'transfer-lift', role: 'retracted' },
     { point: 'DI-TRANSFER-END', station: '移载工位', part: 'transfer-push' },
     { point: 'DI-DOWNSTREAM-ALLOW', station: '移载工位', part: '移载工位' },
     { point: 'ST-TRANSFER-ESTOP', station: '移载工位', part: '急停' },

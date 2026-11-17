@@ -1,0 +1,55 @@
+/* Shared desktop workspace chrome. Original actions retain their IDs/listeners. */
+.project-context-workflows{display:none}
+.cad-overlay .project-context-workflows{display:flex;gap:3px;flex-basis:100%;border-top:1px solid #303e49;padding-top:7px}
+.cad-overlay .project-context-workflows button{border:1px solid #3d515e;border-radius:4px;background:#23333f;color:#b9cbd8;padding:5px 10px;font:inherit;cursor:pointer}
+.cad-overlay .project-context-bar{flex-wrap:wrap}
+.cad-overlay .project-context-workflows button:hover{color:#d8fff1;border-color:#559482;background:#2b463d}
+.desktop-workspace #app{position:relative}
+.project-context-bar{display:flex;align-items:center;gap:14px;min-height:48px;padding:8px 16px;background:#171e25;border-bottom:1px solid #35414d;color:#dce6ed;box-sizing:border-box;font:12px/1.4 var(--font-ui,"Segoe UI",sans-serif);flex:0 0 auto;z-index:12}
+.project-context-heading{display:flex;align-items:baseline;gap:12px;min-width:0;flex:1}
+.project-context-heading strong{font-size:14px;font-weight:600;max-width:34vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.project-context-heading span{font-size:11px;color:#98a8b7;white-space:nowrap}
+.project-geometry-badge{font-size:10px;color:#a8bdc9;border:1px solid #3c4d59;background:#202c35;border-radius:4px;padding:4px 8px;white-space:nowrap}
+.project-context-bar[data-stage="import"] .project-context-heading span{color:#e9c37e}
+.project-context-actions{display:flex;align-items:center;gap:8px;min-width:0}
+.project-context-actions button{min-height:30px;border:1px solid #3b4b57;border-radius:5px;background:#263440;color:#d4e2eb;padding:5px 10px;font:inherit;cursor:pointer;white-space:nowrap}
+.project-context-actions button:hover{background:#304553;border-color:#648396}
+.project-context-actions button:disabled{opacity:.45;cursor:default}
+.project-context-actions #projectSessionStatus{background:transparent;border-color:transparent;color:#8fd7be;font-size:11px;max-width:260px;overflow:hidden;text-overflow:ellipsis}
+.project-context-actions #projectSessionStatus[data-error="true"]{color:#ffb5a6;background:#422c2a;border-color:#80524a}
+.project-context-actions #recoverLastProject{color:#d9e9fc;border-color:#56769b;background:#25384f}
+.desktop-workspace .tb-left #saveAsProjectButton{display:none}
+.desktop-workspace .topbar{min-height:48px;height:auto;flex-wrap:wrap;gap:8px;padding-block:6px}
+.desktop-workspace .topbar .tb-left{flex:0 1 auto;min-width:0}
+.desktop-workspace .topbar .file-menu-wrap{max-width:220px}
+.desktop-workspace .topbar .file-name{max-width:150px}
+.desktop-workspace .topbar > #modes,.desktop-workspace .topbar > #modesElec{order:4;flex-basis:100%;justify-content:flex-start;border-top:1px solid #303d47;padding-top:5px}
+.desktop-workspace .topbar > #modes[hidden],.desktop-workspace .topbar > #modesElec[hidden]{display:none}
+.workspace-nav{display:flex;align-items:center;gap:10px;flex:1;min-width:0}
+.workspace-nav-tabs{display:flex;align-items:center;gap:3px;white-space:nowrap}
+.workspace-nav-button{border:1px solid transparent;background:transparent;color:#9fb0bf;border-radius:5px;padding:8px 11px;font-family:inherit;font-size:12px;line-height:1.3;cursor:pointer;white-space:nowrap}
+.workspace-nav-button:hover{color:#eef6fb;background:#293742}
+.workspace-nav-button.is-active,.workspace-nav-button[aria-pressed="true"],.workspace-nav-button[aria-current="page"]{color:#baf1e0;border-color:#376e62;background:#213c35}
+.workspace-tool-strip{display:flex;align-items:center;gap:4px;min-width:0;overflow:auto;border-left:1px solid #3a4651;padding-left:10px;scrollbar-width:thin}
+.workspace-tool-shortcut{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;border:1px solid #374653;border-radius:4px;background:#202c36;color:#bdcdd9;padding:5px 8px;min-height:29px;font-family:inherit;font-size:11px;line-height:1.3;cursor:pointer}
+.workspace-tool-shortcut:hover{background:#304351;color:#fff}
+.workspace-tool-shortcut svg{width:13px;height:13px;fill:none;stroke:currentColor}
+.workspace-nav button:focus-visible,.project-context-bar button:focus-visible,.cad-inspector-tabs button:focus-visible{outline:2px solid #7fcebb;outline-offset:2px}
+.cad-overlay .project-context-bar{order:-2}
+.cad-overlay .cad-topbar{height:auto;min-height:46px;flex-basis:auto;flex-wrap:wrap;gap:8px;padding-block:6px}
+.cad-overlay .cad-brand{min-width:130px}
+.cad-overlay .cad-brand-sub{display:none}
+.cad-overlay .cad-actions{flex-wrap:wrap;min-width:0;gap:5px}
+.cad-overlay .cad-file-wrap{margin-left:auto}
+.cad-overlay .cad-file-info{max-width:210px}
+.cad-inspector-tabs{display:flex;align-items:center;justify-content:flex-end;gap:4px;min-height:35px;flex:0 0 auto;padding:4px 12px;background:#1c252d;border-bottom:1px solid #37434d}
+.cad-inspector-tabs:before{content:"右侧面板";font-size:10px;color:#8294a3;margin-right:8px}
+.cad-inspector-tabs button{background:transparent;color:#a7b9c7;border:1px solid transparent;border-radius:4px;padding:5px 11px;font-size:11px;cursor:pointer}
+.cad-inspector-tabs button.is-active,.cad-inspector-tabs button[aria-selected="true"]{color:#c3f3e7;background:#29463d;border-color:#3c7866}
+.cad-inspector-tabs button[hidden]{display:none}
+.cad-inspector[hidden]{display:none!important}
+.cad-overlay .cad-sidebar{width:250px;flex-basis:250px}
+.cad-overlay .cad-inspector,.cad-overlay .cad-kinematics-drawer,.cad-overlay .cad-parametric-drawer{width:340px;flex-basis:340px;max-width:36vw}
+.cad-overlay[data-cad-inspector-panel="collapsed"] .cad-viewport{flex:1}
+@media(max-width:1250px){.workspace-nav{flex-wrap:wrap}.workspace-tool-strip{flex-basis:100%;border-left:0;padding-left:0}.project-geometry-badge{display:none}.project-context-heading{flex-direction:column;align-items:flex-start;gap:2px}.desktop-workspace .topbar .tb-right{margin-left:auto}.cad-overlay .cad-sidebar{width:210px;flex-basis:210px}.cad-overlay .cad-inspector,.cad-overlay .cad-kinematics-drawer,.cad-overlay .cad-parametric-drawer{width:300px;flex-basis:300px}}
+@media(max-width:850px){.project-context-bar{gap:8px;padding:7px 10px;flex-wrap:wrap}.project-context-heading strong{max-width:65vw}.project-context-actions{width:100%;justify-content:flex-start}.project-context-actions #projectSessionStatus{max-width:55vw}.workspace-nav-tabs{overflow:auto;max-width:100%}.workspace-nav-button{padding:7px 8px}.workspace-nav{flex-basis:100%;order:3}.desktop-workspace .topbar .tb-left{max-width:60%}.cad-overlay .cad-brand{display:none}.cad-overlay .cad-sidebar{width:175px;flex-basis:175px}.cad-overlay .cad-inspector,.cad-overlay .cad-kinematics-drawer,.cad-overlay .cad-parametric-drawer{width:270px;flex-basis:270px;max-width:40vw}.cad-overlay .cad-file-wrap{display:none}}

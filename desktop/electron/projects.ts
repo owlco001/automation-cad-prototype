@@ -19,6 +19,7 @@ import { parseProjectLayoutPlacements } from '../src/design/project-layout.ts';
 import { buildProjectLayoutValidationView } from '../src/design/project-layout-validation.ts';
 import { isProjectGeometryReview, type ProjectGeometryReview } from '../src/design/geometry-review.ts';
 import type { Placement } from '../src/enclosure/layout.ts';
+import { parseProjectSnapshot, type ProjectSnapshot } from '../src/project-session/snapshot.ts';
 
 export interface ProjectRecord {
   id: string;
@@ -60,11 +61,14 @@ export interface ProjectSaveInput {
   stlData?: Uint8Array;
   partData?: Array<{ name: string; data: Uint8Array; path?: string[] }>;
   placements?: unknown[];
+  workspace?: unknown;
 }
 
 export interface ProjectOpenResult {
   ok: boolean;
   record?: ProjectRecord;
+  workspace?: ProjectSnapshot;
+  workspaceMessage?: string;
   /** 只从 design.json 恢复的二维毫米坐标；旧工程或损坏数据返回空数组。 */
   placements?: Placement[];
   /** 仅当 design.json、机器设计与 placements 均有效时才允许修改。 */
@@ -96,7 +100,9 @@ function projectDir(userDataDir: string, id: string): string {
 function readRecord(dir: string): ProjectRecord | null {
   try {
     const raw = JSON.parse(readFileSync(join(dir, 'project.json'), 'utf8')) as ProjectRecord;
-    if (!raw || typeof raw.id !== 'string' || typeof raw.name !== 'string') return null;
+    if (!raw || typeof raw.id !== 'string' || typeof raw.name !== 'string' || raw.id !== basename(dir) || sanitizeId(raw.id) !== raw.id) return null;
+    if (!Array.isArray(raw.partsList) || raw.partsList.some((item) => !item || typeof item.name !== 'string' ||
+      typeof item.file !== 'string' || !item.file || item.file === '.' || item.file === '..' || item.file.includes('/') || item.file.includes('\\'))) return null;
     if (raw.geometryReview !== undefined && !isProjectGeometryReview(raw.geometryReview)) return null;
     return raw;
   } catch {
@@ -147,11 +153,12 @@ function readProjectLayoutSnapshot(dir: string): { snapshot?: ProjectLayoutSnaps
 
 /** 列出全部工程，按创建时间倒序（新的在前）。 */
 export function listProjects(userDataDir: string): ProjectRecord[] {
+  recoverProjectSwaps(userDataDir);
   const root = projectsRoot(userDataDir);
   if (!existsSync(root)) return [];
   const records: ProjectRecord[] = [];
   for (const entry of readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
     const record = readRecord(join(root, entry.name));
     if (record) records.push(record);
   }
@@ -159,115 +166,172 @@ export function listProjects(userDataDir: string): ProjectRecord[] {
   return records.slice(0, MAX_PROJECTS);
 }
 
-/**
- * 保存一个工程。同名工程覆盖（id 由名字派生），保证下拉里不会堆一堆"皮带输送机-2-3"。
+interface ProjectSwap {
+  id: string;
+  stage: string;
+  backup: string;
+}
+
+/** A journal exists only after the entire replacement directory is ready.
+ * Missing live directory means interruption before publication: restore the old
+ * directory (or discard an unpublished first save). A live directory wins after
+ * publication. Never expose stage/backup directories in the project list.
  */
+function recoverProjectSwaps(userDataDir: string): void {
+  const root = projectsRoot(userDataDir);
+  if (!existsSync(root)) return;
+  for (const entry of readdirSync(root)) {
+    if (!entry.startsWith('.project-swap-') || !entry.endsWith('.json')) continue;
+    const journal = join(root, entry);
+    const swap = JSON.parse(readFileSync(journal, 'utf8')) as ProjectSwap;
+    if (typeof swap.id !== 'string' || sanitizeId(swap.id) !== swap.id ||
+        entry !== `.project-swap-${swap.id}.json` ||
+        typeof swap.stage !== 'string' || !/^\.project-stage-[a-f0-9-]+$/.test(swap.stage) ||
+        typeof swap.backup !== 'string' || !/^\.project-backup-[a-f0-9-]+$/.test(swap.backup)) {
+      throw new Error('工程保存恢复日志无效');
+    }
+    const dir = join(root, swap.id);
+    const backup = join(root, swap.backup);
+    if (!existsSync(dir) && existsSync(backup)) renameSync(backup, dir);
+    rmSync(join(root, swap.stage), { recursive: true, force: true });
+    rmSync(backup, { recursive: true, force: true });
+    rmSync(journal, { force: true });
+  }
+}
+
+function savedProjectId(userDataDir: string, name: string): string {
+  const root = projectsRoot(userDataDir);
+  const base = sanitizeId(name);
+  // Retain legacy IDs and same-name overwrite behavior, including names whose
+  // sanitized forms collide. Compare case-insensitively for Windows filesystems.
+  const entries = existsSync(root) ? readdirSync(root).filter((entry) => !entry.startsWith('.')) : [];
+  for (const entry of entries) {
+    if (sanitizeId(entry) === entry && readRecord(join(root, entry))?.name === name) return entry;
+  }
+  const occupied = new Set(entries.map((entry) => entry.toLowerCase()));
+  if (!occupied.has(base.toLowerCase())) return base;
+  const suffix = createHash('sha256').update(name).digest('hex').slice(0, 12);
+  const hashed = `${base.slice(0, 35)}-${suffix}`;
+  let id = hashed;
+  for (let index = 2; occupied.has(id.toLowerCase()); index++) id = `${hashed.slice(0, 40)}-${index}`;
+  return id;
+}
+
+/** 同名工程覆盖；先生成完整目录，再通过可恢复的目录交换发布。 */
 export function saveProject(userDataDir: string, input: ProjectSaveInput): { ok: boolean; record?: ProjectRecord; message?: string } {
-  const name = String(input.name ?? '').trim();
-  if (!name) return { ok: false, message: '工程名不能为空' };
-  const id = sanitizeId(name);
-  const dir = projectDir(userDataDir, id);
+  let stage: string | undefined;
+  let journal: string | undefined;
+  let published = false;
   try {
+    if (!input || typeof input.name !== 'string' || !input.name.trim()) throw new Error('工程名不能为空');
+    const name = input.name.trim();
     const validatedDesign = input.design === undefined ? undefined : validateMachineDesign(input.design);
+    const workspace = input.workspace === undefined ? undefined : parseProjectSnapshot(input.workspace);
     if (input.config !== undefined) validateMachineConfig(input.config);
-    if (input.geometryReview !== undefined && !isProjectGeometryReview(input.geometryReview)) {
-      return { ok: false, message: '3D/干涉校核状态无效，工程未保存' };
-    }
-    const temporaryParts = join(dir, `.parts-${process.pid}-${Date.now()}`);
-    rmSync(temporaryParts, { recursive: true, force: true });
-    mkdirSync(temporaryParts, { recursive: true });
-    const stagedParts: Array<{ file: string; name: string }> = [];
-    const stagePart = (name: string, data: Uint8Array): void => {
-      const safe = sanitizeId(name.replace(/\.stl$/i, ''));
-      const file = `${safe}.stl`;
-      writeFileSync(join(temporaryParts, file), data);
-      stagedParts.push({ file, name });
+    if (input.geometryReview !== undefined && !isProjectGeometryReview(input.geometryReview)) throw new Error('3D/干涉校核状态无效，工程未保存');
+    if (input.placements !== undefined && !parseProjectLayoutPlacements(input.placements)) throw new Error('二维布局数据无效');
+    if (input.parts !== undefined && (!Number.isInteger(input.parts) || input.parts < 0)) throw new Error('零件数量无效');
+    if (input.massKg != null && (typeof input.massKg !== 'number' || !Number.isFinite(input.massKg) || input.massKg < 0)) throw new Error('工程质量无效');
+    if (input.envelope != null && (!Array.isArray(input.envelope) || input.envelope.length !== 3 || input.envelope.some((n) => typeof n !== 'number' || !Number.isFinite(n) || n <= 0))) throw new Error('工程包络尺寸无效');
+    if (input.material !== undefined && (!Array.isArray(input.material) || input.material.some((item) => typeof item !== 'string'))) throw new Error('工程材料无效');
+    if (input.partPaths !== undefined && !Array.isArray(input.partPaths)) throw new Error('零件路径无效');
+    if (input.partData !== undefined && !Array.isArray(input.partData)) throw new Error('零件数据无效');
+    const validateData = (data: Uint8Array): void => {
+      if (!(data instanceof Uint8Array) || !data.byteLength) throw new Error('STL 数据无效');
     };
+    // Restore interrupted overwrites before resolving sources which may point
+    // into the project's own previous directory.
+    recoverProjectSwaps(userDataDir);
+    const validateSource = (path: string): void => {
+      if (typeof path !== 'string' || !path || !statSync(path).isFile() || statSync(path).size === 0) throw new Error(`模型文件无效：${path}`);
+    };
+    if (input.stepPath != null) validateSource(input.stepPath);
+    if (input.stlPath != null) validateSource(input.stlPath);
+    if (input.stlData !== undefined) validateData(input.stlData);
     for (const item of input.partPaths ?? []) {
-      if (!item?.path || !existsSync(item.path)) continue;
-      stagePart(item.name || basename(item.path), readFileSync(item.path));
+      if (!item || typeof item.name !== 'string') throw new Error('零件名称无效');
+      validateSource(item.path);
     }
     for (const item of input.partData ?? []) {
-      if (!(item.data instanceof Uint8Array) || item.data.byteLength === 0) return { ok: false, message: `零件 ${item.name} STL 数据无效` };
-      stagePart(item.name, item.data);
+      if (!item || typeof item.name !== 'string') throw new Error('零件名称无效');
+      validateData(item.data);
     }
-    mkdirSync(join(dir, 'parts'), { recursive: true });
-    for (const file of readdirSync(join(dir, 'parts'))) rmSync(join(dir, 'parts', file), { force: true });
-    for (const item of stagedParts) renameSync(join(temporaryParts, item.file), join(dir, 'parts', item.file));
-    rmSync(temporaryParts, { recursive: true, force: true });
+
+    recoverProjectSwaps(userDataDir);
+    const root = projectsRoot(userDataDir);
+    mkdirSync(root, { recursive: true });
+    const id = savedProjectId(userDataDir, name);
+    const dir = join(root, id);
+    const token = randomUUID();
+    const swap: ProjectSwap = { id, stage: `.project-stage-${token}`, backup: `.project-backup-${token}` };
+    stage = join(root, swap.stage);
+    mkdirSync(join(stage, 'parts'), { recursive: true });
     const partsList: Array<{ file: string; name: string; path?: string[]; color?: string }> = [];
+    // Prefixes ensure uniqueness even for identical, truncated, case-folded or
+    // sanitized names, across both source collections.
+    const partFile = (name: string): string => `${String(partsList.length + 1).padStart(4, '0')}-${sanitizeId(name.replace(/\.stl$/i, ''))}.stl`;
     for (const item of input.partPaths ?? []) {
-      if (!item?.path || !existsSync(item.path)) continue;
-      const safe = sanitizeId(basename(item.path).replace(/\.stl$/i, ''));
-      const target = join(dir, 'parts', `${safe}.stl`);
-      copyFileSync(item.path, target);
-      // 颜色只收 '#rrggbb'：脏数据（旧版工程没有这一项）就不写，读回来按默认色板处理
+      const file = partFile(item.name || basename(item.path));
+      copyFileSync(item.path, join(stage, 'parts', file));
       const color = typeof item.color === 'string' && /^#[0-9a-f]{6}$/i.test(item.color) ? item.color.toLowerCase() : undefined;
-      partsList.push({ file: `${safe}.stl`, name: String(item.name ?? safe), ...(color ? { color } : {}) });
+      partsList.push({ file, name: item.name, ...(color ? { color } : {}) });
     }
     for (const item of input.partData ?? []) {
-      if (!(item.data instanceof Uint8Array) || item.data.byteLength === 0) return { ok: false, message: `零件 ${item.name} STL 数据无效` };
-      const safe = sanitizeId(item.name);
-      const target = join(dir, 'parts', `${safe}.stl`);
-      writeFileSync(target, item.data);
-      // 装配层级路径（根 → 父节点）：可选，最多 8 级、单段 ≤60 字符，脏数据直接丢掉不写坏工程
-      const path = Array.isArray(item.path)
-        ? item.path
-            .filter((segment): segment is string => typeof segment === 'string')
-            .map((segment) => segment.trim().slice(0, 60))
-            .filter(Boolean)
-            .slice(0, 8)
-        : [];
-      partsList.push(path.length > 0
-        ? { file: `${safe}.stl`, name: item.name, path }
-        : { file: `${safe}.stl`, name: item.name });
+      const file = partFile(item.name);
+      writeFileSync(join(stage, 'parts', file), item.data);
+      // Preserve existing tolerant hierarchy/color normalization.
+      const path = Array.isArray(item.path) ? item.path.filter((segment): segment is string => typeof segment === 'string')
+        .map((segment) => segment.trim().slice(0, 60)).filter(Boolean).slice(0, 8) : [];
+      partsList.push({ file, name: item.name, ...(path.length ? { path } : {}) });
     }
-    let hasStep = false;
-    let hasStl = false;
-    if (input.stepPath && existsSync(input.stepPath)) {
-      copyFileSync(input.stepPath, join(dir, 'model.step'));
-      hasStep = true;
-    }
-    if (input.stlPath && existsSync(input.stlPath)) {
-      copyFileSync(input.stlPath, join(dir, 'model.stl'));
-      hasStl = true;
-    }
-    if (input.stlData !== undefined) {
-      if (!(input.stlData instanceof Uint8Array) || input.stlData.byteLength === 0) return { ok: false, message: '整机 STL 数据无效' };
-      writeFileSync(join(dir, 'model.stl'), input.stlData);
-      hasStl = true;
-    }
-    const bytes = directoryBytes(dir);
+    if (input.stepPath) copyFileSync(input.stepPath, join(stage, 'model.step'));
+    if (input.stlPath) copyFileSync(input.stlPath, join(stage, 'model.stl'));
+    if (input.stlData !== undefined) writeFileSync(join(stage, 'model.stl'), input.stlData);
+    if (validatedDesign) writeFileSync(join(stage, 'design.json'), `${JSON.stringify({ design: validatedDesign, placements: input.placements ?? [] }, null, 2)}\n`, 'utf8');
+    if (workspace) writeFileSync(join(stage, 'workspace.json'), `${JSON.stringify(workspace, null, 2)}\n`, 'utf8');
     const record: ProjectRecord = {
-      id,
-      name,
-      process: String(input.process ?? 'unknown'),
-      // params 只收有限数字：历史上有过 "11-128" 这种既不是数字也不是字符串的值写进工程，
-      // 读回来 JSON.parse 直接炸，工程被当成损坏文件跳过
-      params: Object.fromEntries(
-        Object.entries(input.params ?? {}).filter(([, value]) => typeof value === 'number' && Number.isFinite(value))
-      ),
-      parts: Number(input.parts ?? partsList.length),
-      massKg: typeof input.massKg === 'number' ? input.massKg : null,
-      envelope: input.envelope ?? null,
-      material: input.material ?? [],
-      createdAt: new Date().toISOString(),
-      partsList,
-      hasStep,
-      hasStl,
+      id, name, process: String(input.process ?? 'unknown'),
+      params: Object.fromEntries(Object.entries(input.params ?? {}).filter(([, value]) => typeof value === 'number' && Number.isFinite(value))),
+      parts: input.parts ?? partsList.length,
+      massKg: input.massKg ?? null, envelope: input.envelope ?? null, material: input.material ?? [],
+      createdAt: new Date().toISOString(), partsList,
+      hasStep: Boolean(input.stepPath), hasStl: Boolean(input.stlPath || input.stlData),
       ...(validatedDesign ? { design: validatedDesign } : {}),
       ...(input.geometryReview ? { geometryReview: input.geometryReview } : {}),
-      bytes
+      bytes: directoryBytes(stage)
     };
-    writeFileSync(join(dir, 'project.json'), JSON.stringify(record, null, 2), 'utf8');
-    if (validatedDesign) writeFileSync(join(dir, 'design.json'), `${JSON.stringify({ design: validatedDesign, placements: input.placements ?? [] }, null, 2)}\n`, 'utf8');
+    writeFileSync(join(stage, 'project.json'), JSON.stringify(record, null, 2), 'utf8');
+    // Publish a fully written journal atomically: interruption while writing
+    // must not leave a truncated recovery document next to a live project.
+    const journalPath = join(root, `.project-swap-${id}.json`);
+    const preparedJournal = join(stage, '.swap.json');
+    writeFileSync(preparedJournal, JSON.stringify(swap), { encoding: 'utf8', flag: 'wx' });
+    renameSync(preparedJournal, journalPath);
+    journal = journalPath;
+    if (existsSync(dir)) renameSync(dir, join(root, swap.backup));
+    renameSync(stage, dir);
+    published = true;
+    stage = undefined;
+    // Once published, cleanup errors must not report a failed save. The journal
+    // retains enough information for the next access to finish cleanup.
+    try { recoverProjectSwaps(userDataDir); } catch { /* retry on next access */ }
     return { ok: true, record };
   } catch (error) {
+    if (journal && !published) {
+      try { recoverProjectSwaps(userDataDir); } catch { /* keep journal/backup for later recovery */ }
+    }
     return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  } finally {
+    if (stage && !journal) {
+      try { rmSync(stage, { recursive: true, force: true }); } catch { /* unpublished hidden staging directory */ }
+    }
   }
 }
 
 export function openProject(userDataDir: string, id: string): ProjectOpenResult {
+  try { recoverProjectSwaps(userDataDir); } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
   const dir = projectDir(userDataDir, id);
   const record = readRecord(dir);
   if (!record) return { ok: false, message: `工程「${id}」不存在或已损坏` };
@@ -276,14 +340,22 @@ export function openProject(userDataDir: string, id: string): ProjectOpenResult 
   // partsList 的顺序就是零件序，名字来自保存时记录（零件树要显示中文名）
   for (const entry of record.partsList ?? []) {
     const path = join(partsDir, entry.file);
-    if (!existsSync(path)) continue;
+    if (!existsSync(path)) return { ok: false, message: `工程零件文件缺失：${entry.file}` };
     partPaths.push({ name: entry.name, path, ...(entry.color ? { color: entry.color } : {}) });
   }
   const stepPath = join(dir, 'model.step');
   const layout = readProjectLayoutSnapshot(dir);
+  let workspace: ProjectSnapshot | undefined;
+  let workspaceMessage: string | undefined;
+  if (existsSync(join(dir, 'workspace.json'))) {
+    try { workspace = parseProjectSnapshot(JSON.parse(readFileSync(join(dir, 'workspace.json'), 'utf8'))); }
+    catch { workspaceMessage = '工程工作区快照损坏，无法恢复编辑状态'; }
+  }
   return {
     ok: true,
     record,
+    ...(workspace ? { workspace } : {}),
+    ...(workspaceMessage ? { workspaceMessage } : {}),
     placements: layout.snapshot?.placements ?? [],
     layoutEditable: Boolean(layout.snapshot),
     ...(layout.snapshot ? { layoutFingerprint: layout.snapshot.fingerprint } : {}),
@@ -314,6 +386,9 @@ export function saveProjectLayout(
   proposedPlacements: unknown
 ): ProjectLayoutSaveResult {
   if (!/^[a-f0-9]{64}$/i.test(expectedFingerprint)) return { ok: false, message: '布局版本指纹无效，请重新打开工程布局' };
+  try { recoverProjectSwaps(userDataDir); } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
   const dir = projectDir(userDataDir, id);
   const path = join(dir, 'design.json');
   const current = readProjectLayoutSnapshot(dir);
@@ -375,6 +450,9 @@ export function saveProjectLayout(
 }
 
 export function deleteProject(userDataDir: string, id: string): { ok: boolean; message?: string } {
+  try { recoverProjectSwaps(userDataDir); } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
   const dir = projectDir(userDataDir, id);
   if (!existsSync(dir)) return { ok: false, message: `工程「${id}」不存在` };
   try {

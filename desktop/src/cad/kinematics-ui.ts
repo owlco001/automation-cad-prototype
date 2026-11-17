@@ -732,6 +732,8 @@ export interface KinematicsUiHandle {
   isOpen(): boolean;
   setSource(sourceFile: string, meshes: readonly KinematicsMeshInfo[], projectId?: string, projectStorageKey?: string): void;
   getAnnotation(): KinematicsAnnotation;
+  /** Local recovery only: caller must verify the exact saved mesh signature first. */
+  restoreAnnotation(annotation: KinematicsAnnotation): void;
   getValidation(): DraftValidation;
   addMovingPart(meshIds: readonly number[], name?: string): string;
   updatePart(id: string, patch: Partial<MovingPart>): void;
@@ -1553,6 +1555,19 @@ export function initKinematicsUi(options: KinematicsUiOptions): KinematicsUiHand
       renderAll();
     },
     getAnnotation: annotation,
+    restoreAnnotation(candidate: KinematicsAnnotation): void {
+      const parsed = deserializeAnnotation(serializeAnnotation(candidate));
+      if (!parsed.ok || !parsed.annotation) throw new Error('工程运动学标注无效');
+      const available = new Set(meshes.map((mesh) => mesh.id));
+      if (parsed.annotation.parts.some((part) => part.meshIds.some((id) => !available.has(id)))) {
+        throw new Error('工程运动学引用了不存在的零件');
+      }
+      // The project snapshot signature proves the exact mesh sequence, including v1 indices.
+      parts = parsed.annotation.parts.map(clonePart);
+      slides.clear();
+      batches = [];
+      renderAll();
+    },
     getValidation: () => validation,
     addMovingPart,
     updatePart(id: string, patch: Partial<MovingPart>): void {

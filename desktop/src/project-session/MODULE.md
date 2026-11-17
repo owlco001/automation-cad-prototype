@@ -1,0 +1,13 @@
+# Local project session recovery
+
+Saved library projects persist geometry separately from editable state. `workspace.json` is the initial snapshot captured on explicit save. `session.json` is the latest autosave envelope; `session.json.bak` is the prior valid envelope. State includes machine config/available normalized design, editable PLC point definitions, parameter feature document, kinematics, camera and wireframe. Source geometry is bound by SHA-256 over framed ordered part names and STL bytes, not by basename or file path.
+
+Renderer polls lightweight state every 1.5 seconds, compares JSON and debounces changed snapshots by 500 ms. At most one write is in flight. Only its exact acknowledged snapshot becomes baseline. Failures keep dirty state; conflicts require reopening. Explicit project save stages a whole replacement directory and journals the directory swap; autosave only replaces state files and fsyncs before rename. Main-process synchronous APIs serialize within this application process; there is no cross-process filesystem lock. Journal recovery covers interrupted process saves, not a power-loss guarantee for complete geometry directories.
+
+On startup, “恢复上次工程” offers recovery without opening a project or connecting hardware automatically. Opening a project restores state only after its saved geometry signature matches. Library STL has a local isolated state binding and cannot inherit portable CAD export identity. Camera and annotations restore independently of global active-machine startup. Old projects can open and begin state autosaving; absent state is not invented.
+
+If the current session is damaged, a valid prior backup can be opened read-only. The status button offers explicit repair, retaining damaged raw bytes in `session.corrupt-UUID.json`; only then do writes resume. Invalid current+backup data is preserved and cannot be overwritten by autosave.
+
+Excluded: live PLC/factory connections, writes, execution state, credentials, global module preferences, infinite-canvas/design drafts, arbitrary scene geometry modifications after the saved baseline, and `.acproj` archive application. Parameter document restoration does not claim a successful real-kernel rebuild; generated mesh caches are not included. Persist changed base geometry explicitly with “存为工程”. Disabled parameter modules retain the saved JSON inertly.
+
+Verification: `node --test test/project-session/*.test.mjs test/electron/projects*.test.mjs`; `node scripts/project-session-smoke.mjs` (build first). The real Electron smoke uses fixture STL and no CAD kernel/PLC service, verifies edits, persistence, reopen, cold recovery and renderer Node isolation.
