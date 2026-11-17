@@ -1,6 +1,8 @@
 import occtimportjs, { type OcctModule, type OcctNode } from 'occt-import-js';
 import type { CadImportResult, CadMeshData } from '../shared/types';
 import { readablePartNames } from './part-naming.ts';
+import { occtFormatForFile } from './format.ts';
+export { occtFormatForFile } from './format.ts';
 
 export interface ParseOcctOptions {
   wasmUrl?: string;
@@ -21,14 +23,6 @@ function loadOcct(options: ParseOcctOptions): Promise<OcctModule> {
     );
   }
   return occtPromise;
-}
-
-export function occtFormatForFile(name: string): 'step' | 'iges' | 'brep' | null {
-  const ext = name.toLowerCase().split('.').pop() || '';
-  if (ext === 'step' || ext === 'stp') return 'step';
-  if (ext === 'iges' || ext === 'igs') return 'iges';
-  if (ext === 'brep') return 'brep';
-  return null;
 }
 
 function toFloat32Array(values: number[]): Float32Array {

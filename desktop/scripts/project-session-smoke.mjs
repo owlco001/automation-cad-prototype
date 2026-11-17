@@ -209,6 +209,13 @@ async function main() {
   assert.equal(fixture.ok, true, fixture.message);
   step = 'open fixture';
   await launch();
+  if (process.env.PROJECT_SESSION_SMOKE_CAD) {
+    step = 'external WASM CAD import';
+    await cdp.evaluate(`AutomationCadViewer.importPath(${JSON.stringify(process.env.PROJECT_SESSION_SMOKE_CAD)})`);
+    const imported = await cdp.evaluate('AutomationCadViewer.describeScene()');
+    assert.ok(imported.parts.length > 0, 'external WASM must parse actual CAD through worker');
+    console.log('PROJECT_SESSION_SMOKE_CAD_PASS parts=' + imported.parts.length);
+  }
   const opened = await cdp.evaluate(`AutomationCadProjects.open(${JSON.stringify(fixture.record.id)})`);
   console.log('PROJECT_SESSION_SMOKE_OPEN ' + JSON.stringify(opened));
   console.log('PROJECT_SESSION_SMOKE_INITIAL_SESSION ' + JSON.stringify(await cdp.evaluate(`desktop.projects.session(${JSON.stringify(fixture.record.id)})`)));

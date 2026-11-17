@@ -44,6 +44,10 @@ interface Box {
   actuatorId: string;
   min: [number, number, number];
   max: [number, number, number];
+  part: any;
+  center: [number, number, number];
+  half: [number, number, number];
+  rotZ: number;
 }
 
 const halfExtents = (part: any, extraRotDeg: number): [number, number, number] => {
@@ -65,7 +69,7 @@ const halfExtents = (part: any, extraRotDeg: number): [number, number, number] =
   return [hx * cos + hy * sin, hx * sin + hy * cos, hz];
 };
 
-const boxOf = (part: any, pose: Pose): Box => {
+const boxOf = (part: any, pose: Pick<Pose, 'offsets' | 'rotZDeg'>): Box => {
   const id = String(part.id);
   const offset = pose.offsets[id] ?? [0, 0, 0];
   const rotZ = pose.rotZDeg[id] ?? 0;
@@ -79,18 +83,27 @@ const boxOf = (part: any, pose: Pose): Box => {
     stationId: String(part.stationId ?? ''),
     actuatorId: String(part.actuatorId ?? ''),
     min: [cx - hx, cy - hy, cz - hz],
-    max: [cx + hx, cy + hy, cz + hz]
+    max: [cx + hx, cy + hy, cz + hz],
+    part,
+    center: [Number(center[0]) || 0, Number(center[1]) || 0, Number(center[2]) || 0],
+    half: [hx, hy, hz],
+    rotZ
   };
 };
 
-const overlap = (a: Box, b: Box): { axis: 'x' | 'y' | 'z'; depth: number } | null => {
-  const depths: Array<{ axis: 'x' | 'y' | 'z'; depth: number }> = [
-    { axis: 'x', depth: Math.min(a.max[0], b.max[0]) - Math.max(a.min[0], b.min[0]) },
-    { axis: 'y', depth: Math.min(a.max[1], b.max[1]) - Math.max(a.min[1], b.min[1]) },
-    { axis: 'z', depth: Math.min(a.max[2], b.max[2]) - Math.max(a.min[2], b.min[2]) }
-  ];
-  if (depths.some((item) => item.depth <= 0)) return null;
-  return depths.reduce((worst, item) => (item.depth < worst.depth ? item : worst));
+// Reuse bounds and half extents; translation does not change the latter.
+const updateBox = (box: Box, pose: Pose): void => {
+  const offset = pose.offsets[box.id];
+  const rotZ = pose.rotZDeg[box.id] ?? 0;
+  if (!Object.is(rotZ, box.rotZ)) {
+    box.half = halfExtents(box.part, rotZ);
+    box.rotZ = rotZ;
+  }
+  for (const axis of [0, 1, 2] as const) {
+    const center = box.center[axis] + (offset == null ? 0 : offset[axis]);
+    box.min[axis] = center - box.half[axis];
+    box.max[axis] = center + box.half[axis];
+  }
 };
 
 const scopeOf = (a: Box, b: Box): MotionSuspect['scope'] => {
@@ -117,34 +130,58 @@ export function checkMotionEnvelope(
   const movedParts = new Set<string>();
   for (const axis of linkage.axes) for (const partId of axis.partIds) movedParts.add(partId);
 
-  const seen = new Map<string, MotionSuspect>();
-  let intraStation = 0;
-  let maxDepthMm = 0;
+  const boxes = parts.map((part) => boxOf(part, { offsets: {}, rotZDeg: {} }));
+  const movingIndices: number[] = [];
+  boxes.forEach((box, index) => { if (movedParts.has(box.id)) movingIndices.push(index); });
+  // Jaws can name parts outside partIds: they affect bounds, but must not change
+  // the original partIds-only eligibility rule for collision pairs.
+  const posedParts = new Set([...movedParts].map(String));
+  for (const axis of linkage.axes) {
+    for (const jaw of Array.isArray(axis.jaws) ? axis.jaws : []) posedParts.add(String(jaw.partId));
+  }
+  const changingBoxes = boxes.filter((box) => posedParts.has(box.id));
+  const candidates: Array<{ a: Box; b: Box; scope: MotionSuspect['scope']; key: string }> = [];
+  let nextMoving = 0;
+  for (let i = 0; i < boxes.length; i += 1) {
+    const a = boxes[i];
+    if (!a) continue;
+    while (nextMoving < movingIndices.length && movingIndices[nextMoving]! <= i) nextMoving += 1;
+    const addPair = (j: number): void => {
+      const b = boxes[j];
+      if (!b || (a.actuatorId && a.actuatorId === b.actuatorId)) return;
+      candidates.push({ a, b, scope: scopeOf(a, b), key: `${a.id}|${b.id}` });
+    };
+    // Enumerate only moving-vs-other pairs, in the original i<j order. This
+    // also preserves Map insertion order when the final stable sort has ties.
+    if (movedParts.has(a.id)) {
+      for (let j = i + 1; j < boxes.length; j += 1) addPair(j);
+    } else {
+      for (let m = nextMoving; m < movingIndices.length; m += 1) addPair(movingIndices[m]!);
+    }
+  }
 
+  const seen = new Map<string, MotionSuspect>();
+  let maxDepthMm = 0;
   for (let frame = 0; frame < frameCount; frame += 1) {
     const tMs = Math.round((linkage.cycleMs * frame) / frameCount);
     const pose = poseAt(linkage, tMs);
-    const boxes = parts.map((part) => boxOf(part, pose));
-    for (let i = 0; i < boxes.length; i += 1) {
-      const a = boxes[i];
-      if (!a) continue;
-      const aMoving = movedParts.has(a.id);
-      for (let j = i + 1; j < boxes.length; j += 1) {
-        const b = boxes[j];
-        if (!b) continue;
-        // 两边都不动 = 静态布局问题，已经由 layoutCompliance 管，这里不重复报
-        if (!aMoving && !movedParts.has(b.id)) continue;
-        const hit = overlap(a, b);
-        if (!hit || hit.depth < minDepth) continue;
-        const scope = scopeOf(a, b);
-        if (scope === 'intra-station' && a.actuatorId && a.actuatorId === b.actuatorId) continue;
-        const key = `${a.id}|${b.id}`;
-        const previous = seen.get(key);
-        if (previous && previous.depthMm >= hit.depth) continue;
-        seen.set(key, { tMs, a: a.id, b: b.id, axis: hit.axis, depthMm: Math.round(hit.depth * 10) / 10, scope });
-        if (scope === 'intra-station') intraStation += 1;
-        maxDepthMm = Math.max(maxDepthMm, hit.depth);
-      }
+    for (const box of changingBoxes) updateBox(box, pose);
+    for (const { a, b, scope, key } of candidates) {
+      const dx = Math.min(a.max[0], b.max[0]) - Math.max(a.min[0], b.min[0]);
+      const dy = Math.min(a.max[1], b.max[1]) - Math.max(a.min[1], b.min[1]);
+      const dz = Math.min(a.max[2], b.max[2]) - Math.max(a.min[2], b.min[2]);
+      if (dx <= 0 || dy <= 0 || dz <= 0) continue;
+      // Strict comparisons retain x/y/z tie priority and the old NaN behavior.
+      let depth = dx;
+      let axis: MotionSuspect['axis'] = 'x';
+      if (dy < depth) { depth = dy; axis = 'y'; }
+      if (dz < depth) { depth = dz; axis = 'z'; }
+      if (depth < minDepth) continue;
+      const previous = seen.get(key);
+      // Compare the previously rounded value against the new raw depth.
+      if (previous && previous.depthMm >= depth) continue;
+      seen.set(key, { tMs, a: a.id, b: b.id, axis, depthMm: Math.round(depth * 10) / 10, scope });
+      maxDepthMm = Math.max(maxDepthMm, depth);
     }
   }
 

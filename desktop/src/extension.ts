@@ -1,7 +1,7 @@
 import cadStyles from './cad.css?inline';
 import CadImportWorker from './cad/importer.worker?worker&inline';
-import wasmAssetUrl from 'occt-import-js/dist/occt-import-js.wasm?url';
-import { occtFormatForFile, parseOcctBuffer } from './cad/step';
+import wasmAssetUrl from 'occt-import-js/dist/occt-import-js.wasm?url&no-inline';
+import { occtFormatForFile } from './cad/format.ts';
 import { parseStandardCadBuffer, parseStandardCadBuffers } from './cad/loaders';
 import { hexToLinear, machineMaterialColor } from './cad/machine-colors.ts';
 import { CadViewer } from './cad/viewer';
@@ -2410,10 +2410,8 @@ function showCadImportFailure(prefix: string, error: unknown): void {
   setEmptyVisible(view.emptyStateVisible);
 }
 function resolveWasmUrl(): string {
-  if (/^(data:|blob:|https?:|file:)/i.test(wasmAssetUrl)) return wasmAssetUrl;
   const base = window.desktop?.extensionBaseUrl || new URL('./', window.location.href).href;
-  const relative = wasmAssetUrl.replace(/^\.?\//, '');
-  return new URL(relative, base).href;
+  return new URL(wasmAssetUrl.replace(/^\.?\//, ''), base).href;
 }
 
 function disposeCadWorker(reason = 'shutdown'): void {

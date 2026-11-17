@@ -1,0 +1,15 @@
+slices:
+  - id: external-wasm
+    status: done
+    scope: [desktop/src/extension.ts, desktop/src/cad/importer.worker.ts, desktop/src/cad/step.ts, desktop/src/cad/format.ts]
+    deletion_targets: [two inlined WASM imports, main renderer OCCT dependency for format detection]
+    verification: production build and native STEP smoke
+  - id: motion-hotloop
+    status: done
+    scope: [desktop/src/machine/motion-envelope.ts, desktop/test/machine/motion-envelope-performance.test.mjs, scripts/bench-motion-envelope.mjs]
+    verification: deep equality reference tests and measured benchmark
+  - id: convergence
+    status: done
+    dependencies: [external-wasm, motion-hotloop]
+    scope: [desktop/scripts/check-bundle-size.mjs, desktop/package.json, .claude/migration/performance]
+    verification: npm test; npm run build:ext; git diff --check

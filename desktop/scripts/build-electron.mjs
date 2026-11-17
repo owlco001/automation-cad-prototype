@@ -16,6 +16,8 @@ await build({
   format: 'cjs',
   target: 'node22',
   sourcemap: true,
+  minify: true,
+  keepNames: true,
   external: ['electron']
 });
 
@@ -27,6 +29,8 @@ await build({
   format: 'cjs',
   target: 'node22',
   sourcemap: true,
+  minify: true,
+  keepNames: true,
   external: ['electron']
 });
 

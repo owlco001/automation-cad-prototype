@@ -1,4 +1,3 @@
-import wasmUrl from 'occt-import-js/dist/occt-import-js.wasm?url';
 import { parseOcctBuffer } from './step';
 
 interface ParseRequest {
@@ -6,14 +5,14 @@ interface ParseRequest {
   kind: 'occt';
   name: string;
   buffer: ArrayBuffer;
-  wasmUrl?: string;
+  wasmUrl: string;
 }
 
 self.onmessage = async (event: MessageEvent<ParseRequest>) => {
   const request = event.data;
   try {
     const result = await parseOcctBuffer(request.buffer, request.name, {
-      wasmUrl: request.wasmUrl || wasmUrl
+      wasmUrl: request.wasmUrl
     });
     const transfers: ArrayBuffer[] = [];
     for (const mesh of result.meshes) {

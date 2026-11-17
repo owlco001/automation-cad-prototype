@@ -1,0 +1,17 @@
+path,status,verification
+.claude/migration/performance/CHARTER.md,done,full tests; build guard; STEP smoke; benchmark
+.claude/migration/performance/HANDOFF.md,done,full tests; build guard; STEP smoke; benchmark
+.claude/migration/performance/MAP.csv,done,full tests; build guard; STEP smoke; benchmark
+.claude/migration/performance/REPORT.md,done,full tests; build guard; STEP smoke; benchmark
+.claude/migration/performance/SHIP_CHECKLIST.md,done,full tests; build guard; STEP smoke; benchmark
+.claude/migration/performance/SLICES.yaml,done,full tests; build guard; STEP smoke; benchmark
+desktop/package.json,done,full tests; build guard; STEP smoke; benchmark
+desktop/scripts/check-bundle-size.mjs,done,full tests; build guard; STEP smoke; benchmark
+desktop/scripts/project-session-smoke.mjs,done,full tests; build guard; STEP smoke; benchmark
+desktop/src/cad/format.ts,done,full tests; build guard; STEP smoke; benchmark
+desktop/src/cad/importer.worker.ts,done,full tests; build guard; STEP smoke; benchmark
+desktop/src/cad/step.ts,done,full tests; build guard; STEP smoke; benchmark
+desktop/src/extension.ts,done,full tests; build guard; STEP smoke; benchmark
+desktop/src/machine/motion-envelope.ts,done,full tests; build guard; STEP smoke; benchmark
+desktop/test/machine/motion-envelope-performance.test.mjs,done,full tests; build guard; STEP smoke; benchmark
+scripts/bench-motion-envelope.mjs,done,full tests; build guard; STEP smoke; benchmark
