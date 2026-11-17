@@ -12,7 +12,9 @@ import { buildDesignPackage, parseDesignPackage } from '../src/sync/package.ts';
 import { validateMachineConfig } from '../src/commission/machine-config.ts';
 import { loadMachineLinkage, loadPlcAudit } from './machine-linkage.ts';
 import { launchQt, subscribeQtExit } from './qt-client.ts';
-import type { DesignBomRow, SyncConfig, SyncPlcUploadPayload, SyncUploadPayload } from '../src/sync/types.ts';
+import type { SyncConfig, SyncUploadPayload } from '../src/sync/types.ts';
+import { parseSyncPayload } from '../src/sync/upload-payload.ts';
+import { plcExportFiles } from '../src/plcgen/export-files.ts';
 import {
   EXPORT_EXTENSIONS,
   assertAllowedTargetPath,
@@ -82,7 +84,7 @@ import { AUDIT_DISPLAY_LIMIT, limitAuditEntries } from '../src/agent/audit-view.
 import type { AgentProgressEvent } from '../src/agent/feedback.ts';
 import type { FeatureDoc } from '../src/parametric/features.ts';
 import type { ParametricManager, ParametricStartInfo } from './parametric.ts';
-import { createZip, normalizeZipPath, type ZipEntry } from '../src/shared/zip.ts';
+import { createZip } from '../src/shared/zip.ts';
 import {
   exportSelectedCadAsPortableArchive,
   previewSelectedPortableArchive,
@@ -355,76 +357,6 @@ function costExportFailure(error: unknown): { ok: false; code: string; message: 
   };
 }
 
-function syncBytes(value: unknown, label: string): Uint8Array {
-  if (value instanceof Uint8Array) {
-    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  }
-  if (value instanceof ArrayBuffer) return new Uint8Array(value);
-  if (ArrayBuffer.isView(value)) {
-    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-  }
-  throw new Error(`${label}必须是字节数组`);
-}
-
-function syncText(value: unknown, label: string): string {
-  if (typeof value !== 'string') throw new Error(`${label}必须是字符串`);
-  return value;
-}
-
-function syncBom(value: unknown): DesignBomRow[] {
-  if (!Array.isArray(value)) throw new Error('BOM 必须是数组');
-  return value.map((entry, index) => {
-    if (typeof entry !== 'object' || entry === null) throw new Error(`第 ${index + 1} 条 BOM 不是对象`);
-    const row = entry as Record<string, unknown>;
-    const no = typeof row.no === 'number' ? row.no : index + 1;
-    const name = typeof row.name === 'string' ? row.name.trim() : '';
-    const spec = typeof row.spec === 'string' ? row.spec.trim() : '';
-    const mat = typeof row.mat === 'string' ? row.mat.trim() : '';
-    const qty = typeof row.qty === 'number' && Number.isFinite(row.qty) ? row.qty : 1;
-    if (!name) throw new Error(`第 ${index + 1} 条 BOM 缺少名称`);
-    const result: DesignBomRow = { no, name, spec, qty, mat };
-    if (typeof row.remark === 'string' && row.remark.trim()) result.remark = row.remark.trim();
-    return result;
-  });
-}
-
-function parseSyncPlcPayload(value: unknown): SyncPlcUploadPayload {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('PLC 同步数据必须是对象');
-  const source = value as Record<string, unknown>;
-  if (typeof source.target !== 'string') throw new Error('PLC target 必须是字符串');
-  if (typeof source.generatedVersion !== 'string') throw new Error('PLC generatedVersion 必须是字符串');
-  if (typeof source.machineId !== 'string') throw new Error('PLC machineId 必须是字符串');
-  if (!Array.isArray(source.programFiles)) throw new Error('PLC programFiles 必须是数组');
-  const programFiles = source.programFiles.map((entry, index) => {
-    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) throw new Error(`PLC programFiles[${index}] 必须是对象`);
-    const file = entry as Record<string, unknown>;
-    if (typeof file.path !== 'string' || typeof file.content !== 'string') throw new Error(`PLC programFiles[${index}] 缺少 path/content`);
-    return { path: file.path, content: file.content };
-  });
-  if (typeof source.mappingCsv !== 'string') throw new Error('PLC mappingCsv 必须是字符串');
-  return {
-    target: source.target as SyncPlcUploadPayload['target'],
-    generatedVersion: source.generatedVersion,
-    machineId: source.machineId,
-    programFiles,
-    mappingCsv: source.mappingCsv
-  };
-}
-
-function parseSyncPayload(value: unknown): SyncUploadPayload {
-  if (typeof value !== 'object' || value === null) throw new Error('同步数据必须是对象');
-  const source = value as Record<string, unknown>;
-  return {
-    projectName: syncText(source.projectName, 'projectName'),
-    bomCsv: typeof source.bomCsv === 'string' ? source.bomCsv : syncBytes(source.bomCsv, 'bom.csv'),
-    reportHtml: syncText(source.reportHtml, '报告 HTML'),
-    glb: syncBytes(source.glb, 'model.glb'),
-    dxf: typeof source.dxf === 'string' ? source.dxf : syncBytes(source.dxf, 'drawing.dxf'),
-    bom: syncBom(source.bom),
-    ...(source.plc === undefined ? {} : { plc: parseSyncPlcPayload(source.plc) })
-  };
-}
-
 export function createPackRegistry(context: Pick<IpcContext, 'builtinDir' | 'userDir' | 'stateFile'>): PackRegistry {
   return new PackRegistry({
     builtinDir: context.builtinDir,
@@ -453,22 +385,6 @@ function readPlcGenHistory(): PlcHistoryEntry[] {
 function writePlcGenHistory(history: PlcHistoryEntry[]): void {
   mkdirSync(dirname(plcHistoryFile()), { recursive: true });
   writeFileSync(plcHistoryFile(), `${JSON.stringify(history, null, 2)}\n`, 'utf8');
-}
-
-function plcExportFiles(value: unknown): ZipEntry[] {
-  if (!Array.isArray(value) || value.length === 0) throw new Error('PLC 导出缺少文件');
-  if (value.length > 200) throw new Error('PLC 导出文件过多');
-  let total = 0;
-  const entries = value.map((item, index): ZipEntry => {
-    if (typeof item !== 'object' || item === null) throw new Error(`PLC 导出文件 ${index + 1} 格式不合法`);
-    const source = item as Record<string, unknown>;
-    const path = normalizeZipPath(source.path);
-    if (typeof source.content !== 'string') throw new Error(`PLC 导出文件 ${path} 缺少正文`);
-    total += Buffer.byteLength(source.content, 'utf8');
-    return { path, content: source.content };
-  });
-  if (total > 20 * 1024 * 1024) throw new Error('PLC 导出正文超过 20MB');
-  return entries;
 }
 
 function plcExportFailure(error: unknown): { ok: false; code: string; message: string } {

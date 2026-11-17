@@ -32,6 +32,8 @@ jobs:
           cache-dependency-path: desktop/package-lock.json
       - name: 安装依赖
         run: npm ci
+      - name: IPC 领域边界检查
+        run: node scripts/check-ipc-boundaries.mjs
       - name: 类型检查
         run: npx tsc --noEmit
       - name: 单元测试（含 kb.json 新鲜度与工具数量文档一致性）

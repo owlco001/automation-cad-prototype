@@ -1,0 +1,30 @@
+slices:
+  - id: ipc-boundaries
+    type: implementation
+    name: Extract synchronization and PLC export boundary validation
+    status: done
+    dependencies: []
+    touched_paths: [desktop/electron/ipc.ts, desktop/src/sync/upload-payload.ts, desktop/src/plcgen/export-files.ts, desktop/test/sync/upload-payload.test.mjs, desktop/test/plcgen/export-files.test.mjs]
+    external_surfaces: [sync upload IPC, PLC source export IPC]
+    contracts: {added: [], changed: [], removed: []}
+    deletion_targets: [inline sync validators in ipc.ts, inline plcExportFiles in ipc.ts]
+    temp_artifacts: []
+    dependency_changes: []
+    docs_to_update: [.claude/migration/AUDIT.md]
+    residue_queries: ['inline parseSyncPayload/syncBytes/syncText/syncBom/parseSyncPlcPayload/plcExportFiles declarations in desktop/electron/ipc.ts']
+    verification_commands: ['node --test test/sync/upload-payload.test.mjs test/plcgen/export-files.test.mjs', 'npx tsc --noEmit', 'npm test', 'node scripts/check-ipc-boundaries.mjs']
+    replay_scenarios: [binary view offsets, BOM defaults and errors, optional PLC payload, ZIP path and UTF-8 limits]
+    smoke_scenarios: []
+    manual_checks: []
+    risks: [Preserve validation semantics rather than tightening accepted inputs]
+    notes: New module tests fail with ERR_MODULE_NOT_FOUND before extraction.
+  - id: convergence
+    type: convergence
+    name: Reconcile docs and architecture guard and run ship gate
+    status: done
+    dependencies: [ipc-boundaries]
+    touched_paths: [.github/workflows/ci.yml, desktop/scripts/check-ipc-boundaries.mjs, .claude/migration]
+    deletion_targets: []
+    temp_artifacts: []
+    dependency_changes: []
+    verification_commands: ['git diff --check', 'npm run build:ext', 'node scripts/check-ipc-boundaries.mjs']

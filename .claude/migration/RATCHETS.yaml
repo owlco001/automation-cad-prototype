@@ -1,0 +1,12 @@
+{
+  "ratchets": [
+    {
+      "id": "ipc-domain-validators",
+      "pattern": "^function (?:syncBytes|syncText|syncBom|parseSyncPlcPayload|parseSyncPayload|plcExportFiles)\\(",
+      "scope": "desktop/electron/ipc.ts",
+      "baseline": 6,
+      "budget": 0,
+      "rationale": "Domain validation must stay in the synchronization and PLC modules, independently testable without Electron."
+    }
+  ]
+}
