@@ -82,6 +82,7 @@ import {
   pickModelBuilder,
   normalizeModelParams,
   toConveyorParams,
+  buildBufferTowerDesign,
   resolveBufferTowerModelInput,
   resolveModelDispatch,
   RULES_ONLY_PROCESSES,
@@ -2421,6 +2422,15 @@ async function saveProjectToLibrary(input: {
    * design.json 与 project.json。
    */
   design?: unknown;
+  /**
+   * 完整机型配置（`design.config` 的同构体），只给 config 的入口走这里。
+   *
+   * `projects.save` 用 `validateMachineConfig` 校验后包成 `{ config }` 写进 design.json /
+   * project.json。为什么裸 config 不能顶替 `design`：`design` 分支过的是
+   * `validateMachineDesign`，它要求 id/stations/actuators/sensors 齐全（塔的 config 简写
+   * 往往只有 `bufferTower`），整份被拒就是 `project.saved=false` —— 建出来了却没进库。
+   */
+  config?: MachineConfig;
 }): Promise<{ ok: boolean; message?: string; record?: DesktopProjectRecordLike }> {
   if (!window.desktop?.projects) return { ok: false, message: '工程库接口不可用' };
   try {
@@ -2704,6 +2714,38 @@ function towerGeometryConfig(design: Record<string, unknown>, config: MachineBuf
 }
 
 /**
+ * 裸 config 入口落盘用的机型配置（`projects.save` 的 `config` 字段只收完整 `MachineConfig`）。
+ *
+ * 为什么不能把裸 config 当 design 存：`build_machine_model` 的 `config` 简写就是
+ * `design.config`（缓存塔调用方常常只给 `{ bufferTower }` 一块），
+ * `resolveBufferTowerModelInput` 会给它合成一份 `{ config }` 壳；那份壳没有
+ * id/stations/actuators/sensors，送进 `validateMachineDesign` 必报
+ * 「缺少必填参数：机型配置.stations」—— 几何照建、`project.saved=false`，参数没进库。
+ *
+ * 两条口径，不夹紧：
+ * - 调用方给了机型级字段（stations/actuators/sensors 任一存在）→ 原样交给主进程
+ *   `validateMachineConfig` 判，形状错就整份失败并回 message（渲染层不替它补齐，
+ *   否则「参数写错」会被悄悄改成一台默认塔）；
+ * - 只给塔块 → 用 `buildBufferTowerDesign`（params 入口合成 design 的同一个函数）
+ *   补最小可落盘集；`bufferTower` 一律用**解析后**的配置，与几何同一份。
+ */
+function towerSaveConfigFor(rawConfig: unknown, tower: MachineBufferTowerConfig): MachineConfig {
+  const raw = typeof rawConfig === 'object' && rawConfig !== null && !Array.isArray(rawConfig)
+    ? rawConfig as Record<string, unknown>
+    : {};
+  if (['stations', 'actuators', 'sensors'].some((key) => key in raw)) {
+    return { ...(raw as unknown as MachineConfig), bufferTower: tower };
+  }
+  const shell = buildBufferTowerDesign(tower).config as unknown as MachineConfig;
+  return {
+    ...shell,
+    ...(typeof raw.id === 'string' && raw.id.trim() ? { id: raw.id.trim() } : {}),
+    ...(typeof raw.name === 'string' && raw.name.trim() ? { name: raw.name.trim() } : {}),
+    bufferTower: tower
+  };
+}
+
+/**
  * 缓存塔：参数 → 零件表（`build_machine_model` 的塔分支）。
  *
  * 与 `apply_machine_design` 走**同一份**建造器（`bufferTowerParamsFromConfig` +
@@ -2859,6 +2901,17 @@ async function buildMachineModel(input: unknown): Promise<Record<string, unknown
       message: '缓存塔不支持 brief 解析：塔参数只能来自 design.config.bufferTower 或扁平参数（levels/layerPitchMm/panel*/inbound*/beltHeightMm/sectionMm）'
     };
   }
+  /**
+   * 塔的落盘来源（只给 config 的入口）：
+   * `resolveBufferTowerModelInput` 对裸 config 合成的 `design` 是 `{ config }` 壳 ——
+   * 它没有 id/stations/actuators/sensors，当 `design` 送进 `validateMachineDesign`
+   * 必报「缺少必填参数：机型配置.stations」，整台机器存不下来（`project.saved=false`）。
+   * 所以这条入口改走 `projects.save` 的 config 字段；design 入口与 params 合成方案不动。
+   */
+  const towerSaveConfig = towerModel !== null && towerModel.ok
+    && towerModel.source === 'design' && request.design === undefined
+    ? towerSaveConfigFor(request.config, towerModel.config)
+    : null;
   const normalized: NormalizedModelParams = towerModel
     ? { ok: true, params: towerModel.params, ignored: [] }
     : normalizeModelParams(builder, mergedParams);
@@ -2986,8 +3039,10 @@ async function buildMachineModel(input: unknown): Promise<Record<string, unknown
       })
       .filter((item) => item.path.length > 0),
     // 塔的 panel/inbound/frame 是嵌套对象，params 装不下（projects.ts 只留数字）：
-    // 走 design 才不会被静默丢掉，重开工程还能拿回完整 `config.bufferTower`
-    ...(towerModel ? { design: towerModel.design } : {})
+    // 完整 design 走 design、裸 config 走 config，两条都能让重开工程拿回完整
+    // `config.bufferTower`；裸 config 合成的 `{ config }` 壳当 design 会被
+    // validateMachineDesign 整份拒（缺 stations → project.saved=false）
+    ...(towerSaveConfig ? { config: towerSaveConfig } : (towerModel ? { design: towerModel.design } : {}))
   });
 
   // 视口里已换成这台整机且已入库：它就是当前工程，电气图跟着换（否则电气域还停在上一个工程/方案）

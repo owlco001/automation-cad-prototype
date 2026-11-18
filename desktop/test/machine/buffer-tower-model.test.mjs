@@ -395,7 +395,9 @@ test('接线：buildMachineModel 用统一分派 + 塔分支走同一几何收�
   assert.match(source, /bufferTowerParamsFromConfig\(\{ bufferTower: towerModel\.config \}\)/, '几何必须与 apply_machine_design 同一份');
   assert.match(source, /buildBufferTowerParts\(params\)/, '塔必须走塔身建造器，不是 buildConveyorParts');
   assert.match(source, /parametric\.build\(doc, \{ perPart: true \}\)/, '逐件 STL 依赖 perPart');
-  assert.match(source, /\.\.\.\(towerModel \? \{ design: towerModel\.design \} : \{\}\)/, '嵌套参数必须走 design 落盘');
+  // 落盘来源二选一：完整 design（或 params 合成方案）走 design，裸 config 走 config ——
+  // 裸 config 合成的 `{ config }` 壳缺 stations，当 design 送进 validateMachineDesign 会被整份拒。
+  assert.match(source, /\(towerModel \? \{ design: towerModel\.design \} : \{\}\)/, '嵌套参数必须走 design/config 落盘');
 });
 
 test('接线：几何入口与整机建模用同一个判别函数（不许两边各写一份 kind 判定）', () => {

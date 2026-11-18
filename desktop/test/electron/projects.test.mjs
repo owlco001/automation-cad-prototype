@@ -326,3 +326,69 @@ test('saveProject：路径超过 8 级只保留前 8 级', () => {
   assert.equal(result.record.partsList[0].path.length, 8);
   assert.equal(result.record.partsList[0].path[7], 'L8');
 });
+
+/* ---------------- 缓存塔：只给 config 的落库路径（config.bufferTower 三层对象不许丢） ---------------- */
+
+/** 塔配置：panel/inbound/frame 三层对象正是 `params` 装不下、只能靠 design/config 落盘的部分。 */
+const TOWER_BLOCK = {
+  kind: 'tower',
+  towers: 1,
+  slotsPerTower: 2,
+  levels: 2,
+  slotsPerLevel: 1,
+  layerPitchMm: 180,
+  panel: { lengthMm: 2278, widthMm: 1134, thicknessMm: 35, massKg: 32 },
+  inbound: { lengthMm: 2400, widthMm: 1200, beltHeightMm: 900 },
+  frame: { material: 'AL6063', sectionMm: 40 }
+};
+/** 渲染层补齐机型级字段后的 config（`towerSaveConfigFor` 的产物形状）。 */
+const TOWER_CONFIG = {
+  id: 'buffer-tower-2l',
+  name: '缓存塔 2 层',
+  stations: ['进出料'],
+  actuators: [],
+  sensors: [],
+  bufferTower: TOWER_BLOCK
+};
+
+test('只给 config 的塔工程：保存后用 openProject 拿回完整 config.bufferTower（panel/inbound/frame 都在）', () => {
+  const root = mkdtempSync(join(tmpdir(), 'cad-projects-tower-'));
+  roots.push(root);
+  const saved = saveProject(root, { name: '塔 config 工程', process: 'buffer-tower', parts: 48, config: TOWER_CONFIG });
+  assert.equal(saved.ok, true, saved.message);
+
+  const designFile = JSON.parse(readFileSync(join(projectsRoot(root), saved.record.id, 'design.json'), 'utf8'));
+  assert.deepEqual(Object.keys(designFile).sort(), ['design', 'placements']);
+  assert.deepEqual(designFile.design.config.bufferTower.panel, TOWER_BLOCK.panel, 'panel 不许被丢掉/改成数字列');
+  assert.deepEqual(designFile.design.config.bufferTower.inbound, TOWER_BLOCK.inbound, 'inbound 不许丢');
+  assert.deepEqual(designFile.design.config.bufferTower.frame, TOWER_BLOCK.frame, 'frame 不许丢');
+
+  const opened = openProject(root, saved.record.id);
+  assert.equal(opened.ok, true, opened.message);
+  const tower = opened.record.design.config.bufferTower;
+  assert.equal(tower.levels, TOWER_BLOCK.levels);
+  assert.equal(tower.layerPitchMm, TOWER_BLOCK.layerPitchMm);
+  assert.deepEqual(tower.panel, TOWER_BLOCK.panel);
+  assert.deepEqual(tower.inbound, TOWER_BLOCK.inbound);
+  assert.deepEqual(tower.frame, TOWER_BLOCK.frame);
+  assert.equal(opened.record.process, 'buffer-tower');
+});
+
+/**
+ * 边界（为什么渲染层必须先补齐机型级字段）：裸 `{ bufferTower }` 两条路都被拒。
+ * - 当 design：`validateMachineDesign` 报「缺少必填参数：机型配置.stations」——
+ *   这就是 `build_machine_model({config})` 曾出现的 `project.saved=false`；
+ * - 直接当 config：`validateMachineConfig` 同一口径，也要 stations/actuators/sensors。
+ */
+test('裸 {bufferTower} 当 design 或当 config 都会被拒（参数没进库的原始缺陷形态）', () => {
+  const root = mkdtempSync(join(tmpdir(), 'cad-projects-bare-tower-'));
+  roots.push(root);
+  const bare = { bufferTower: TOWER_BLOCK };
+  const asDesign = saveProject(root, { name: '裸塔当 design', process: 'buffer-tower', parts: 48, design: { config: bare } });
+  assert.equal(asDesign.ok, false);
+  assert.match(asDesign.message ?? '', /缺少必填参数：机型配置\.stations/);
+  const asConfig = saveProject(root, { name: '裸塔当 config', process: 'buffer-tower', parts: 48, config: bare });
+  assert.equal(asConfig.ok, false);
+  assert.match(asConfig.message ?? '', /缺少必填参数：机型配置\.stations/);
+  assert.deepEqual(listProjects(root), [], '被拒的保存不许留下半个工程');
+});

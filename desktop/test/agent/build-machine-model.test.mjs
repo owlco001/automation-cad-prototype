@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { AgentTools } from '../../src/agent/tools.ts';
 import { createAgentCommandBus } from '../../src/agent/commands.ts';
@@ -288,4 +289,47 @@ test('build_machine_model：bufferTower 显式 null 不属于「kind 错了」�
   assert.match(result.error?.message ?? '', /没有塔块/);
   assert.doesNotMatch(result.error?.message ?? '', /kind !== 'tower'/);
   assert.equal(calls.length, 0, '非塔 design 不许静默建默认 2000×300 的 29 件线');
+});
+
+/* ---------------- 裸 config 入口：落盘走 config 字段，不许顶替 design ---------------- */
+
+/** `build_machine_model({ config })` 的真实形状：塔的调用方手上常常只有塔块。 */
+const BARE_TOWER_CONFIG = { bufferTower: TOWER_DESIGN.config.bufferTower };
+
+test('build_machine_model：裸 {bufferTower} 经 bus 到 bridge 仍是 config（panel/inbound/frame 原样），不合成 design', async () => {
+  const { bus, calls } = setup();
+  const result = await bus.execute('build_machine_model', { config: BARE_TOWER_CONFIG });
+  assert.equal(result.ok, true, result.error?.message);
+  assert.equal(calls.length, 1);
+  const payload = calls[0].args[0];
+  assert.equal(payload.process, 'buffer-tower', '裸 config 必须判成塔，不能默认 conveyor');
+  assert.equal(payload.design, undefined, 'config 入口不许在命令层合成 design 外壳（那份壳缺 stations）');
+  assert.deepEqual(payload.config, BARE_TOWER_CONFIG, 'config 必须原样到渲染层（工具层不许改写）');
+  assert.deepEqual(payload.config.bufferTower.panel, TOWER_DESIGN.config.bufferTower.panel);
+  assert.deepEqual(payload.config.bufferTower.inbound, TOWER_DESIGN.config.bufferTower.inbound);
+  assert.deepEqual(payload.config.bufferTower.frame, TOWER_DESIGN.config.bufferTower.frame);
+});
+
+/**
+ * 落盘接线：裸 config 必须走 `projects.save` 的 config 字段。
+ *
+ * 反例（真实 Electron 实测）：把 `{ config }` 壳当 design 送进 `validateMachineDesign`
+ * →「缺少必填参数：机型配置.stations」→ `project.saved=false`：几何建出来了、参数没进库。
+ */
+test('接线：裸 config 落盘走 projects.save 的 config 字段，完整 design/params 仍走 design', () => {
+  const source = readFileSync(new URL('../../src/extension.ts', import.meta.url), 'utf8');
+  assert.ok(
+    source.includes('towerSaveConfig ? { config: towerSaveConfig } : (towerModel ? { design: towerModel.design }'),
+    '裸 config 入口必须落 config 字段（design 只留给完整方案/params 合成方案）'
+  );
+  assert.ok(
+    source.includes("towerModel.source === 'design' && request.design === undefined"),
+    '只有裸 config 才改走 config（params 路径保持 design）'
+  );
+  assert.ok(source.includes('function towerSaveConfigFor('), '裸 config 的机型级字段必须由一个入口补齐，不散在调用点');
+  assert.ok(
+    source.includes('buildBufferTowerDesign(tower).config as unknown as MachineConfig'),
+    '只给塔块时用与 params 入口同源的合成器补最小可落盘集（id/name/stations/actuators/sensors）'
+  );
+  assert.ok(source.includes('config?: MachineConfig;'), 'saveProjectToLibrary 必须显式接 MachineConfig');
 });
