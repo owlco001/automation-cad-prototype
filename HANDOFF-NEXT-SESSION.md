@@ -1,77 +1,104 @@
 # AutomationCAD 下一会话交接
 
-更新时间：2026-11-18（本轮：缓存控制层复审 N1–N6 整改 + 全链路验收）
+更新时间：2026-11-18（本轮：塔 B-Rep 入口接通 + 整机 STEP 完整性门禁 + 统一分派判据）
 项目：`owlco001/automation-cad-prototype`
 工作目录：`/tmp/automation-cad-prototype`
+当前 HEAD：`411f21d`（已推送，该提交对应 CI run `44276548527` 7/7 全绿）；**工作区有本轮未提交改动：16 M + 3 ??**（清单见「本轮未提交的文件」）。
+
+> **口径**：下文凡标「本轮」的数字，都是 **HEAD `411f21d` + 上述未提交工作区** 在本机（**node v26.7.0** / npm 11.19.0）跑出的最终实测——**未提交、未推送、未上 CI**。标「历史」的数字来自已提交的上一轮，只能当历史，不能当现状。
 
 ## 开始前必做
 
 ```bash
 cd /tmp/automation-cad-prototype
-git status --short
-git log -5 --oneline
+git status --short      # 现在是 16 M + 3 ??（本轮改动，未提交、未推送）
+git log -5 --oneline    # 顶端仍是 411f21d
 ```
 
-当前改动仍未提交（本地 15 个 M + 18 个 ??）。不要覆盖、回滚或删除已有本地修改；提交或推送前先审查完整 diff 和测试结果。
+`git status` 非空是**预期状态**，不是别人插队：先看清单再动手，不要回滚、不要 `git checkout --`。
 
 ## 当前远端状态
 
-最后已推送提交：
+最后已推送提交（远端 `main` 就是这里）：
 
-- `a2fc5c8`：性能与体积优化
-- `a85dc92`：工程恢复、工作区 UI、管线/联动修复
+- `411f21d`：锁存故障期来料拒绝（`ITEM_REJECTED_FAULT`）+ 静态守卫扫三种同步子进程 API
+- `65229c5`：缓存塔塔身几何 builder（fail-loud 配置、真派生储位、塔升降轴）
+- `e6c1ef3`：per-station PLC 转换（并行工位联动时间线通过审计）
+- `b3b13f3`：CI 沙箱守卫
 
-## 本轮（2026-11-18）真实结果
+远端 CI（run `44276548527`）= **7/7 job 全 success**，但验的是 `411f21d`，**不包含本轮任何改动**。`featuretree-geometry` 里新增的 16 层 + 8 层 STEP 完整性步骤一次都没在 CI 上执行过。
 
-全部串行执行，原始日志在 `/root/.hermes/cache/scratch/cad-delivery-*.log`：
+## 本轮门禁：最终本地实测（当前未提交工作区）
 
-| 步骤 | 命令 | exit | 结果 |
-|---|---|---:|---|
-| focused | `npm run test:focused` | 0 | tests 181 / pass 181 / fail 0 / skipped 0，4.4 s |
-| 类型检查 | `npx tsc --noEmit` | 0 | 0 条诊断（日志 0 字节） |
-| 生产构建 + 体积门禁 | `npm run build:ext` | 0 | tsc + vite + build-electron + build-mcp + check-bundle-size 全过（extension 2 912 087 B / gzip 909 446 B / wasm 7 604 031 B） |
-| 全量测试 | `timeout -k 15 600 npm test` | 0 | tests 3417 / pass 3414 / fail 0 / skipped 3，197 s（未触发 600 s 超时） |
-| 新构建重生成 PV 工程 | `npm run regen:pv-buffer` | 0 | `PV_REGEN_RESULT ok=true checks=58 failed=0`，真实 Electron + 真 B-Rep |
-| 工程会话冒烟 | `PROJECT_SESSION_SMOKE_CAD=…/cube-mm.step node scripts/project-session-smoke.mjs` | 0 | `PROJECT_SESSION_SMOKE_CAD_PASS parts=1` + `PROJECT_SESSION_SMOKE_PASS` |
+**全部已跑，node v26.7.0，原始日志在 `/root/.hermes/cache/scratch/cad-brep-lastmile-{focused,tsc,build,npm-test-close}.log`, `cad-brep-final-current-kernel.log` 与 `cad-brep-final-09-project-session-smoke.log`**：
 
-说明：全量套件此前曾因 CLI 子测试长耗时被人工停止，本轮在 600 s 上限内跑完；仍建议保持 `timeout -k 15 600` 这种有界跑法，不要把无界等待当成通过。
+| 目标 | 命令 | 结果（本轮未提交工作区） |
+|---|---|---|
+| 定向：入口链 | `node --test test/agent/build-machine-model.test.mjs` | **14 / 14 pass**（含 `process` 非字符串/空白的命令层+工具层拒绝） |
+| 定向：塔模型 | `node --test test/machine/buffer-tower-model.test.mjs` | **19 / 19 pass** |
+| 定向：STEP 门禁 | `node --test test/parametric/verify-step-tower.test.mjs` | **27 / 27 pass**（含 6 条 CLI 级用例：`--levels`/缺失文件/桩 STEP/`--merge-manifest` 正反/三种 manifest 形状/证据不合格） |
+| 定向：工程保存 | `node --test test/electron/projects*.test.mjs` | **29 / 29 pass** |
+| focused | `npm run test:focused` | tests **281** / pass **281** / fail 0 / skipped 0，6.16 s |
+| 类型检查 | `npx tsc --noEmit` | exit 0，**0 诊断** |
+| 构建 + 体积门禁 | `npm run build:ext` | exit 0，extension **2,938,104 B**，gzip **918,889 B**，wasm **7,604,031 B** |
+| 全量 | `timeout -k 15 900 npm test` | **3518 tests / 3515 pass / 0 fail / 3 skipped**，204.3 s |
+| 真内核：16 层塔 | `npm run verify:step-tower -- --levels 16` | **146 件 / STEP 2,301,982 B / 104 solids / 812 faces / mode=fuse / 门禁 9/9 PASS** |
+| 真内核：8 层基线 | `npm run verify:step-tower -- --levels 8` | **90 件 / STEP 1,622,322 B / 55 solids / 538 faces / 门禁 9/9 PASS** |
+| 旧整机 STEP 门禁 | `npm run verify:step`（85 件机型） | **7 / 7 PASS**（85 件逐件覆盖、并集 6000×1495×930） |
+| 重生成 | `npm run regen:pv-buffer` | `PV_REGEN_RESULT ok=true checks=58 failed=0`，仍 **8 层 90 件**，scene 90/90 |
+| 会话冒烟 | `project-session-smoke.mjs` | `PROJECT_SESSION_SMOKE_CAD_PASS parts=1` + `PROJECT_SESSION_SMOKE_PASS`，exit 0 |
 
-## 缓存控制层 API 边界（本轮收紧，勿读宽）
+**仍未跑 / 不能当通过**：
 
-`desktop/src/machine/buffer-control.ts` 有两个入口，能力不同，不能互相替代：
+- **CI 本轮未跑**：上述 16 层 + 8 层门禁只在本地真内核跑通，CI 上一次都没执行过本轮工作区。
+- 结构强度/挠度/防坠、安全回路、电气、PLC 联调——**均未校核或验收**（见「尚未完成」）。
+- 所有机械 `sweep` 干涉仍 **fail**（见下），不得改判。
 
-- `evaluateBufferControl(input)`：**单帧电平映射**，纯只读、无记忆、**不仲裁**（两侧许可可同时为真）。只用于兼容旧契约。
-- `stepBufferControl(memory, input)`：一次调用 = 一个扫描周期，带记忆的事件序列状态机。以下是本轮定稿的边界：
+## 缓存塔：静态几何存在，B-Rep 核验跑通，机构/结构未验
 
-1. **完成计数严格 +1**（`consumeSeq`）。`seq === seen + 1` 才接受并销账；`seq <= seen` 记 `TRANSFER_DONE_IGNORED`；`seq > seen + 1` 记 `TRANSFER_SEQ_GAP` 并**拒绝**——不销账、不推进计数。旧行为是“接受跳号 + 记事件”，那会让一件没有真实完成的料被静默少算一件，已废止。
-2. **重基只允许下抬**（`transferSeqRebase <= transferSeqSeen`）。上抬一律 `TRANSFER_SEQ_REBASE_BLOCKED`。前置条件：无锁存故障、无在途转移、`transferDone` 为低，且**现场已确认** PLC 计数已归零、上一轮完成脉冲已排空。这条前提是人工/上位机责任，本层无法自证。
-3. **复位/对账/重基当拍不启动转移**（`state.arbitrationHeld=true`）。同一报文里给“对账 + 复位 + 下游就绪”不会在同一扫描周期就重新发起出料；至少空一个监督拍。进料仍按正常规则判定（不吞来料），冻结拍内不产生争用事件。
-4. **对账只有显式 `reconcile:'confirmed'|'aborted'`** 能清未知件。`confirmed` 只出队被打断的那一件；`aborted` 留队。有未对账件时复位被 `RECONCILE_REQUIRED` 拒绝。
-5. **对账消费序号与正常完成同口径**（走同一个 `consumeSeq`），跳号在对账路径上同样被拒绝并记 `TRANSFER_SEQ_GAP`。
-6. **完成信号语义必须显式声明**：缺省 `edge`（上升沿），`transferDoneMode:'level'` 为电平常高握手，每个在途转移只接受一次。`level` 是对现场握手的断言，不是默认放宽。
+- **静态零件表（已提交，`65229c5`）**：`config.bufferTower` → 塔身建造器 → **16 层 146 件 / 设计包络 2430×1790×3840 / 柱高 3840 / 柱截面 80（按柱高反算）/ 16 层 × 1 位 / 可用储位 15 / 升降行程 2700**，`slots{fromGeometry:16, claimed:16, aligned:true}`，`source:'buffer-tower-assembly'`。这是**静态件表 + AABB**，不是可制造结构。
+- **整机建模入口（本轮接通，未提交）**：`build_machine_model` 现在认塔，三条入参路径都通：
+  - `process:'buffer-tower'` + 扁平塔参数（严格校验，越界**拒绝**不夹紧）；
+  - `design`（`design_machine` 的产物，`design.config.bufferTower` 是权威来源）；
+  - `config`（`design.config` 的简写）。
+  命令层白名单已加 `design`/`config` 并原样透传（以前 `未知参数：design` 直接拒，design 权威链对智能体不可达）。塔分支出 **146 件**，并且走 `resolveMachineGeometry` 收尾（地面线守卫 + 随动件标注 + 两条链件数一致性断言）。
+- **入口边界本轮收紧（`resolveModelDispatch` 一份判据，命令层/渲染层共用）**：
+  - `design`/`config`/`design.config`/`params` 只要给了就必须是**非数组对象**（`design:[1,2]` 以前在脚本 API 侧 `ok:true` → 29 件输送线）；
+  - `process` 必须落在 `MODEL_BUILDERS` 里（conveyor / buffer-tower）：`process:'screw'` 现在在命令层就 `INVALID_ARGUMENT`、bridge **0 次**（以前打到渲染层才报 `NO_PARAMETRIC_BUILDER`）；
+  - `process` 的**形状也先判**：给了就必须是非空字符串——`process:123` / `{}` / `[]` / `true` / `'   '` / `null` 以前被静默当「没写 process」→ 按 conveyor 建 29 件且 `ok:true`；现在命令层、工具层、脚本 API（同一份 `resolveModelDispatch`）都拒成 `INVALID_ARGUMENT`，bridge **0 次**；
+  - `design` 与 `config` 只能二选一（脚本 API 也拒）；
+  - **塔 + `params` 双源直接拒**：塔几何只认 `design.config.bufferTower`/`config.bufferTower`，params 里的键会被静默丢掉；
+  - **非塔 design/config 直接拒**（`config.conveyor{lengthMm:6000}` 以前 `ok:true` 却建默认 2000×300、无任何提示）——输送线尺寸只从 `params` 读，工具描述已写明。
+- **分派判据只有一份**：`isBufferTowerConfig`（判别字段 `config.bufferTower.kind === 'tower'`）+ `resolveModelDispatch`，命令层/渲染层/几何层共用。**显式 `process:'conveyor'` + 塔 design = 冲突，显式拒绝**；只给 design 不给 process = 按塔建。不再存在「同一份 design 出 146 件 / 29 件且 `ok:true`」。
+- **B-Rep / STEP（本轮真内核实测）**：整机建模出逐件 STL（146 件）+ 合并 `model.step`（生产 `ParametricManager`，一次性 `fuse`）。有效性判据是 `desktop/scripts/verify-step-tower.mjs`（`npm run verify:step-tower`）。
+  - 16 层：**146 件 → STEP 2,301,982 B / 104 MANIFOLD_SOLID_BREP / 812 ADVANCED_FACE / merge mode=fuse / 9/9 PASS**。
+  - 8 层基线：**90 件 → STEP 1,622,322 B / 55 solids / 538 faces / 9/9 PASS**。
+  - **顶点容差必须说清（上一版把语义写反了，这里更正）**：16 层 STEP 顶点包络 **2430×1770×3840**，逐件 STL 包络 Y 上界比 STEP 高 **19.99 mm**。这 19.99 mm 来自 **Ø40 竖直（轴 Z）升降导柱的径向母线**：B-Rep 把圆柱写成「一条圆边 + 接缝顶点」，顶点只落在接缝（y=780）上，真实外形到母线（y=800），差 20 mm 就是半径。判据因此只在**垂直于导柱轴**的方向（x、y）给半径 20 mm，**沿导柱轴（Z）的端面仍严格 ±1 mm**（`minAllowance=[1,1,1]`、`maxAllowance=[1,20,1]`，按端点极值件逐端取）。一句话：**端面/平面端严格 ±1，只有回转体的径向给半径** —— 不是「水平圆柱端点 20 mm 容差」。所以这是「在声明容差内通过」，**不是逐点完全一致**；16 层与 8 层的 Y 上界差都是 19.99 mm。
+  - **门禁的判别力边界（说清楚，别夸大）**：证据是（1）顶点并集、（2）实体数与件数挂钩、（3）逐件 bbox 与内核自报一致、（4）合并路径必须是 `fuse`。四条都是**包络/数量级**证据，**不是逐件身份**：内部件丢失只要不动任何轴极值、且丢掉后的实体数仍在**下限**之上，就看不见 —— 16 层 floor=`ceil(146×0.6)`=88、实测 104（可丢 16 个实体）；8 层 floor=54、实测 **55**（**只丢 1 个实体仍然绿**）。要堵这个盲区得做逐实体 bbox / 件名-件族覆盖匹配，本轮没做。**门禁通过 ≠ 逐件身份核对、≠ 制造验收。**
+  - **合并路径是硬门禁（不是提示）**：build 模式必须由内核上报 `stats.merge`，**缺失即判红**（与逐件 `solids` 缺失同口径，上一版 `if (mergeMode)` 会让整条检查消失、9 项变 8 项照样全绿）；`mode=compound` 或 `fallback:true` 一律失败。`--file` 模式只读 STEP，**裸 STEP 里 fuse 与 compound 回退都是 `MANIFOLD_SOLID_BREP`，判不了**，所以默认判红并明说「合并路径未验证」；要 PASS 必须显式给 `--merge-manifest <构建期 stats.merge JSON>`（含 `mode` + `fallback` 布尔值），接受的形状就是代码实现并测过的三种：`{merge:{mode,fallback}}`、扁平的 `{mode,fallback}`、以及整份 stats `{stats:{merge:{mode,fallback}}}`（多带的键忽略）。**`--file` 不是验收模式。**
+- **质量/BOM 口径分两条**（别混）：整机建模走 `conveyorBom(parts, volumes)`，给的是**按内核体积折算**的质量（不是称重）；`design_machine`/`apply_machine_design` 那边仍是 `massKg:null`、`massSource:'not-measured'`、`bomCoverage` 标注塔身 117 件不入机器 BOM、`costScope:'base-conveyor-only'`。
+- 升降轴 `tower-lift`：行程 = (levels−1)×layerPitch = 2700，`strokeSource:'geometry'`。
+- **动态干涉（未变，全部机械 sweep 仍 fail）**：`rest` / `lift` = **pass**（38 对、0 命中）；**`sweep` = fail**（pairs 42 / hits 405 / confirmed 270 / screen 135、`items 10`）——台面落在托板投影内、层托板是整块板，**没有升降通道**，真实机构缺口，不得改判。`push` 不适用。
+- **结构**：`structure.staticOnly:true`、`structure.accepted:false`；柱截面按柱高反算 80 mm，折算板料后仍超许用约一成以上 → **未校核**。静态几何「存在」不等于「可承载」。
 
-已知能力缺口（不是本轮 bug，是设计边界）：
+## 8 层 = 8 储位；regen 仍走 8 层（本轮已重跑）
 
-- 计数器必须**从 0 起、按 +1 递增**。若现场 PLC 计数器不从 0 开始或已跑偏，本层无法直接“同步到现值”（重基不许上抬），只能把 PLC 计数零化后再 `transferSeqRebase:0`；**“带独立确认的同步/对齐操作”本轮未实现**。
-- 锁存故障期间给 `incomingItemId` 不产生任何事件（上游来料在故障期被丢弃时调用方拿不到拒绝理由）。
-- 本层是纯数据状态机：不写 IO、不连设备、不代表已实现 PLC 程序或安全回路。
-
-## 8 层 = 8 储位，不等于 16 位
-
-- `layers: 8` 的几何只对应 **8 个储位**（第 1 层是底层输送线）。
-- `16` 位只存在于 `bufferTower` 纯数据槽位模型（容量分析的结论），**没有**对应的 8 层几何实现。
-- regen 报告固定输出 `slotsFromGeometry=8 claimedSlots=16 aligned=false`，任何“16 层/16 位几何”的说法都是误读。
+- `layers: 8`（`config.conveyor`）只对应 **8 个储位**（第 1 层是底层输送线），regen 固定输出 `slotsFromGeometry=8 claimedSlots=16 aligned=false`。
+- `npm run regen:pv-buffer` 本轮实跑：**`checks=58 failed=0`，仍 8 层 90 件**（包络 2430×1690×2400，scene 90/90），塔**不在**该路径上。
+- `PV_REGEN_NOTE` 的文案在脚本 `desktop/scripts/pv-buffer-regenerate.mjs` 里，是「16 层塔身几何已由 bufferTower 建造器生成（146 件静态件表），但不在本脚本路径上，故本报告无塔 B-Rep/STEP；本脚本不把 8 层冒充 16 位」——**这段文案与 BASELINE 注释是本轮改的**（旧文是「16 位只存在于 bufferTower 纯数据槽位模型」，且 BASELINE 还写着旧的 781,970 B / 47 实体），本轮的 `regen:pv-buffer`（`checks=58 failed=0`）就是改完之后用新脚本跑的，输出里那行 `PV_REGEN_NOTE` 已带新文案。
+- regen 产出的 STEP 本轮实测：**1,622,322 B / 55 实体 / 538 advanced faces**（与 8 层基线一致）；旧的 **781,970 B / 47 实体 / 264 faces 是丢件产物（历史）**，不得再引用。
 
 ## sceneIntegrity 现状与剩余风险
 
-现状：`desktop/src/cad/scene-integrity.ts` 是**计数等式门禁**——两个计数必须是非负整数，模型件数 == 场景件数（可选再等于期望件数），否则 `complete=false` / `assertSceneIntegrity` 抛错。UI 页脚显示 `场景完整性：90/90 件`，隐藏件数单独提示。
+现状：`desktop/src/cad/scene-integrity.ts` 是**计数等式门禁**——两个计数必须是非负整数，模型件数 == 场景件数（可选再等于期望件数），否则 `complete=false` / `assertSceneIntegrity` 抛错。UI 页脚显示 `场景完整性：90/90 件`。
 
 剩余风险（必须一起说）：
 
 - 只证明**件数一致**，不证明几何正确：错形状、错位置、错层级、错朝向都能 90/90 通过。
 - 不证明 180 mm 层距下的 lift/sweep/push 动态干涉、结构强度、挠度、防坠。
-- 计数来自 viewer 诊断聚合，历史上有过“实例重复计数”缺陷（已修）；任何新增实例化路径都要重新验证计数口径。
-- 隐藏/批量实例的计数口径依赖 `viewer.ts` 的聚合实现，改渲染层时要同步跑 `test/cad/scene-integrity.test.mjs` 与 regen 的 90/90 断言。
+- 计数来自 viewer 诊断聚合，历史上有过「实例重复计数」缺陷（已修）；任何新增实例化路径都要重新验证计数口径。
+- 塔路径目前**没有**接 sceneIntegrity 的 146/146 断言（regen 只覆盖 8 层 90 件）。
+- `complete=true` 不是「可以交付制造」的结论。
 
 ## 真实光伏缓存机设计结果（历史，未变）
 
@@ -81,65 +108,55 @@ git log -5 --oneline
 - 上游 12 s/件（5 件/分钟），下游 15 s/件（4 件/分钟），下游停机 120 s
 - 初始库存 2、在途 1、预留 2 → 停机新增 `ceil(120/12)=10`，占用 13，需求 15 → 16 位可覆盖该窗口；正常净积料 1 件/分钟
 - 有限缓存不能解决长期产能差：必须背压、上游减速或下游提速
-- 当前严格 180 mm 八层产物：90 件 / 47 实体 / 包络 2430×1690×2400 mm / `model.step` 约 782 KB / `model.stl` 约 1.02 MB / 质量约 827 kg
 - 旧 `/tmp/automationcad-pv-buffer-iter` 里的历史产物是 250 mm 层的旧结果，不能改参数后声称几何已更新
+- 该 8 层产物当时的 STEP 是 **781,970 B / 47 实体（历史丢件产物）**；修复后的当前值是 1,622,322 B / 55 实体
 
-## 当前工作区重点文件
+## 本轮未提交的文件（16 M + 3 ??）
 
-既有修改（M）：
-
-- `desktop/electron/write-confirm.ts`、`desktop/package.json`、`desktop/scripts/machine-e2e.mjs`
-- `desktop/src/agent/confirm-card.ts`、`desktop/src/agent/tools.ts`
-- `desktop/src/cad/viewer.ts`、`desktop/src/canvas/canvas.css`、`desktop/src/desktop-api.d.ts`
-- `desktop/src/extension.ts`、`desktop/src/machine/conveyor-assembly.ts`、`desktop/src/machine/model-builders.ts`
-- `desktop/src/ui/workspace.css`
-- `desktop/test/agent/design-machine.test.mjs`、`desktop/test/machine/cli.test.mjs`、`desktop/test/machine/conveyor-assembly.test.mjs`
-
-新增（??）：
-
-- `desktop/src/machine/buffer-control.ts`、`buffer-io.ts`、`buffer-io-map.ts`、`buffer-tower.ts`、`buffer-capacity.ts`
-- `desktop/src/cad/scene-integrity.ts`
-- `desktop/scripts/pv-buffer-regenerate.mjs`
-- 对应测试（`test/machine/buffer-*.test.mjs`、`test/cad/scene-integrity.test.mjs`、`test/machine/pv-buffer-regenerate.test.mjs`）
-- 文档：`docs/desktop/PV-BUFFER-LIVE-DESIGN.md`、`PV-BUFFER-SOFTWARE-IMPROVEMENTS.md`、`PV-BUFFER-ITERATION-HANDOFF.md`、本文件
+- 新增：`desktop/scripts/verify-step-tower.mjs`（整机 STEP 完整性门禁）、`desktop/test/machine/buffer-tower-model.test.mjs`、`desktop/test/parametric/verify-step-tower.test.mjs`
+- 修改（源码）：`desktop/src/machine/model-builders.ts`（塔注册表/严格校验/`resolveModelDispatch` 统一分派，本轮再收紧：形状/机型/双源/非塔 design 拒绝，**外加 `process` 形状：非字符串/空白/null 一律 `INVALID_ARGUMENT`，不再默认 conveyor**）、`buffer-tower-assembly.ts`（导出 `isBufferTowerConfig`）、`machine-geometry.ts`（几何入口改用同一判定；升降轴多件化）、`spec.ts`（`ModelProcess`）、`desktop/src/extension.ts`（塔分派 + 几何收尾 + design 落盘）、`desktop/electron/projects.ts`（config-only 也落盘）、`desktop/src/agent/commands.ts`（`design`/`config` 白名单与冲突拒绝；`params` 也进分派）、`desktop/src/agent/tools.ts`（schema/描述/透传）
+- 修改（门禁与内核）：`spike/build123d/app.py`（一次性 fuse + 自校验 + 回退；逐件实体数）、`desktop/package.json`（`verify:step-tower`；`test:focused` 加三个新文件）、`.github/workflows/ci.yml`（featuretree-geometry job 加 16/8 层门禁；job timeout 30→60→**75**，步骤预算 72 min）
+- 修改（文档/注释）：`HANDOFF-NEXT-SESSION.md`、`docs/desktop/PV-BUFFER-ITERATION-HANDOFF.md`、`docs/desktop/PV-BUFFER-SOFTWARE-IMPROVEMENTS.md`、`desktop/scripts/pv-buffer-regenerate.mjs`（`PV_REGEN_NOTE` + 实测注释）
+- 测试改动：`desktop/test/agent/build-machine-model.test.mjs`（design/config 入口 + 冲突拒绝 + **`process` 非字符串/空白在命令层与工具层都拒**）、`desktop/test/machine/buffer-tower-model.test.mjs`（分派层补 `process` 形状拒绝）、`desktop/test/parametric/verify-step-tower.test.mjs`（**`--merge-manifest` 三种形状**：`{merge}` / 扁平 `{mode,fallback}` / 整份 `{stats:{merge}}`）
 
 ## 尚未完成的关键工作
 
-### 设计/控制
+### 设计/几何
 
-- 双塔真实结构和镜像几何；托盘几何、空托盘回流、真实升降台、伸缩叉、丝杠、导轨、抱闸、防坠
-- 缓存塔专用 `MachineConfig` 与真实几何生成入口
-- 纯数据 FIFO 尚未接入真实设备状态，无伺服/传感器闭环
-- PLC 程序与真实硬件联调；计数器同步/对齐操作（见上）
-
-### 电气/安全
-
-- 完整 IO（16 位到位检测、升降/叉原点与限位）；IO 草案地址仍为 `null`，`executable=false`
-- 双通道急停、安全门、光幕、安全继电器/安全控制器——普通 DI 不能替代
-- 现有 90 件 BOM 不等于完整电气 BOM
+- **升降通道（`sweep` 转绿的唯一路径）**：层托板整块板 + 台面在托板投影内，必须设计**可承载的升降通道**（托板开口/梳齿/伸缩叉避让），再用 `sweep` 复验 405→0；在此之前 sweep fail 是事实。
+- **STEP 内部件漏件盲区**：现在门禁只看整机顶点并集与实体/件数比，**内部件丢失且不动轴极值时仍可能漏**。要做**逐实体 bbox 覆盖匹配**（每个零件在 STEP 里找到对应实体/位置），并按**实际组件对应关系**（件名/件族 → 实体）做门禁，而不是只数总数。
+- 塔身 BOM/成本接生成器（117 件只在 `bomCoverage` + `design.warnings` 里标注）
+- 双塔真实结构与镜像几何、托盘几何、空托盘回流、伸缩叉、丝杠、导轨、抱闸、防坠
+- 塔的 146 件没有 sceneIntegrity 断言
 
 ### 校核
 
-- 正确缓存塔 config 下的 lift/sweep/push 动态干涉
-- 结构强度、挠度、防坠、链条/丝杠载荷
+- 结构强度、挠度、防坠、链条/丝杠载荷——目前只有屈曲手算量级，`structure.accepted:false`；塔几何「静态存在」「B-Rep 核验跑通」都不等于可承载
+- `sweep` 现为 fail，不得改判
 - 双塔同时进出、汇流争用、空托盘回流后的真实吞吐
-- 静态 AABB 命中必须拆分 mates/confirmedHits，不能直接当制造碰撞结论
+- 静态 AABB 命中必须拆分 `mates`/`confirmedHits`，不能直接当制造碰撞结论
+
+### 电气/安全/PLC
+
+- 完整 IO（16 位到位检测、升降/叉原点与限位）；IO 草案地址仍为 `null`、`executable=false`
+- PLC 程序与真实硬件联调；计数器同步/对齐入口
+- 双通道急停、安全门、光幕、安全继电器/安全控制器——普通 DI 不能替代
+- **结构、安全、电气、PLC 均未验收**
 
 ### 软件一致性
 
-- P3-1：CLI 静态守卫**只统计 `execFileSync(`**，`spawnSync`/`execSync` 一行即可绕过（守卫本身已加，见下）
-  - 已改（`test/machine/cli.test.mjs`，非「未改」）：所有 CLI 调用收进 `runCli()`（`execFileSync` 带 `timeout` + `killSignal:'SIGKILL'`，runner 的 `{timeout}` 管不住占死事件循环的同步子进程）；新增「子进程到点被硬杀」用例，以及剥注释后必须只剩 1 处 `execFileSync(` 的静态守卫。
-  - 仍剩：静态守卫的匹配式只有 `execFileSync(`，改成 `spawnSync`/`execSync` 一行就能绕过。
-- P3-4：CLI catch-all 仍把内部异常报成 `INVALID_ARGUMENT`
-- `sceneIntegrity` 仍是计数门禁，可继续纳入更多正式交付门禁，但不要当成几何正确性证据
+- P3-1：已修 —— `sync-subprocess-scan.mjs` 扫 `execFileSync|spawnSync|execSync`，剥注释、排除字符串/属性
+- P3-4：已修（范围限 `design_machine`）—— 内部异常回 `INTERNAL_ERROR`，只有 `RangeError` 才回 `INVALID_ARGUMENT`
+- `sceneIntegrity` 仍是计数门禁，可继续纳入交付门禁，但不要当成几何正确性证据
+- `pv-buffer-regenerate.mjs` 的 `slotsFromGeometry` 仍是 `(layers)=>layers` 参数回声（塔路径才是从零件表派生），门禁脚本核不到「整层丢失」，属既有已知项
 
 ## 下一会话建议顺序
 
-1. 读本文件 + `docs/desktop/PV-BUFFER-ITERATION-HANDOFF.md`、`git status`、`git log`，确认不丢本地修改。
-2. 若接现场 PLC：先补“计数器同步/对齐”入口与“故障期来料拒绝事件”，再谈接线。
-3. 审查当前全部 diff，特别是 `desktop/src/agent/tools.ts` 的只读诊断返回形状。
-4. `npm run kb:build` 只索引 `desktop/src/agent/kb/index.ts` 里 `KB_DOC_FILES` 那 13 份文档（不含 `PV-BUFFER-*.md`）；改那 13 份中的任何一份后必须重建，否则 `test/agent/kb-freshness.test.mjs` 会失败。
-5. 最后：`npm run test:focused` → `npx tsc --noEmit` → `npm run build:ext` → `timeout -k 15 600 npm test` → `npm run regen:pv-buffer` → project-session-smoke。
+1. 读本文件 + `docs/desktop/PV-BUFFER-ITERATION-HANDOFF.md`，跑 `git status` / `git log -5`。**工作区非空是本轮改动**，先确认要不要提交，不要覆盖。
+2. **提交并让 CI 首跑本轮工作区**：本地门禁已全绿（focused 281、tsc 0、build 2,938,104 B/gzip 918,889 B、全量 3518/3515/0/3、16 层 9/9、8 层 9/9、verify:step 7/7、regen 58/58、smoke PASS），但 **CI 尚未跑过**；提交后确认 `featuretree-geometry` 的 16/8 层步骤首次通过，再对外说「门禁已上 CI」。
+3. **设计可承载的升降通道**：让 `sweep` 的 confirmed 命中归零，再谈机构可行性；同时做**逐实体 bbox 覆盖 + 实际组件对应**的 STEP 门禁，堵内部件漏件盲区。
+4. 之后才是结构/安全/电气/PLC：结构 `accepted:false`、IO 地址 `null`、`executable=false`，都未验收。
+5. `npm run kb:build` 只索引 `desktop/src/agent/kb/index.ts` 里 `KB_DOC_FILES` 那 13 份文档（不含 `PV-BUFFER-*.md`）；改那 13 份中的任何一份后必须重建，否则 `test/agent/kb-freshness.test.mjs` 会失败。
 
 ## 安全与数据注意事项
 
