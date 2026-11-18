@@ -10,6 +10,7 @@
   "scripts": {
     "build:ext": "tsc --noEmit && vite build && node scripts/build-electron.mjs && node scripts/build-mcp.mjs && node scripts/check-bundle-size.mjs",
     "check:bundle-size": "node scripts/check-bundle-size.mjs",
+    "check:electron-bundle": "node scripts/check-electron-bundle-security.mjs dist-electron/main.cjs",
     "bench:motion": "node ../scripts/bench-motion-envelope.mjs",
     "start": "electron .",
     "test": "node --test",
