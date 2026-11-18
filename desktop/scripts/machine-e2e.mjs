@@ -32,6 +32,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkGlbMaterials, describeGlbMaterials } from './lib/glb-inspect.mjs';
 import { checkMaterialPixels, describeMaterialPixels } from './lib/material-gate.mjs';
+import { assertSceneMatchesBuild, buildPartCount } from '../src/cad/scene-integrity.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(here, '..');
@@ -294,6 +295,11 @@ async function main() {
   let stepsOk = 0;
   /** 产品侧已确认的缺口（不是脚本失败）：逐条记下来，最后统一打印。 */
   const blocked = [];
+  /**
+   * 移载机这台的 build_machine_model 返回（step 11 落下来的）。
+   * step 14 的件数门禁只认这里的 parts，绝不写死某个工程的常数。
+   */
+  let transferBuildFacts = null;
   const step = async (index, label, run) => {
     const startedAt = Date.now();
     try {
@@ -307,6 +313,21 @@ async function main() {
       failedReason = message;
       throw error;
     }
+  };
+  /**
+   * 只在显式 opt-in 时跳过的步骤（当前用于「只验证 3D 场景门禁」：
+   * 既有 PLC 预检在本机会 PRECHECK_FAILED，不隔离就跑不到 step 14）。
+   * 跳过的步骤必须打印出来，不能静默当成功。
+   */
+  const skippableSteps = new Set(
+    (process.env.MACHINE_E2E_SKIP_STEPS ?? '').split(',').map((item) => item.trim()).filter(Boolean)
+  );
+  const optionalStep = async (index, label, run) => {
+    if (skippableSteps.has(label)) {
+      console.log(`MACHINE_E2E_SKIP step=${index} label=${label} reason=MACHINE_E2E_SKIP_STEPS`);
+      return null;
+    }
+    return step(index, label, run);
   };
 
   try {
@@ -998,10 +1019,12 @@ async function main() {
       const bomRows = Array.isArray(bomRaw) ? bomRaw : Array.isArray(bomRaw?.items) ? bomRaw.items : [];
       const rows = bomRows.filter((row) => /移载|对接段/.test(String(row?.name ?? '')));
       if (rows.length < 6) throw new Error(`结构 BOM 里移载件不足：${rows.map((row) => row.name).join('/')}`);
+      // step 14 的场景门禁只认这次构建的真实件数，所以把载荷原样留到后面。
+      transferBuildFacts = body;
       return `parts=${items} loaded=${loaded} colored=${colored} bomRows=${bomRows.length} transferRows=${rows.length} (${rows.slice(0, 5).map((row) => row.name).join(' / ')})`;
     });
 
-    const transferPlc = await step(12, 'transfer-plc', async () => {
+    const transferPlc = await optionalStep(12, 'transfer-plc', async () => {
       await sendMessage(cdp, `按当前机型生成 PLC 程序并落盘（含 IO 点位映射），需求：${TRANSFER_BRIEF}`);
       // 用 namePrefix=pv-transfer 区分两台机器的 PLC 结果卡
       await cdp.waitFor(
@@ -1089,7 +1112,7 @@ async function main() {
       return `blocked=0 steps=${stepCount} handshake=${logicHits.length}/4 [${logicHits.join(' / ')}] ST点位引用=${handshakeRefs}处 io-map=${latest.path} signals=${TRANSFER_SIGNALS.map((p) => `${p}@${rows[p].address}`).join(',')}`;
     });
 
-    const transferStates = await step(13, 'transfer-interference-states', async () => {
+    const transferStates = await optionalStep(13, 'transfer-interference-states', async () => {
       await sendMessage(cdp, '对当前机型做四态干涉检查（rest/lift/sweep/push），看移载机构和既有线体有没有干涉');
       await cdp.waitFor(
         `Array.from(document.querySelectorAll('.acp-chat-tool')).some((node) => {
@@ -1136,8 +1159,18 @@ async function main() {
         return true;
       })()`);
       await cdp.waitFor(`Boolean(document.querySelector('#automationCadOverlay') && !document.querySelector('#automationCadOverlay').hidden)`, 'CAD 覆盖层可见', 20_000);
-      await cdp.waitFor(`(Number(document.getElementById('cadPartCount')?.textContent || 0) >= 100)`, '3D 视口里装着 ≥100 件', 30_000);
-      // 诊断（不是断言）：视口里每个零件的材质色，确认「渲染的就是这份着色」
+      // 期望件数只能来自 step 11 这台机器自己的 build payload：106 件的移载机不能拿
+      // PV 缓存机的 90 当门禁（那会把「跑得通的机器」判成失败，也会把抄错数字当成证据）。
+      const expectedParts = buildPartCount(transferBuildFacts);
+      await cdp.waitFor(
+        `(Number(document.getElementById('cadPartCount')?.textContent || 0) >= ${expectedParts})`,
+        `3D 视口里装着 ≥${expectedParts} 件`,
+        30_000
+      );
+      const scene = await cdp.evaluate(`(() => window.AutomationCadViewer?.sceneIntegrity?.() ?? null)()`);
+      const integrity = assertSceneMatchesBuild(scene, transferBuildFacts);
+      console.log(`MACHINE_E2E_SCENE_INTEGRITY expected=${expectedParts} ${JSON.stringify(integrity)}`);
+      // 诊断：视口里每个零件的材质色，确认「渲染的就是这份着色」
       const sceneColors = await cdp.evaluate(`(() => {
         const scene = window.AutomationCadViewer?.describeScene?.();
         if (!scene) return { error: 'describeScene 不可用' };
