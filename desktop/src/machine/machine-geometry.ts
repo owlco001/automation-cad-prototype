@@ -46,6 +46,13 @@ import {
   type TurnerLayout
 } from './conveyor-assembly.ts';
 import {
+  BufferTowerGeometryError,
+  bufferTowerInboundParams,
+  bufferTowerParamsFromConfig,
+  buildBufferTowerParts,
+  type ResolvedBufferTowerParams
+} from './buffer-tower-assembly.ts';
+import {
   generateMachineGeometry,
   shapeHalfExtents,
   type GeomBomGroup,
@@ -59,8 +66,8 @@ import {
   type Vec3
 } from './geometry.ts';
 
-/** 几何来源：只有这两种，没有第三种。 */
-export type MachineGeometrySource = 'conveyor-assembly' | 'station-generator';
+/** 几何来源：三种——输送类参数化整机、缓存塔塔身、工位生成器代理体。 */
+export type MachineGeometrySource = 'conveyor-assembly' | 'buffer-tower-assembly' | 'station-generator';
 
 export interface ResolvedMachineGeometry {
   geometry: MachineGeometry;
@@ -673,6 +680,11 @@ export function conveyorJoints(parts: readonly ConveyorPart[]): GeomJoint[] {
 export interface ConveyorGeometryOptions {
   /** 运动轴挂在哪个工位名下；参数化整机没有工位底板，缺省空串 */
   stationId?: string;
+  /**
+   * 几何来源标注。缺省 `conveyor-assembly`；缓存塔塔身（同一个 ConveyorPart 管线）
+   * 传 `buffer-tower-assembly`，让评审/干涉/3D 知道这不是「输送线的多层缓存」。
+   */
+  geometrySource?: MachineGeometry['geometrySource'];
 }
 
 /**
@@ -850,7 +862,7 @@ export function conveyorGeometryFromParts(
     name: config.name,
     units: 'mm',
     upAxis: 'z',
-    geometrySource: 'conveyor-assembly',
+    geometrySource: options.geometrySource ?? 'conveyor-assembly',
     // 装配件数与几何刚体数分开报：85 件装配 + 2 根活塞杆 = 87 个刚体（见 mappedSolids）
     assemblyPartCount: parts.length,
     // 件的外形是参数化整机零件的包围盒/主形体（不是 B-rep）；实体布尔在 build123d 内核里对
@@ -918,6 +930,114 @@ function isDesignLike(value: MachineGeometryInput): value is { config: MachineCo
 }
 
 /**
+ * 地面线守卫：塔件一律不得低于 z=0。
+ *
+ * 为什么单独导出：`arch §9` 的验收第 5 条写着 `minZ ≥ 0`，但以前只有一条测试拿**好参数**
+ * 验过一次，运行时没有任何守卫 —— 建造器基准一改就没人拦。导出后测试可以直接对零件表
+ * 注入「整体下移」的负例，不必绕参数校验。
+ */
+export function assertTowerAboveGround(
+  parts: readonly ConveyorPart[],
+  context: { inbound: { beltHeightMm: number }; columnHeightMm: number }
+): number {
+  const minZ = Math.min(...parts.map((part) => partWorldBounds(part).min[2]));
+  if (!Number.isFinite(minZ) || minZ < 0) {
+    throw new BufferTowerGeometryError(
+      `缓存塔零件落到地面以下：最低件 z=${Number.isFinite(minZ) ? Math.round(minZ * 10) / 10 : minZ} mm（`
+        + `inbound.beltHeightMm=${context.inbound.beltHeightMm}、柱高 ${context.columnHeightMm}）。`
+        + '要么抬高 beltHeightMm，要么修建造器的地面基准'
+    );
+  }
+  return minZ;
+}
+
+/**
+ * 缓存塔的升降轴：静态几何只建**一个**台面，但这条轴必须存在且行程到顶。
+ *
+ * 为什么不能只靠 `conveyorMovingAxes`：那条函数只认转向/移载工位（turner/transfer），
+ * 缓存塔两者都没有，于是塔会报 `movingAxes: 0` —— 一个「有 16 层、但一条运动轴都没有」的塔，
+ * 干涉/联动会把它当纯静态货架读。这里按塔的参数显式给出这条轴（仍然只是**示意**：
+ * 伺服/抱闸/防坠/层定位都不在本模块内）。
+ */
+function towerLiftAxis(
+  parts: readonly ConveyorPart[],
+  params: ResolvedBufferTowerParams
+): GeomMovingAxis {
+  const platform = parts.find((part) => part.id === 'lift-platform');
+  // 台面缺失不再静默返回 null（那会变成「16 层的塔、0 条运动轴」而没人报错）：
+  // 塔的轴是塔身几何的一部分，缺件就是建造器缺陷。
+  if (!platform) {
+    throw new BufferTowerGeometryError('缓存塔缺少 lift-platform：升降轴无法建立（塔身建造器缺陷，不是参数问题）');
+  }
+  const platformZ = platform.transform.z;
+  return {
+    actuatorId: 'tower-lift',
+    // 参数化整机没有工位底板：塔的运动轴不挂工位（与 conveyor-assembly 的轴同一口径）
+    stationId: '',
+    kind: 'linear',
+    partIds: [platform.id],
+    axis: [0, 0, 1],
+    // pivot = 台面建模位（不是层平面）：状态化干涉按 strokeMm 平移台面，pivot 只用于说明基准
+    pivot: [0, 0, platformZ],
+    strokeMm: params.liftTravelMm,
+    rangeDeg: 0,
+    home: 'retracted',
+    // 只给一个量级（单层 180 mm 层距、双链牵引的常见速度），不是伺服曲线；
+    // 联动时间线如要精确值，必须由工程师给，不能拿这个数当验收。
+    durationMs: Math.round((params.liftTravelMm / 200) * 1000),
+    points: { extend: `到第 ${params.levels} 层`, retract: '回第 1 层（进出料）' },
+    // 联动视图只看这个字段：没有它，轴会被判成「没点位、播放不驱动」
+    point: 'DI-TOWER-LIFT-LEVEL',
+    // 行程不是 config.actuators[].travelMm 给的（塔的 config.actuators 为空），
+    // 而是塔参数 (层数−1)×层距 派生的几何标注：干涉/联动必须按「精度更低」读它。
+    strokeSource: 'geometry'
+  };
+}
+
+/** 塔身几何的收尾：标 source 派生的假设/告警，并把唯一台面标成随动件。 */
+function towerGeometry(
+  parts: readonly ConveyorPart[],
+  config: MachineConfig,
+  params: ResolvedBufferTowerParams
+): MachineGeometry {
+  const base = conveyorGeometryFromParts(parts, config, bufferTowerInboundParams(params), {
+    geometrySource: 'buffer-tower-assembly'
+  });
+  const axis = towerLiftAxis(parts, params);
+  const partsWithMoving = base.parts.map((part) => (axis.partIds.includes(part.id) ? { ...part, moving: true as const, actuatorId: axis.actuatorId } : part));
+  assertTowerAboveGround(parts, params);
+  return {
+    ...base,
+    parts: partsWithMoving,
+    moving: [axis, ...base.moving],
+    assumptions: [
+      `几何来源：buffer-tower-assembly 缓存塔塔身（${parts.length} 件，含底层输送线），与 BOM/STEP 同一份零件表`,
+      `塔参数：${params.levels} 层 × ${params.slotsPerLevel} 位、层距 ${params.layerPitchMm} mm、柱高 ${params.columnHeightMm} mm、`
+        + `立柱截面 ${params.columnSectionMm} mm（${params.columnSectionSource === 'derived' ? '按柱高反算' : '显式给出'}）、`
+        + `升降行程 ${params.liftTravelMm} mm（导柱顶 ${params.postTopZMm} ≥ 顶层托板 ${params.topLayerZMm} + 240）`,
+      `升降轴 tower-lift：行程 ${params.liftTravelMm} = (${params.levels}−1) × ${params.layerPitchMm}，`
+        + `台面建模在 beltHeight + 层距/2 = ${params.inbound.beltHeightMm + params.layerPitchMm / 2} mm（层间中间位，`
+        + `不是层平面）：按行程平移后终点比顶层平面 ${params.topLayerZMm} 高 ${params.inbound.beltHeightMm + params.layerPitchMm / 2 + params.liftTravelMm - params.topLayerZMm} mm。`
+        + '行程来自几何标注（config.actuators 为空），不是工程师给的伺服 travelMm。',
+      '静态概念几何：未做结构强度/挠度/屈曲校核、未做防坠与抱闸；导柱/链条/台面是机构示意，不是伺服装配。'
+        + 'lift/sweep 动态干涉已接（塔轴可被 resolveLiftAxis 认出来），但**台面没有升降通道**：'
+        + '层托板是整块板、台面在托板投影内，sweep 逐层扫掠会把 lift-platform × tray-* 报为命中 —— 这是真实的机构缺口，不是误报，也不是已解决',
+      '层数 ≠ 可服务储位数：第 1 层是进出料输送线，单塔 16 层只有 15 个可用储位',
+      ...base.assumptions
+    ],
+    warnings: [
+      ...base.warnings,
+      `结构：柱高 ${params.columnHeightMm} mm 下按柱高反算最小截面 ${params.requiredColumnSectionMm} mm；`
+        + '这只是屈曲手算量级（探针：AL6063 40×40×2 在 K=2 时临界约 88 kg/柱、K=1 约 350 kg；80×80×3 约 1092 kg），'
+        + '不是结构校核结论（未组合风载/地震/螺栓/焊缝/疲劳/挠度）。按特征体积估算四柱静载约 0.41 t/柱，'
+        + '80×80×3 在 K=2 + 安全系数 3 下许用约 0.36 t，仍差约 13%——截面升级只把量级拉回可讨论范围，定截面必须做正式校核',
+      `合规：整机总高 ${Math.round(params.columnHeightMm)} mm，涉及稳定性、消防/通道净高、检修平台与登高作业，`
+        + '必须由人工/结构专业确认后才能对外称「可落地」'
+    ]
+  };
+}
+
+/**
  * 整机几何的唯一入口。
  *
  * 入参与 `generateMachineGeometry` 一致：可以给 `MachineConfig`，也可以给带 `config` 的
@@ -944,6 +1064,22 @@ export function resolveMachineGeometry(
   const hasFormHint = Boolean(formKind || formId);
   // 判定：形态属于输送类（或老方案根本没写形态，只能靠参数认），**并且**能推出线体长/带宽。
   // 形态明确是非输送类时，即使 config 里带了 conveyor 参数也不改道 —— 那是脏数据，不是输送线。
+  // 缓存塔：判别字段是 config.bufferTower.kind（**不看 formId** —— 塔的 formId 仍是 belt-line，
+  // 它的第 1 层就是那条输送线）。必须排在 conveyorLike 之前，否则会被当成「输送线的多层缓存」。
+  // 参数不完整时**抛错**，不回落：回落会拿工位生成器代理体冒充塔（同一台机器两套几何）。
+  if (config.bufferTower?.kind === 'tower') {
+    const towerParams = bufferTowerParamsFromConfig(config);
+    const towerParts = buildBufferTowerParts(towerParams);
+    const geometry = towerGeometry(towerParts, config, towerParams);
+    return {
+      geometry,
+      source: 'buffer-tower-assembly',
+      partCount: geometry.parts.length,
+      assemblyPartCount: towerParts.length,
+      reason: `缓存塔（config.bufferTower，${towerParams.levels} 层 × ${towerParams.slotsPerLevel} 位）：`
+        + `按塔身建造器出 ${towerParts.length} 件，${geometry.parts.length} 个几何刚体`
+    };
+  }
   const conveyorLike = isConveyorForm({ id: formId, kind: formKind })
     || (!hasFormHint && config.conveyor !== undefined && config.conveyor !== null);
   if (conveyorLike) {

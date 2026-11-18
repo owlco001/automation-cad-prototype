@@ -174,6 +174,12 @@ export interface PushStateSummary extends InterferenceStateSummary {
 export interface LiftAxisInfo {
   actuatorId: string;
   strokeMm: number;
+  /**
+   * 行程来源。`config` = 来自 `config.actuators[].travelMm`（工程师给的轴参数）；
+   * `geometry` = 几何标注自带（缓存塔：`config.actuators` 为空，行程 = (层数−1)×层距）。
+   * 后者精度更低 —— 回执里必须能看出来，别把几何派生值当成伺服行程。
+   */
+  strokeSource: 'config' | 'geometry';
   /** 实际施加的位移方向（已被 config 覆盖，见 resolveLiftAxis） */
   direction: Vec3;
   /** 几何里建模的伸出方向（未覆盖） */
@@ -356,6 +362,12 @@ function unit(vector: Vec3): Vec3 | null {
  * 找「可顶升轴」：先认 active config 里的执行机构（id=turner-lift 或名字带顶升/lift，
  * 且 travelMm > 0），再回几何的 moving 轴取 partIds / 方向。
  *
+ * config 里没有顶升执行机构时，退一步认**几何自带行程**的轴（`strokeSource === 'geometry'`）：
+ * 缓存塔的 `config.actuators` 是空数组（它的第 1 层就是输送线），轴只存在于零件表里
+ * （`machine-geometry.ts` 的 `towerLiftAxis`，行程 = (层数−1)×层距）。以前这里直接返回 null，
+ * 于是「16 层塔 + tower-lift 轴」查 lift 一律 STATE_UNAVAILABLE —— 轴是声明性的，干涉/联动看不见它。
+ * 认这条轴时 `strokeSource='geometry'`，把「行程不是 config 给的」这个精度差写进回执。
+ *
  * 任何一步缺数据都返回 null —— 宁可报 STATE_UNAVAILABLE，也不猜哪几个零件会动。
  */
 export function resolveLiftAxis(config: unknown, geometry: unknown): LiftAxisInfo | null {
@@ -366,7 +378,7 @@ export function resolveLiftAxis(config: unknown, geometry: unknown): LiftAxisInf
     return actuator.id === 'turner-lift' || /lift|顶升/i.test(`${actuator.id} ${String(actuator.name ?? '')}`);
   });
   const actuator = candidates.find((item) => Number(item.travelMm) > 0);
-  if (!actuator) return null;
+  if (!actuator) return geometrySourcedLiftAxis(geometry);
   const strokeMm = Number(actuator.travelMm);
   if (!Number.isFinite(strokeMm) || strokeMm <= 0) return null;
 
@@ -403,12 +415,49 @@ export function resolveLiftAxis(config: unknown, geometry: unknown): LiftAxisInf
   return {
     actuatorId: String(actuator.id),
     strokeMm,
+    strokeSource: 'config',
     direction,
     geometryDirection,
     directionOverridden,
     partIds,
     ...travelOverridesOf(axis)
   };
+}
+
+/**
+ * 只认**几何自己声明了行程来源**的轴（`strokeSource === 'geometry'`）。
+ *
+ * 为什么必须显式标注才认：`geometry.moving` 里也有按 config 行程生成的轴，
+ * 若按「名字像 lift」去猜，会在 config 缺参数时用几何的旧值冒充 —— 那是另一种参数回声。
+ * 缓存塔的轴在 `towerLiftAxis` 里显式写了 `strokeSource: 'geometry'`，只有它走这条路。
+ */
+function geometrySourcedLiftAxis(geometry: unknown): LiftAxisInfo | null {
+  const axes = isRecord(geometry) && Array.isArray(geometry.moving) ? geometry.moving : [];
+  for (const item of axes) {
+    if (!isRecord(item) || item.strokeSource !== 'geometry') continue;
+    const strokeMm = Number(item.strokeMm);
+    if (!Number.isFinite(strokeMm) || strokeMm <= 0) continue;
+    if (!Array.isArray(item.partIds)) continue;
+    const partIds = item.partIds.filter((id): id is string => typeof id === 'string' && id.length > 0);
+    if (partIds.length === 0) continue;
+    const rawAxis: Vec3 = Array.isArray(item.axis)
+      ? [Number(item.axis[0]) || 0, Number(item.axis[1]) || 0, Number(item.axis[2]) || 0]
+      : [0, 0, 1];
+    const direction = unit(rawAxis);
+    if (!direction) continue;
+    return {
+      actuatorId: typeof item.actuatorId === 'string' && item.actuatorId ? item.actuatorId : 'geometry-lift',
+      strokeMm,
+      strokeSource: 'geometry',
+      direction,
+      geometryDirection: [...direction],
+      // 没有 config.position 可比对，就不存在方向覆盖：几何标注即实际方向
+      directionOverridden: false,
+      partIds,
+      ...travelOverridesOf(item)
+    };
+  }
+  return null;
 }
 
 /** 轴上的「个别件拾取空行程」：只收有限非负数，脏数据一律忽略（宁可多平移，也不静默乱动）。 */
@@ -562,6 +611,7 @@ export function resolvePushAxis(config: unknown, geometry: unknown): LiftAxisInf
   return {
     actuatorId: String(actuator.id),
     strokeMm,
+    strokeSource: 'config',
     direction,
     geometryDirection,
     directionOverridden,
@@ -612,7 +662,11 @@ export function runInterferenceStates(input: {
     // 调用方直接给了几何：来源按几何自带的标注（没标注就按工位生成器代理体处理）。
     // 这个字段存在的目的就是让下游知道「别拿两套几何的数字对撞」。
     geometry = input.geometry as unknown as MachineGeometry;
-    geometrySource = geometry.geometrySource === 'conveyor-assembly' ? 'conveyor-assembly' : 'station-generator';
+    // 透传几何自带的来源标注：新增 source 必须在这里显式认，否则三元会把它误标成
+    // `station-generator`（干涉报告里就会写「代理体」——对塔是假结论）。
+    geometrySource = geometry.geometrySource === 'conveyor-assembly' || geometry.geometrySource === 'buffer-tower-assembly'
+      ? geometry.geometrySource
+      : 'station-generator';
   } else {
     try {
       const resolved = resolveMachineGeometry(input.config as unknown as MachineConfig);
@@ -635,8 +689,9 @@ export function runInterferenceStates(input: {
     return {
       ok: false,
       code: 'STATE_UNAVAILABLE',
-      message: '当前机型没有可顶升的轴（config 里找不到 travelMm > 0 的 lift/顶升执行机构，或几何里没有它的运动零件）',
-      hint: '先用 design_machine 生成带转向/顶升工位的机型，或确认 turner-lift 的行程字段'
+      message: '当前机型没有可顶升的轴（config 里找不到 travelMm > 0 的 lift/顶升执行机构，'
+        + '几何里也没有标了 strokeSource=geometry 的轴，或轴缺少运动零件）',
+      hint: '先用 design_machine 生成带转向/顶升工位的机型，或确认 turner-lift 的行程字段；缓存塔应给出 config.bufferTower（塔轴由几何自带行程）'
     };
   }
   const push = needPush ? resolvePushAxis(input.config, geometry) : null;
@@ -805,7 +860,11 @@ export function runInterferenceStates(input: {
     note: 'AABB 初筛 + 解析式确认：declared=已声明连接，mate=同轴嵌套配合（缸体×活塞杆这类，实体布尔必然重叠但不是设计干涉），'
       + 'suspect=待复核；suspect 再分 confirmedHits（解析式精确，可判 FAIL）与 screenHits（只有包围盒依据，只判 WARN）。'
       + 'mm3=pairs 的 AABB 上界合计（含 declared/mate，只作量级参考），mm3Confirmed/mm3Screen 是分开的真实口径。'
-      + 'lift/sweep 按 config 的 travelMm 平移；若 config 方向与几何建模的伸出方向相反（poseValidity=direction-overridden），'
+      + 'lift/sweep 按行程平移：`lift.strokeSource=config` 时取 config.actuators[].travelMm；'
+      + '`strokeSource=geometry` 时取几何标注（缓存塔：config.actuators 为空，行程 = (层数−1)×层距），精度低于 config 行程，'
+      + '不要当成伺服参数验收。缓存塔的台面没有升降通道（层托板是整块板、台面在托板投影内），'
+      + 'sweep 逐层扫掠会把 lift-platform × tray-* 报为命中——这是真实的机构缺口，不是误报。'
+      + '若 config 方向与几何建模的伸出方向相反（poseValidity=direction-overridden），'
       + '该态只是反向平移、位姿不可达，动件相关命中一律降级为待复核。'
       + 'sweep 的计数按步累计，pairs 取单步最大；push 同样是**扫掠**（每 10 mm 一个位姿，先顶升再沿 +Y 推出），'
       + '返回 samples/hitSamples/hitRange/worst（逐点数组不回传：会把结果顶过 10 KB 上限被裁成 preview）。'
@@ -818,7 +877,7 @@ export function runInterferenceStates(input: {
           + '口径：partCount（几何刚体数）含它 +1，assemblyPartCount / BOM / 成本**不含**（工件是被加工对象，不是采购件）。'
         : '本次几何里没有工件占位体（非移载机型或调用方直接给了不含工件的几何）：结论只对机构件成立，'
           + '「板能不能推出出料口」不在本结果的证明范围内。')
-      + `本次几何来源 geometrySource=${geometrySource}（输送类走参数化整机，其余形态走工位生成器），`
+      + `本次几何来源 geometrySource=${geometrySource}（输送类走参数化整机，缓存塔走塔身建造器，其余形态走工位生成器），`
       + '结论只对这套零件表成立；和 B-Rep 结论对齐前先确认两边 assemblyPartCount 一致。'
   };
 }

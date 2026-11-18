@@ -27,7 +27,19 @@ import { completeDesign } from '../design/synthesis.ts';
 import { validatePricebook, type Pricebook } from '../cost/pricebook.ts';
 import { buildClarify } from '../machine/clarify.ts';
 import { summarizeGeometry } from '../machine/geometry.ts';
-import { resolveMachineGeometry } from '../machine/machine-geometry.ts';
+import { partWorldBounds, resolveMachineGeometry, type ResolvedMachineGeometry } from '../machine/machine-geometry.ts';
+import { buildConveyorParts, conveyorEnvelope, type ConveyorPart } from '../machine/conveyor-assembly.ts';
+import {
+  BufferTowerConfigError,
+  BufferTowerGeometryError,
+  bufferTowerInboundParams,
+  bufferTowerParamsFromConfig,
+  bufferTowerSlots,
+  buildBufferTowerParts,
+  type MachineBufferTowerConfig,
+  type ResolvedBufferTowerParams
+} from '../machine/buffer-tower-assembly.ts';
+import { validateMachineConfig } from '../commission/machine-config.ts';
 import { AGENT_TOOL_MODULES, moduleDisabledResult, moduleIsEnabled, type ModuleEnabledReader } from '../modules/tool-gates.ts';
 import { describeRenderStats, normalizeRenderStats } from '../shared/render-stats.ts';
 
@@ -422,8 +434,127 @@ const BUFFER_CAPACITY_SCHEMA = {
   additionalProperties: false
 };
 
+/**
+ * 缓存塔几何入参。与 `bufferTower`（纯数据槽位）并列、不合并：
+ * 前者是「容量身份」，后者是「塔身几何」。两者同时出现时要求
+ * `levels × slotsPerLevel === slotsPerTower`，否则回 `INVALID_ARGUMENT`（带算式，不夹紧）。
+ */
+const BUFFER_TOWER_GEOMETRY_SCHEMA = {
+  type: 'object',
+  properties: {
+    levels: { type: 'integer', minimum: 2, maximum: 64, description: '物理层数（含第 1 层进出料输送线）' },
+    slotsPerLevel: {
+      type: 'integer',
+      minimum: 1,
+      maximum: 8,
+      description: '每层储位数；本期几何只做 1 位。每层多位需要伸缩叉/穿梭车（进料线要 ≥4.9 m），请求更大值会被明确拒建，不按 1 位静默建'
+    },
+    layerPitchMm: { type: 'number', minimum: 165, maximum: 600, description: '层距 mm，缺省 180；必须 ≥ 板厚+130' },
+    panel: {
+      type: 'object',
+      properties: {
+        lengthMm: { type: 'number', exclusiveMinimum: 0 },
+        widthMm: { type: 'number', exclusiveMinimum: 0 },
+        thicknessMm: { type: 'number', exclusiveMinimum: 0 },
+        massKg: { type: 'number', minimum: 0 }
+      },
+      required: ['lengthMm', 'widthMm', 'thicknessMm', 'massKg'],
+      additionalProperties: false
+    },
+    inbound: {
+      type: 'object',
+      properties: {
+        lengthMm: { type: 'number', exclusiveMinimum: 0, description: '底层输送线长；必须 ≥ 板长+120' },
+        widthMm: { type: 'number', exclusiveMinimum: 0 },
+        beltHeightMm: { type: 'number', exclusiveMinimum: 0 }
+      },
+      required: ['lengthMm', 'widthMm', 'beltHeightMm'],
+      additionalProperties: false
+    },
+    frame: {
+      type: 'object',
+      properties: {
+        material: { type: 'string', enum: ['AL6063', 'Q235'] },
+        sectionMm: { type: 'number', exclusiveMinimum: 0, description: '底层输送型材截面（40 = 4040）' },
+        columnSectionMm: { type: 'number', exclusiveMinimum: 0, description: '立柱截面；缺省按柱高反算（max(型材截面, ceil5(柱高/48))），显式值只能更大' }
+      },
+      additionalProperties: false
+    }
+  },
+  required: ['levels', 'slotsPerLevel', 'panel', 'inbound'],
+  additionalProperties: false,
+  description:
+    '缓存塔塔身几何（可选）。出现时必须同时给 bufferTower，且 levels×slotsPerLevel === slotsPerTower（单塔）。'
+    + '返回 slots（fromGeometry 由 tray-* 件计数派生）/geometry/structure/capabilityBoundary；'
+    + '几何是静态概念件，结构只做屈曲手算量级标注，不是验收。'
+} as const;
+
 /** design_machine 缓存快照使用的假设转移超时（秒）：只用于让单步快照可解释，不是现场设定值。 */
 const BUFFER_SNAPSHOT_TRANSFER_TIMEOUT_SEC = 30;
+
+/**
+ * `bufferTowerGeometry` 的**入参白名单**（形状之后、归一化之前的唯一一道显式门）。
+ *
+ * 为什么需要它：JSON Schema 的 `additionalProperties:false` 只约束契约端正的客户端，
+ * MCP / LLM 侧、以及进程内 `AgentTools.call`（直接 `handler(args)`，**不跑 schema 校验**）
+ * 都可能塞多余键。旧实现把这些键 `...(towerGeometryInput)` 展开在 `towers`/`slotsPerTower`
+ * **之后**，于是 `{levels:2, slotsPerTower:2}` 会静默改写容量身份：调用方声明 16 位，
+ * 回执写回 2 位，且没有任何告警——「参数不生效却看不出来」的反向版本（多出来的键生效了）。
+ *
+ * 现在：不在白名单里的键直接拒绝（`CONFIG_SHAPE` → `INVALID_ARGUMENT`），
+ * 容量身份只能由 `bufferTower` 给，几何只负责 `levels/slotsPerLevel/layerPitchMm/panel/inbound/frame`。
+ */
+const TOWER_GEOMETRY_KEYS = ['levels', 'slotsPerLevel', 'layerPitchMm', 'panel', 'inbound', 'frame'] as const;
+const TOWER_PANEL_KEYS = ['lengthMm', 'widthMm', 'thicknessMm', 'massKg'] as const;
+const TOWER_INBOUND_KEYS = ['lengthMm', 'widthMm', 'beltHeightMm'] as const;
+const TOWER_FRAME_KEYS = ['material', 'sectionMm', 'columnSectionMm'] as const;
+
+function rejectUnknownKeys(record: Record<string, unknown>, allowed: readonly string[], label: string): void {
+  const unknown = Object.keys(record).filter((key) => !allowed.includes(key));
+  if (unknown.length > 0) {
+    throw new BufferTowerConfigError(
+      'CONFIG_SHAPE',
+      `${label} 不接受键 ${unknown.join('、')}：只允许 ${allowed.join(' / ')}`
+        + (unknown.some((key) => key === 'towers' || key === 'slotsPerTower' || key === 'towerCount')
+          ? '；容量身份（塔数/每塔储位）只能由 bufferTower 给，几何入参不许改写它'
+          : '')
+    );
+  }
+}
+
+/**
+ * 只挑出塔几何认识的键，**逐层白名单**（含 panel/inbound/frame 三个子块）。
+ * 返回的对象只含白名单键，调用方按显式字段赋值（不再 spread 进 bufferTower）。
+ */
+function coerceTowerGeometryInput(raw: unknown): Record<string, unknown> {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new BufferTowerConfigError('CONFIG_SHAPE', 'bufferTowerGeometry 必须是对象');
+  }
+  const record = raw as Record<string, unknown>;
+  rejectUnknownKeys(record, TOWER_GEOMETRY_KEYS, 'bufferTowerGeometry');
+  const pickBlock = (key: 'panel' | 'inbound' | 'frame', allowed: readonly string[]): Record<string, unknown> | undefined => {
+    const value = record[key];
+    if (value === undefined) return undefined;
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      throw new BufferTowerConfigError('CONFIG_SHAPE', `bufferTowerGeometry.${key} 必须是对象`);
+    }
+    const block = value as Record<string, unknown>;
+    rejectUnknownKeys(block, allowed, `bufferTowerGeometry.${key}`);
+    return block;
+  };
+  const panel = pickBlock('panel', TOWER_PANEL_KEYS);
+  const inbound = pickBlock('inbound', TOWER_INBOUND_KEYS);
+  const frame = pickBlock('frame', TOWER_FRAME_KEYS);
+  return {
+    levels: record.levels,
+    slotsPerLevel: record.slotsPerLevel,
+    ...(record.layerPitchMm !== undefined ? { layerPitchMm: record.layerPitchMm } : {}),
+    ...(panel !== undefined ? { panel } : {}),
+    ...(inbound !== undefined ? { inbound } : {}),
+    ...(frame !== undefined ? { frame } : {})
+  };
+}
+
 /** 快照回显的槽位上限：1×512 全量回显会把 44 KB 塞进 agent 上下文，超出部分只给计数。 */
 const BUFFER_SLOT_ECHO_LIMIT = 16;
 
@@ -455,6 +586,7 @@ const DESIGN_MACHINE_SCHEMA = {
       ],
       description: `缓存塔纯数据排布预览；只生成空队列 FIFO 槽位模型。总槽位上限 ${MAX_BUFFER_SLOTS}（towerCount=2 时每塔最多 ${MAX_BUFFER_SLOTS / 2}，单塔最多 ${MAX_BUFFER_SLOTS}），不代表真实机械或安全验收。返回值为单个扫描周期的快照，握手输入是显式假设而非现场状态。`
     },
+    bufferTowerGeometry: BUFFER_TOWER_GEOMETRY_SCHEMA,
     stationCount: {
       type: 'integer',
       minimum: MACHINE_STATIONS_MIN,
@@ -470,6 +602,243 @@ const DESIGN_MACHINE_SCHEMA = {
   required: ['brief'],
   additionalProperties: false
 };
+
+/**
+ * 缓存塔几何回执（`design_machine` 的 `bufferTowerGeometry`）。
+ *
+ * 四条硬约束（写作时就定了，别在别处另算一份）：
+ * 1. `slots.fromGeometry` **从零件表派生**（层数 × 每层托板件数 × 立柱塔数），三项都不抄配置——
+ *    参数回声会让「16 层配置 / 8 层几何」自证对齐；缺层/多件由 `bufferTowerSlots` 抛错；
+ * 2. `massKg` 一律 `null` + `massSource: 'not-measured'`：本工具不跑内核，不给估算值
+ *    （真实质量只能由真 B-Rep 的 regen 产出）；
+ * 3. `capabilityBoundary` 里的能力项全 `false`，并原样带安全边界原文——
+ *    「16 位几何存在」不等于「16 个可服务储位」「结构已校核」「缓存机已实现」；
+ * 4. 回执里任何「派生量」都要能从件表或参数复算（`partBreakdown` 的底架项独立再建一次，
+ *    `postReachMm` 从实体包围盒量，不是 `postTop − topLayerZ` 的定义回声）。
+ */
+function buildBufferTowerGeometryReceipt(
+  params: ResolvedBufferTowerParams,
+  parts: readonly ConveyorPart[],
+  resolved: ResolvedMachineGeometry,
+  machineBom: { rows: number; costTotal: number | null }
+): Record<string, unknown> {
+  const slots = bufferTowerSlots(params, parts);
+  const envelope = conveyorEnvelope(parts);
+  const round1 = (value: number): number => Math.round(value * 10) / 10;
+  // 件数构成**按件号数**，不按算术猜：回执里的分解必须能逐件对上 STEP/BOM
+  const countBy = (pattern: RegExp): number => parts.filter((part) => pattern.test(part.id)).length;
+  // 底架真值独立再建一次（`layers: 1` 的同一条输送线），**不用**「总件数 − 塔身件数」倒算：
+  // 那个式子在任何建造器改动下都恒成立，等于零信息量。
+  const baseParts = buildConveyorParts(bufferTowerInboundParams(params));
+  const baseIds = new Set(baseParts.map((part) => part.id));
+  const baseConveyor = baseParts.length;
+  const breakdown = {
+    baseConveyor,
+    columns: countBy(/^column-/),
+    topBeams: countBy(/^top-beam-/),
+    trayRails: countBy(/^tray-(rail)-/),
+    trays: countBy(/^tray-\d+$/),
+    trayRollers: countBy(/^tray-roller-/),
+    stops: countBy(/^stop-/),
+    layerSensors: countBy(/^layer-sensor-/),
+    liftPosts: countBy(/^lift-post-/),
+    liftChains: countBy(/^lift-chain-/),
+    liftPlatforms: countBy(/^lift-platform$/),
+    liftMotors: countBy(/^lift-motor$/)
+  };
+  const breakdownSum = Object.values(breakdown).reduce((sum, value) => sum + value, 0);
+  if (breakdownSum !== parts.length) {
+    throw new BufferTowerGeometryError(
+      `缓存塔件数分解与零件表不符：分解合计 ${breakdownSum} ≠ 零件 ${parts.length}（回执不能自己凑数）`
+    );
+  }
+  // 导柱净余量：从**实体**包围盒量（导柱顶 − 顶层托板上表面），不拿 postTop − topLayerZ 自证
+  const boundsOf = (predicate: (id: string) => boolean): number[] => parts
+    .filter((part) => predicate(part.id))
+    .map((part) => partWorldBounds(part).max[2]);
+  const postTops = boundsOf((id) => /^lift-post-/.test(id));
+  const trayTops = boundsOf((id) => /^tray-\d+$/.test(id));
+  if (postTops.length === 0 || trayTops.length === 0) {
+    throw new BufferTowerGeometryError('缓存塔缺 lift-post-* 或 tray-*：导柱净余量无法从实体几何量出来');
+  }
+  const postTopZ = Math.max(...postTops);
+  const topTrayTopZ = Math.max(...trayTops);
+  const postReachMm = round1(postTopZ - topTrayTopZ);
+  // 结构余量必须含板料载荷：15 个储位 × 32 kg 不在几何质量里，只算塔身自重会把缺口说小 3 倍
+  const panelLoadKg = Math.round(slots.usableStorage * params.panel.massKg);
+  const selfWeightPerColumnT = 0.41;
+  const panelLoadPerColumnKg = Math.round(panelLoadKg / slots.towersFromGeometry / 4);
+  const columnLoadT = Math.round((selfWeightPerColumnT + panelLoadPerColumnKg / 1000) * 100) / 100;
+  const allowableT = 0.36;
+  const overPercent = Math.round((columnLoadT / allowableT - 1) * 100);
+  const towerParts = parts.length - baseConveyor;
+  return {
+    readOnly: true,
+    // 归一化后的配置原样回显；与 design.config.bufferTower 是同一份（apply 时不需要重算）
+    config: params.config,
+    slots: {
+      fromGeometry: slots.fromGeometry,
+      claimed: slots.claimed,
+      aligned: slots.aligned,
+      transferLevels: slots.transferLevels,
+      usableStorage: slots.usableStorage,
+      levels: slots.levels,
+      slotsPerLevel: slots.slotsPerLevel,
+      levelsFromGeometry: slots.levelsFromGeometry,
+      slotsPerLevelFromGeometry: slots.slotsPerLevelFromGeometry,
+      towersFromGeometry: slots.towersFromGeometry,
+      trayCount: slots.trayCount,
+      layerSensorCount: slots.sensorCount,
+      derivation: `托板 ${slots.trayCount} 层 + 第 1 层进出料位 ${slots.transferLevels} = ${slots.levelsFromGeometry} 层，`
+        + `× 每层托板 ${slots.slotsPerLevelFromGeometry} 件（= 每层储位）× 立柱 ${slots.towersFromGeometry} 塔 = ${slots.fromGeometry}；`
+        + `可用储位 = ${slots.fromGeometry} − ${slots.transferLevels} = ${slots.usableStorage}（第 1 层兼作进出料工位）。`
+        + `层完整性：第 2~${slots.levelsFromGeometry} 层逐层核对托板 1 / 托条 2 / 挡停 1 / 光电 1（缺层或多件直接抛错，不再只比两族件数）`,
+      layerAudit: {
+        levelsChecked: slots.levelsFromGeometry - slots.transferLevels,
+        families: ['tray', 'tray-rail', 'stop', 'layer-sensor'],
+        rowsSample: slots.layerTrace.slice(0, 2),
+        statement: '任一层缺件或多件 → design_machine 回 INTERNAL_ERROR（建造器缺陷），不会给出 aligned:false 的 ok:true'
+      }
+    },
+    geometry: {
+      source: resolved.source,
+      // 装配件数（BOM/STEP 口径，来自 TS 零件表）与几何刚体数分开报
+      partCount: parts.length,
+      geometryPartCount: resolved.partCount,
+      envelopeMm: envelope,
+      movingAxes: resolved.geometry.moving.length,
+      liftStrokeMm: params.liftTravelMm,
+      levels: params.levels,
+      layerPitchMm: params.layerPitchMm,
+      partBreakdown: {
+        ...breakdown,
+        sum: breakdownSum,
+        basePartsMatched: parts.filter((part) => baseIds.has(part.id)).length,
+        towerParts,
+        note: `底架 ${baseConveyor} 件是**另外再建一次** layers:1 输送线数出来的（不是 parts.length − 塔身件数）；塔身 ${towerParts} 件逐族计数`
+      },
+      // 不跑内核就不给质量。估算值会被当成「实测」，混进成本/吊装/楼板核算。
+      massKg: null,
+      massSource: 'not-measured' as const,
+      massNote: '本工具不跑建模内核：质量必须由真 B-Rep（regen/STEP）回传体积后按密度算，这里不给估算值'
+    },
+    /**
+     * BOM / 成本覆盖度（P2-6）：回执里 146 件几何、8 行 BOM 是两台机器的清单。
+     * 本轮**不**把塔身塞进 `design.bomDraft`（那会改成本口径与价格簿匹配），而是显式标注
+     * 「机器 BOM 只覆盖底架、塔身见 geometry.structureBom」，让 cost.total 不被当整机成本。
+     */
+    bomCoverage: {
+      machineBomRows: machineBom.rows,
+      machineBomCoversTower: false as const,
+      machineBomScope: '底层输送线（第 1 层）' as const,
+      geometryPartCount: parts.length,
+      towerPartsNotInMachineBom: towerParts,
+      geometryStructureBomRows: resolved.geometry.structureBom.length,
+      costTotal: machineBom.costTotal,
+      costScope: 'base-conveyor-only' as const,
+      /// 「不适用」必须写清楚是哪一项不适用：成本不能代表整机，几何零件表可以
+      notApplicable: ['cost.total（只算底架输送线，不含塔身）', 'design.bomDraft 作为整机采购清单'],
+      note: `design.bomDraft 只有 ${machineBom.rows} 行（底架输送线口径），不含塔身 ${towerParts} 件；`
+        + `完整件表见 geometry.partBreakdown / 几何 structureBom（${resolved.geometry.structureBom.length} 行分组）。`
+        + '塔身接 BOM 生成器是下一轮的事，本轮不伪造成本'
+    },
+    structure: {
+      columnHeightMm: params.columnHeightMm,
+      columnSectionMm: params.columnSectionMm,
+      columnSectionRecommendedMm: params.requiredColumnSectionMm,
+      columnSectionSource: params.columnSectionSource,
+      frameSectionMm: params.frameSectionMm,
+      liftTravelMm: params.liftTravelMm,
+      topLayerZMm: params.topLayerZMm,
+      /** 导柱顶：从 `lift-post-*` 实体包围盒量（= 柱高），不是参数回显 */
+      postTopZMm: postTopZ,
+      /** 顶层托板上表面：从 `tray-*` 实体包围盒量（3606.5，比层平面 3600 高 6.5 = 托板厚 3 + 5 装配间隙 /2 口径） */
+      topTrayTopZMm: topTrayTopZ,
+      /**
+       * 导柱顶 − 顶层托板**上表面**（实体口径）= 233.5 mm。
+       * 旧字段用 `postTopZMm − topLayerZMm` 算，而这两者本来就是同一条算式里定义的
+       * （postTop = 柱高 = topLayer + 240），只能得出 240 —— 定义回声，不是量出来的。
+       */
+      postReachMm,
+      postReachBasis: 'entity-bounds' as const,
+      /** 同一余量的「层平面口径」（= 建造器的 240 设计值），供对照；实体口径比它少 6.5 mm */
+      postReachPlaneMm: round1(params.postTopZMm - params.topLayerZMm),
+      inboundBeltHeightMm: params.inbound.beltHeightMm,
+      loadPerColumnKg: null,
+      staticOnly: true as const,
+      accepted: false as const,
+      notes: [
+        `立柱截面按柱高反算：max(型材截面 ${params.frameSectionMm}, ceil5(${params.columnHeightMm}/48)) = ${params.requiredColumnSectionMm} mm`
+          + `（本次 ${params.columnSectionSource === 'derived' ? '由建造器取反算值' : '为显式给出值'} ${params.columnSectionMm} mm）；`
+          + '反算只解决「40 柱在这个高度差一个量级」，不等于截面够了',
+        '屈曲只是手算量级（AL6063、两端铰接 K=1 / 门架 K≈2）：40×40×2 在 3.84 m 时临界约 350 kg（K=1）、88 kg（K=2），'
+          + '80×80×3 约 1092 kg（K=2）。按探针口径（特征体积×密度，不是 B-Rep 实测）16 层塔身自重约 1.63 t、四柱均分约 0.41 t/柱；'
+          + '80×80×3 在 K=2 + 安全系数 3 下许用约 0.36 t。'
+          + `**两种口径必须分开读**：只看自重差约 13%；但 ${slots.usableStorage} 个储位的板料（${params.panel.massKg} kg/件，`
+          + `共 ${panelLoadKg} kg，不在几何质量里）加进来后是 ${selfWeightPerColumnT} + ${panelLoadPerColumnKg}/1000 = ${columnLoadT} t/柱，`
+          + `超许用约 ${overPercent}% —— 板料把缺口从 13% 放大到 ${overPercent}%，不能说成「差不多够」。`
+          + '**结论：定截面必须做正式校核（或改 Q235 / 加斜撑 / 做落地基座）。**未做风载/地震/螺栓/焊缝/疲劳/挠度组合。',
+        `导柱净余量按**实体**量：导柱顶 ${postTopZ} − 顶层托板上表面 ${topTrayTopZ} = ${postReachMm} mm`
+          + `（层平面口径 ${params.postTopZMm} − ${params.topLayerZMm} = 240，差 6.5 mm 来自「托板中心 vs 托板上表面」）。`
+          + '旧 conveyor-assembly 的 8 层路径导柱顶恒比顶层低 560 mm，那是既有缺陷，本次不复制也不修它。',
+        '**层间没有横梁/支撑（显式声明）**：塔身只有顶部 2 根横梁；15 层托条两端与立柱在几何上不相接'
+          + '（`tray-rail` 在 y∈[−350,−310]，立柱在 y∈[−755,−675]，间隙 325 mm），`conveyorJoints` 里 rail×column 为 0 对。'
+          + 'JOINT_RULES 里「托条两端搭在缓存立柱上」是**连接语义**，不是几何事实。'
+          + '这条既有缺陷从 8 层建造器就在（旧路径同样悬空），塔把它放大到 3.84 m/15 层；要变成可制造件必须补层间横梁或托架挂耳（会改件数与包络）。',
+        `升降轴：tower-lift，行程 ${params.liftTravelMm} mm = (${params.levels}−1) × ${params.layerPitchMm}，`
+          + '行程来自几何标注（config.actuators 为空），状态化干涉里 `lift.strokeSource=geometry`。'
+          + `台面建模在 beltHeight + 层距/2（层间中间位，非层平面），按行程平移终点比顶层平面高 90 mm；`
+          + '且台面在托板投影内、层托板是整块板 —— **没有升降通道**，sweep 逐层扫掠会把 lift-platform × tray-* 报为命中（真实机构缺口，未解决）',
+        `总高 ${params.columnHeightMm} mm：稳定性、消防/通道净高、检修平台与登高作业无法由静态几何回答，必须由人工/结构专业确认。`
+      ],
+      /** 塔身缺件清单（显式「不适用/未建」）：供下游别把结构件当已建 */
+      notModeled: [
+        '层间横梁/托架挂耳（托条目前悬空，见 notes）',
+        '升降通道（台面与层托板投影重叠，sweep 会命中）',
+        '防坠/抱闸、层定位机构、拖链与线缆',
+        '安全门/光幕/急停回路'
+      ]
+    },
+
+    capabilityBoundary: {
+      geometryKind: 'static-concept' as const,
+      acceptanceStatus: 'not-accepted' as const,
+      dynamicInterferenceChecked: false as const,
+      structuralChecked: false as const,
+      fireComplianceChecked: false as const,
+      ioAddressesAssigned: false as const,
+      plcProgramIncluded: false as const,
+      safetyCircuitIncluded: false as const,
+      throughputVerified: false as const,
+      slotClaim: {
+        total: slots.fromGeometry,
+        usable: slots.usableStorage,
+        message: `${slots.fromGeometry} 位 = 零件表里的 ${slots.fromGeometry} 个货位（含第 1 层进出料位），`
+          + `不是 ${slots.fromGeometry} 个已验证可服务储位；真实可服务储位 ${slots.usableStorage} 个`
+      },
+      /**
+       * 状态化干涉的**可用性**（不是"已校核"）：
+       * 轴已接进 `resolveLiftAxis`（strokeSource=geometry），所以 lift/sweep 能跑；
+       * 但台面没有升降通道、sweep 会把台面×托板报为命中 —— 这不是验收结论，是缺口证据。
+       */
+      dynamicInterference: {
+        statesAvailable: ['rest', 'lift', 'sweep'] as const,
+        statesUnavailable: ['push'] as const,
+        liftStrokeSource: 'geometry' as const,
+        sweepDeclaredHits: 'lift-platform × tray-*（台面在托板投影内，无升降通道）',
+        checkedForAcceptance: false as const
+      },
+      message:
+        '本几何为静态概念模型：件的外形是参数化特征/包围盒，不是制造用 B-Rep 结论；'
+        + 'lift/sweep 状态化干涉可跑（轴由几何标注、行程 strokeSource=geometry），但只做 AABB 初筛 + 解析式确认，'
+        + '且台面没有升降通道（sweep 会把 lift-platform × tray-* 报为命中，属真实机构缺口）；push 不适用（无移载轴）；'
+        + '结构强度/挠度/屈曲校核、防坠与抱闸、链条/丝杠载荷、双塔汇流争用、空托盘回流均未做；未生成 PLC 程序、未分配 IO 地址'
+        + '（草案 executable=false）、未做安全回路；静态 AABB 命中不等于制造碰撞结论。'
+        + '禁止宣称「16 位已实现/已验收」「结构已校核」「缓存机已实现」。'
+    }
+  };
+}
+
 
 const BUILD_MACHINE_MODEL_SCHEMA = {
   type: 'object',
@@ -951,6 +1320,40 @@ export class AgentTools {
         try {
           const bufferAnalysis = args.buffer === undefined ? undefined : analyzeBufferCapacity(args.buffer as BufferCapacityInput);
           const bufferTowerConfig = args.bufferTower === undefined ? undefined : args.bufferTower as BufferTowerConfig;
+          // 塔身几何：单独一块入参。不塞进 bufferTower（容量身份）也不塞进 config.conveyor
+          // （输送线的 1–8 层语义）。三者的关系只有一条：levels × slotsPerLevel === slotsPerTower。
+          const towerGeometryInput = args.bufferTowerGeometry;
+          let towerParams: ReturnType<typeof bufferTowerParamsFromConfig> | undefined;
+          let towerParts: ConveyorPart[] | undefined;
+          if (towerGeometryInput !== undefined) {
+            if (bufferTowerConfig === undefined) {
+              return {
+                ok: false,
+                code: 'INVALID_ARGUMENT',
+                message: 'bufferTowerGeometry 必须与 bufferTower 同时给出：前者是塔身几何，后者是容量身份（towerCount/slotsPerTower），'
+                  + '缺一个就无法核对「层数 × 每层位数 = 储位数」'
+              };
+            }
+            // 形状**不再**指望 schema（进程内调用不跑 schema）：先按白名单挑键，多余键直接拒绝。
+            // 容量身份（towers/slotsPerTower）只认 bufferTower，几何入参不能覆盖 —— 旧实现用
+            // spread 把 geometry 的键放在容量身份之后，于是 `slotsPerTower:2` 能静默改掉 16。
+            const geometryInput = coerceTowerGeometryInput(towerGeometryInput);
+            // 显式字段赋值（不 spread 进 bufferTower）：多出来的键没有任何机会改写容量身份。
+            towerParams = bufferTowerParamsFromConfig({
+              bufferTower: {
+                kind: 'tower',
+                towers: bufferTowerConfig.towerCount,
+                slotsPerTower: bufferTowerConfig.slotsPerTower,
+                levels: geometryInput.levels,
+                slotsPerLevel: geometryInput.slotsPerLevel,
+                ...(geometryInput.layerPitchMm !== undefined ? { layerPitchMm: geometryInput.layerPitchMm } : {}),
+                panel: geometryInput.panel,
+                inbound: geometryInput.inbound,
+                ...(geometryInput.frame !== undefined ? { frame: geometryInput.frame } : {})
+              } as unknown as MachineBufferTowerConfig
+            });
+            towerParts = buildBufferTowerParts(towerParams);
+          }
           // schema 无法表达"总量 ≤512"，这里先给出带两个乘数的明确回执，再交给纯数据层兜底。
           if (bufferTowerConfig !== undefined) {
             const towers = Number((bufferTowerConfig as { towerCount?: unknown }).towerCount);
@@ -1051,6 +1454,43 @@ export class AgentTools {
           });
           // 摘要里的零件数必须来自唯一几何入口：输送类是 85 件参数化整机，
           // 不是 48 件代理体 —— 否则工具回执与评审/3D 又对不上。
+          // 塔身几何：把归一化后的 config.bufferTower 写进 config（**不是**回执里临时拼一份），
+          // apply/regen/干涉/3D 才会读同一份配置。同时把 config.conveyor 收敛成「第 1 层那条输送线」
+          //（layers=1）：两份「层数」并存就是「参数不生效却看不出来」的老坑。
+          if (towerParams !== undefined && towerParts !== undefined) {
+            const towerConfig = towerParams.config;
+            const previousLayers = design.config.conveyor?.layers;
+            design.config = validateMachineConfig({
+                ...design.config,
+                bufferTower: towerConfig,
+                conveyor: {
+                  ...(design.config.conveyor ?? {}),
+                  lengthMm: towerConfig.inbound.lengthMm,
+                  widthMm: towerConfig.inbound.widthMm,
+                  beltHeightMm: towerConfig.inbound.beltHeightMm,
+                  frameSectionMm: towerConfig.frame.sectionMm,
+                  layers: 1,
+                  layerPitchMm: towerConfig.layerPitchMm
+                }
+              });
+            if (previousLayers !== undefined && previousLayers > 1) {
+              design.warnings.push(
+                `缓存塔几何覆盖了 brief/方案推断的 conveyor.layers=${previousLayers}：`
+                  + `塔的第 1 层就是这条底层输送线（layers=1），层数改由 config.bufferTower.levels=${towerConfig.levels} 表达`
+              );
+            }
+            // BOM/成本口径：`design.bomDraft` 是机型方案的执行机构/传感器清单（底架输送线口径），
+            // 不含塔身 117 件。不显式说，回执里「146 件几何 + 8 行 BOM + cost.total」会被读成整机成本。
+            const basePartCount = buildConveyorParts(bufferTowerInboundParams(towerParams)).length;
+            const bomRows = Array.isArray(design.bomDraft?.items) ? design.bomDraft.items.length : 0;
+            design.warnings.push(
+              `BOM/成本未含塔身 ${towerParts.length - basePartCount} 件：design.bomDraft 只有 ${bomRows} 行（底架输送线口径），`
+                + 'cost.total 只算这条底层输送线，不是整机成本；塔身件表见 bufferTowerGeometry.geometry.partBreakdown'
+            );
+            if (design.config.bufferTower === undefined) {
+              return { ok: false, code: 'INTERNAL_ERROR', message: '缓存塔配置写回 config 后丢失：parseBufferTower 未保留 bufferTower 块' };
+            }
+          }
           const resolvedGeometry = resolveMachineGeometry(design);
           return {
             ok: true,
@@ -1059,7 +1499,15 @@ export class AgentTools {
             // 重算时间线，否则面板只能拿机型名去重跑管线，算出来是另一台机器（步序/零件 id 全对不上）。
             brief: briefText,
             ...(bufferAnalysis ? { bufferAnalysis } : {}),
-             ...(bufferTower ? { bufferTower } : {}),
+            ...(bufferTower ? { bufferTower } : {}),
+            ...(towerParams !== undefined && towerParts !== undefined
+              ? {
+                bufferTowerGeometry: buildBufferTowerGeometryReceipt(towerParams, towerParts, resolvedGeometry, {
+                  rows: Array.isArray(design.bomDraft?.items) ? design.bomDraft.items.length : 0,
+                  costTotal: typeof design.cost?.total === 'number' ? design.cost.total : null
+                })
+              }
+              : {}),
             ...(bufferTouched || bufferRequested ? { bufferCapability: {
               status: 'partial-concept-only',
               capacityVerified: false,
@@ -1089,16 +1537,30 @@ export class AgentTools {
           };
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          // 缓存参数越界（RangeError）与内部程序缺陷分开记日志，回执 code 保持不变以免破坏调用方。
-          if (error instanceof RangeError) {
-            console.warn('[DESIGN_MACHINE_RANGE_REJECTED]', { site: 'desktop/src/agent/tools.ts:design_machine' }, message);
-          } else {
-            console.warn('[DESIGN_MACHINE_FAILED]', { site: 'desktop/src/agent/tools.ts:design_machine' }, message);
+          // 三种情况必须分开，不能一律 INVALID_ARGUMENT：
+          // - `BufferTowerConfigError.code === 'NOT_IMPLEMENTED'`：参数合法但本期几何不支持（双塔/每层多位）；
+          // - 其余 `RangeError`：调用方参数越界（容量算式/层距/进料长度…），记 RANGE 日志，回 INVALID_ARGUMENT；
+          // - 其它异常：**程序内部缺陷**。以前也回 INVALID_ARGUMENT，调用方会去改参数，
+          //   而真正该做的是报缺陷——这里回 INTERNAL_ERROR 并给 hint，日志单独一条。
+          if (error instanceof BufferTowerConfigError && error.code === 'NOT_IMPLEMENTED') {
+            console.warn('[DESIGN_MACHINE_NOT_IMPLEMENTED]', { site: 'desktop/src/agent/tools.ts:design_machine' }, message);
+            return { ok: false, code: 'NOT_IMPLEMENTED', message };
           }
+          if (error instanceof RangeError) {
+            // 缓存参数越界（RangeError）与内部程序缺陷分开记日志，回执 code 保持不变以免破坏调用方。
+            console.warn('[DESIGN_MACHINE_RANGE_REJECTED]', { site: 'desktop/src/agent/tools.ts:design_machine' }, message);
+            return {
+              ok: false,
+              code: 'INVALID_ARGUMENT',
+              message
+            };
+          }
+          console.warn('[DESIGN_MACHINE_FAILED]', { site: 'desktop/src/agent/tools.ts:design_machine' }, message);
           return {
             ok: false,
-            code: 'INVALID_ARGUMENT',
-            message
+            code: 'INTERNAL_ERROR',
+            message,
+            hint: '这是软件内部异常（不是参数问题）：请不要改参数重试，直接反馈现场日志与机型 brief'
           };
         }
       }
@@ -1384,7 +1846,8 @@ export class AgentTools {
         '口径：partCount（几何刚体数）含工件 +1，assemblyPartCount/BOM/成本**不含**工件。' +
         '口径必须按字段读：confirmedHits=解析式精确求交确认的实体重叠（唯一能否决出图的数字）；screenHits=只有包围盒依据或位姿不可达，只能当待复核；' +
         'mates=同轴嵌套配合（缸体×活塞杆这类，实体布尔必然重叠但不是干涉，不是缺陷）；mm3 含 declared/mate，只作量级参考。' +
-        '顶升行程读 active 机型 config 的执行机构 travelMm（turner-lift），读不到返回 STATE_UNAVAILABLE，绝不拿静态位姿冒充 lift；' +
+        '顶升行程优先读 active 机型 config 的执行机构 travelMm（turner-lift）；config 里没有顶升机构时认几何标注了 strokeSource=geometry 的轴' +
+        '（缓存塔 tower-lift，行程 = (层数−1)×层距），此时回执 lift.strokeSource=geometry，精度低于 config 行程；两种都没有才返回 STATE_UNAVAILABLE，绝不拿静态位姿冒充 lift；' +
         'directionOverridden=true 表示 config 方向与几何建模的伸出方向相反，该态是反向平移、位姿不可达。',
       inputSchema: INTERFERENCE_CHECK_SCHEMA,
       handler: async (args) => {

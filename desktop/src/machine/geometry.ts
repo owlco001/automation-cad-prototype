@@ -90,6 +90,20 @@ export interface GeomMovingAxis {
   home: 'retracted' | 'open' | 'zero';
   durationMs: number;
   points: { extend?: string; retract?: string; grip?: string; point?: string };
+  /**
+   * 轴的点位（联动视图按它判「这条轴有没有点位可点亮」）。
+   *
+   * 与 `points` 的区别：`points` 是「每个动作阶段点哪个 IO」，`point` 是「这条轴自己叫什么点位」。
+   * 缓存塔没有 config.actuators，轴是几何标注出来的，只能在这里给点位；
+   * 缺了它联动视图会报「N 个运动轴没有点位，联动播放不会驱动它们」。
+   */
+  point?: string;
+  /**
+   * 行程来源：`config` = 来自 `config.actuators[].travelMm`；`geometry` = 几何标注自带
+   * （缓存塔：`config.actuators` 为空，行程由塔参数 `(层数−1)×层距` 派生）。
+   * 干涉检查靠它标精度：几何标注的行程不是工程师给的伺服参数。
+   */
+  strokeSource?: 'config' | 'geometry';
   /** gripper：每个夹指闭合时沿 axis 的符号（+1 / -1）。 */
   jaws?: { partId: string; sign: 1 | -1 }[];
   /**
@@ -145,10 +159,11 @@ export interface MachineGeometry {
   upAxis: 'z';
   /**
    * 几何来源：`conveyor-assembly` = 输送类参数化整机（与 STEP/GLB/BOM 同一份零件表），
-   * `station-generator` = 工位生成器代理体。由 `machine-geometry.ts` 的唯一入口标注；
+   * `buffer-tower-assembly` = 缓存塔塔身（同样是 ConveyorPart 管线，但层数不适用输送线的
+   * 1–8 层语义），`station-generator` = 工位生成器代理体。由 `machine-geometry.ts` 的唯一入口标注；
    * 直接调 `generateMachineGeometry` 的老调用方留空（等价于 station-generator）。
    */
-  geometrySource?: 'conveyor-assembly' | 'station-generator';
+  geometrySource?: 'conveyor-assembly' | 'buffer-tower-assembly' | 'station-generator';
   /**
    * 映射前的整机装配件数（BOM/STEP 的口径）。只在几何刚体数与装配件数不一致时出现：
    * 输送类的顶升气缸在 BOM 里是一件，但缸体与活塞杆是两个刚体（顶升时只动杆），

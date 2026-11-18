@@ -14,6 +14,11 @@
 //   - assertDesign 抛 issues[0].message，保持既有 `throw new Error(中文文案)` 的调用方式。
 
 import { normalizePointKey } from '../plcgen/io.ts';
+import {
+  BufferTowerConfigError,
+  bufferTowerParamsFromConfig,
+  type MachineBufferTowerConfig
+} from './buffer-tower-assembly.ts';
 
 export const DEFAULT_ACTUATOR_TRAVEL_MM = 40;
 export const MIN_ACTUATOR_TRAVEL_MM = 0.1;
@@ -126,6 +131,12 @@ export interface MachineConfig {
   formId?: string;
   /** 输送机参数：有它才可能走参数化整机，缺省则回落工位生成器 */
   conveyor?: MachineConveyorConfig;
+  /**
+   * 缓存塔（塔身几何）参数：`kind: 'tower'` 是判别字段，有它就走塔身建造器
+   * （`buffer-tower-assembly.ts`），与 `conveyor.layers` 的 1–8 层语义**互不影响**。
+   * 形状与不变量在 `buffer-tower-assembly.ts` 里判定（fail-loud，不夹紧）。
+   */
+  bufferTower?: MachineBufferTowerConfig;
 }
 
 export type DesignIssueCode =
@@ -137,7 +148,10 @@ export type DesignIssueCode =
   | 'FORM_KIND_UNSUPPORTED'
   | 'ACTUATOR_KIND_UNSUPPORTED'
   | 'SAFETY_REF_UNDEFINED'
-  | 'CONFIG_SHAPE';
+  | 'CONFIG_SHAPE'
+  /** 缓存塔：容量与几何对不上 / 数值不成立 / 本期几何不支持 */
+  | 'BUFFER_TOWER_INVALID'
+  | 'BUFFER_TOWER_NOT_IMPLEMENTED';
 
 export interface DesignIssue {
   code: DesignIssueCode;
@@ -309,9 +323,10 @@ function parseConfig(value: unknown): MachineConfig {
   /**
    * 输送线例外：板在带面上由线体带走，站轴是空的（驱动滚筒属传动件，进 BOM/电机选型，
    * 不进 config.actuators——否则会以「分度 90° 的旋转轴」身份进 PLC 步序与 DB_IO）。
-   * 判定不靠机型名，靠 config.conveyor 是否给出了线体参数；其余机型仍然必须有执行机构。
+   * 判定不靠机型名，靠 config.conveyor 是否给出了线体参数；缓存塔（config.bufferTower）同理——
+   * 它的第 1 层就是一条输送线，动作在驱动电机上，不在 config.actuators 里。其余机型仍必须有执行机构。
    */
-  const conveyorConfig = isRecord(record.conveyor);
+  const conveyorConfig = isRecord(record.conveyor) || isRecord(record.bufferTower);
   if (!Array.isArray(rawActuators) || (rawActuators.length === 0 && !conveyorConfig)) {
     fail(
       'CONFIG_SHAPE',
@@ -446,6 +461,29 @@ function parseConfig(value: unknown): MachineConfig {
   if (formId !== undefined) config.formId = formId;
   const conveyor = parseConveyorParams(record.conveyor);
   if (conveyor !== undefined) config.conveyor = conveyor;
+  const bufferTower = parseBufferTower(record.bufferTower);
+  if (bufferTower !== undefined) config.bufferTower = bufferTower;
+  /**
+   * 「两份层数并存」是配置层的老坑（P1-5）：`conveyor.layers` 与 `bufferTower.levels`
+   * 是两套语义（输送线的多层缓存 / 塔的物理层数）。塔的第 1 层就是那条底层输送线，
+   * 所以塔在场时 `conveyor.layers` 只能是 1。
+   *
+   * 以前这里没有任何交叉不变量：`conveyor.layers=8 + bufferTower.levels=16` 能过校验，
+   * 随后几何出 146 件 / 16 层，而任何读 `conveyor.layers` 的下游（BOM / PLC / brief 回显）
+   * 仍以为是 8 层。现在 fail-loud：宁可让调用方改参数，不给一台「层数说不清」的机器。
+   */
+  if (config.bufferTower !== undefined && config.conveyor !== undefined) {
+    const layers = config.conveyor.layers ?? 1;
+    if (layers > 1) {
+      fail(
+        'BUFFER_TOWER_INVALID',
+        'config.conveyor.layers',
+        `缓存塔与输送线层数不能并存：config.conveyor.layers=${layers}，config.bufferTower.levels=${config.bufferTower.levels}`,
+        '塔的第 1 层就是那条底层输送线（layers 必须是 1），层数只由 config.bufferTower.levels 表达；'
+          + '把 conveyor.layers 改成 1（或删掉 bufferTower 走输送线多层缓存语义）'
+      );
+    }
+  }
   return config;
 }
 
@@ -483,6 +521,35 @@ function parseConveyorParams(value: unknown): MachineConveyorConfig | undefined 
   const partThickness = optionalPositive(value.transferPartThicknessMm);
   if (partThickness !== undefined) conveyor.transferPartThicknessMm = Math.min(200, partThickness);
   return conveyor;
+}
+
+/**
+ * 解析 `config.bufferTower`（缓存塔几何参数）。
+ *
+ * 与 `conveyor` 的宽容口径**相反**：塔一块要么完整成立、要么报错。
+ * 理由：把 16 层静默按 8 层出图，用户看到的是一台「参数不生效却看不出来」的机器；
+ * 现状 `conveyor.layers` 就是 4 处 clamp（其中 `parseConveyorParams` 连 message 都不给）。
+ * 判定本身只有一份实现（`buffer-tower-assembly.ts` 的 fail-loud 不变量），这里只做错误码映射：
+ * 形状/算式/范围 → `BUFFER_TOWER_INVALID`；本期几何不支持 → `BUFFER_TOWER_NOT_IMPLEMENTED`。
+ */
+function parseBufferTower(value: unknown): MachineBufferTowerConfig | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!isRecord(value)) {
+    fail('CONFIG_SHAPE', 'config.bufferTower', 'config.bufferTower 必须是对象（缓存塔几何参数）');
+  }
+  try {
+    return bufferTowerParamsFromConfig({ bufferTower: value as unknown as MachineBufferTowerConfig }).config;
+  } catch (error) {
+    if (error instanceof BufferTowerConfigError) {
+      fail(
+        error.code === 'NOT_IMPLEMENTED' ? 'BUFFER_TOWER_NOT_IMPLEMENTED' : 'BUFFER_TOWER_INVALID',
+        'config.bufferTower',
+        error.message,
+        '缓存塔配置不夹紧：请按 message 里的算式/范围修正参数，不要期待 16 被静默改成 8'
+      );
+    }
+    throw error;
+  }
 }
 
 /**

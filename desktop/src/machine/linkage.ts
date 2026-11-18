@@ -21,6 +21,8 @@ export interface MovingAxis {
   home: string;
   durationMs: number;
   points?: Record<string, string>;
+  /** 轴自己的点位（几何显式给的，如缓存塔 `tower-lift`）；联动视图用它判「有没有点位」 */
+  point?: string;
   axis?: Vec3;
   pivot?: Vec3;
   jaws?: Array<{ partId: string; sign: number }>;

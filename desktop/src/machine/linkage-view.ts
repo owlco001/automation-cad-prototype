@@ -53,7 +53,10 @@ export function formatLinkageView(linkage: any): LinkageView {
   });
 
   const warnings: string[] = [];
-  const missingIo = axes.filter((axis) => !axis?.point || axis?.point === '');
+  // 点位认两处：`point`（几何显式给的轴点位，缓存塔用）与 `points.point`（分度台这类
+  // 把点位写在 points 里的轴）。只认前者会把「有点位」的轴也报成没点位。
+  const pointOf = (axis: any): string => String(axis?.point ?? axis?.points?.point ?? '');
+  const missingIo = axes.filter((axis) => pointOf(axis) === '');
   if (missingIo.length > 0) {
     warnings.push(`${missingIo.length} 个运动轴没有点位（${missingIo.map((axis) => String(axis?.id ?? axis?.partId ?? '?')).slice(0, 3).join('、')}${missingIo.length > 3 ? ' 等' : ''}），联动播放不会驱动它们`);
   }
