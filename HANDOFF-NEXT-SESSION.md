@@ -1,15 +1,15 @@
 # AutomationCAD 下一会话交接
 
-更新时间：2026-11-18（本轮：M1 承托/通道修复 + 塔 B-Rep 入口接通 + 整机 STEP 完整性门禁 + 统一分派判据）
+更新时间：2026-11-18（本轮：M1 承托/通道诊断接入 Agent 工具层，修复 fail-closed 输入契约）
 项目：`owlco001/automation-cad-prototype`
 工作目录：`/tmp/automation-cad-prototype`
-当前 HEAD：`7b089a1`（与 `origin/main` 同点）；**工作区现有未提交改动：10 M + 5 ??**（M1 承托/通道这一轮 + 上一轮塔 B-Rep/STEP 门禁叠在同一工作区，清单见「未提交的文件」，`git status --short` 为准）。
+当前 HEAD：`5885e51`（与 `origin/main` 同点）；当前工作区有本轮未提交的 Agent 工具接线、测试与文档改动（以 `git status --short` 为准）。此前 M1 几何/诊断实现已在 `5885e51` 提交且 CI 7/7 全绿。
 
-> **口径**：下文凡标「本轮」的数字，都是 **HEAD `7b089a1` + 上述未提交工作区** 在本机（**node v26.7.0** / npm 11.19.0）跑出的最终实测——**未提交、未上 CI**。标「历史」的数字来自已提交的上一轮，只能当历史，不能当现状。
+> **当前轮实测**：Agent 专项 26/26、focused 341/341、全量 3580 项（3577 pass / 3 skip / 0 fail）、`npx tsc --noEmit` 通过。因本轮更新 `NL-AGENT.md` 与 README 索引统计，`kb:build` 已重建；提交前需再次跑与最终文档一致的 `kb:build`、focused、tsc、diff-check。当前改动尚未提交、未 push、当前 CI 尚未运行。
 
-## M1「首层承托取放」纯数据概念验证（2026-11-18，基线 `main@7b089a1`，未提交）
+## M1「首层承托取放」纯数据概念验证（2026-11-18，几何实现已提交于 `5885e51`）
 
-> 这一节是**最新一轮**（基线 `7b089a1`）在 T3 对抗审查修完 P1、并按只读复核闭合 P1-R1/P1-R2/P2-5/P2-6 之后的实测；下面从「开始前必做」起仍是 `411f21d` 那一轮的记录，数字不要混用。
+> 以下几何实测为上一轮 M1 实现的范围与结果；本轮只增加 Agent 工具契约和文档，不改变几何/干涉判据。
 
 **先钉死三条口径（否则后面的数字会被误读）**
 
@@ -29,6 +29,7 @@
   - **`verified` 只认几何行表（复核 P1-R2）**：`rowsSource='caller'` 一律 `diagnostic-only`（夹具行表 + 生产几何 + pose 曾报 `verified`/双向 `supported`/`m1.feasible=true`，而该塔 146 件、叉指 0 件）；`resolveChannelFeasibility` 收到 `supportSource:'caller-rows'` 也强制 `diagnosticOnly`。
 - `machine-geometry.ts` 的 `towerWorkpiecePlaceholder()`（上一轮已落地，本轮未改）：板占位体 2278×1134×35、底面 900、`inCollisionSet:false`，**不进 `parts`**。
 - `interference-states.ts` 只读 `panelSupport / panelFeasibility / panelChannelNote` + `requirePanel:true`，判据未改。
+- **工具层已接（`src/agent/commands.ts` + `tools.ts`）**：`run_interference_check` 新增布尔 `requirePanel`，经 `run_interference` 的 states 分支透传到 `runInterferenceStates`；`requirePanel:true` 是强制校验诊断适用条件的 fail-closed 参数；缓存塔在缺省路径也会回只读诊断字段 `panelSupport`/`panelFeasibility`/`panelChannelNote`，此参数不是字段开关。几何里没有板或机型不是缓存塔回 `INVALID_ARGUMENT`（含「`requirePanel` 没给 states」也显式拒，不静默忽略）；缺省/false 与旧回执逐字节一致。口径仍由 `panel-channel.ts` 定：生产塔恒 `diagnostic-only` + `feasible=false`，`verified` 只属于 M1 夹具件表；结果 >10 KB 时照旧走 `serializeToolResult`（preview + `resultId`，全文外置）。测试 `test/agent/interference-panel-diagnostics.test.mjs`（9 条，覆盖命令层与工具层的缺省、类型、空状态和截断契约）。
 - `scripts/verify-channel.mjs` 重写为**层数无关**（件数从 `parts` 派生、只校验关系，不写 146 / 16 层 / ≥400 处），新增 4 条反例：中心偏移、位移 5、生产 placeholder、缺位姿/缺位移；**`--levels` 2..64 均 exit 0**：17 层起基线建造器的 `gearmotor|column-bl` 相交 1 对（柱截面随塔高派生 → 柱位外移）单列为 `baselineNotes`，不计入通道自证，**其余 rest/lift 命中仍判失败**，≤16 层要求全 0；断言名也改掉「真实件表首层也托不住」这种把阈值当几何事实的写法。
 - 测试：`panel-channel.test.mjs` **32 条** + `buffer-tower-channel.test.mjs` **17 条**，都在 `test:focused` 里（定向复跑 **49/49 pass**）。
 
