@@ -183,10 +183,33 @@ export interface MachineGeometry {
   moving: GeomMovingAxis[];
   /** 生成器显式产出的结构连接（不靠命名规则猜），干涉初筛只放行这些。 */
   joints: GeomJoint[];
+  /**
+   * 板（工件）占位体的**只读诊断**描述：**不进 `parts`**、不参与任何 AABB 判据。
+   *
+   * 为什么单列而不是当普通件塞进 parts（本轮的边界）：缓存塔把板塞进碰撞件表会让
+   * `partCount` 由 146 变 147、并把 lift/sweep 的命中数一起改掉（板随 2700 行程穿过各层托板，
+   * 实测 sweep 由 405 增到 446）——那是另一轮「板进扫掠」的语义变更，不是本轮只读诊断。
+   * 所以这里只带「板在静止位姿的尺寸/位置」，让承托断言（`panel-channel.ts`）有真实输入，
+   * 而 rest/lift/sweep 的判据一个字不动。`inCollisionSet: false` 是判据字段，不是注释。
+   */
+  workpiecePlaceholder?: GeomWorkpiecePlaceholder;
   /** 结构件 BOM（机架、底板、门架、输送线等），与 bomDraft 的执行机构/传感器分开。 */
   structureBom: { name: string; spec: string; qty: number; material: string }[];
   assumptions: string[];
   warnings: string[];
+}
+
+/**
+ * 只读板件占位体（见 `MachineGeometry.workpiecePlaceholder`）。
+ * 字段与转移工位的老工件件（`workpiece-plate`）同口径，将来真要接进 `parts` 时只需要换容器。
+ */
+export interface GeomWorkpiecePlaceholder extends GeomPart {
+  /** 长×宽×厚（mm） */
+  sizeMm: Vec3;
+  /** 静止位姿的板底 z（mm） */
+  bottomZmm: number;
+  /** 是否在碰撞件表里；本轮恒 false（口径见 MachineGeometry.workpiecePlaceholder） */
+  inCollisionSet: boolean;
 }
 
 export interface MachineGeometryOptions {

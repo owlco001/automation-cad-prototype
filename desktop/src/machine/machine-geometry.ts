@@ -62,6 +62,7 @@ import {
   type GeomPart,
   type GeomRole,
   type GeomShape,
+  type GeomWorkpiecePlaceholder,
   type MachineGeometry,
   type MachineGeometryOptions,
   type Vec3
@@ -1029,6 +1030,39 @@ export function towerLiftAxis(
   };
 }
 
+/**
+ * 塔的板件占位体：**只读诊断**，不进 `parts`（口径见 `geometry.ts` 的 workpiecePlaceholder）。
+ *
+ * 为什么要它：承托断言（`panel-channel.ts` 的 `resolvePanelSupport`）必须从**几何**里读板，
+ * 而不是从参数另算一份 —— 否则「几何里有板」和「这次查了板」又会是两件事。
+ * 本轮只带静止位姿（底面 = 第 1 层承托面 = beltHeight），因为 M1 段只有 20 mm 取放；
+ * 把它挂进升降轴（行程 2700）会立刻改变 lift/sweep 的全部命中数，那是下一轮的语义变更。
+ */
+export function towerWorkpiecePlaceholder(params: ResolvedBufferTowerParams): GeomWorkpiecePlaceholder {
+  const thickness = params.panel.thicknessMm;
+  const bottomZ = params.inbound.beltHeightMm;
+  return {
+    id: WORKPIECE_PART_ID,
+    name: '工件（板件占位体 · 只读诊断）',
+    role: 'workpiece',
+    shape: {
+      type: 'box',
+      size: [round2(params.panel.lengthMm), round2(params.panel.widthMm), round2(thickness)]
+    },
+    center: [0, 0, round2(bottomZ + thickness / 2)],
+    rotationZDeg: 0,
+    // 与转移工位的老工件件同色同材质：视口里板必须和机台件一眼分开
+    color: '#0ea5e9',
+    material: 'PV-GLASS',
+    bomGroup: 'structure',
+    estimated: true,
+    moving: false,
+    sizeMm: [round2(params.panel.lengthMm), round2(params.panel.widthMm), round2(thickness)],
+    bottomZmm: round2(bottomZ),
+    inCollisionSet: false
+  };
+}
+
 /** 塔身几何的收尾：标 source 派生的假设/告警，并把唯一台面标成随动件。 */
 function towerGeometry(
   parts: readonly ConveyorPart[],
@@ -1040,13 +1074,19 @@ function towerGeometry(
   });
   const axis = towerLiftAxis(parts, params);
   const partsWithMoving = base.parts.map((part) => (axis.partIds.includes(part.id) ? { ...part, moving: true as const, actuatorId: axis.actuatorId } : part));
+  const panel = towerWorkpiecePlaceholder(params);
   assertTowerAboveGround(parts, params);
   return {
     ...base,
     parts: partsWithMoving,
     moving: [axis, ...base.moving],
+    workpiecePlaceholder: panel,
     assumptions: [
       `几何来源：buffer-tower-assembly 缓存塔塔身（${parts.length} 件，含底层输送线），与 BOM/STEP 同一份零件表`,
+      `板件占位体（只读）：${panel.sizeMm[0]}×${panel.sizeMm[1]}×${panel.sizeMm[2]} mm、role=workpiece、material=PV-GLASS，`
+        + `底面 ${panel.bottomZmm}（= 第 1 层承托面）。它只挂在 geometry.workpiecePlaceholder 上供承托断言读取，`
+        + `**不进 parts**：装配件数仍是 ${parts.length} 件、partCount=${parts.length}、rest/lift/sweep 的判定与命中数一个都不变。`
+        + '把板接进碰撞件表（partCount 146→147、满行程 sweep 405→446 命中）是下一轮语义变更，本轮不做',
       `塔参数：${params.levels} 层 × ${params.slotsPerLevel} 位、层距 ${params.layerPitchMm} mm、柱高 ${params.columnHeightMm} mm、`
         + `立柱截面 ${params.columnSectionMm} mm（${params.columnSectionSource === 'derived' ? '按柱高反算' : '显式给出'}）、`
         + `升降行程 ${params.liftTravelMm} mm（导柱顶 ${params.postTopZMm} ≥ 顶层托板 ${params.topLayerZMm} + 240）`,

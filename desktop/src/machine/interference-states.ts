@@ -29,6 +29,12 @@ import {
 } from './machine-geometry.ts';
 import type { MachineGeometry } from './geometry.ts';
 import { screenInterference } from './interference.ts';
+import {
+  checkPanelChannel,
+  panelSourceOfGeometry,
+  type ChannelFeasibility,
+  type PanelSupportReport
+} from './panel-channel.ts';
 
 export const INTERFERENCE_STATES = ['rest', 'lift', 'sweep', 'push'] as const;
 export type InterferenceState = (typeof INTERFERENCE_STATES)[number];
@@ -256,6 +262,20 @@ export interface InterferenceStatesPayload {
   reviewStatus: ReviewStatus;
   precision: InterferencePrecision;
   note: string;
+  /**
+   * 板（工件）承托断言（**只读**，来自 `panel-channel.ts` 的纯函数）：
+   * 顶面贴板底 ±1 mm 才算接触；覆盖率/接触带/x 重叠三条各自判。
+   * `null` = 本机型不在 M1 范围或几何里没有板占位体（原因见 panelChannelNote），
+   * **不是**「板被托住了」。
+   */
+  panelSupport: { rest: PanelSupportReport; carried: PanelSupportReport } | null;
+  /**
+   * 升降通道可行性（**只读**）：行程/净跨/走廊/承托 + blockers。
+   * `feasible=false` 是「多层通道不成立」，与首层 M1 段能托住是两个结论，不许互相覆盖。
+   */
+  panelFeasibility: ChannelFeasibility | null;
+  /** 上面两块为 null 的原因 / 结论口径（不静默：缺板说明缺什么，不成立说明缺哪几条） */
+  panelChannelNote: string;
 }
 
 export interface InterferenceStatesFailure {
@@ -642,6 +662,12 @@ export function runInterferenceStates(input: {
   states: unknown;
   config: unknown;
   geometry?: unknown;
+  /**
+   * 要求本次检查必须给出板承托结论（M1 通道检查用）。
+   * 为 true 时：几何里没有板占位体、或机型不是缓存塔 → 直接 INVALID_ARGUMENT，
+   * **绝不**返回一份「查不到 → 绿」的回执（N5）。
+   */
+  requirePanel?: boolean;
 }): InterferenceStatesOutcome {
   const normalized = normalizeStates(input.states);
   if (!normalized.ok) return normalized;
@@ -684,6 +710,56 @@ export function runInterferenceStates(input: {
 
   const needLift = states.some((state) => state === 'lift' || state === 'sweep');
   const needPush = states.some((state) => state === 'push');
+
+  /* ------------------------------------------------------------------ *
+   * 板承托 / 通道可行性（**只读**：不改 states 的任何判据、不动 partCount）
+   * ------------------------------------------------------------------ */
+  const isTower = geometrySource === 'buffer-tower-assembly';
+  const panelSource = panelSourceOfGeometry(geometry);
+  if (input.requirePanel === true && !panelSource) {
+    return {
+      ok: false,
+      code: 'INVALID_ARGUMENT',
+      message: '要求检查板承托通道，但几何里没有板占位体（workpiece-plate / role=workpiece）',
+      hint: '缺板就判不了承托：本检查拒绝返回绿（「没查到」不等于「被托住」）。'
+        + 'M1 件表要在几何里给出 workpiece-plate 占位件，或由塔分派给出 geometry.workpiecePlaceholder'
+    };
+  }
+  if (input.requirePanel === true && !isTower) {
+    return {
+      ok: false,
+      code: 'INVALID_ARGUMENT',
+      message: `板承托通道检查只对缓存塔成立（本次几何来源 ${geometrySource}）`,
+      hint: '用 config.bufferTower（kind=tower）的机型；别的机型没有升降通道这条轴'
+    };
+  }
+  let panelSupport: { rest: PanelSupportReport; carried: PanelSupportReport } | null = null;
+  let panelFeasibility: ChannelFeasibility | null = null;
+  let panelChannelNote: string;
+  if (isTower && panelSource) {
+    const check = checkPanelChannel({ config: input.config, geometry });
+    if (check.ok) {
+      panelSupport = check.panelSupport;
+      panelFeasibility = check.feasibility;
+      const rest = check.panelSupport.rest;
+      const carried = check.panelSupport.carried;
+      panelChannelNote = `承托断言（只读，阈值 ≥${rest.thresholds.minCoveredPct}% / ≥${rest.thresholds.minBands} 带 / `
+        + `带 x≥${rest.thresholds.minBandOverlapXmm} / 接触 x≥${rest.thresholds.minContactOverlapXmm}）：`
+        + `rest ${rest.verdict}（覆盖 ${rest.coveredPct}%、${rest.bandsY.length} 带）、`
+        + `carried ${carried.verdict}（覆盖 ${carried.coveredPct}%、${carried.bandsY.length} 带，随动 +${carried.poseShiftMm} mm）；`
+        + `多层通道 feasible=${check.feasibility.feasible}，blockers=`
+        + `${check.feasibility.blockers.map((blocker) => blocker.reason).join('/')}。`
+        + '首层能托住 ≠ 多层可行；blockers 里的 load-passes-shelf 是结构事实（纯 Z 升降必穿过板投影内的承托面）';
+    } else {
+      panelChannelNote = `承托/通道未算出：${check.message}`;
+    }
+  } else {
+    panelChannelNote = panelSource
+      ? `本次几何来源 ${geometrySource} 不是缓存塔：没有升降通道这条轴，panelSupport/panelFeasibility 不产出（null 不代表板被托住）`
+      : '几何里没有板占位体（workpiece-plate / role=workpiece）：panelSupport/panelFeasibility 为 null，'
+        + '「板能不能被托住」不在本结果的证明范围内（要它就给 M1 件表或 requirePanel=true）';
+  }
+
   const lift = needLift || needPush ? resolveLiftAxis(input.config, geometry) : null;
   if (needLift && !lift) {
     return {
@@ -847,6 +923,9 @@ export function runInterferenceStates(input: {
     ...(pushUnavailable ? { unavailable: { push: pushUnavailable } } : {}),
     states: output,
     reviewStatus,
+    panelSupport,
+    panelFeasibility,
+    panelChannelNote,
     precision: {
       screen: 'aabb',
       confirm: 'analytic-primitive',
@@ -879,5 +958,6 @@ export function runInterferenceStates(input: {
           + '「板能不能推出出料口」不在本结果的证明范围内。')
       + `本次几何来源 geometrySource=${geometrySource}（输送类走参数化整机，缓存塔走塔身建造器，其余形态走工位生成器），`
       + '结论只对这套零件表成立；和 B-Rep 结论对齐前先确认两边 assemblyPartCount 一致。'
+      + `承托/通道（只读，判据一字未改）：${panelChannelNote}`
   };
 }
