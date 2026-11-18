@@ -1321,7 +1321,7 @@ export function checkPanelChannel(input: {
       code: 'INVALID_ARGUMENT',
       message: '几何里没有板的位姿（workpiecePlaceholder 缺 center / 无 role=workpiece 的件）：'
         + '「没查到板」不等于「板没被托住」，本检查必须拒绝，不能返回绿',
-      hint: 'M1 件表要在几何里给出 workpiece-plate 占位件（或 geometry.workpiecePlaceholder 带 center）'
+      hint: '几何里没有可识别的板占位体时不会返回承托结论；需要板件时先重建包含板占位体的几何，再执行诊断'
     };
   }
   const rowsSource: 'geometry' | 'caller' = input.rows ? 'caller' : 'geometry';

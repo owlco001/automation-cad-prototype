@@ -764,6 +764,34 @@ function registerReadCommands(bus: CommandBus): void {
     async run(args, ctx) {
       // 状态化检查（rest/lift/sweep）：走 active 机型的参数化几何，行程从 config 读。
       // 不传 states 时保持旧行为（渲染层当前场景的静态位姿），不能改形状。
+      // requirePanel 是几何诊断开关，没有 states 就没有几何可查 —— 显式拒绝，不许静默忽略。
+      //
+      // 类型先在命令层卡死：语义只有布尔一条，'true'/1/{} 这类「看着像真」的输入一律
+      // INVALID_ARGUMENT。以前这里全程 `=== true` 判定，非布尔就落回旧行为返回 ok:true，
+      // 与工具层（tools.ts 同一条 typeof 校验）、MODULE.md/NL-AGENT.md 写的「不会静默忽略」
+      // 相反；直接 bus.execute 的脚本/IPC/eval 绕过工具层，所以这条必须在命令层也有。
+      // NaN/0/'' 同理被拒 —— 布尔口径按类型认，不按真值认。
+      if (args.requirePanel !== undefined && typeof args.requirePanel !== 'boolean') {
+        return {
+          ok: true,
+          data: {
+            ok: false,
+            code: 'INVALID_ARGUMENT',
+            message: 'requirePanel 必须是布尔值（true=要求承托/通道诊断，false 或省略=旧行为）'
+          }
+        };
+      }
+      if (args.requirePanel === true && (args.states === undefined || args.states === null)) {
+        return {
+          ok: true,
+          data: {
+            ok: false,
+            code: 'INVALID_ARGUMENT',
+            message: 'requirePanel 只在位姿化检查里成立：请同时传非空 states（rest / lift / sweep / push）',
+            hint: '承托/通道要在现有几何上算；不传 states 走的是渲染层静态位姿，没有能查的几何来源'
+          }
+        };
+      }
       if (args.states !== undefined && args.states !== null) {
         if (!ctx.userDataRoot) {
           return {
@@ -788,7 +816,16 @@ function registerReadCommands(bus: CommandBus): void {
             }
           };
         }
-        return { ok: true, data: runInterferenceStates({ states: args.states, config: active.config }) };
+        // 承托/通道诊断（requirePanel）：只在显式 true 时透传。缺省（或 false）不下发，
+        // 回执形状/判据与旧行为逐字节一致 —— 不能因为多了个参数就让所有塔检查变成可能失败。
+        return {
+          ok: true,
+          data: runInterferenceStates({
+            states: args.states,
+            config: active.config,
+            ...(args.requirePanel === true ? { requirePanel: true } : {})
+          })
+        };
       }
       const result = await ctx.bridge.call<InterferenceBridgeResult>('runInterference');
       if (!result || isBridgeFailure(result) || !Array.isArray(result.items)) {

@@ -91,7 +91,7 @@ interface Bridge {
 | `import_cad` | `path` | `import_cad` | ✅ 可用 |
 | `get_bom` | 无 | `get_bom` | ✅ 简化 BOM |
 | `get_project_context` | 无 | `get_project_context` | ✅ 只读：域/视图/选中/机型/底板/单位/最近操作，缺失为 null |
-| `run_interference_check` | `states?`（`rest`/`lift`/`sweep`） | `run_interference` | ✅ 不传 states=旧行为（渲染层静态位姿，前 20 条）；传 states=按 active 机型位姿化检查（lift 按 `turner-lift.travelMm` 平移可动件，sweep 每 10 mm 一步），无顶升轴返回 `STATE_UNAVAILABLE` |
+| `run_interference_check` | `states?`（`rest`/`lift`/`sweep`/`push`）/ `requirePanel?` | `run_interference` | ✅ 不传 states=旧行为（渲染层静态位姿，前 20 条）；传 states=按 active 机型位姿化检查（lift 按 `turner-lift.travelMm` 平移可动件，sweep 每 10 mm 一步），无顶升轴返回 `STATE_UNAVAILABLE`；`requirePanel:true`（须同时给非空 states）用于**强制校验**板承托 / 升降通道诊断适用条件，错误类型为 `INVALID_ARGUMENT`；缓存塔在缺省路径也会回 `panelSupport`/`panelFeasibility`/`panelChannelNote` 只读诊断字段，该参数不是字段开关。几何里没有板或机型不是缓存塔直接拒绝，缺省/false 与旧回执逐字节一致。
 | `capture_view` | `view?`（3d/linkage/library/exports）/ `width?` / `height?` / `region?{x,y,w,h}` / `scale?` | `capture_view` → 主进程 `electron/agent-capture.ts` | ✅ 只读：`capturePage` 落盘 `userData/agent-shots/<timestamp>-<view>.png`，返回 `{path,bytes,sha256,width,height,view}`；首页/未就绪 `VIEW_NOT_READY`，>5 MiB 缩尺寸重拍一次。`region` 用原图像素坐标（原点在图像左上；`w,h>=32`、`0<=x,y`），上界是**本次截图的真实像素尺寸**（高 DPI 屏大于 1600×1000，可用范围以返回的 `sourceSize` 为准），**先裁后缩**，越界按真实尺寸夹紧并回 `{region,clamped,scale,sourceSize}`（`clamped:true`），局部图落盘名带 `-region`；不传 region 且 scale=1 时落盘字节与旧版完全一致 |
 | `suggest_kinematics` | `includeLow? / limit?` | `suggest_kinematics` → 渲染桥 `suggestKinematics` | ✅ 只读：返回压缩后的高/低置信度建议，只刷新标注抽屉建议列表，`applied=false`，从不写标注 |
 | `insert_component` | `partId / name?` | `insert_component` | ✅ 可撤销 |
@@ -110,6 +110,8 @@ interface Bridge {
 | `undo_last` | 无 | 直接 `CommandBus.undoLast()` | ✅ 可用 |
 
 `get_bom` 的 BOM 由「当前 CAD 零件 + 已插入占位件」生成：序号递增、名称/型号取零件名、数量 1、材料 `—`，并带 `note` 说明这是简化 BOM。没有模型时返回空数组。
+
+`run_interference_check` 的承托/通道口径（`requirePanel:true`）：回执只给几何诊断读数 —— `panelSupport.*.claim` / `panelFeasibility.diagnosticOnly` 按「行表是否来自几何」判，生产塔的板只是只读占位体（`workpiecePlaceholder`、`inCollisionSet:false`，不进 `parts`），`claim` 恒 `diagnostic-only`；本次生产塔实测的 `verdict=unsupported`、`feasible=false`；`verified` 只属于 M1 夹具件表（`test-support/m1-channel-fixture.mjs`，152 件）。几何里没有板、或机型不是缓存塔一律 `INVALID_ARGUMENT`（不做「查不到 → 绿」）；回执里 `panelChannelNote`/`panelFeasibility.note` 自带「首层能托住 ≠ 多层可行、净跨/走廊需结构确认」的边界，这些字段不是结构验收，不能据此对外称可落地。
 
 `capture_view` / 位姿化干涉的真机自检（本机 xvfb 实跑通过，四个视图全覆盖）：
 

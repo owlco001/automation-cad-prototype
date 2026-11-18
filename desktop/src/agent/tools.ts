@@ -141,6 +141,15 @@ const INTERFERENCE_CHECK_SCHEMA = {
       description:
         '要查的位姿：rest=静态位姿，lift=顶升到位，sweep=按 10 mm 逐步顶升到行程，'
         + 'push=顶升移载「顶升到位 + 沿 +Y 推出到位」的复合位姿。不传=旧行为（只查当前场景静态位姿）'
+    },
+    requirePanel: {
+      type: 'boolean',
+      description:
+        '要求校验板承托 / 升降通道（只对 states 有意义）：true 时启用严格输入校验（缺 states、无板、非缓存塔均 INVALID_ARGUMENT）；缓存塔本来就会回 panelSupport / panelFeasibility / panelChannelNote（只读诊断字段），不是此标志打开的字段开关；'
+        + '几何里没有板占位体、或机型不是缓存塔 → INVALID_ARGUMENT（不做「查不到 → 绿」）。'
+        + '口径边界：生产塔当前只有 diagnostic-only（板是只读占位体、没有承托路径，claim=diagnostic-only、feasible=false），'
+        + 'verified 只属于 M1 夹具件表（test-support/m1-channel-fixture.mjs，152 件）。'
+        + '该字段只给几何诊断读数，不是结构验收：不要据此对外称可落地，也不要当结构结论引用。'
     }
   },
   additionalProperties: false
@@ -1882,20 +1891,38 @@ export class AgentTools {
         'mates=同轴嵌套配合（缸体×活塞杆这类，实体布尔必然重叠但不是干涉，不是缺陷）；mm3 含 declared/mate，只作量级参考。' +
         '顶升行程优先读 active 机型 config 的执行机构 travelMm（turner-lift）；config 里没有顶升机构时认几何标注了 strokeSource=geometry 的轴' +
         '（缓存塔 tower-lift，行程 = (层数−1)×层距），此时回执 lift.strokeSource=geometry，精度低于 config 行程；两种都没有才返回 STATE_UNAVAILABLE，绝不拿静态位姿冒充 lift；' +
-        'directionOverridden=true 表示 config 方向与几何建模的伸出方向相反，该态是反向平移、位姿不可达。',
+        'directionOverridden=true 表示 config 方向与几何建模的伸出方向相反，该态是反向平移、位姿不可达。' +
+        '要板承托/通道诊断时可加 requirePanel=true（须同时给 states）：该标志要求严格校验诊断适用条件（缺 states、无板、非缓存塔均为 INVALID_ARGUMENT）；缓存塔在缺省路径也会回这些只读诊断字段，requirePanel 不是字段开关。' +
+        '几何无板或非缓存塔直接 INVALID_ARGUMENT。生产塔当前只有 diagnostic-only，M1 夹具件表才是 verified —— 这些字段只是几何诊断，不构成结构结论。',
       inputSchema: INTERFERENCE_CHECK_SCHEMA,
       handler: async (args) => {
         if (args.states !== undefined && args.states !== null && !Array.isArray(args.states)) {
           return { ok: false, code: 'INVALID_ARGUMENT', message: 'states 必须是数组（rest / lift / sweep / push）' };
         }
-        const result = await this.execute(
-          'run_interference',
-          Array.isArray(args.states) ? { states: args.states } : {}
-        );
+        if (args.requirePanel !== undefined && typeof args.requirePanel !== 'boolean') {
+          return {
+            ok: false,
+            code: 'INVALID_ARGUMENT',
+            message: 'requirePanel 必须是布尔值（true=要求承托/通道诊断，false 或省略=旧行为）'
+          };
+        }
+        if (args.requirePanel === true && !Array.isArray(args.states)) {
+          return {
+            ok: false,
+            code: 'INVALID_ARGUMENT',
+            message: 'requirePanel 只在位姿化检查里成立：请同时传非空 states（rest / lift / sweep / push）',
+            hint: '承托/通道要在几何上算，静态场景检查（不传 states）没有几何来源可查'
+          };
+        }
+        const result = await this.execute('run_interference', {
+          ...(Array.isArray(args.states) ? { states: args.states } : {}),
+          ...(args.requirePanel === true ? { requirePanel: true } : {})
+        });
         if (!result) return this.unavailable();
         if (!result.ok) return commandFailure(result);
         const data = isRecord(result.data) ? result.data : {};
-        // 状态化结果本身就是终形状（可能带 ok:false + STATE_UNAVAILABLE），原样返回
+        // 状态化结果本身就是终形状（可能带 ok:false + STATE_UNAVAILABLE/INVALID_ARGUMENT），原样返回：
+        // panelSupport/panelFeasibility/panelChannelNote 不在这里挑字段，口径由 panel-channel.ts 定。
         if (isRecord(data.states) || data.ok === false) return data;
         const items = Array.isArray(data.items) ? data.items.slice(0, 20) : [];
         return {

@@ -482,7 +482,7 @@ test('checkPanelChannel：几何里没有板 → INVALID_ARGUMENT（不做「空
   if (outcome.ok) return;
   assert.equal(outcome.code, 'INVALID_ARGUMENT');
   assert.match(outcome.message, /没有板的位姿/);
-  assert.match(outcome.hint ?? '', /M1 件表要在几何里给出 workpiece-plate 占位件/);
+  assert.match(outcome.hint ?? '', /几何里没有可识别的板占位体/);
   // 同一份几何的机构件三态是干净的 —— 这正是「绿」不能替代承托断言的理由
   assert.equal(panelSourceOfGeometry(fixture.geometry), null);
 });

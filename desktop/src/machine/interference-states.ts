@@ -722,7 +722,7 @@ export function runInterferenceStates(input: {
       code: 'INVALID_ARGUMENT',
       message: '要求检查板承托通道，但几何里没有板占位体（workpiece-plate / role=workpiece）',
       hint: '缺板就判不了承托：本检查拒绝返回绿（「没查到」不等于「被托住」）。'
-        + 'M1 件表要在几何里给出 workpiece-plate 占位件，或由塔分派给出 geometry.workpiecePlaceholder'
+        + '几何中没有可识别的板占位体时不会返回承托结论；需要板件时先重建包含板占位体的几何，再执行诊断。'
     };
   }
   if (input.requirePanel === true && !isTower) {
