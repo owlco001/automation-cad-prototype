@@ -130,8 +130,9 @@ async function flushTurns(rounds = 20) {
   for (let index = 0; index < rounds; index += 1) await new Promise((resolve) => setImmediate(resolve));
 }
 
-/** 轮询等待某个条件成立（不用真实时间，只转宏任务），超轮次即失败。 */
-async function waitFor(label, predicate, rounds = 200) {
+/** 轮询等待某个条件成立（不用真实时间，只转宏任务），超轮次即失败。
+ *  默认 2000 轮：全量套件下事件循环竞争会拉长异步链，200 轮出现过抖动假红（2026-11 实测）。 */
+async function waitFor(label, predicate, rounds = 2000) {
   for (let index = 0; index < rounds; index += 1) {
     if (predicate()) return;
     await new Promise((resolve) => setImmediate(resolve));

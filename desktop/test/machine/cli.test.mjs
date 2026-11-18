@@ -16,12 +16,38 @@ const caseFile = join(repoRoot, 'docs', 'desktop', 'eval', 'machine-case.json');
 
 const BRIEF = '六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅';
 
-test('machine-design-cli 输出的方案与 machine-case.json 一致', { timeout: 120_000 }, () => {
-  const stdout = execFileSync(process.execPath, [script, '--brief', BRIEF], {
+/**
+ * 同步跑 CLI —— 本文件唯一的子进程入口。
+ *
+ * 为什么闸门必须下在子进程上（实测过，不是保险）：
+ *   - `test(..., { timeout })` 与 `--test-timeout` 都靠 runner 的**进程内定时器**，而
+ *     `execFileSync` 会把事件循环整段占死，定时器根本没机会触发。探针里
+ *     `test(..., {timeout:300}, () => execFileSync(...))` 照样跑到 3,145 ms。
+ *   - 给 `execFileSync` 自己加 `timeout + killSignal` 才是有效闸门：到点子进程被 SIGKILL，
+ *     用例立刻失败，而不是让整个套件无限挂起。
+ *
+ * 取值：本文件基线最长 71.3 s（`--layout-compliance 40`），这里给 180 s（约 2.5 倍余量）。
+ * 需要另行标定时用 `FT_CLI_TIMEOUT_MS=90000 node --test test/machine/cli.test.mjs` 覆盖。
+ */
+const CLI_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.FT_CLI_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 180_000;
+})();
+
+function runCli(args, { timeoutMs = CLI_TIMEOUT_MS } = {}) {
+  return execFileSync(process.execPath, [script, ...args], {
     cwd: desktopRoot,
     encoding: 'utf8',
-    maxBuffer: 32 * 1024 * 1024
+    stdio: ['ignore', 'pipe', 'pipe'],
+    maxBuffer: 64 * 1024 * 1024,
+    timeout: timeoutMs,
+    // 硬杀：CLI 卡在内核探测 / sidecar HTTP 时 SIGTERM 可能被忽略
+    killSignal: 'SIGKILL'
   });
+}
+
+test('machine-design-cli 输出的方案与 machine-case.json 一致', { timeout: 120_000 }, () => {
+  const stdout = runCli(['--brief', BRIEF]);
   const fromCli = JSON.parse(stdout);
   const reference = JSON.parse(readFileSync(caseFile, 'utf8'));
 
@@ -40,11 +66,7 @@ test('machine-design-cli 输出的方案与 machine-case.json 一致', { timeout
 });
 
 test('--move 改中心点并带出 moves，未知零件/格式错误都退出 2', { timeout: 120_000 }, () => {
-  const stdout = execFileSync(
-    process.execPath,
-    [script, '--brief', BRIEF, '--with-geometry', '--move', 'frame-stringer-front:0,0,-1000'],
-    { cwd: desktopRoot, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 }
-  );
+  const stdout = runCli(['--brief', BRIEF, '--with-geometry', '--move', 'frame-stringer-front:0,0,-1000']);
   const parsed = JSON.parse(stdout);
   assert.deepEqual(parsed.geometry.moves, [{ id: 'frame-stringer-front', delta: [0, 0, -1000] }]);
   const moved = parsed.geometry.parts.find((part) => part.id === 'frame-stringer-front');
@@ -55,11 +77,7 @@ test('--move 改中心点并带出 moves，未知零件/格式错误都退出 2'
 
   const run = (extra) => {
     try {
-      execFileSync(process.execPath, [script, '--brief', BRIEF, '--with-geometry', ...extra], {
-        cwd: desktopRoot,
-        encoding: 'utf8',
-        stdio: 'pipe'
-      });
+      runCli(['--brief', BRIEF, '--with-geometry', ...extra]);
       return { status: 0, stderr: '' };
     } catch (error) {
       return { status: error.status, stderr: String(error.stderr) };
@@ -78,11 +96,7 @@ test('挪开横梁后对应重叠消失（试摆位闭环）', { timeout: 180_00
   // 用四工位 brief：这台机器只有「立柱插横梁」两处重叠，挪走后应当真的归零，
   // 六工位机还有立柱×转台这类 AABB 保守重叠，数量不会归零（那是初筛的固有噪声，不该拿来当零基线）
   const brief = '四工位点胶机，节拍 25 件/分钟，每工位 1 套步进 + 1 个气爪 + 1 个到位检测';
-  const run = (extra) => JSON.parse(execFileSync(process.execPath, [script, '--brief', brief, '--with-geometry', ...extra], {
-    cwd: desktopRoot,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024
-  }));
+  const run = (extra) => JSON.parse(runCli(['--brief', brief, '--with-geometry', ...extra]));
   const before = run([]).geometry.interference;
   const after = run(['--move', 'frame-stringer-front:0,0,-1000', '--move', 'frame-stringer-back:0,0,-1000']).geometry.interference;
   assert.ok(before.count > 0, `挪之前应当有重叠，实际 ${before.count}`);
@@ -92,7 +106,7 @@ test('挪开横梁后对应重叠消失（试摆位闭环）', { timeout: 180_00
 test('machine-design-cli 缺少 --brief 时退出码 2 且不输出 JSON', { timeout: 60_000 }, () => {
   let failed = null;
   try {
-    execFileSync(process.execPath, [script], { cwd: desktopRoot, encoding: 'utf8', stdio: 'pipe' });
+    runCli([]);
   } catch (error) {
     failed = error;
   }
@@ -103,9 +117,7 @@ test('machine-design-cli 缺少 --brief 时退出码 2 且不输出 JSON', { tim
 
 
 test('--clearance 20 输出间距初筛，且按间隙升序、count 与数组一致', { timeout: 120_000 }, () => {
-  const stdout = execFileSync(process.execPath,
-    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--clearance', '20'],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+  const stdout = runCli(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--clearance', '20']);
   const clearance = JSON.parse(stdout).geometry.clearance;
   assert.equal(clearance.thresholdMm, 20);
   assert.equal(clearance.count, clearance.pairs.length);
@@ -121,8 +133,7 @@ test('--clearance 取值不合法时退出码 2（不带 --with-geometry 也不�
   for (const value of ['0', '-5', 'abc']) {
     let status = 0;
     try {
-      execFileSync(process.execPath, [script, '--brief', '四工位点胶机', '--clearance', value],
-        { stdio: ['ignore', 'ignore', 'ignore'] });
+      runCli(['--brief', '四工位点胶机', '--clearance', value]);
     } catch (error) {
       status = error.status;
     }
@@ -132,9 +143,7 @@ test('--clearance 取值不合法时退出码 2（不带 --with-geometry 也不�
 
 
 test('--boolean-recheck：连不上 sidecar 时如实标「未复核」，不冒充没问题', { timeout: 120_000 }, () => {
-  const stdout = execFileSync(process.execPath,
-    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--boolean-recheck', 'http://127.0.0.1:1'],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const stdout = runCli(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--boolean-recheck', 'http://127.0.0.1:1']);
   const recheck = JSON.parse(stdout).geometry.booleanRecheck;
   assert.equal(recheck.suspects, 0, '排布合规后的样机没有疑似对');
   assert.equal(recheck.checked, 0);
@@ -142,10 +151,7 @@ test('--boolean-recheck：连不上 sidecar 时如实标「未复核」，不冒
 });
 
 test('--insert-part 配 --part-size：零件按新尺寸落地，底面仍贴地', { timeout: 120_000 }, () => {
-  const stdout = execFileSync(process.execPath,
-    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry',
-     '--insert-part', 'upright@-900,0,0', '--part-size', '60x60x1200'],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const stdout = runCli(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--insert-part', 'upright@-900,0,0', '--part-size', '60x60x1200']);
   const parts = JSON.parse(stdout).geometry.parts;
   const inserted = parts.find((part) => part.id.startsWith('user-upright'));
   assert.ok(inserted, '必须插入 user-upright-*');
@@ -154,9 +160,7 @@ test('--insert-part 配 --part-size：零件按新尺寸落地，底面仍贴地
 });
 
 test('--touching-report：未声明贴面列成可处置清单（带轴与建议）', { timeout: 180_000 }, () => {
-  const stdout = execFileSync(process.execPath,
-    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--touching-report'],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const stdout = runCli(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--touching-report']);
   const geometry = JSON.parse(stdout).geometry;
   const report = geometry.touchingReport;
   assert.ok(Array.isArray(report), '必须有清单字段');
@@ -174,9 +178,7 @@ test('--touching-report：未声明贴面列成可处置清单（带轴与建议
 
 test('relation 分清 overlap / touching / clear（0 mm 不等于撞了）', { timeout: 180_000 }, () => {
   const read = (flag, value) => {
-    const stdout = execFileSync(process.execPath,
-      [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', flag, value],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+    const stdout = runCli(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', flag, value]);
     const geometry = JSON.parse(stdout).geometry;
     return geometry.inserted ?? geometry.moveNearest;
   };
@@ -188,9 +190,7 @@ test('relation 分清 overlap / touching / clear（0 mm 不等于撞了）', { t
 
 test('--move 后给出该件最近邻居（贴合/重叠为 0），与插入口径对等', { timeout: 180_000 }, () => {
   const read = (move) => {
-    const stdout = execFileSync(process.execPath,
-      [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--move', move],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+    const stdout = runCli(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--move', move]);
     return JSON.parse(stdout).geometry.moveNearest;
   };
   const touching = read('frame-leg-1:840,0,0');
@@ -204,9 +204,7 @@ test('--move 后给出该件最近邻居（贴合/重叠为 0），与插入口�
 
 test('声明叠装链后：未声明贴面为 0，但真重叠与最大可行间距结论不许变', { timeout: 240_000 }, () => {
   const read = (brief, extra) => {
-    const stdout = execFileSync(process.execPath,
-      [script, '--brief', brief, '--with-geometry', ...extra],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+    const stdout = runCli(['--brief', brief, '--with-geometry', ...extra]);
     return JSON.parse(stdout).geometry;
   };
   const four = read('四工位点胶机，节拍 25 件/分钟', ['--clearance', '20']);
@@ -230,9 +228,7 @@ test('声明叠装链后：未声明贴面为 0，但真重叠与最大可行间
 
 test('--insert-part 会给出新件最近邻居与间隙（重叠时 0）', { timeout: 180_000 }, () => {
   const read = (spec) => {
-    const stdout = execFileSync(process.execPath,
-      [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--insert-part', spec],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+    const stdout = runCli(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--insert-part', spec]);
     return JSON.parse(stdout).geometry.inserted;
   };
   const hit = read('gripper@-870,-330,0');
@@ -245,9 +241,7 @@ test('--insert-part 会给出新件最近邻居与间隙（重叠时 0）', { ti
 });
 
 test('--with-geometry 输出 bounds，且与 parts 一一对应（Qt 拖动预览靠它本地判重叠）', { timeout: 120_000 }, () => {
-  const stdout = execFileSync(process.execPath,
-    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry'],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const stdout = runCli(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry']);
   const geometry = JSON.parse(stdout).geometry;
   const parts = geometry.parts;
   const bounds = geometry.bounds;
@@ -261,9 +255,7 @@ test('--with-geometry 输出 bounds，且与 parts 一一对应（Qt 拖动预�
 });
 
 test('线体加宽：CLI 把结论写进 geometry.widening，不可行时给带数字的原因', { timeout: 240_000 }, () => {
-  const stdout = execFileSync(process.execPath,
-    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--min-widening', '40'],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const stdout = runCli(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--min-widening', '40']);
   const widening = JSON.parse(stdout).geometry.widening;
   assert.equal(widening.targetClearanceMm, 40);
   assert.equal(widening.reachable, false, '四工位 40 mm 加宽到上限仍不收敛');
@@ -275,10 +267,7 @@ test('线体加宽：CLI 把结论写进 geometry.widening，不可行时给带�
 });
 
 test('--resolve-clearance 20 把间距推到阈值之上（不是只算建议，要真的合规）', { timeout: 180_000 }, () => {
-  const stdout = execFileSync(process.execPath,
-    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry',
-     '--resolve-clearance', '20', '--clearance', '20'],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const stdout = runCli(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--resolve-clearance', '20', '--clearance', '20']);
   const geometry = JSON.parse(stdout).geometry;
   const resolution = geometry.clearanceResolution;
   assert.equal(resolution.converged, true, `未收敛：${resolution.stopReason}`);
@@ -296,10 +285,7 @@ test('--resolve-clearance 20 把间距推到阈值之上（不是只算建议，
 
 
 test('--layout-compliance 20 交替跑完必须两类都清零（不是只清一类）', { timeout: 240_000 }, () => {
-  const stdout = execFileSync(process.execPath,
-    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry',
-     '--layout-compliance', '20', '--clearance', '20'],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const stdout = runCli(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--layout-compliance', '20', '--clearance', '20']);
   const geometry = JSON.parse(stdout).geometry;
   const layout = geometry.layoutCompliance;
   assert.equal(layout.converged, true, `未收敛：${layout.stopReason}`);
@@ -317,9 +303,7 @@ test('--layout-compliance 20 交替跑完必须两类都清零（不是只清一
 
 
 test('排布合规：40 mm 放不下时如实报未收敛，且不空转到上千次位移', { timeout: 240_000 }, () => {
-  const stdout = execFileSync(process.execPath,
-    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--layout-compliance', '40'],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const stdout = runCli(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--layout-compliance', '40']);
   const layout = JSON.parse(stdout).geometry.layoutCompliance;
   assert.equal(layout.converged, false, '40 mm 在四工位布局下放不下，不能报合规');
   assert.ok((layout.stopReason ?? '').length > 0, '必须说明为什么没收敛');
@@ -333,9 +317,7 @@ test('排布合规：40 mm 放不下时如实报未收敛，且不空转到上�
 
 
 test('--layout-compliance 会把合规结论写成文档顶层的 compliance 戳（与 details 一致）', { timeout: 240_000 }, () => {
-  const stdout = execFileSync(process.execPath,
-    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--layout-compliance', '20'],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const stdout = runCli(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--layout-compliance', '20']);
   const document = JSON.parse(stdout);
   const stamp = document.compliance;
   const details = document.geometry.layoutCompliance;
@@ -371,9 +353,7 @@ test('排布合规 fixture 与当前算法一致（CI 的 Qt 自检靠它，漂�
 
 
 test('排布没收敛时必须给出“还剩哪几对、往哪挪多少”（不能只说没排开）', { timeout: 300_000 }, () => {
-  const stdout = execFileSync(process.execPath,
-    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--layout-compliance', '40'],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const stdout = runCli(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--layout-compliance', '40']);
   const layout = JSON.parse(stdout).geometry.layoutCompliance;
   assert.equal(layout.converged, false);
   assert.ok(layout.remainingPairs.length > 0, '未收敛时必须列出剩余重叠对');
@@ -386,8 +366,7 @@ test('排布没收敛时必须给出“还剩哪几对、往哪挪多少”（�
 });
 
 test('排布求解器不得在两张布局之间来回挪：必须识别活锁并如实说明', { timeout: 300_000 }, () => {
-  const run = (args) => JSON.parse(execFileSync(process.execPath, [script, ...args],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 })).geometry.layoutCompliance;
+  const run = (args) => JSON.parse(runCli([...args])).geometry.layoutCompliance;
 
   // 40 mm：实测会在 st1/st4-rotary-1-table 的 z 上来回 +13/-13，直到轮数用尽
   const forty = run(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--layout-compliance', '40']);
@@ -415,9 +394,7 @@ test('排布求解器不得在两张布局之间来回挪：必须识别活锁�
 });
 
 test('--max-clearance 二分出四工位的最大可行间距 = 25 mm，且该值复算确实收敛', { timeout: 300_000 }, () => {
-  const stdout = execFileSync(process.execPath,
-    [script, '--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--max-clearance'],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+  const stdout = runCli(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--max-clearance']);
   const maxClearance = JSON.parse(stdout).geometry.maxClearance;
   assert.equal(maxClearance.feasibleMm, 25, `实际 ${maxClearance.feasibleMm}`);
   assert.ok(maxClearance.probes.length >= 3, '二分至少探测 3 次');
@@ -430,9 +407,7 @@ test('--max-clearance 二分出四工位的最大可行间距 = 25 mm，且该�
 
 test('工位级建议：只有跨工位的间距问题才可能给建议', { timeout: 300_000 }, () => {
   const read = (brief, threshold) => {
-    const stdout = execFileSync(process.execPath,
-      [script, '--brief', brief, '--with-geometry', '--layout-compliance', String(threshold)],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+    const stdout = runCli(['--brief', brief, '--with-geometry', '--layout-compliance', String(threshold)]);
     return JSON.parse(stdout).geometry.layoutCompliance;
   };
 
@@ -453,9 +428,7 @@ test('工位级建议：只有跨工位的间距问题才可能给建议', { tim
 test('建议的可执行性：actionable 只给「跨工位且推完不撞」的条目', { timeout: 300_000 }, () => {
   const brief = '六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅';
   const read = (threshold) => {
-    const stdout = execFileSync(process.execPath,
-      [script, '--brief', brief, '--with-geometry', '--layout-compliance', String(threshold)],
-      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+    const stdout = runCli(['--brief', brief, '--with-geometry', '--layout-compliance', String(threshold)]);
     return JSON.parse(stdout).geometry.layoutCompliance;
   };
 
@@ -479,4 +452,32 @@ test('建议的可执行性：actionable 只给「跨工位且推完不撞」的
   assert.ok(forty.advice.filter((item) => !item.intraScope).every((item) => item.actionable === false),
     '40 mm 下这台六工位机器不该有可执行建议');
   assert.ok(forty.advice.some((item) => item.overlapsAfter > 0), '应当报出「推哪都撞」的预计对数');
+});
+
+test('CLI 子进程到点被硬杀（真正的闸门在子进程上，不在 {timeout}）', () => {
+  const started = Date.now();
+  let failure = null;
+  try {
+    // 1ms 必然超时：正常单条 CLI 约 0.4s，这条件下不许"静默跑完"
+    runCli(['--brief', BRIEF], { timeoutMs: 1 });
+  } catch (error) {
+    failure = error;
+  }
+  const elapsed = Date.now() - started;
+  assert.ok(failure, '1ms 超时必须让调用失败');
+  assert.ok(
+    failure.code === 'ETIMEDOUT' || failure.signal === 'SIGKILL',
+    `必须以超时/硬杀结束，实际 code=${failure.code} signal=${failure.signal}`
+  );
+  assert.ok(elapsed < 30_000, `必须立刻结束，实际等了 ${elapsed}ms`);
+});
+
+test('cli.test.mjs 里同步子进程都带 timeout 与 killSignal（防止有人绕过 runCli）', () => {
+  const source = readFileSync(fileURLToPath(import.meta.url), 'utf8');
+  // 注释里会讲到 execFileSync，统计前先剥掉注释，避免把说明文字算成调用点
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const sites = code.match(/execFileSync\(/g) ?? [];
+  assert.equal(sites.length, 1, '所有 CLI 调用必须走 runCli，不允许散落 execFileSync');
+  assert.match(code, /timeout: timeoutMs/, 'runCli 必须把 timeout 传给子进程');
+  assert.match(code, /killSignal: 'SIGKILL'/, 'runCli 必须硬杀超时子进程');
 });
