@@ -704,3 +704,33 @@ test('回归 N6：对账消费序号与正常完成同一口径（严格 +1，�
   assert.equal(bufferQueueIo(done.queue).occupied, 0, 'confirmed 只出队被打断的那一件');
   assert.equal(done.state.transferActive, false);
 });
+
+// ---------------------------------------------------------------------------
+// P3 回归：故障锁存期间的来料必须给拒绝事件（不许静默吞掉）
+// ---------------------------------------------------------------------------
+
+test('回归 P3：故障锁存期间的来料报 ITEM_REJECTED_FAULT，队列不变、执行器空闲', () => {
+  const h = harness(1);
+  h.run({ fault: true, upstreamReady: true, nowSec: 0 });
+  // 旧实现：整段进料判定包在 if (!faultLatched) 里 → 这里 events 为空，
+  // 上游只看到「没反应」，复盘时分不清「没送到」和「送到了被压着」。
+  const rejected = h.run({ fault: true, upstreamReady: true, incomingItemId: 'p2', nowSec: 1 });
+  assert.deepEqual(rejected.events, ['ITEM_REJECTED_FAULT']);
+  assert.equal(bufferQueueIo(rejected.queue).occupied, 1, '故障期间一律不收料');
+  assert.equal(rejected.state.actuator, 'idle');
+  assert.equal(rejected.state.mode, 'FAULT_OVER');
+  assert.equal(rejected.state.upstreamPermit, false);
+
+  // 复位后同一件料能被正常接收：拒绝事件不代表「永久黑名单」
+  const reset = h.run({ fault: false, reset: true, upstreamReady: true, incomingItemId: 'p2', nowSec: 2 });
+  assert.deepEqual(reset.events, ['FAULT_CLEARED', 'ITEM_ACCEPTED']);
+  assert.equal(bufferQueueIo(reset.queue).occupied, 2);
+});
+
+test('回归 P3：故障期间的重复件号仍报 ITEM_REJECTED_DUPLICATE（不用「故障」掩盖重复送料）', () => {
+  const h = harness(1);
+  h.run({ fault: true, upstreamReady: true, nowSec: 0 });
+  const duplicate = h.run({ fault: true, upstreamReady: true, incomingItemId: 'p1', nowSec: 1 });
+  assert.deepEqual(duplicate.events, ['ITEM_REJECTED_DUPLICATE']);
+  assert.equal(bufferQueueIo(duplicate.queue).occupied, 1);
+});

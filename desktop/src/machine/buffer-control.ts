@@ -48,6 +48,9 @@ export function evaluateBufferControl(input: BufferControlInput): BufferControlS
  * - `TRANSFER_DONE_UNSOLICITED` 表示没有本层发起的转移却收到完成信号：不消费队列，但消费该计数。
  * - `ITEM_REJECTED_FULL` / `ITEM_REJECTED_BUSY` / `ITEM_REJECTED_UPSTREAM_NOT_READY` / `ITEM_REJECTED_DUPLICATE`
  *   区分“缓存已满”“执行器被出料占用”“上游未就绪”“件号与在库件重复”。
+ * - `ITEM_REJECTED_FAULT` 表示故障锁存期间收到来料：**不进队，但必须回一个拒绝事件**。
+ *   以前整段进料判定都包在 `if (!faultLatched)` 里，故障期间的来料既不入队也不报事件——
+ *   上游只看到「没反应」，没法区分「没送到」和「送到了但被压着」，复盘时这件料就等于凭空消失。
  * - `ITEM_STATE_UNKNOWN` 表示转移被打断且件状态未知：队列不变、不自动重发，必须显式 `reconcile`。
  * - `RECONCILE_REQUIRED` 表示存在未对账件时复位被拒（复位不会静默解除未知状态）。
  * - `TRANSFER_SEQ_GAP` 表示完成计数**跳号**（`seq > seen + 1`）：本次完成被**拒绝**，
@@ -78,7 +81,8 @@ export type BufferControlEvent =
   | 'ITEM_REJECTED_FULL'
   | 'ITEM_REJECTED_BUSY'
   | 'ITEM_REJECTED_UPSTREAM_NOT_READY'
-  | 'ITEM_REJECTED_DUPLICATE';
+  | 'ITEM_REJECTED_DUPLICATE'
+  | 'ITEM_REJECTED_FAULT';
 
 export type BufferControlFaultCode = 'NONE' | 'FAULT_OVER' | 'TRANSFER_TIMEOUT';
 
@@ -558,6 +562,10 @@ export function stepBufferControl(memory: BufferControlMemory, input: BufferCont
         events.push('ITEM_REJECTED_UPSTREAM_NOT_READY');
       }
     }
+  } else if (input.incomingItemId !== undefined) {
+    // 故障锁存期间的来料：不进队（故障期间一律不收），但必须回拒绝事件。
+    // 件号与在库件重复仍然是调用方错误，先判它，避免用「故障」掩盖一次重复送料。
+    events.push(queue.queue.includes(input.incomingItemId) ? 'ITEM_REJECTED_DUPLICATE' : 'ITEM_REJECTED_FAULT');
   }
 
   const io = bufferQueueIo(queue);

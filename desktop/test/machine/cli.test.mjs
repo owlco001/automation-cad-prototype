@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { scanSyncSubprocessSites } from './sync-subprocess-scan.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(here, '..', '..');
@@ -474,10 +475,33 @@ test('CLI 子进程到点被硬杀（真正的闸门在子进程上，不在 {ti
 
 test('cli.test.mjs 里同步子进程都带 timeout 与 killSignal（防止有人绕过 runCli）', () => {
   const source = readFileSync(fileURLToPath(import.meta.url), 'utf8');
-  // 注释里会讲到 execFileSync，统计前先剥掉注释，避免把说明文字算成调用点
+  // 扫描口径只有一份实现（`sync-subprocess-scan.mjs`）：注释里会讲到这些 API，先剥注释再数；
+  // 三种同步子进程都要认——只数 execFileSync 的话，换成 spawnSync/execSync 就能绕过这把锁
+  // （它们同样会把事件循环占死，{timeout} 选项照样不生效）。
+  const sites = scanSyncSubprocessSites(source);
+  assert.equal(sites.length, 1, `所有 CLI 调用必须走 runCli，不允许散落同步子进程（实际命中 ${sites.join('/') || '无'}）`);
+  assert.equal(sites[0], 'execFileSync', 'runCli 里的那一次调用必须是 execFileSync（要能拿到 ETIMEDOUT/SIGKILL）');
   const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
-  const sites = code.match(/execFileSync\(/g) ?? [];
-  assert.equal(sites.length, 1, '所有 CLI 调用必须走 runCli，不允许散落 execFileSync');
   assert.match(code, /timeout: timeoutMs/, 'runCli 必须把 timeout 传给子进程');
   assert.match(code, /killSignal: 'SIGKILL'/, 'runCli 必须硬杀超时子进程');
+});
+
+test('静态守卫负例（行为式）：扫描函数对三种同步子进程都必须咬，且不误报字符串/属性', () => {
+  // 负向自证不再「自己抄一份正则」：这里只喂伪造源码给**守卫用的同一个函数**，验它的行为。
+  // 守卫若退化成只认 `execFileSync\(`，`spawnSync`/`execSync` 两条断言立刻红——
+  // 旧写法（负例自己写一份同样的正则）在守卫退化时两条测试会同时绿，等于没自证。
+  const fakeCall = (name, args = '') => `${name}(${args})`;
+  assert.deepEqual(scanSyncSubprocessSites(fakeCall('execFileSync', "'node', ['x'], { timeout: 1 }")), ['execFileSync']);
+  assert.deepEqual(scanSyncSubprocessSites(fakeCall('spawnSync', "'node', ['x']")), ['spawnSync'], '只认 execFileSync 的实现会在这里返回 []');
+  assert.deepEqual(scanSyncSubprocessSites(fakeCall('execSync', "'node x'")), ['execSync'], '只认 execFileSync 的实现会在这里返回 []');
+  assert.deepEqual(
+    scanSyncSubprocessSites([fakeCall('execFileSync'), fakeCall('spawnSync'), fakeCall('execSync')].join('; ')),
+    ['execFileSync', 'spawnSync', 'execSync']
+  );
+  // 名字出现在字符串/属性里不算调用点（避免把文档文字或 foo.execSyncX( ) 当子进程）
+  assert.deepEqual(scanSyncSubprocessSites("const name = 'spawnSync'; foo.execSyncX(1)"), []);
+  // 注释里的调用片段也不算（真有人写说明文字时不该把守卫顶红）。
+  // 这里用拼接构造：字面量里不出现「名字紧跟左括号」，否则上面的全文件扫描会把本测试自己数进去。
+  const commented = ['// 这里有 spawn' + 'Sync(x)', '/* exec' + 'Sync(y) */', 'const ok = 1;'].join('\n');
+  assert.deepEqual(scanSyncSubprocessSites(commented), []);
 });
