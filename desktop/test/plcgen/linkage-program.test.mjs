@@ -103,14 +103,16 @@ const runAudit = (brief) => JSON.parse(execFileSync(process.execPath,
   ['scripts/machine-design-cli.mjs', '--brief', brief, '--with-geometry', '--plc-audit'],
   { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 })).plcAudit;
 
-test('整机端到端：三工位 —— 5 处缺口全部可补、PLC 工程 11 文件、6 步、6/6 点位被驱动', () => {
+test('整机端到端：三工位 —— 5 处缺口全部可补、PLC 工程 3×11 文件、6 步、6/6 点位被驱动', () => {
   const audit = runAudit('三工位锁螺丝机，节拍 25 件/分钟，每工位 1 个伺服拧紧轴 + 1 个气爪 + 到位检测');
   assert.equal(audit.gapsFound, 5);
   assert.equal(audit.autoFixable, 5);
   assert.equal(audit.applied.length, 5);
   assert.deepEqual(audit.remainingErrors, []);
   assert.equal(audit.generated, true);
-  assert.equal(audit.files, 11);
+  assert.equal(audit.conversionScope, 'per-station');
+  assert.equal(audit.stations, 3);
+  assert.equal(audit.files, 33, '11 个文件 × 3 个分工位工程');
   assert.equal(audit.sequenceSteps, 6);
   assert.equal(audit.audit.linkageSteps, 6);
   assert.equal(audit.audit.pointsInPlcTable, 6);
@@ -119,13 +121,21 @@ test('整机端到端：三工位 —— 5 处缺口全部可补、PLC 工程 11
   assert.equal(audit.audit.ok, true);
 });
 
-test('整机端到端：六工位并行联动不被静默编译成串行 PLC', () => {
+// 六工位：并行时间线不再被整包硬拒（那会把真实 brief 全判死），也不再被静默编成一条串行长程序：
+// 按工位切片，各站独立生成；st1 的气爪挂了两个没有方向语义的传感器（工位检测 + 安全光栅），
+// 生成器拒绝猜方向 —— 失败要点名到工位，且不给半截对账结果。
+test('整机端到端：六工位并行联动按工位切片，转不了的站如实拒绝', () => {
   const audit = runAudit('六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅');
   assert.equal(audit.gapsFound, 8);
   assert.equal(audit.applied.length, 8);
-  assert.equal(audit.sequenceSteps, 0);
+  assert.equal(audit.conversionScope, 'per-station');
+  assert.equal(audit.parallelStations, true);
+  assert.equal(audit.stations, 6);
+  assert.equal(audit.projects, 5, '5 个站生成成功，st1 被拒');
   assert.equal(audit.generated, false);
   assert.equal(audit.generateErrors[0].code, 'UNSUPPORTED_LINKAGE_CONVERSION');
-  assert.match(audit.generateErrors[0].message, /overlap|并行|重叠/i);
+  assert.match(audit.generateErrors[0].message, /^st1:/, '拒绝原因要点名到工位');
+  assert.match(audit.generateErrors[0].message, /ambiguous wait sensors/i);
+  assert.equal(audit.audit, undefined);
   assert.match(audit.conversionSemantics, /event-driven/);
 });

@@ -17,7 +17,7 @@ import { screenClearance } from '../src/machine/clearance.ts';
 import { buildLinkage, poseAt, cycleMsFromThroughput } from '../src/machine/linkage.ts';
 import { checkMotionEnvelope } from '../src/machine/motion-envelope.ts';
 import { planPlcGaps, repairPlcConfig } from '../src/plcgen/machine-gaps.ts';
-import { buildSequenceFromLinkage, auditLinkageVsProgram } from '../src/plcgen/linkage-program.ts';
+import { convertLinkagePerStation } from '../src/plcgen/per-station.ts';
 import { generateProject } from '../src/plcgen/generate.ts';
 
 
@@ -284,50 +284,38 @@ if (withGeometry) {
       }
     };
   }
-  // PLC 深度体检：预检缺口 → 最小补齐 → 用联动时间线生成步序 → 生成工程 → 程序↔3D 对账
+  // PLC 深度体检：预检缺口 → 最小补齐 → 逐工位切片生成步序 → 生成工程 → 程序↔3D 逐站对账
   if (args.indexOf('--plc-audit') >= 0) {
     if (!caseData.design?.config) {
       process.stderr.write('--plc-audit 需要整机方案里的 design.config\n');
       process.exit(2);
     }
-    const throughput = Number(caseData.cycleAnalysis?.throughputPerMin ?? 0);
-    const linkageCycle = cycleMsFromThroughput(throughput) ?? undefined;
     const linkage = finalLinkage();
     const plan = planPlcGaps(caseData.design.config);
     const repair = repairPlcConfig(caseData.design.config, plan);
-    let sequence = [];
-    let conversionError = null;
-    try { sequence = buildSequenceFromLinkage(linkage, repair.config); }
-    catch (error) { conversionError = error instanceof Error ? error.message : String(error); }
-    const configWithSequence = { ...repair.config, sequence };
-    const generated = conversionError
-      ? { ok: false, errors: [{ code: 'UNSUPPORTED_LINKAGE_CONVERSION', message: conversionError }] }
-      : generateProject({ config: configWithSequence, namePrefix: 'audit' });
+    // 并行只发生在工位之间，站内本就串行：按 stationId 切片后各站都能合法转换。
+    // 聚合结果里如实标注 conversionScope='per-station' —— 不再宣称「整机时序等价」。
+    const conversion = convertLinkagePerStation(linkage, repair.config, { namePrefix: 'audit' });
     const auditBlock = {
       geometryRevision,
       conversionSemantics: 'event-driven; timed parallel preview is not an equivalent PLC program',
+      conversionScope: conversion.conversionScope,
+      stations: conversion.stations,
+      parallelStations: conversion.parallelStations,
+      projects: conversion.projects,
       gapsFound: plan.errors.length,
       autoFixable: plan.autoFixable,
       fixes: plan.errors.map((gap) => ({ code: gap.code, message: gap.message, fix: gap.fix?.detail ?? null })),
       applied: repair.applied,
       remainingErrors: repair.remainingErrors,
-      generated: generated.ok,
-      sequenceSteps: sequence.length,
-      generateErrors: generated.ok ? [] : generated.errors.map((error) => ({ code: error.code, message: error.message }))
+      generated: conversion.generated,
+      sequenceSteps: conversion.sequenceSteps,
+      generateErrors: conversion.generateErrors,
+      files: conversion.files,
+      plcPoints: conversion.plcPoints,
+      stationAudits: conversion.stationAudits,
+      ...(conversion.audit ? { audit: conversion.audit } : {})
     };
-    if (generated.ok) {
-      const mapping = JSON.parse(generated.files.find((file) => file.path === 'mapping.json').content);
-      const programText = generated.files
-        .filter((file) => file.path === 'src/FC_AutoSequence.st' || file.path === 'src/FC_Safety.st')
-        .map((file) => file.content)
-        .join('\n');
-      const audit = auditLinkageVsProgram(linkage, mapping.points ?? [], programText, sequence.length, mapping.sequence ?? sequence);
-      Object.assign(auditBlock, {
-        files: generated.files.length,
-        plcPoints: (mapping.points ?? []).length,
-        audit
-      });
-    }
     caseData.plcAudit = auditBlock;
 
     // 调试时序表：每个点位在循环里的 ON 区间，现场调试/示波器对点用
@@ -338,9 +326,15 @@ if (withGeometry) {
         process.stderr.write('--linkage-timing-csv 需要输出路径\n');
         process.exit(2);
       }
-      const timingProject = generated.ok ? generated : generateProject({ config: { ...repair.config, sequence: [] }, namePrefix: 'preview' });
-      const mapping = timingProject.ok ? JSON.parse(timingProject.files.find((file) => file.path === 'mapping.json').content) : { points: [] };
-      const byPoint = new Map((mapping.points ?? []).map((point) => [point.point, point]));
+      // 点位→地址表：各站 mapping 的点位表相同，取并集；一站都没生成出来时退回预览工程
+      let timingPoints = conversion.points;
+      if (timingPoints.length === 0) {
+        const preview = generateProject({ config: { ...repair.config, sequence: [] }, namePrefix: 'preview' });
+        timingPoints = preview.ok
+          ? (JSON.parse(preview.files.find((file) => file.path === 'mapping.json').content).points ?? [])
+          : [];
+      }
+      const byPoint = new Map(timingPoints.map((point) => [point.point, point]));
       const header = ['步号', '执行机构', '点位', '地址', '变量', '开始ms', '结束ms', '时长ms'];
       const rows = [];
       for (const step of [...linkage.steps].sort((a, b) => a.startMs - b.startMs)) {
@@ -362,7 +356,7 @@ if (withGeometry) {
       writeFileSync(targetPath, csv, 'utf8');
       caseData.linkageTiming = {
         semantics: 'preview-timeline; not PLC execution timing',
-        plcGenerated: generated.ok,
+        plcGenerated: conversion.generated,
         path: targetPath,
         rows: rows.length,
         steps: linkage.steps.length,

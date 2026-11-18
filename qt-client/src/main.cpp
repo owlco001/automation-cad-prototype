@@ -410,7 +410,15 @@ int main(int argc, char *argv[]) {
         const int driven = recon.value(QStringLiteral("pointsDriven")).toInt();
         const int reconGaps = recon.value(QStringLiteral("gaps")).toArray().size();
         if (!generated) {
-            qCritical().noquote() << "FT_QT_PLC_AUDIT_FAIL PLC 工程没生成出来";
+            // 只加诊断：失败原因（如某工位重叠/等待传感器歧义）必须落进 CI 日志，
+            // 否则只剩「没生成出来」一句话，triage 要靠猜。断言条件不变。
+            QStringList reasons;
+            for (const QJsonValue &value : audit.value(QStringLiteral("generateErrors")).toArray()) {
+                const QString message = value.toObject().value(QStringLiteral("message")).toString();
+                if (!message.isEmpty()) reasons << message;
+            }
+            qCritical().noquote() << "FT_QT_PLC_AUDIT_FAIL PLC 工程没生成出来"
+                                  << (reasons.isEmpty() ? QStringLiteral("（generateErrors 为空）") : reasons.join(QStringLiteral("；")));
             return 1;
         }
         if (points == 0 || driven != points) {
