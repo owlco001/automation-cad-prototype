@@ -1,18 +1,62 @@
 # AutomationCAD 下一会话交接
 
-更新时间：2026-11-18（本轮：塔 B-Rep 入口接通 + 整机 STEP 完整性门禁 + 统一分派判据）
+更新时间：2026-11-18（本轮：M1 承托/通道修复 + 塔 B-Rep 入口接通 + 整机 STEP 完整性门禁 + 统一分派判据）
 项目：`owlco001/automation-cad-prototype`
 工作目录：`/tmp/automation-cad-prototype`
-当前 HEAD：`411f21d`（已推送，该提交对应 CI run `44276548527` 7/7 全绿）；**工作区有本轮未提交改动：16 M + 3 ??**（清单见「本轮未提交的文件」）。
+当前 HEAD：`7b089a1`（与 `origin/main` 同点）；**工作区现有未提交改动：10 M + 5 ??**（M1 承托/通道这一轮 + 上一轮塔 B-Rep/STEP 门禁叠在同一工作区，清单见「未提交的文件」，`git status --short` 为准）。
 
-> **口径**：下文凡标「本轮」的数字，都是 **HEAD `411f21d` + 上述未提交工作区** 在本机（**node v26.7.0** / npm 11.19.0）跑出的最终实测——**未提交、未推送、未上 CI**。标「历史」的数字来自已提交的上一轮，只能当历史，不能当现状。
+> **口径**：下文凡标「本轮」的数字，都是 **HEAD `7b089a1` + 上述未提交工作区** 在本机（**node v26.7.0** / npm 11.19.0）跑出的最终实测——**未提交、未上 CI**。标「历史」的数字来自已提交的上一轮，只能当历史，不能当现状。
+
+## M1「首层承托取放」纯数据概念验证（2026-11-18，基线 `main@7b089a1`，未提交）
+
+> 这一节是**最新一轮**（基线 `7b089a1`）在 T3 对抗审查修完 P1、并按只读复核闭合 P1-R1/P1-R2/P2-5/P2-6 之后的实测；下面从「开始前必做」起仍是 `411f21d` 那一轮的记录，数字不要混用。
+
+**先钉死三条口径（否则后面的数字会被误读）**
+
+- **生产塔没变**：16 层仍是 **146 件 / 146 装配件 / `partCount` 146**，板**不在** `geometry.parts`（只挂 `workpiecePlaceholder`、`inCollisionSet:false`），升降轴只随动 `lift-platform`。
+- **M1 的 152 件是 fixture-only**：只在 `test-support/m1-channel-fixture.mjs` 里（146 −1 台面 +2 叉指 +1 横梁 +4 分段带），生产建造器 `/build_machine_model` 都不会产出它。
+- **生产塔的通道诊断恒 `diagnostic-only`**：`checkPanelChannel` 在「板只在 placeholder」**或**「行表不是几何给的（`rowsSource='caller'`）」时，返回 `mode='diagnostic-only'`、承托 `claim='diagnostic-only'`、`feasible=false`、`m1.feasible=false` —— 夹具的 M1 绿**不许**写成生产塔可行，调用方自带 `rows`+`pose` 也升不成 `verified`。
+
+**本轮做了什么**
+
+- `desktop/src/machine/panel-channel.ts`（纯函数）修 P1：
+  - 板位姿**必须显式**：`resolvePanelSupport` 要求 `panel.centerXMm/centerYMm`（不再默认 0）+ `bottomZmm`；`resolveChannelFeasibility` 要求 `pose{ bottomZmm, centerXMm, centerYMm }`（与 `panel.center*` 冲突则拒绝），**不再读 `inbound.beltHeightMm` 当板底**；
+  - carried 与轴绑定：carried 底面 = `pose.bottomZmm + max(0, 轴位移 − 拾取空行程)`（与 `interference-states.workpiece.bottomZ.lift` 同公式），位移/空行程来自 `carriedShiftMm`/`pickupGapMm` 或几何轴，**都没有 → 按 0 处理 + `m1.diagnosticError`，不可能报 supported**；
+  - **显式位移 fail-closed（复核 P1-R1）**：`carriedShiftMm` 负值 → `INVALID_ARGUMENT`；`shift > axis.strokeMm`（或板抬 > 行程）→ `INVALID_ARGUMENT`（旧实现照收 shift=100 / 轴声明 20 并回 `carried.supported`）；几何里没有 `axis.strokeMm` 时只作诊断；空行程只能靠 M1 缺省值（`m1-default`）时同样只作诊断 —— 0 / 超行程 / 无轴证据一律不许 `supported`；
+  - blockers 只留可复算事实（`load-passes-shelf` / `no-support` / `stroke-shortfall`）；净跨/走廊降级为 `designNotes`（`clear-span-conservative` / `corridor-conservative`），文案改成「当前结构参数下的保守设计余量，需结构确认」，并给出 `columnSweep`（实测柱与板 y 向重叠 0、行程内相交 0 件）；
+  - 每条 `load-passes-shelf` 的 detail 从件表派生（不写「26 处 / 446 处」）；`stroke-shortfall` 标明 **M1 叉指停位口径**（现轴台面 `lift-platform` AABB **z 970..1010**，顶面 1010 / 底面 970；970 这个停位口径下不缺）；
+  - `panelSourceOfGeometry` 回传 `centerXMm/centerYMm` 且占位体缺 `center` 就**不认板**；`center/size/bottomZmm` 改用严格数字判据（`typeof === 'number' && Number.isFinite`，不再 `Number()` 强转：`Number(null)===0`、`Number('')===0` 会把 `center=[null,null,917.5]` 读成 (0,0) 并谎称来自几何 —— 复核 P2-6）；新增 `liftAxisOfGeometry`；`checkPanelChannel` 现接受 `rows/pose/carriedShiftMm` 覆盖，并把非本模块的 RangeError 从 `NOT_A_TOWER` 改成 `INVALID_ARGUMENT`；
+  - **`verified` 只认几何行表（复核 P1-R2）**：`rowsSource='caller'` 一律 `diagnostic-only`（夹具行表 + 生产几何 + pose 曾报 `verified`/双向 `supported`/`m1.feasible=true`，而该塔 146 件、叉指 0 件）；`resolveChannelFeasibility` 收到 `supportSource:'caller-rows'` 也强制 `diagnosticOnly`。
+- `machine-geometry.ts` 的 `towerWorkpiecePlaceholder()`（上一轮已落地，本轮未改）：板占位体 2278×1134×35、底面 900、`inCollisionSet:false`，**不进 `parts`**。
+- `interference-states.ts` 只读 `panelSupport / panelFeasibility / panelChannelNote` + `requirePanel:true`，判据未改。
+- `scripts/verify-channel.mjs` 重写为**层数无关**（件数从 `parts` 派生、只校验关系，不写 146 / 16 层 / ≥400 处），新增 4 条反例：中心偏移、位移 5、生产 placeholder、缺位姿/缺位移；**`--levels` 2..64 均 exit 0**：17 层起基线建造器的 `gearmotor|column-bl` 相交 1 对（柱截面随塔高派生 → 柱位外移）单列为 `baselineNotes`，不计入通道自证，**其余 rest/lift 命中仍判失败**，≤16 层要求全 0；断言名也改掉「真实件表首层也托不住」这种把阈值当几何事实的写法。
+- 测试：`panel-channel.test.mjs` **32 条** + `buffer-tower-channel.test.mjs` **17 条**，都在 `test:focused` 里（定向复跑 **49/49 pass**）。
+
+**实测（node v26.7.0，修复后）**
+
+| 对象 | 实测 |
+|---|---|
+| 真实塔（`parts.length`=146 @16 层） | rest/lift = 0/0 pass；sweep = 270 确认 + 135 待复核 fail（与基线一致）。**≥17 层**：rest/lift 各多 1 对 `gearmotor\|column-bl`（柱截面随塔高派生 → 柱位外移，建造器问题，非通道判据，脚本单列 `baselineNotes`） |
+| 真实塔承托 | rest 覆盖 100% 但只有 **1** 条接触带 → `verdict=unsupported`、`claim=diagnostic-only`；carried 底面 = 静止底面、`claim=diagnostic-only`（位移来源 missing） |
+| 真实塔通道 | `feasible=false`：blockers = load-passes-shelf / stroke-shortfall（缺 16.5，M1 叉指口径）；designNotes = clear-span-conservative / corridor-conservative（净跨 2000 vs 2278、走廊 135 vs 567，**非阻塞**） |
+| M1 概念件表（152 机台件 + 板 = 153 刚体 / 装配 152 / 包络 2430×1790×3840） | rest/lift/sweep = **0/0/0 pass**（20 mm 段）；`mode=verified`；承托 rest **80.6%**（3 带）、carried **15.48%**（2 带）都 supported；位移 20（axis）→ 板抬 10；多层仍 false |
+| 自证 22 条（**正向 11 / 负向 11**） | 正向：行程不变量、净跨关系、走廊关系、柱与板 AABB 不相交、多层不可行、单条 1200 整带 → claim 降级、件数语义、rest/lift 通道相关 0、M1 三态、M1 承托 supported、M1 多层仍 false。负向 N1–N11：板外叉 0%；缺板 → INVALID_ARGUMENT；120 宽叉 → 红且指到 lift-finger；超行程 40 → 红且含 belt-top×lift-carriage；满行程 → 红且含板/托板；非塔 → NOT_A_TOWER；**中心偏移 300 → 80.6%→72.22%**；**位移 5 → 报告 5、carried 底面不变、m1.feasible=false**；**生产 placeholder → 无 supported claim**；缺位姿 → 拒绝；缺位移 → 不伪造绿 |
+| 门禁 | `npm run verify:channel` → `TOWER_CHANNEL_RESULT ok`，自证 **22/22**（正向 11 / 负向 11），exit 0；`--levels 2 / 16 / 17 / 64` 同为 22/22、exit 0；定向 `node --test test/machine/panel-channel.test.mjs test/machine/buffer-tower-channel.test.mjs` = **49/49 pass**；`npx tsc --noEmit` = 0；`git diff --check` = 0（本机，全量 `npm test` 未跑） |
+
+**CI 边界**：`verify:channel` **不在 CI**（`ci.yml` 只跑 `npm test`）；负向用例在测试文件里，所以 `npm test` 仍有覆盖，但「22/22 自证」只有本机跑过。
+
+**口径更正**：架构文档写的 82.5% / 17.0% 与它自己的件表尺寸不符（`2278×914/2278×1134 = 80.61%`、`2×2000×100/2583252 = 15.48%`）。按实测记账，未改阈值；carried 只剩 0.48 个百分点余量。
+
+**没跑**：STEP/内核（152 件未进 build123d）、`regen:pv-buffer`、全量 `npm test`、CI、Electron 冒烟。
+
+**遗留**：M1 只证明「首层托住并抬起 10 mm」，**不是多层可行**；**生产塔没有 channel 承托路径**，其诊断恒 `diagnostic-only`；板挠度、导向/同步、防坠/抱闸、安全回路、PLC/IO 未建未验；真实塔 sweep 仍 fail；行程缺口 16.5 mm（M1 叉指口径）未修；净跨/走廊的保守设计阻塞需结构确认。
 
 ## 开始前必做
 
 ```bash
 cd /tmp/automation-cad-prototype
-git status --short      # 现在是 16 M + 3 ??（本轮改动，未提交、未推送）
-git log -5 --oneline    # 顶端仍是 411f21d
+git status --short      # 现在是 10 M + 5 ??（M1 承托/通道 + 上一轮塔 B-Rep/STEP 门禁，未提交）
+git log -5 --oneline    # 顶端是 7b089a1（= origin/main）
 ```
 
 `git status` 非空是**预期状态**，不是别人插队：先看清单再动手，不要回滚、不要 `git checkout --`。
@@ -26,7 +70,7 @@ git log -5 --oneline    # 顶端仍是 411f21d
 - `e6c1ef3`：per-station PLC 转换（并行工位联动时间线通过审计）
 - `b3b13f3`：CI 沙箱守卫
 
-远端 CI（run `44276548527`）= **7/7 job 全 success**，但验的是 `411f21d`，**不包含本轮任何改动**。`featuretree-geometry` 里新增的 16 层 + 8 层 STEP 完整性步骤一次都没在 CI 上执行过。
+远端 CI 最近一次全绿是 run `44276548527`，验的是 `411f21d`；**不包含本轮任何改动**（工作区未提交，`7b089a1` 之后的改动也没上 CI）。`featuretree-geometry` 里新增的 16 层 + 8 层 STEP 完整性步骤一次都没在 CI 上执行过。
 
 ## 本轮门禁：最终本地实测（当前未提交工作区）
 
@@ -111,7 +155,16 @@ git log -5 --oneline    # 顶端仍是 411f21d
 - 旧 `/tmp/automationcad-pv-buffer-iter` 里的历史产物是 250 mm 层的旧结果，不能改参数后声称几何已更新
 - 该 8 层产物当时的 STEP 是 **781,970 B / 47 实体（历史丢件产物）**；修复后的当前值是 1,622,322 B / 55 实体
 
-## 本轮未提交的文件（16 M + 3 ??）
+## 未提交的文件
+
+### 当前工作区（**10 M + 5 ??**，两轮叠在一起，未提交）
+
+- 修改（10）：`desktop/src/machine/panel-channel.ts` 之外的两轮改动都在这里 —— `desktop/src/machine/interference-states.ts`（M1 只读字段 + `requirePanel`）、`desktop/src/machine/machine-geometry.ts`（`towerWorkpiecePlaceholder` + 几何入口/升降轴多件化）、`desktop/src/machine/geometry.ts`、`desktop/src/extension.ts`（塔分派 + design 落盘）、`desktop/package.json`（`verify:channel` / `verify:step-tower` / `test:focused`）、`desktop/test/agent/build-machine-model.test.mjs`、`desktop/test/electron/projects.test.mjs`、`desktop/test/machine/buffer-tower-model.test.mjs`、`HANDOFF-NEXT-SESSION.md`、`docs/desktop/PV-BUFFER-ITERATION-HANDOFF.md`
+- 新增（5）：`desktop/src/machine/panel-channel.ts`、`desktop/scripts/verify-channel.mjs`、`desktop/test-support/m1-channel-fixture.mjs`、`desktop/test/machine/panel-channel.test.mjs`、`desktop/test/machine/buffer-tower-channel.test.mjs`
+
+> 件数以 `git status --short` 为准（写这份时实测 10 M + 5 ??）；上一版文档写的「6 M + 5 ??」「16 M + 3 ??」都是当时快照，**不要再引用**。
+
+### 上一轮（塔 B-Rep 入口 + STEP 门禁；源码改动部分已随 `18b08bb` / `7b089a1` 落地，下列清单是当轮记录，保留作历史）
 
 - 新增：`desktop/scripts/verify-step-tower.mjs`（整机 STEP 完整性门禁）、`desktop/test/machine/buffer-tower-model.test.mjs`、`desktop/test/parametric/verify-step-tower.test.mjs`
 - 修改（源码）：`desktop/src/machine/model-builders.ts`（塔注册表/严格校验/`resolveModelDispatch` 统一分派，本轮再收紧：形状/机型/双源/非塔 design 拒绝，**外加 `process` 形状：非字符串/空白/null 一律 `INVALID_ARGUMENT`，不再默认 conveyor**）、`buffer-tower-assembly.ts`（导出 `isBufferTowerConfig`）、`machine-geometry.ts`（几何入口改用同一判定；升降轴多件化）、`spec.ts`（`ModelProcess`）、`desktop/src/extension.ts`（塔分派 + 几何收尾 + design 落盘）、`desktop/electron/projects.ts`（config-only 也落盘）、`desktop/src/agent/commands.ts`（`design`/`config` 白名单与冲突拒绝；`params` 也进分派）、`desktop/src/agent/tools.ts`（schema/描述/透传）
