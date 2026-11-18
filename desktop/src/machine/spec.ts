@@ -12,6 +12,18 @@ export type MachineProcess =
   | 'conveyor'
   | 'unknown';
 
+/**
+ * 参数化整机入口（`build_machine_model`）认的机型值。
+ *
+ * 比可合成工艺多一个 `buffer-tower`（缓存塔塔身）。它**故意不并进** `MachineProcess`：
+ * `templates.ts`（`TEMPLATES`）、`forms.ts`（`PROCESS_BASE_SECONDS`）、`synth.ts`
+ * （`PROCESS_LABEL`）都是 `Record<MachineProcess, …>` 的穷举表，塞进去会让那三处缺键；
+ * 而塔没有 synth 模板/节拍基数/形态表 —— 它是**几何专用机型**，配置入口是
+ * `design.config.bufferTower`，不是需求原文 brief。把两者混在一个联合类型里，
+ * 下一个读这段的人会以为「写句需求就能合成一台塔」。
+ */
+export type ModelProcess = MachineProcess | 'buffer-tower';
+
 export type MachineActuatorKind = 'cylinder' | 'gripper' | 'rotary';
 export type MachineSensorKind = 'proximity' | 'photoelectric' | 'safety' | 'pressure';
 export type MachineVoltage = '220VAC' | '380VAC' | '24VDC';

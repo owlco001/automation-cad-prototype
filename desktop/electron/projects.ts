@@ -227,7 +227,14 @@ export function saveProject(userDataDir: string, input: ProjectSaveInput): { ok:
     const name = input.name.trim();
     const validatedDesign = input.design === undefined ? undefined : validateMachineDesign(input.design);
     const workspace = input.workspace === undefined ? undefined : parseProjectSnapshot(input.workspace);
-    if (input.config !== undefined) validateMachineConfig(input.config);
+    /**
+     * `config` 以前只校验、不落盘：只给 config 的调用方（例如缓存塔按
+     * `design.config.bufferTower` 建模、手上只有一份 config）以为参数进库了，
+     * 重开却什么都没有。现在 config 会被包成 `{ config }` 存进 design.json /
+     * project.json；`design` 在场时仍以 design 为准（它带工位身份与点位）。
+     */
+    const validatedConfig = input.config === undefined ? undefined : validateMachineConfig(input.config);
+    const designDocument = validatedDesign ?? (validatedConfig ? { config: validatedConfig } : undefined);
     if (input.geometryReview !== undefined && !isProjectGeometryReview(input.geometryReview)) throw new Error('3D/干涉校核状态无效，工程未保存');
     if (input.placements !== undefined && !parseProjectLayoutPlacements(input.placements)) throw new Error('二维布局数据无效');
     if (input.parts !== undefined && (!Number.isInteger(input.parts) || input.parts < 0)) throw new Error('零件数量无效');
@@ -287,7 +294,7 @@ export function saveProject(userDataDir: string, input: ProjectSaveInput): { ok:
     if (input.stepPath) copyFileSync(input.stepPath, join(stage, 'model.step'));
     if (input.stlPath) copyFileSync(input.stlPath, join(stage, 'model.stl'));
     if (input.stlData !== undefined) writeFileSync(join(stage, 'model.stl'), input.stlData);
-    if (validatedDesign) writeFileSync(join(stage, 'design.json'), `${JSON.stringify({ design: validatedDesign, placements: input.placements ?? [] }, null, 2)}\n`, 'utf8');
+    if (designDocument) writeFileSync(join(stage, 'design.json'), `${JSON.stringify({ design: designDocument, placements: input.placements ?? [] }, null, 2)}\n`, 'utf8');
     if (workspace) writeFileSync(join(stage, 'workspace.json'), `${JSON.stringify(workspace, null, 2)}\n`, 'utf8');
     const record: ProjectRecord = {
       id, name, process: String(input.process ?? 'unknown'),
@@ -296,7 +303,7 @@ export function saveProject(userDataDir: string, input: ProjectSaveInput): { ok:
       massKg: input.massKg ?? null, envelope: input.envelope ?? null, material: input.material ?? [],
       createdAt: new Date().toISOString(), partsList,
       hasStep: Boolean(input.stepPath), hasStl: Boolean(input.stlPath || input.stlData),
-      ...(validatedDesign ? { design: validatedDesign } : {}),
+      ...(designDocument ? { design: designDocument } : {}),
       ...(input.geometryReview ? { geometryReview: input.geometryReview } : {}),
       bytes: directoryBytes(stage)
     };

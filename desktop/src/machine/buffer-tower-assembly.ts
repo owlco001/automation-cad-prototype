@@ -228,6 +228,18 @@ function ceil5(value: number): number {
 }
 
 /**
+ * 塔的**唯一判别字段**：`config.bufferTower.kind === 'tower'`。
+ *
+ * 为什么单独导出：整机建模入口（`extension.ts` / `model-builders.ts`）与几何入口
+ * （`machine-geometry.ts`）以前各写一份判定，一边按 `process`、一边按
+ * `config.bufferTower.kind`，于是「只给 design、不给 process」会静默落到 29 件输送线
+ * 且回执 `ok:true`。判定只许有一份，两边都调这里。
+ */
+export function isBufferTowerConfig(value: unknown): value is MachineBufferTowerConfig {
+  return isRecord(value) && value.kind === 'tower';
+}
+
+/**
  * 把外部输入（JSON / 工具参数 / 落盘 config）归一化成 `MachineBufferTowerConfig`。
  *
  * 只做**形状**归一：缺省值只补 `layerPitchMm`（180）、`frame.sectionMm`（40）、

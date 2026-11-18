@@ -74,15 +74,27 @@ import {
   conveyorBom,
   conveyorEnvelope,
   MATERIAL_LABEL,
-  type ConveyorParams
+  type ConveyorParams,
+  type ConveyorPart
 } from './machine/conveyor-assembly';
 import {
   MODEL_BUILDERS,
   pickModelBuilder,
   normalizeModelParams,
   toConveyorParams,
-  RULES_ONLY_PROCESSES
+  resolveBufferTowerModelInput,
+  resolveModelDispatch,
+  RULES_ONLY_PROCESSES,
+  type NormalizedModelParams
 } from './machine/model-builders';
+import { resolveMachineGeometry } from './machine/machine-geometry.ts';
+import {
+  BufferTowerGeometryError,
+  bufferTowerParamsFromConfig,
+  buildBufferTowerParts,
+  type MachineBufferTowerConfig,
+  type ResolvedBufferTowerParams
+} from './machine/buffer-tower-assembly.ts';
 import { detectBufferLayers, detectConveyorSpec, detectTransfer, detectTurner, detectWorkpiece } from './machine/spec.ts';
 import { buildEntryButton as buildPanelEntryButton, createDrawer } from './ui/panels';
 import { qtExitNotice, qtLaunchNotice, type QtExitPayload, type QtLaunchReply } from './ui/qt-exit-notice.ts';
@@ -2400,6 +2412,15 @@ async function saveProjectToLibrary(input: {
   stepPath: string | null;
   stlPath: string | null;
   partPaths: Array<{ name: string; path: string; color?: string }>;
+  /**
+   * 完整方案（含 `config.bufferTower` 这类**嵌套**参数）。
+   *
+   * `params` 只收数字（`projects.ts` 落盘时过滤非数字），缓存塔的 `panel/inbound/frame`
+   * 是三层对象，走 params 会被静默丢掉 —— 重开工程只剩 `levels/layerPitchMm`。
+   * 所以嵌套参数必须走 `design`，它会被 `validateMachineDesign` 校验后原样写进
+   * design.json 与 project.json。
+   */
+  design?: unknown;
 }): Promise<{ ok: boolean; message?: string; record?: DesktopProjectRecordLike }> {
   if (!window.desktop?.projects) return { ok: false, message: '工程库接口不可用' };
   try {
@@ -2665,9 +2686,83 @@ async function buildCanvasAssembly(input: unknown): Promise<Record<string, unkno
 }
 
 /**
+ * 塔的收尾几何配置：从 design 里取 id/name/stations/actuators/sensors，塔块换成**归一化后**的
+ * config。只用于 `resolveMachineGeometry` 的收尾（评价/干涉字段不在这里消费），所以
+ * 缺字段时给安全缺省而不是猜几何。
+ */
+function towerGeometryConfig(design: Record<string, unknown>, config: MachineBufferTowerConfig): MachineConfig {
+  const rawConfig = design.config;
+  const raw = typeof rawConfig === 'object' && rawConfig !== null ? rawConfig as Record<string, unknown> : {};
+  return {
+    id: typeof raw.id === 'string' && raw.id ? raw.id : `buffer-tower-${config.levels}l`,
+    name: typeof raw.name === 'string' && raw.name ? raw.name : `缓存塔 ${config.levels} 层`,
+    stations: Array.isArray(raw.stations) ? raw.stations as string[] : [],
+    actuators: Array.isArray(raw.actuators) ? raw.actuators as MachineConfig['actuators'] : [],
+    sensors: Array.isArray(raw.sensors) ? raw.sensors as MachineConfig['sensors'] : [],
+    bufferTower: config
+  };
+}
+
+/**
+ * 缓存塔：参数 → 零件表（`build_machine_model` 的塔分支）。
+ *
+ * 与 `apply_machine_design` 走**同一份**建造器（`bufferTowerParamsFromConfig` +
+ * `buildBufferTowerParts`），所以两条链的件数/包络/件号不可能分叉；
+ * 差别只在出口：这里交给 `window.desktop.parametric` 出逐件 STL + 合并 STEP。
+ *
+ * 收尾断言也走**同一条**几何入口（`resolveMachineGeometry` → `towerGeometry`）：
+ * 里面含 `assertTowerAboveGround`（地面线守卫）与随动件标注。绕过它的后果是同一份 config
+ * 在 `design_machine` 因落地/立柱问题被拒、在整机建模却照建照存。
+ *
+ * 错误分两类，不许混：
+ * - `RangeError`（`BufferTowerConfigError` 继承它）= 调用方参数问题 → `INVALID_ARGUMENT`；
+ * - `BufferTowerGeometryError` = 零件表与配置自相矛盾（建造器缺陷）→ `INTERNAL_ERROR`。
+ * 把后者报成参数问题，用户会去改参数而永远修不好。
+ */
+function buildTowerModelParts(
+  towerModel: { config: MachineBufferTowerConfig; design: Record<string, unknown> },
+  requestedName: string
+): { ok: true; parts: ConveyorPart[]; label: string; params: ResolvedBufferTowerParams }
+  | { ok: false; code: string; message: string } {
+  try {
+    const params = bufferTowerParamsFromConfig({ bufferTower: towerModel.config });
+    const parts = buildBufferTowerParts(params);
+    // 收尾：与 apply_machine_design 同一条几何入口（地面线守卫 + 随动件标注 + 件数一致性）
+    const closing = resolveMachineGeometry({ config: towerGeometryConfig(towerModel.design, towerModel.config) });
+    if (closing.source !== 'buffer-tower-assembly' || closing.assemblyPartCount !== parts.length) {
+      return {
+        ok: false,
+        code: 'INTERNAL_ERROR',
+        message: `缓存塔几何收尾不一致：source=${closing.source}、几何件数=${closing.assemblyPartCount}、零件表件数=${parts.length}`
+      };
+    }
+    return {
+      ok: true,
+      parts,
+      params,
+      label: requestedName
+        || `缓存塔 ${params.levels} 层（${Math.round(params.inbound.lengthMm)}×${Math.round(params.inbound.widthMm)} mm，升降 ${params.liftTravelMm}）`
+    };
+  } catch (error) {
+    if (error instanceof BufferTowerGeometryError) {
+      return { ok: false, code: 'INTERNAL_ERROR', message: `缓存塔零件表自相矛盾（建造器缺陷，不是参数问题）：${error.message}` };
+    }
+    if (error instanceof RangeError) {
+      const code = (error as { code?: unknown }).code;
+      return {
+        ok: false,
+        code: 'INVALID_ARGUMENT',
+        message: `${typeof code === 'string' ? code : 'CONFIG_RANGE'}：${error.message}`
+      };
+    }
+    throw error;
+  }
+}
+
+/**
  * 整机模型构建入口（智能体工具 build_machine_model 与脚本 API 共用）。
  *
- * 机型经 MODEL_BUILDERS 注册表分发；输送机走参数化内核：28 件真实零件逐件导出 STL，
+ * 机型经 MODEL_BUILDERS 注册表分发；输送机走参数化内核：29 件真实零件逐件导出 STL，
  * 再在视口里装配成 28 个独立零件（零件树可见、干涉检查可用）。
  */
 async function buildMachineModel(input: unknown): Promise<Record<string, unknown>> {
@@ -2677,8 +2772,29 @@ async function buildMachineModel(input: unknown): Promise<Record<string, unknown
     name?: unknown;
     load?: unknown;
     brief?: unknown;
+    /** 完整方案（design_machine 产物）：塔的几何与落盘都以 design.config.bufferTower 为准 */
+    design?: unknown;
+    /** 只给 config 的简写（塔几何同样认 config.bufferTower） */
+    config?: unknown;
   };
-  const process = typeof request.process === 'string' && request.process.trim() ? request.process.trim() : 'conveyor';
+  /**
+   * 分派：先判塔（`resolveModelDispatch` 是命令层/几何层共用的那一份判据）。
+   *
+   * 为什么不能只看 `process === 'buffer-tower'`：`process` 的缺省值是 `'conveyor'`，
+   * 而 `design.config.bufferTower` 才是塔的权威来源。只给 design（design_machine 的自然产物）
+   * 时旧代码判不出塔 → 走 `toConveyorParams` 默认 2000×300 → **29 件输送线、`ok:true`**，
+   * 还把这份 design 落盘成那个 29 件工程。冲突（显式 process=conveyor + 塔 design）必须显式拒，
+   * 不能任选一个。
+   */
+  const dispatch = resolveModelDispatch({
+    process: request.process,
+    // params 进分派：塔 + params 双源、非塔 design/config 都在这一份判据里拒（渲染层不再静默挑一个）。
+    ...(request.params !== undefined ? { params: request.params } : {}),
+    ...(request.design !== undefined ? { design: request.design } : {}),
+    ...(request.config !== undefined ? { config: request.config } : {})
+  });
+  if (!dispatch.ok) return { ok: false, code: 'INVALID_ARGUMENT', message: dispatch.message };
+  const process = dispatch.process;
   const builder = pickModelBuilder(process);
   if (!builder) {
     const rulesHint = RULES_ONLY_PROCESSES.includes(process as never)
@@ -2720,11 +2836,49 @@ async function buildMachineModel(input: unknown): Promise<Record<string, unknown
     ...briefParams,
     ...((typeof request.params === 'object' && request.params !== null ? request.params : {}) as Record<string, number>)
   };
-  const normalized = normalizeModelParams(builder, mergedParams);
+  /**
+   * 缓存塔分派：判据来自 `dispatch.tower`（`process==='buffer-tower'` **或** 入参里的
+   * `design.config.bufferTower` / `config.bufferTower`），不靠「参数里有没有 panel」猜。
+   *
+   * 为什么必须显式分派：以前这条链只认 `toConveyorParams` + `buildConveyorParts`，
+   * 同一份塔 config 在 `apply_machine_design` 出 146 件、在「整机建模」出 29 件（layers=1 底层线），
+   * 回执还是 `ok:true`。塔的几何只能由 `bufferTowerParamsFromConfig` 派生（fail-loud 不夹紧）。
+   */
+  const towerModel = dispatch.tower
+    ? resolveBufferTowerModelInput({ params: request.params, design: request.design, config: request.config })
+    : null;
+  if (towerModel && !towerModel.ok) {
+    return { ok: false, code: 'INVALID_ARGUMENT', message: towerModel.message ?? '缓存塔参数无效' };
+  }
+  // 塔没有 brief 解析（没有 synth 模板）：静默忽略 brief 会让人以为「一句话就建了塔」，
+  // 实际出来的是一台默认 16 层塔。宁可显式拒绝。
+  if (towerModel && briefText) {
+    return {
+      ok: false,
+      code: 'INVALID_ARGUMENT',
+      message: '缓存塔不支持 brief 解析：塔参数只能来自 design.config.bufferTower 或扁平参数（levels/layerPitchMm/panel*/inbound*/beltHeightMm/sectionMm）'
+    };
+  }
+  const normalized: NormalizedModelParams = towerModel
+    ? { ok: true, params: towerModel.params, ignored: [] }
+    : normalizeModelParams(builder, mergedParams);
   if (!normalized.ok) return { ok: false, code: 'INVALID_ARGUMENT', message: normalized.message };
 
-  const params = toConveyorParams(normalized.params);
-  const parts = buildConveyorParts(params);
+  const requestedName = typeof request.name === 'string' && request.name.trim() ? request.name.trim() : '';
+  let parts: ConveyorPart[];
+  let modelLabel: string;
+  let towerParams: ResolvedBufferTowerParams | null = null;
+  if (towerModel) {
+    const towerBuild = buildTowerModelParts(towerModel, requestedName);
+    if (!towerBuild.ok) return { ok: false, code: towerBuild.code, message: towerBuild.message };
+    parts = towerBuild.parts;
+    modelLabel = towerBuild.label;
+    towerParams = towerBuild.params;
+  } else {
+    const params = toConveyorParams(normalized.params);
+    parts = buildConveyorParts(params);
+    modelLabel = requestedName || `${builder.label.split('（')[0] ?? '整机'} ${Math.round(params.lengthMm)}×${Math.round(params.widthMm)}`;
+  }
   const doc = conveyorAssembly(parts);
 
   if (!window.desktop?.parametric) return { ok: false, code: 'UNAVAILABLE', message: '参数化内核接口不可用' };
@@ -2736,9 +2890,6 @@ async function buildMachineModel(input: unknown): Promise<Record<string, unknown
   const built = await window.desktop.parametric.build(doc, { perPart: true });
   if (!built.ok) return { ok: false, code: 'BUILD_FAILED', message: built.message ?? '建模失败' };
 
-  const modelLabel = typeof request.name === 'string' && request.name.trim()
-    ? request.name.trim()
-    : `${builder.label.split('（')[0] ?? '整机'} ${Math.round(params.lengthMm)}×${Math.round(params.widthMm)}`;
   const instanceStats = (built.stats?.instances ?? []) as Array<{ id: string; volumeMm3: number }>;
   const volumes: Record<string, number> = {};
   for (const item of instanceStats) volumes[item.id] = item.volumeMm3;
@@ -2833,7 +2984,10 @@ async function buildMachineModel(input: unknown): Promise<Record<string, unknown
           ...(color ? { color: color.hex } : {})
         };
       })
-      .filter((item) => item.path.length > 0)
+      .filter((item) => item.path.length > 0),
+    // 塔的 panel/inbound/frame 是嵌套对象，params 装不下（projects.ts 只留数字）：
+    // 走 design 才不会被静默丢掉，重开工程还能拿回完整 `config.bufferTower`
+    ...(towerModel ? { design: towerModel.design } : {})
   });
 
   // 视口里已换成这台整机且已入库：它就是当前工程，电气图跟着换（否则电气域还停在上一个工程/方案）
@@ -2868,6 +3022,24 @@ async function buildMachineModel(input: unknown): Promise<Record<string, unknown
       stl: (built.files?.stl as { bytes?: number } | undefined)?.bytes ?? null,
       partCount: perPart.length
     },
+    ...(towerParams
+      ? {
+        bufferTower: {
+          levels: towerParams.levels,
+          slotsPerLevel: towerParams.slotsPerLevel,
+          slotsPerTower: towerParams.levels * towerParams.slotsPerLevel,
+          layerPitchMm: towerParams.layerPitchMm,
+          liftTravelMm: towerParams.liftTravelMm,
+          columnHeightMm: towerParams.columnHeightMm,
+          columnSectionMm: towerParams.columnSectionMm,
+          panel: towerParams.panel,
+          inbound: towerParams.inbound,
+          frame: towerParams.config.frame,
+          /** 几何来源与 apply_machine_design 同一份零件表；这里只补出口差别 */
+          geometrySource: 'buffer-tower-assembly'
+        }
+      }
+      : {}),
     ...(normalized.message ? { warnings: [normalized.message] } : {}),
     ...(loadMessage ? { loadMessage } : {})
   };

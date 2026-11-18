@@ -50,6 +50,7 @@ import {
   bufferTowerInboundParams,
   bufferTowerParamsFromConfig,
   buildBufferTowerParts,
+  isBufferTowerConfig,
   type ResolvedBufferTowerParams
 } from './buffer-tower-assembly.ts';
 import {
@@ -952,33 +953,67 @@ export function assertTowerAboveGround(
 }
 
 /**
- * 缓存塔的升降轴：静态几何只建**一个**台面，但这条轴必须存在且行程到顶。
+ * 升降轴的**随动件族**。
+ *
+ * 现有塔身建造器只建一块 `lift-platform`；通道方案（侧叉 / 梳齿）会把台面拆成
+ * 横梁 + 2 根叉臂 / 3 根叉指 —— 运动轴要一次带走**多件**。族名写在这里而不是写死
+ * `'lift-platform'`：件号一换轴不用改；反过来，任何方案都必须落在这些前缀里，
+ * 否则「轴建起来了但只带走一件」这种半接线会静默通过干涉/联动。
+ */
+const TOWER_LIFT_PART_PATTERNS: readonly RegExp[] = [
+  /^lift-platform$/,
+  /^lift-carriage$/,
+  /^lift-fork-/,
+  /^lift-finger-/
+];
+
+/**
+ * 缓存塔的升降轴：静态几何只建**一个**台面（或按方案拆成多件），但这条轴必须存在且行程到顶。
  *
  * 为什么不能只靠 `conveyorMovingAxes`：那条函数只认转向/移载工位（turner/transfer），
  * 缓存塔两者都没有，于是塔会报 `movingAxes: 0` —— 一个「有 16 层、但一条运动轴都没有」的塔，
  * 干涉/联动会把它当纯静态货架读。这里按塔的参数显式给出这条轴（仍然只是**示意**：
  * 伺服/抱闸/防坠/层定位都不在本模块内）。
+ *
+ * 多件口径（本轮新增；旧单件行为一字未改）：
+ * - 只找到 `lift-platform` 一件 → `partIds` 仍为 `['lift-platform']`、`pivot` 仍为
+ *   `[0, 0, platform.transform.z]`（= 台面建模位，不是层平面）；
+ * - 找到多件（横梁 + 叉臂 / 叉指）→ `partIds` 按零件表顺序全带走，`pivot` 取这些件
+ *   **世界包围盒 z 的中心**（叉臂与横梁不在同一 z，用第一件的 transform 会给出偏移基准）；
+ * - 一件都没有 → 仍然**抛错**：缺件是建造器缺陷，不是「静默 0 条运动轴」。
  */
-function towerLiftAxis(
+export function towerLiftAxis(
   parts: readonly ConveyorPart[],
   params: ResolvedBufferTowerParams
 ): GeomMovingAxis {
-  const platform = parts.find((part) => part.id === 'lift-platform');
-  // 台面缺失不再静默返回 null（那会变成「16 层的塔、0 条运动轴」而没人报错）：
+  const moving = parts.filter((part) => TOWER_LIFT_PART_PATTERNS.some((pattern) => pattern.test(part.id)));
+  // 缺件不再静默返回 null（那会变成「16 层的塔、0 条运动轴」而没人报错）：
   // 塔的轴是塔身几何的一部分，缺件就是建造器缺陷。
-  if (!platform) {
-    throw new BufferTowerGeometryError('缓存塔缺少 lift-platform：升降轴无法建立（塔身建造器缺陷，不是参数问题）');
+  if (moving.length === 0) {
+    throw new BufferTowerGeometryError(
+      '缓存塔缺少升降运动件（lift-platform / lift-carriage / lift-fork-* / lift-finger-*）：'
+        + '升降轴无法建立（塔身建造器缺陷，不是参数问题）'
+    );
   }
-  const platformZ = platform.transform.z;
+  // 单件保持旧口径（pivot = 台面建模位）；多件取包围盒 z 中心（叉臂与横梁不在同一 z）
+  let pivotZ: number;
+  if (moving.length === 1) {
+    pivotZ = moving[0]!.transform.z;
+  } else {
+    const bounds = moving.map((part) => partWorldBounds(part));
+    const minZ = Math.min(...bounds.map((bound) => bound.min[2]));
+    const maxZ = Math.max(...bounds.map((bound) => bound.max[2]));
+    pivotZ = Math.round(((minZ + maxZ) / 2) * 10) / 10;
+  }
   return {
     actuatorId: 'tower-lift',
     // 参数化整机没有工位底板：塔的运动轴不挂工位（与 conveyor-assembly 的轴同一口径）
     stationId: '',
     kind: 'linear',
-    partIds: [platform.id],
+    partIds: moving.map((part) => part.id),
     axis: [0, 0, 1],
-    // pivot = 台面建模位（不是层平面）：状态化干涉按 strokeMm 平移台面，pivot 只用于说明基准
-    pivot: [0, 0, platformZ],
+    // pivot = 运动件包围盒 z 中心（不是层平面）：状态化干涉按 strokeMm 平移运动件，pivot 只用于说明基准
+    pivot: [0, 0, pivotZ],
     strokeMm: params.liftTravelMm,
     rangeDeg: 0,
     home: 'retracted',
@@ -1066,8 +1101,10 @@ export function resolveMachineGeometry(
   // 形态明确是非输送类时，即使 config 里带了 conveyor 参数也不改道 —— 那是脏数据，不是输送线。
   // 缓存塔：判别字段是 config.bufferTower.kind（**不看 formId** —— 塔的 formId 仍是 belt-line，
   // 它的第 1 层就是那条输送线）。必须排在 conveyorLike 之前，否则会被当成「输送线的多层缓存」。
+  // 判定走 `isBufferTowerConfig`，与整机建模入口（`resolveModelDispatch`）同一个函数：
+  // 两边各写一份判据就会出现「同一份 design 出 146 件 / 29 件」。
   // 参数不完整时**抛错**，不回落：回落会拿工位生成器代理体冒充塔（同一台机器两套几何）。
-  if (config.bufferTower?.kind === 'tower') {
+  if (isBufferTowerConfig(config.bufferTower)) {
     const towerParams = bufferTowerParamsFromConfig(config);
     const towerParts = buildBufferTowerParts(towerParams);
     const geometry = towerGeometry(towerParts, config, towerParams);
