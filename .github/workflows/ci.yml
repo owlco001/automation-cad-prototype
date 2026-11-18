@@ -812,7 +812,10 @@ jobs:
   featuretree-geometry:
     name: FeatureTree real geometry (build123d)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 步骤预算（最坏情形）：安装 build123d ~10 + 装配 10 + 体积 10 + STEP 12 + 缓存塔 20 + AABB 10
+    # = 72 min，另加 checkout/setup-python 的 1~2 min；job 级 75 min 必须 ≥ 步骤合计，
+    # 否则最后一步会在跑完断言前被掐断，表现成「红但原因误导」（60 < 62 就是旧口径的错）。
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -842,6 +845,16 @@ jobs:
           . .venv-ft/bin/activate
           cd desktop
           AUTOMATIONCAD_PYTHON="$PWD/../.venv-ft/bin/python" npm run verify:step
+      # 整机 STEP 完整性：字节数/实体数下界挡不住"丢件"——缓存塔 16 层曾经丢到 z 3636/3840
+      # 还照样过。这条按"整机 STEP 顶点并集 == 逐件 STL 并集（±1mm）"判，16 层与 8 层基线都跑。
+      - name: 缓存塔 STEP 完整性门禁（16 层 + 8 层基线）
+        timeout-minutes: 20
+        run: |
+          . .venv-ft/bin/activate
+          cd desktop
+          export AUTOMATIONCAD_PYTHON="$PWD/../.venv-ft/bin/python"
+          npm run verify:step-tower -- --levels 16
+          npm run verify:step-tower -- --levels 8
       # AABB 初筛 vs 真实布尔：量出「把圆柱当方块」与「看不见孔」两种误差方向
       - name: AABB 初筛与真实布尔的误差
         timeout-minutes: 10

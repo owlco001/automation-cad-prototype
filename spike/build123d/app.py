@@ -168,7 +168,8 @@ def _instance_transform(value, index: int) -> tuple[float, float, float, float]:
     return float(x), float(y), float(z), float(rz)
 
 
-def build_assembly(instances) -> tuple[object, list[dict]]:
+def build_assembly(instances) -> tuple[object, list[dict], list, dict]:
+    """逐件建模 → 整机合并。返回 (整机形状, 逐件体积表, 逐件形状, 合并元数据)。"""
     if not isinstance(instances, list) or not instances:
         raise ValueError("instances 必须是非空数组")
     if len(instances) > MAX_INSTANCES:
@@ -189,16 +190,71 @@ def build_assembly(instances) -> tuple[object, list[dict]]:
         x, y, z, rz = _instance_transform(instance.get("transform"), index)
         shape = build(instance.get("ops") or [])
         placed = bd.Pos(x, y, z) * (bd.Rot(0, 0, rz) * shape)
+        solid_count = len(placed.solids())
         shapes.append(placed)
         volumes.append({
             "id": instance_id,
             "name": str(instance.get("name") or instance_id),
             "volumeMm3": round(shape.volume, 1),
+            # 逐件实体数：整机 STEP 的 MANIFOLD_SOLID_BREP 应当与「逐件合计」对得上，
+            # 门禁据此判断整机导出有没有丢件（旧累计 fuse 会少一半）。
+            "solids": solid_count,
         })
-    combined = shapes[0]
-    for shape in shapes[1:]:
-        combined = combined + shape
-    return combined, volumes, shapes
+    combined, merge_meta = merge(shapes)
+    return combined, volumes, shapes, merge_meta
+
+
+def _extent(shape) -> tuple[float, float, float, float, float, float]:
+    """(minX, minY, minZ, maxX, maxY, maxZ)，用于合并前后的包络校验。"""
+    bb = shape.bounding_box()
+    return (bb.min.X, bb.min.Y, bb.min.Z, bb.max.X, bb.max.Y, bb.max.Z)
+
+
+def merge(parts: list) -> tuple[object, dict]:
+    """整机合并：**一次性** fuse + 包络/体积校验，校验不过回退 Compound。
+
+    为什么必须改（实测，不是推测）：旧实现 `combined = combined + shape` 是**逐件累计**
+    布尔并，OCCT 的 BOP 在长链累计里会静默返回丢了若干实体的形状，build123d 不抛错：
+
+      | 装配 | 件数 | 累计 fuse 结果 | 正确包络（逐件 STL 并集） |
+      |---|---|---|---|
+      | PV 缓存 8 层 | 90 | 47 实体、顶点 z 仅到 2196 | z 0..2400 |
+      | 缓存塔 16 层 | 146 | 86 实体、z 仅到 3636、z 最小 770 | z 0..3840 |
+
+    丢的是顶层/底部结构，而 byte 数（781,970 B）、面数、实体数下限这些门禁照样过——
+    「已验收」的 8 层 STEP 就是这么来的。
+    一次性 `shapes[0].fuse(*shapes[1:])` 实测三个装配包络都完整；但版本/几何组合会变，
+    所以合并后再量一次包络与体积，对不上就回退 `Compound`——复合体不做布尔，
+    按定义不可能丢件（代价：重叠体积不去重，相邻件的实体不合并）。
+
+    返回 (shape, meta)；meta 进 `stats.merge`，调用方与门禁据此判断走的是哪条路。
+    """
+    if len(parts) == 1:
+        return parts[0], {"mode": "single", "solids": len(parts[0].solids())}
+    extents = [_extent(item) for item in parts]
+    want_min = [min(item[axis] for item in extents) for axis in range(3)]
+    want_max = [max(item[axis + 3] for item in extents) for axis in range(3)]
+    volume_sum = sum(item.volume for item in parts)
+    reason = ""
+    try:
+        fused = parts[0].fuse(*parts[1:])
+        got = _extent(fused)
+        drift = max(
+            max(abs(got[axis] - want_min[axis]) for axis in range(3)),
+            max(abs(got[axis + 3] - want_max[axis]) for axis in range(3)),
+        )
+        if drift > 0.5:
+            reason = f"fuse 包络偏移 {drift:.2f}mm（>0.5），判定丢件"
+        elif volume_sum > 0 and fused.volume < volume_sum * 0.9:
+            reason = f"fuse 体积 {fused.volume:.0f} < 逐件合计 {volume_sum:.0f}×0.9，判定丢件"
+        else:
+            return fused, {"mode": "fuse", "driftMm": round(drift, 3),
+                           "solids": len(fused.solids())}
+    except Exception as exc:  # noqa: BLE001 —— 内核布尔失败也必须出图（回退不丢件）
+        reason = f"fuse 抛错：{exc}"
+    compound = bd.Compound(children=parts)
+    return compound, {"mode": "compound", "fallback": True, "reason": reason,
+                      "solids": len(compound.solids())}
 
 
 def describe(shape, instances: list[dict] | None = None) -> dict:
@@ -269,8 +325,9 @@ class Handler(BaseHTTPRequestHandler):
             instances = payload.get("instances")
             per_part = bool(payload.get("perPart"))
             placed_shapes: list = []
+            merge_meta: dict | None = None
             if instances is not None:
-                shape, instance_volumes, placed_shapes = build_assembly(instances)
+                shape, instance_volumes, placed_shapes, merge_meta = build_assembly(instances)
             else:
                 shape, instance_volumes = build(payload.get("ops") or []), None
             built_ms = (time.perf_counter() - started) * 1000
@@ -298,12 +355,23 @@ class Handler(BaseHTTPRequestHandler):
                         "name": str(item.get("name") or raw_id),
                         "stl": {"path": part_path, "bytes": os.path.getsize(part_path)},
                         "volumeMm3": round(placed.volume, 1),
+                        "solids": len(placed.solids()),
+                        "faces": len(placed.faces()),
                         "bbox": [round(bb.size.X, 2), round(bb.size.Y, 2), round(bb.size.Z, 2)],
                         "bboxMin": [round(bb.min.X, 2), round(bb.min.Y, 2), round(bb.min.Z, 2)],
                         "bboxMax": [round(bb.max.X, 2), round(bb.max.Y, 2), round(bb.max.Z, 2)]
                     })
                 files["parts"] = parts_meta
-            self._send(200, {"ok": True, "kernel": "build123d", "stats": describe(shape, instance_volumes), "buildMs": round(built_ms, 1), "files": files})
+            stats = describe(shape, instance_volumes)
+            if merge_meta is not None:
+                stats["merge"] = merge_meta
+                # 逐件实体数只在 perPart 导出时才有；非 perPart 时**不要**写 0/null 冒充
+                # 「逐件实体合计 = 0」——那会让门禁的实体数上限变成 2，日志里的
+                # `partSolids=0` 也会被误读成「一块实体都没有」。
+                part_solids = [item.get("solids") for item in (files.get("parts") or [])]
+                if part_solids and all(isinstance(value, int) for value in part_solids):
+                    stats["partSolids"] = sum(part_solids)
+            self._send(200, {"ok": True, "kernel": "build123d", "stats": stats, "buildMs": round(built_ms, 1), "files": files})
         except Exception as exc:  # noqa: BLE001
             self._send(400, {"ok": False, "error": str(exc), "trace": traceback.format_exc(limit=2)})
 

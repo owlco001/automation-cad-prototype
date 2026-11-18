@@ -76,10 +76,18 @@ export const BASELINE = Object.freeze({
   }),
   parts: 90,
   envelope: Object.freeze([2430, 1690, 2400]),
-  /** 真 B-Rep STEP 实测 781,970B；参数化桩只有几 KB，用它区分"真几何"与"占位几何" */
+  /**
+   * 真 B-Rep STEP 实测 1,622,322 B（T2 修复整机 fuse 丢件后；修复前那份"已验收"的
+   * 781,970 B 实际只有 47 实体、顶点 z 只到 2196/2400，是丢件产物）。
+   * 参数化桩只有几 KB，用它区分"真几何"与"占位几何"。
+   */
   minStepBytes: 200_000,
   minStlBytes: 500_000,
-  /** 实测 47 个 MANIFOLD_SOLID_BREP / 264 个 ADVANCED_FACE（47 实体）；桩/空文件远达不到 */
+  /**
+   * 实测 55 个 MANIFOLD_SOLID_BREP / 538 个 ADVANCED_FACE（90 件里相邻件被布尔并成一体）。
+   * 修复前是 47/264（丢件版）；这里仍是**下限**，完整性由 `verify:step-tower --levels 8`
+   * 按"整机 STEP 顶点并集 == 逐件 STL 并集"判，字节数/实体数下界挡不住丢件。
+   */
   minSolidBreps: 40,
   minAdvancedFaces: 200,
   /** 几何层数 → 储位数：第 1 层是底层输送线，所以 8 层只有 8 个储位 */
@@ -1032,7 +1040,8 @@ async function main(argv) {
     claimedSlots: BASELINE.claimedSlots,
     aligned: BASELINE.slotsFromLayers(options.params.layers) === BASELINE.claimedSlots,
     text: `几何层数 ${options.params.layers} 层 = ${BASELINE.slotsFromLayers(options.params.layers)} 个储位；`
-      + `16 位只存在于 bufferTower 纯数据槽位模型，本脚本不把 8 层冒充 16 位。`
+      + '16 层塔身几何已由 bufferTower 建造器生成（146 件静态件表），但不在本脚本路径上，'
+      + '故本报告无塔 B-Rep/STEP；本脚本不把 8 层冒充 16 位。'
   };
 
   if (options.dryRun) {
