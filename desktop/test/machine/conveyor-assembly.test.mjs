@@ -80,6 +80,13 @@ test('包络按零件实际外形求并集（电机外挂会撑宽，不是公�
   assert.ok(height >= DEFAULT_CONVEYOR.beltHeightMm, '高度至少到皮带面');
 });
 
+test('180 mm 缓存层距不会在装配生成时被二次夹紧', () => {
+  const tightLayers = buildConveyorParts({ ...DEFAULT_CONVEYOR, layers: 2, layerPitchMm: 180 });
+  const lift = tightLayers.find((part) => part.id === 'lift-platform');
+  assert.ok(lift, '两层缓存应包含升降台');
+  assert.equal(lift.transform.z, DEFAULT_CONVEYOR.beltHeightMm + 180 * 0.5);
+});
+
 test('参数越界被夹紧，不会生成负尺寸零件', () => {
   const weird = buildConveyorParts({ ...DEFAULT_CONVEYOR, lengthMm: 10, widthMm: 5, beltHeightMm: 1 });
   assert.ok(weird.length > 0);

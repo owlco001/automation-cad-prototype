@@ -44,7 +44,7 @@ const CONVEYOR_PARAMS: ModelParamSpec[] = [
   { name: 'beltThicknessMm', label: '皮带厚度', defaultValue: DEFAULT_CONVEYOR.beltThicknessMm, min: 1, max: 20, unit: 'mm' },
   { name: 'frameSectionMm', label: '型材截面', defaultValue: DEFAULT_CONVEYOR.frameSectionMm, min: 20, max: 100, unit: 'mm' },
   { name: 'layers', label: '缓存层数（1=普通线体，≥2=立体缓存）', defaultValue: DEFAULT_CONVEYOR.layers, min: 1, max: 8, unit: '层' },
-  { name: 'layerPitchMm', label: '层间距', defaultValue: DEFAULT_CONVEYOR.layerPitchMm, min: 250, max: 900, unit: 'mm' },
+  { name: 'layerPitchMm', label: '层间距', defaultValue: DEFAULT_CONVEYOR.layerPitchMm, min: 180, max: 900, unit: 'mm' },
   // 转向工位：0 = 不做；45/90/180 = 线体中段把工件就地旋转多少度
   { name: 'turnerAngleDeg', label: '转向角度（0=不做转向工位，90=旋转 90°）', defaultValue: DEFAULT_CONVEYOR.turnerAngleDeg, min: 0, max: 180, unit: '°' },
   // 顶升移载（直角移载）：板宽 > 0 才建移载单元（没板宽就没法算移载行程）。

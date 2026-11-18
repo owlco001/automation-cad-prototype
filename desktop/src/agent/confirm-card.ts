@@ -27,7 +27,7 @@ function ensureStyles(): void {
   const style = document.createElement('style');
   style.id = STYLE_ID;
   style.textContent = `
-  .acw-confirm-mask { position: fixed; inset: 0; z-index: 9200; display: flex; align-items: center; justify-content: center;
+  .acw-confirm-mask { position: fixed; inset: 0; z-index: 2147483647; display: flex; align-items: center; justify-content: center;
     background: rgba(6, 10, 16, .62); backdrop-filter: blur(2px); }
   .acw-confirm-card { width: min(620px, calc(100vw - 48px)); max-height: 80vh; display: flex; flex-direction: column;
     background: #141b24; border: 1px solid #2b3846; border-radius: 10px; box-shadow: 0 18px 48px rgba(0,0,0,.5);

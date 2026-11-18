@@ -5,6 +5,7 @@ import { occtFormatForFile } from './cad/format.ts';
 import { parseStandardCadBuffer, parseStandardCadBuffers } from './cad/loaders';
 import { hexToLinear, machineMaterialColor } from './cad/machine-colors.ts';
 import { CadViewer } from './cad/viewer';
+import { sceneIntegrity as computeSceneIntegrity } from './cad/scene-integrity';
 import { describeSuggestions } from './cad/kinematics-auto';
 import {
   initKinematicsUi,
@@ -412,6 +413,7 @@ function buildOverlay(): void {
     </dialog>
     <footer class="cad-footer">
       <span id="cadStats">就绪 · <strong>0</strong> 个零件</span>
+      <span id="cadIntegrity" class="cad-integrity" data-state="unknown">场景完整性：待检查</span>
       <span class="cad-footer-flex"></span>
       <span class="cad-unit-note">单位按源文件 mm 解释 · 未做隐式缩放</span>
     </footer>`;
@@ -1128,6 +1130,17 @@ function fileNameFromPath(path: string): string {
 
 function displayFileInfo(name: string): void {
   refreshProjectContext();
+  const updateIntegrity = (): void => {
+    const node = document.getElementById('cadIntegrity');
+    if (!node || !viewer) return;
+    const scene = viewer.describeScene() as { modelPartCount?: number; scenePartCount?: number; hiddenParts?: number; batches?: Array<{count?:number}> };
+    const model = Number(scene.modelPartCount ?? 0);
+    const rendered = Number(scene.scenePartCount ?? 0);
+    node.dataset.state = model === rendered ? 'ok' : 'warning';
+    node.textContent = model === rendered ? `场景完整性：${rendered}/${model} 件` : `场景不完整：${rendered}/${model} 件 · 隐藏 ${scene.hiddenParts ?? 0}`;
+    node.title = `实例批次 ${scene.batches?.length ?? 0} 组；隐藏 ${scene.hiddenParts ?? 0} 件`;
+  };
+  queueMicrotask(updateIntegrity);
   const info = document.getElementById('cadFileInfo');
   if (info) info.textContent = name;
 }
@@ -4500,6 +4513,7 @@ function init(): void {
   window.AutomationCadViewer = {
       /** 渲染诊断：线框开关、材质、光照、相机（排查"看不见实体"用） */
       describeScene: () => ensureViewer().describeScene(),
+      sceneIntegrity: () => computeSceneIntegrity(ensureViewer().describeScene() as { modelPartCount?: number; scenePartCount?: number }),
       toggleWireframe: () => ensureViewer().toggleWireframe(),
       open: openOverlay,
     close: closeOverlay,

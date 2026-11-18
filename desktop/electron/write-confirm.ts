@@ -10,6 +10,7 @@ import { ipcMain, type BrowserWindow } from 'electron';
  * 超过 120 秒、窗口销毁、或回包 id 不匹配都按拒绝处理——绝不默认放行。
  */
 export const WRITE_CONFIRM_TIMEOUT_MS = 120_000;
+export const WRITE_CONFIRM_TIMEOUT_CODE = 'CONFIRMATION_TIMEOUT' as const;
 
 export interface WriteConfirmRequest {
   /** 工具名，页面卡片上做徽标显示。 */
@@ -30,14 +31,21 @@ export async function requestWriteConfirmation(
   window: BrowserWindow | null,
   request: WriteConfirmRequest
 ): Promise<boolean> {
-  if (!window || window.isDestroyed()) return false;
+  return (await requestWriteConfirmationResult(window, request)).allow;
+}
+
+export async function requestWriteConfirmationResult(
+  window: BrowserWindow | null,
+  request: WriteConfirmRequest
+): Promise<{ allow: boolean; reason: 'allowed' | 'denied' | 'timeout' | 'unavailable' }> {
+  if (!window || window.isDestroyed()) return { allow: false, reason: 'unavailable' };
   const serialized = JSON.stringify(request.args ?? {});
   const summary = serialized.length > 600 ? `${serialized.slice(0, 600)}…` : serialized;
   const requestId = `cw-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-  const answer = new Promise<{ allow: boolean; remember?: boolean }>((resolve) => {
+  const answer = new Promise<{ allow: boolean; remember?: boolean; reason?: 'allowed'|'denied'|'timeout' }>((resolve) => {
     let settled = false;
-    const finish = (value: { allow: boolean; remember?: boolean }): void => {
+    const finish = (value: { allow: boolean; remember?: boolean; reason?: 'allowed'|'denied'|'timeout' }): void => {
       if (settled) return;
       settled = true;
       ipcMain.removeListener('agent:confirm-write:reply', onReply);
@@ -49,9 +57,9 @@ export async function requestWriteConfirmation(
       const record = payload as { id?: unknown; allow?: unknown; remember?: unknown };
       if (record.id !== requestId) return;
       if (event.sender !== window.webContents) return;
-      finish({ allow: record.allow === true, remember: record.remember === true });
+      finish({ allow: record.allow === true, remember: record.remember === true, reason: record.allow === true ? 'allowed' : 'denied' });
     };
-    const timer = setTimeout(() => finish({ allow: false }), WRITE_CONFIRM_TIMEOUT_MS);
+    const timer = setTimeout(() => finish({ allow: false, reason: 'timeout' }), WRITE_CONFIRM_TIMEOUT_MS);
     ipcMain.on('agent:confirm-write:reply', onReply);
   });
 
@@ -64,5 +72,6 @@ export async function requestWriteConfirmation(
     title: request.title ?? '智能体请求写操作',
     ...(request.steps && request.steps.length > 0 ? { steps: request.steps } : {})
   });
-  return (await answer).allow;
+  const result = await answer;
+  return { allow: result.allow, reason: result.reason ?? (result.allow ? 'allowed' : 'denied') };
 }

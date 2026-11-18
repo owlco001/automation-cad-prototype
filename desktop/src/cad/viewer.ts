@@ -708,6 +708,10 @@ export class CadViewer {
     return {
       degraded: this.degraded,
       wireframe: this.wireframe,
+      modelPartCount: this.parts.length,
+      // InstancedMesh replaces hidden source meshes; count visible source meshes plus instance counts.
+      // Do not inspect partIndices here: older render batches intentionally expose only count.
+      scenePartCount: this.parts.filter((part) => part.mesh.visible).length + this.batchGroup.children.reduce((sum, child) => child.userData.instanced ? sum + Number((child as THREE.InstancedMesh).count || 0) : sum, 0),
       parts: this.parts.map((part) => {
         const material = part.mesh.material as THREE.MeshStandardMaterial;
         return {

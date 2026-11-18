@@ -9,6 +9,9 @@
 .project-context-heading{display:flex;align-items:baseline;gap:12px;min-width:0;flex:1}
 .project-context-heading strong{font-size:14px;font-weight:600;max-width:34vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .project-context-heading span{font-size:11px;color:#98a8b7;white-space:nowrap}
+.cad-integrity{font-size:10px;color:#9fb2bf;border:1px solid #3c4c58;background:#202b34;border-radius:4px;padding:4px 8px;white-space:nowrap}
+.cad-integrity[data-state="ok"]{color:#9ce2c4;border-color:#39725e;background:#1e382f}
+.cad-integrity[data-state="warning"]{color:#ffd19a;border-color:#82623d;background:#3a2d21}
 .project-geometry-badge{font-size:10px;color:#a8bdc9;border:1px solid #3c4d59;background:#202c35;border-radius:4px;padding:4px 8px;white-space:nowrap}
 .project-context-bar[data-stage="import"] .project-context-heading span{color:#e9c37e}
 .project-context-actions{display:flex;align-items:center;gap:8px;min-width:0}
@@ -19,19 +22,22 @@
 .project-context-actions #projectSessionStatus[data-error="true"]{color:#ffb5a6;background:#422c2a;border-color:#80524a}
 .project-context-actions #recoverLastProject{color:#d9e9fc;border-color:#56769b;background:#25384f}
 .desktop-workspace .tb-left #saveAsProjectButton{display:none}
-.desktop-workspace .topbar{min-height:48px;height:auto;flex-wrap:wrap;gap:8px;padding-block:6px}
+.desktop-workspace .topbar{min-height:48px;height:auto;flex:0 0 auto;flex-wrap:wrap;gap:8px;padding-block:6px}
+.desktop-workspace .topbar .tb-right{flex:0 1 auto;margin-left:auto;max-width:100%}
+.desktop-workspace .topbar > .workspace-nav{order:3;flex:1 1 100%;width:100%;min-width:0}
+.desktop-workspace .topbar > #modes,.desktop-workspace .topbar > #modesElec{height:auto;min-height:28px}
 .desktop-workspace .topbar .tb-left{flex:0 1 auto;min-width:0}
 .desktop-workspace .topbar .file-menu-wrap{max-width:220px}
 .desktop-workspace .topbar .file-name{max-width:150px}
 .desktop-workspace .topbar > #modes,.desktop-workspace .topbar > #modesElec{order:4;flex-basis:100%;justify-content:flex-start;border-top:1px solid #303d47;padding-top:5px}
 .desktop-workspace .topbar > #modes[hidden],.desktop-workspace .topbar > #modesElec[hidden]{display:none}
 .workspace-nav{display:flex;align-items:center;gap:10px;flex:1;min-width:0}
-.workspace-nav-tabs{display:flex;align-items:center;gap:3px;white-space:nowrap}
+.workspace-nav-tabs{display:flex;align-items:center;gap:3px;white-space:nowrap;flex:0 0 auto;max-width:100%;overflow-x:auto}
 .workspace-nav-button{border:1px solid transparent;background:transparent;color:#9fb0bf;border-radius:5px;padding:8px 11px;font-family:inherit;font-size:12px;line-height:1.3;cursor:pointer;white-space:nowrap}
 .workspace-nav-button:hover{color:#eef6fb;background:#293742}
 .workspace-nav-button.is-active,.workspace-nav-button[aria-pressed="true"],.workspace-nav-button[aria-current="page"]{color:#baf1e0;border-color:#376e62;background:#213c35}
-.workspace-tool-strip{display:flex;align-items:center;gap:4px;min-width:0;overflow:auto;border-left:1px solid #3a4651;padding-left:10px;scrollbar-width:thin}
-.workspace-tool-shortcut{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;border:1px solid #374653;border-radius:4px;background:#202c36;color:#bdcdd9;padding:5px 8px;min-height:29px;font-family:inherit;font-size:11px;line-height:1.3;cursor:pointer}
+.workspace-tool-strip{display:flex;align-items:center;gap:4px;flex:1 1 0;max-width:100%;min-width:0;overflow:auto;border-left:1px solid #3a4651;padding-left:10px;scrollbar-width:thin}
+.workspace-tool-shortcut{display:inline-flex;flex:0 0 auto;align-items:center;gap:5px;white-space:nowrap;border:1px solid #374653;border-radius:4px;background:#202c36;color:#bdcdd9;padding:5px 8px;min-height:29px;font-family:inherit;font-size:11px;line-height:1.3;cursor:pointer}
 .workspace-tool-shortcut:hover{background:#304351;color:#fff}
 .workspace-tool-shortcut svg{width:13px;height:13px;fill:none;stroke:currentColor}
 .workspace-nav button:focus-visible,.project-context-bar button:focus-visible,.cad-inspector-tabs button:focus-visible{outline:2px solid #7fcebb;outline-offset:2px}
