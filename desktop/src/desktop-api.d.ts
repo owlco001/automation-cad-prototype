@@ -1475,6 +1475,7 @@ interface Window {
   AutomationCadViewer?: {
     /** 渲染诊断：线框开关、材质、光照、相机（排查"看不见实体"用） */
     describeScene(): Record<string, unknown>;
+    sceneIntegrity(): { modelPartCount: number; scenePartCount: number; complete: boolean };
     toggleWireframe(): boolean;
     open(): void;
     close(): void;

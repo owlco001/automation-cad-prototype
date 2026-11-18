@@ -7,6 +7,11 @@ import { checkExportTargetPath } from './policy.ts';
 import type { PlcGenConfig } from '../plcgen/types.ts';
 import { summarizeVerification, verifyGenerated, type VerifyOptions } from '../plcgen/verify.ts';
 import { searchDocs } from './kb/search.ts';
+import { analyzeBufferCapacity, type BufferCapacityInput } from '../machine/buffer-capacity.ts';
+import { MAX_BUFFER_SLOTS, bufferQueueIo, createBufferQueue, type BufferTowerConfig } from '../machine/buffer-tower.ts';
+import { createBufferControlMemory, stepBufferControl } from '../machine/buffer-control.ts';
+import { mapBufferIoSignals } from '../machine/buffer-io.ts';
+import { buildBufferIoMapDraft, validateBufferIoMapDraft } from '../machine/buffer-io-map.ts';
 import {
   DEFAULT_NOTE_CYCLE,
   DEFAULT_NOTE_STATIONS,
@@ -402,6 +407,26 @@ const SEARCH_DOCS_SCHEMA = {
   additionalProperties: false
 };
 
+const BUFFER_CAPACITY_SCHEMA = {
+  type: 'object',
+  properties: {
+    upstreamCycleSec: { type: 'number', exclusiveMinimum: 0 },
+    downstreamCycleSec: { type: 'number', exclusiveMinimum: 0 },
+    downstreamStopSec: { type: 'number', minimum: 0 },
+    initialOccupancy: { type: 'integer', minimum: 0 },
+    inTransit: { type: 'integer', minimum: 0 },
+    reserveSlots: { type: 'integer', minimum: 0 },
+    capacity: { type: 'integer', minimum: 0 }
+  },
+  required: ['upstreamCycleSec', 'downstreamCycleSec', 'downstreamStopSec', 'initialOccupancy', 'inTransit', 'reserveSlots'],
+  additionalProperties: false
+};
+
+/** design_machine 缓存快照使用的假设转移超时（秒）：只用于让单步快照可解释，不是现场设定值。 */
+const BUFFER_SNAPSHOT_TRANSFER_TIMEOUT_SEC = 30;
+/** 快照回显的槽位上限：1×512 全量回显会把 44 KB 塞进 agent 上下文，超出部分只给计数。 */
+const BUFFER_SLOT_ECHO_LIMIT = 16;
+
 const DESIGN_MACHINE_SCHEMA = {
   type: 'object',
   properties: {
@@ -409,6 +434,26 @@ const DESIGN_MACHINE_SCHEMA = {
       type: 'string',
       minLength: 1,
       description: '中文机型需求，例如「设计一台三工位锁螺丝机，节拍 20 件/分钟，用 750W 伺服」'
+    },
+    buffer: { ...BUFFER_CAPACITY_SCHEMA, description: '缓存机容量核算：明确上下游秒/件、下游停机秒数、初始库存、在途件、预留槽和实际容量；结果不证明FIFO或几何已实现。' },
+    bufferTower: {
+      type: 'object',
+      properties: {
+        towerCount: { type: 'integer', minimum: 1, maximum: 2 },
+        slotsPerTower: { type: 'integer', minimum: 1, maximum: MAX_BUFFER_SLOTS }
+      },
+      required: ['towerCount', 'slotsPerTower'],
+      additionalProperties: false,
+      // 单塔上限 512，但总量上限也是 512：两塔时每塔最多 256。
+      // 顶层 properties 保留 512 以表达“单塔绝对上限”，组合约束放在 allOf 里，
+      // 标准 JSON Schema 客户端（MCP/LLM 侧）能在调用前就拦住 2×300 这类越界。
+      allOf: [
+        {
+          if: { properties: { towerCount: { const: 2 } }, required: ['towerCount'] },
+          then: { properties: { slotsPerTower: { maximum: MAX_BUFFER_SLOTS / 2 } } }
+        }
+      ],
+      description: `缓存塔纯数据排布预览；只生成空队列 FIFO 槽位模型。总槽位上限 ${MAX_BUFFER_SLOTS}（towerCount=2 时每塔最多 ${MAX_BUFFER_SLOTS / 2}，单塔最多 ${MAX_BUFFER_SLOTS}），不代表真实机械或安全验收。返回值为单个扫描周期的快照，握手输入是显式假设而非现场状态。`
     },
     stationCount: {
       type: 'integer',
@@ -904,6 +949,79 @@ export class AgentTools {
         }
 
         try {
+          const bufferAnalysis = args.buffer === undefined ? undefined : analyzeBufferCapacity(args.buffer as BufferCapacityInput);
+          const bufferTowerConfig = args.bufferTower === undefined ? undefined : args.bufferTower as BufferTowerConfig;
+          // schema 无法表达"总量 ≤512"，这里先给出带两个乘数的明确回执，再交给纯数据层兜底。
+          if (bufferTowerConfig !== undefined) {
+            const towers = Number((bufferTowerConfig as { towerCount?: unknown }).towerCount);
+            const perTower = Number((bufferTowerConfig as { slotsPerTower?: unknown }).slotsPerTower);
+            if (Number.isSafeInteger(towers) && Number.isSafeInteger(perTower) && towers * perTower > MAX_BUFFER_SLOTS) {
+              return {
+                ok: false,
+                code: 'INVALID_ARGUMENT',
+                message: `缓存塔槽位总数 ${towers * perTower}（${towers}×${perTower}）不得超过 ${MAX_BUFFER_SLOTS}`
+              };
+            }
+          }
+          // 快照固定为「空队列 + 显式假设握手」，只推进一个扫描周期：
+          // 不读设备状态、不写 IO、不产生任何“实时”读数。
+          const handshake = { upstreamReady: true, downstreamReady: false, transferDone: false, fault: false };
+          const bufferTower = bufferTowerConfig === undefined ? undefined : (() => {
+            const state = createBufferQueue(bufferTowerConfig);
+            const snapshot = stepBufferControl(createBufferControlMemory(), {
+              queue: state, ...handshake, reset: false, nowSec: 0,
+              transferTimeoutSec: BUFFER_SNAPSHOT_TRANSFER_TIMEOUT_SEC
+            });
+            const ioMapDraft = buildBufferIoMapDraft(bufferTowerConfig);
+            const echoedSlots = state.slots.slice(0, BUFFER_SLOT_ECHO_LIMIT);
+            return {
+              readOnly: true as const,
+              snapshotOf: 'empty-queue-assumed-handshake' as const,
+              // 回显诊断假设：控制结论是在这些输入下算出来的，不是现场信号。
+              assumedInputs: {
+                ...handshake, reset: false, nowSec: 0, transferSeq: null,
+                transferTimeoutSec: BUFFER_SNAPSHOT_TRANSFER_TIMEOUT_SEC
+              },
+              capabilityBoundary: {
+                hardwareWired: false as const,
+                plcProgramIncluded: false as const,
+                plcAddressesAssigned: false as const,
+                safetyCertified: false as const,
+                queueModel: 'pure-data' as const,
+                message: '该快照只演示纯数据队列与单步握手判定：未连接任何现场设备、未生成 PLC 程序、未分配 IO 地址、未经安全认证。'
+              },
+              config: bufferTowerConfig,
+              limits: { slotCount: state.slots.length, maxSlots: MAX_BUFFER_SLOTS },
+              io: bufferQueueIo(state),
+              slots: echoedSlots,
+              // 明确回显截断事实与总量，避免把“前 16 个槽位”误当成全部槽位。
+              slotEcho: {
+                returned: echoedSlots.length,
+                total: state.slots.length,
+                limit: BUFFER_SLOT_ECHO_LIMIT,
+                truncated: echoedSlots.length < state.slots.length,
+                message: echoedSlots.length < state.slots.length
+                  ? `槽位明细仅回显前 ${BUFFER_SLOT_ECHO_LIMIT} 个（共 ${state.slots.length} 个），其余按计数与 limits 表达。`
+                  : null
+              },
+              controlSnapshot: snapshot.state,
+              signals: mapBufferIoSignals(snapshot.state, handshake),
+              ioMapDraft,
+              ioMapValidation: validateBufferIoMapDraft(ioMapDraft)
+            };
+          })();
+          const bufferRequested = /缓存|FIFO|buffer/i.test(briefText);
+          // 只要返回了缓存数字或缓存快照，就必须同时返回能力边界，不能依赖 brief 关键词。
+          const bufferTouched = args.buffer !== undefined || args.bufferTower !== undefined;
+          const bufferInputsEcho = args.buffer === undefined ? null : {
+            upstreamCycleSec: (args.buffer as BufferCapacityInput).upstreamCycleSec ?? null,
+            downstreamCycleSec: (args.buffer as BufferCapacityInput).downstreamCycleSec ?? null,
+            downstreamStopSec: (args.buffer as BufferCapacityInput).downstreamStopSec ?? null,
+            initialOccupancy: (args.buffer as BufferCapacityInput).initialOccupancy ?? null,
+            inTransit: (args.buffer as BufferCapacityInput).inTransit ?? null,
+            reserveSlots: (args.buffer as BufferCapacityInput).reserveSlots ?? null,
+            capacity: (args.buffer as BufferCapacityInput).capacity ?? null
+          };
           const brief = parseMachineBrief(briefText);
           const clarifyBrief = {
             ...brief,
@@ -940,6 +1058,19 @@ export class AgentTools {
             // test/design/candidates.test.mjs 的 deepEqual 锁定）。联动调试要按同一句话
             // 重算时间线，否则面板只能拿机型名去重跑管线，算出来是另一台机器（步序/零件 id 全对不上）。
             brief: briefText,
+            ...(bufferAnalysis ? { bufferAnalysis } : {}),
+             ...(bufferTower ? { bufferTower } : {}),
+            ...(bufferTouched || bufferRequested ? { bufferCapability: {
+              status: 'partial-concept-only',
+              capacityVerified: false,
+              capacityVerifiedReason: '工程未验收：容量只是在给定输入假设下算出的流量结论，不含真实节拍波动、机构吞吐与现场验收。',
+              capacitySufficientFromInputs: bufferAnalysis?.capacitySufficient ?? null,
+              fifoImplemented: false,
+              geometrySlotsVerified: false,
+              inputsEcho: bufferInputsEcho,
+              message: '当前通用输送模板不是完整缓存机；层数不等于容量，单层槽位必须按工件长宽与间隙核算。bufferAnalysis仅核算流量，不能证明双塔、FIFO、托盘转移与安全已实现。',
+              requiredInputs: args.buffer === undefined ? BUFFER_CAPACITY_SCHEMA.required : []
+            } } : {}),
             design: {
               config: design.config,
               cycle: design.cycle,
@@ -957,10 +1088,17 @@ export class AgentTools {
             question: clarify.question
           };
         } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          // 缓存参数越界（RangeError）与内部程序缺陷分开记日志，回执 code 保持不变以免破坏调用方。
+          if (error instanceof RangeError) {
+            console.warn('[DESIGN_MACHINE_RANGE_REJECTED]', { site: 'desktop/src/agent/tools.ts:design_machine' }, message);
+          } else {
+            console.warn('[DESIGN_MACHINE_FAILED]', { site: 'desktop/src/agent/tools.ts:design_machine' }, message);
+          }
           return {
             ok: false,
             code: 'INVALID_ARGUMENT',
-            message: error instanceof Error ? error.message : String(error)
+            message
           };
         }
       }

@@ -27,6 +27,29 @@ test('design_machine schema：brief 必填，stationCount 1–12，cyclePerMin >
   assert.equal(schema.properties.cyclePerMin.exclusiveMinimum, 0);
 });
 
+test('缓存需求返回容量核算及未实现的FIFO/槽位边界', async () => {
+  const result = await tools.call('design_machine', { brief: '光伏组件FIFO缓存机', cyclePerMin: 5, buffer: { upstreamCycleSec: 12, downstreamCycleSec: 15, downstreamStopSec: 120, initialOccupancy: 2, inTransit: 1, reserveSlots: 2, capacity: 16 } });
+  assert.equal(result.ok, true);
+  assert.equal(result.bufferAnalysis.requiredSlots, 15);
+  assert.equal(result.bufferAnalysis.worstStopArrivals, 10);
+  assert.equal(result.bufferAnalysis.sustainedBalance, false);
+  assert.equal(result.bufferCapability.fifoImplemented, false);
+  assert.equal(result.bufferCapability.geometrySlotsVerified, false);
+  assert.equal(result.bufferCapability.status, 'partial-concept-only');
+});
+
+test('design_machine 可返回只读双塔槽位与 IO 预览', async () => {
+  const result = await tools.call('design_machine', { brief: '光伏组件FIFO缓存机', bufferTower: { towerCount: 2, slotsPerTower: 2 } });
+  assert.equal(result.ok, true);
+  assert.equal(result.bufferTower.io.free, 4);
+  assert.equal(result.bufferTower.io.empty, true);
+  assert.equal(result.bufferTower.signals.bufferEmpty, true);
+  assert.equal(result.bufferTower.signals.upstreamRequest, true);
+  assert.equal(result.bufferTower.ioMapValidation.executable, false);
+  assert.equal(result.bufferTower.ioMapValidation.ok, false);
+  assert.deepEqual(result.bufferTower.slots.map(slot => `${slot.tower}${slot.level}`), ['A1', 'A2', 'B1', 'B2']);
+});
+
 test('design_machine 空 brief 返回 INVALID_ARGUMENT', async () => {
   for (const brief of ['', '   ', 42]) {
     const result = await tools.call('design_machine', { brief });
@@ -156,6 +179,82 @@ test('机型设计请求不会被误判为超纲或写操作', () => {
   }
 });
 
+test('design_machine schema：bufferTower 槽位有上限，与队列常量一致', () => {
+  const schema = tools.summaries().find((tool) => tool.name === 'design_machine')?.inputSchema;
+  const tower = schema.properties.bufferTower;
+  assert.equal(tower.properties.slotsPerTower.maximum, 512);
+  assert.equal(tower.properties.towerCount.maximum, 2);
+  assert.equal(tower.additionalProperties, false);
+});
+
+test('design_machine 缓存快照回显假设并声明能力边界，不冒充实时状态', async () => {
+  const result = await tools.call('design_machine', { brief: '光伏组件FIFO缓存机', bufferTower: { towerCount: 1, slotsPerTower: 8 } });
+  assert.equal(result.ok, true);
+  const tower = result.bufferTower;
+  assert.equal(tower.snapshotOf, 'empty-queue-assumed-handshake');
+  assert.equal(tower.readOnly, true);
+  // 回显诊断假设：这些是假设输入，不是现场信号。
+  assert.equal(tower.assumedInputs.upstreamReady, true);
+  assert.equal(tower.assumedInputs.downstreamReady, false);
+  assert.equal(tower.assumedInputs.transferDone, false);
+  assert.equal(tower.assumedInputs.fault, false);
+  assert.equal(tower.assumedInputs.reset, false);
+  assert.equal(tower.assumedInputs.transferSeq, null);
+  assert.equal(tower.assumedInputs.nowSec, 0);
+  // 能力边界必须显式否定硬件/PLC/安全实现。
+  assert.equal(tower.capabilityBoundary.hardwareWired, false);
+  assert.equal(tower.capabilityBoundary.plcProgramIncluded, false);
+  assert.equal(tower.capabilityBoundary.plcAddressesAssigned, false);
+  assert.equal(tower.capabilityBoundary.safetyCertified, false);
+  assert.equal(tower.capabilityBoundary.queueModel, 'pure-data');
+  assert.match(tower.capabilityBoundary.message, /未连接任何现场设备/);
+  // 快照固定为空队列单步结果，没有“实时”读数。
+  assert.equal(tower.io.occupied, 0);
+  assert.equal(tower.controlSnapshot.mode, 'READY');
+  assert.equal(tower.controlSnapshot.transferActive, false);
+  assert.equal(tower.controlSnapshot.transferSeqSeen, 0);
+  assert.equal(tower.controlSnapshot.stepSec, 0);
+  assert.equal(tower.controlSnapshot.faultLatched, false);
+  assert.equal(tower.signals.upstreamRequest, tower.controlSnapshot.upstreamPermit);
+  assert.equal(tower.signals.downstreamRequest, tower.controlSnapshot.downstreamPermit);
+  assert.equal(tower.limits.maxSlots, 512);
+  assert.equal(tower.limits.slotCount, 8);
+  assert.equal('control' in tower, false, '旧 control 字段不保留，避免被当成实时控制状态');
+});
+
+test('buffer 参数触发能力边界，即使 brief 不含缓存关键词', async () => {
+  const result = await tools.call('design_machine', {
+    brief: '设计一台三工位锁螺丝机，节拍 20 件/分钟，用 750W 伺服',
+    buffer: { upstreamCycleSec: 12, downstreamCycleSec: 15, downstreamStopSec: 120, initialOccupancy: 2, inTransit: 1, reserveSlots: 2, capacity: 16 }
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.bufferCapability.status, 'partial-concept-only');
+  assert.equal(result.bufferCapability.capacityVerified, false);
+  assert.match(result.bufferCapability.capacityVerifiedReason, /验收/);
+  assert.equal(result.bufferCapability.capacitySufficientFromInputs, true);
+  assert.equal(result.bufferCapability.capacitySufficientFromInputs, result.bufferAnalysis.capacitySufficient);
+  assert.equal(result.bufferCapability.inputsEcho.capacity, 16);
+  assert.equal(result.bufferCapability.inputsEcho.upstreamCycleSec, 12);
+  assert.equal(result.bufferCapability.inputsEcho.reserveSlots, 2);
+  assert.equal(result.bufferCapability.fifoImplemented, false);
+  assert.equal(result.bufferCapability.geometrySlotsVerified, false);
+});
+
+test('bufferTower 超出槽位上限立即拒绝，不分配内存', async () => {
+  const started = Date.now();
+  for (const bufferTower of [
+    { towerCount: 1, slotsPerTower: 513 },
+    { towerCount: 2, slotsPerTower: 300 },
+    { towerCount: 1, slotsPerTower: 1_000_000_000 }
+  ]) {
+    const result = await tools.call('design_machine', { brief: '光伏组件FIFO缓存机', bufferTower });
+    assert.equal(result.ok, false);
+    assert.equal(result.code, 'INVALID_ARGUMENT');
+    assert.match(result.message, /不得超过 512/);
+  }
+  assert.ok(Date.now() - started < 2000, '超限槽位必须在分配前拒绝');
+});
+
 test('design_machine 不调用命令总线、不落盘', async () => {
   let calls = 0;
   const bus = {
@@ -166,4 +265,51 @@ test('design_machine 不调用命令总线、不落盘', async () => {
   const result = await local.call('design_machine', { brief: BRIEF });
   assert.equal(result.ok, true);
   assert.equal(calls, 0);
+});
+
+test('回归 C4：512 槽快照只回显有限槽位并显式声明截断', async () => {
+  const result = await tools.call('design_machine', { brief: '缓存机', bufferTower: { towerCount: 1, slotsPerTower: 512 } });
+  assert.equal(result.ok, true);
+  const tower = result.bufferTower;
+  assert.equal(tower.limits.slotCount, 512);
+  assert.equal(tower.slots.length, 16);
+  assert.equal(tower.slotEcho.returned, 16);
+  assert.equal(tower.slotEcho.total, 512);
+  assert.equal(tower.slotEcho.limit, 16);
+  assert.equal(tower.slotEcho.truncated, true);
+  assert.match(tower.slotEcho.message, /仅回显前 16 个/);
+  const bytes = Buffer.byteLength(JSON.stringify(result));
+  assert.ok(bytes < 20000, `整条回执必须远小于原来的 44 KB，实际 ${bytes} B`);
+
+  const double = await tools.call('design_machine', { brief: '缓存机', bufferTower: { towerCount: 2, slotsPerTower: 256 } });
+  assert.equal(double.ok, true);
+  assert.equal(double.bufferTower.slots.length, 16);
+  assert.equal(double.bufferTower.slotEcho.total, 512);
+  assert.equal(double.bufferTower.slotEcho.truncated, true);
+});
+
+test('回归：小配置不截断时 slotEcho 明确为 false', async () => {
+  const result = await tools.call('design_machine', { brief: '缓存机', bufferTower: { towerCount: 2, slotsPerTower: 2 } });
+  assert.equal(result.ok, true);
+  assert.equal(result.bufferTower.slots.length, 4);
+  assert.equal(result.bufferTower.slotEcho.truncated, false);
+  assert.equal(result.bufferTower.slotEcho.message, null);
+  assert.equal(result.bufferTower.slotEcho.total, 4);
+});
+
+test('回归 P2-8：schema 组合约束与回执都要能拦住 2×300 这类越界', async () => {
+  const schema = tools.summaries().find((tool) => tool.name === 'design_machine')?.inputSchema;
+  const tower = schema.properties.bufferTower;
+  // 顶层保留单塔绝对上限，组合约束表达“两塔时每塔 ≤256”。
+  assert.equal(tower.properties.slotsPerTower.maximum, 512);
+  assert.equal(tower.allOf[0].if.properties.towerCount.const, 2);
+  assert.equal(tower.allOf[0].then.properties.slotsPerTower.maximum, 256);
+  assert.match(tower.description, /总槽位上限 512/);
+  assert.match(tower.description, /每塔最多 256/);
+
+  const result = await tools.call('design_machine', { brief: '缓存机', bufferTower: { towerCount: 2, slotsPerTower: 300 } });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'INVALID_ARGUMENT');
+  assert.match(result.message, /2×300/);
+  assert.match(result.message, /不得超过 512/);
 });
