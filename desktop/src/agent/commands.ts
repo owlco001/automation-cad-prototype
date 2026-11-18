@@ -91,6 +91,7 @@ import { AGENT_COMMAND_MODULES, moduleDisabledResult, moduleIsEnabled, type Modu
 import { COST_ESTIMATION_MODULE_ID } from '../modules/cost-estimation-gate.ts';
 import { PARAMETRIC_IMPORT_MODULE_ID, PARAMETRIC_MODULE_DISABLED_MESSAGE } from '../modules/parametric-gate.ts';
 import { summarizeGeometry } from '../machine/geometry.ts';
+import { resolveModelDispatch } from '../machine/model-builders.ts';
 import { resolveMachineGeometry } from '../machine/machine-geometry.ts';
 import { stationIdentitiesFor } from '../machine/station-identity.ts';
 import { applyStationGeometryLayout } from '../machine/station-layout.ts';
@@ -1721,15 +1722,47 @@ function registerBuildMachineModelCommand(bus: CommandBus): void {
   bus.register({
     name: 'build_machine_model',
     async run(args, ctx) {
-      const process = optionalString(args, 'process') ?? 'conveyor';
       const rawParams = args.params;
       if (rawParams !== undefined && rawParams !== null && (typeof rawParams !== 'object' || Array.isArray(rawParams))) {
         throw new CommandFailure('INVALID_ARGUMENT', 'params 必须是对象');
       }
-      const names = ['process', 'params', 'name', 'load', 'brief'];
+      // design / config：塔的几何与落盘都以 design.config.bufferTower 为准，所以这两个键
+      // 必须能穿过命令层（以前不在白名单，`未知参数：design` 让「design_machine → 整机建模」
+      // 这条最自然的链在智能体侧直接不可达，只剩脚本 API 能用）。
+      const names = ['process', 'params', 'name', 'load', 'brief', 'design', 'config'];
       for (const key of Object.keys(args)) {
         if (!names.includes(key)) throw new CommandFailure('INVALID_ARGUMENT', `未知参数：${key}`);
       }
+      const isPlainObject = (value: unknown): value is Record<string, unknown> => (
+        typeof value === 'object' && value !== null && !Array.isArray(value)
+      );
+      if (args.design !== undefined && args.design !== null && !isPlainObject(args.design)) {
+        throw new CommandFailure('INVALID_ARGUMENT', 'design 必须是对象（design_machine 返回的完整方案）');
+      }
+      if (args.config !== undefined && args.config !== null && !isPlainObject(args.config)) {
+        throw new CommandFailure('INVALID_ARGUMENT', 'config 必须是对象（机型配置，塔块在 config.bufferTower）');
+      }
+      if (args.design != null && args.config != null) {
+        throw new CommandFailure('INVALID_ARGUMENT', 'design 与 config 只能二选一（config 是「只有机型配置」的简写）');
+      }
+      if (isPlainObject(args.design) && args.design.config !== undefined && args.design.config !== null && !isPlainObject(args.design.config)) {
+        throw new CommandFailure('INVALID_ARGUMENT', 'design.config 必须是机型配置对象');
+      }
+      // 分派判据与渲染层/几何层同一份：显式 process 与塔 design 冲突、或声明是塔却没有
+      // bufferTower，都在这里显式拒——别把不一致的入参打到渲染层去赌它挑哪一个。
+      // design/config 的 null 一律当「没给」（LLM/MCP 客户端常把可选字段显式传 null）；
+      // process 例外：给了就必须是非空字符串，null/数字/空白由分派层拒成 INVALID_ARGUMENT。
+      const designArg = args.design ?? undefined;
+      const configArg = args.config ?? undefined;
+      const dispatch = resolveModelDispatch({
+        process: args.process,
+        // params 也要进分派：塔 + params 双源必须在这里拒（塔几何只认 design.config.bufferTower，
+        // params 会被静默丢掉），而不是等渲染层再挑一个。
+        ...(rawParams !== undefined && rawParams !== null ? { params: rawParams } : {}),
+        ...(designArg !== undefined ? { design: designArg } : {}),
+        ...(configArg !== undefined ? { config: configArg } : {})
+      });
+      if (!dispatch.ok) throw new CommandFailure('INVALID_ARGUMENT', dispatch.message);
       if (args.brief !== undefined && (typeof args.brief !== 'string' || !args.brief.trim())) {
         throw new CommandFailure('INVALID_ARGUMENT', 'brief 必须是非空字符串');
       }
@@ -1740,11 +1773,15 @@ function registerBuildMachineModelCommand(bus: CommandBus): void {
         throw new CommandFailure('INVALID_ARGUMENT', 'load 必须是布尔值');
       }
       const payload = {
-        process,
+        // 用分派结果而不是原始缺省值：只给 design 时 process 必须是 buffer-tower，
+        // 否则渲染层的回执/落盘工程会记成 conveyor（29 件那台）。
+        process: dispatch.process,
         // brief：让工具自己从需求里取线体长/宽/层数，智能体不必猜参数名
         ...(typeof args.brief === 'string' ? { brief: args.brief.trim() } : {}),
         ...(rawParams ? { params: rawParams } : {}),
         ...(typeof args.name === 'string' ? { name: args.name.trim() } : {}),
+        ...(designArg !== undefined ? { design: designArg } : {}),
+        ...(configArg !== undefined ? { config: configArg } : {}),
         ...(args.load === false ? { load: false } : {})
       };
       const result = await ctx.bridge.call<{ ok: boolean; message?: string; code?: string }>('buildMachineModel', [payload]);

@@ -845,16 +845,36 @@ const BUILD_MACHINE_MODEL_SCHEMA = {
   properties: {
     process: {
       type: 'string',
-      description: '机型工艺；当前参数化建模支持 conveyor（皮带输送线）。其余工艺请用 apply_machine_design'
+      description:
+        '机型工艺；参数化建模支持 conveyor（皮带输送线 / 多层缓存）与 buffer-tower（缓存塔塔身，146 件 / 16 层）。'
+        + '其余工艺请用 apply_machine_design。给了塔的 design/config 时可以省略（按塔建），'
+        + '但显式写 process=conveyor 又给塔 design 会被判冲突拒绝'
     },
     params: {
       type: 'object',
-      description: '机型参数（mm）：输送机可用 lengthMm / widthMm / beltHeightMm / pulleyDiameterMm / beltThicknessMm / frameSectionMm；立体缓存另加 layers（1~8，≥2 出多层）、layerPitchMm。缺省用默认值，越界会夹紧并在 warnings 里说明',
+      description:
+        '机型参数（mm）。conveyor：lengthMm / widthMm / beltHeightMm / pulleyDiameterMm / beltThicknessMm / frameSectionMm，'
+        + '多层缓存另加 layers（1~8，≥2 出多层）、layerPitchMm；缺省用默认值，**越界会夹紧**并在 warnings 里说明。'
+        + 'buffer-tower：levels（2~64）/ layerPitchMm / panelLengthMm / panelWidthMm / panelThicknessMm / panelMassKg / '
+        + 'inboundLengthMm / inboundWidthMm / beltHeightMm / sectionMm；塔参数**越界直接拒绝（不夹紧）**，'
+        + '且 slotsPerTower / towers / transferLevel 不接受（容量由 levels 派生）',
+      additionalProperties: true
+    },
+    design: {
+      type: 'object',
+      description:
+        '上一步 design_machine 返回的完整方案。缓存塔的几何与落盘都以 design.config.bufferTower 为准；'
+        + '与 params 里的塔参数只能有一个来源。与 config 二选一',
+      additionalProperties: true
+    },
+    config: {
+      type: 'object',
+      description: '只给机型配置的简写（塔块在 config.bufferTower），等价于 design.config；与 design 二选一。',
       additionalProperties: true
     },
     brief: {
       type: 'string',
-      description: '可选，需求原文。给了就自动取线体长/宽与「N 层」缓存层数，params 里显式给的键优先'
+      description: '可选，需求原文。给了就自动取线体长/宽与「N 层」缓存层数，params 里显式给的键优先。缓存塔不支持 brief（显式拒绝）'
     },
     name: { type: 'string', description: '可选，模型显示名（写入零件树标题）' },
     load: { type: 'boolean', description: '默认 true；false 时只构建并返回统计，不把模型装进视口' }
@@ -1728,9 +1748,13 @@ export class AgentTools {
     this.add({
       name: 'build_machine_model',
       description:
-        '按机型参数生成整机 3D 模型并装配进当前视口：机型经注册表分发，输送机走参数化内核（逐件实体 → 每件独立 STL），返回零件数、实体数、包络、总质量、BOM、STEP/STL 字节数。' +
+        '按机型参数生成整机 3D 模型并装配进当前视口：机型经注册表分发（conveyor / buffer-tower），走参数化内核（逐件实体 → 每件独立 STL），返回零件数、实体数、包络、总质量、BOM、STEP/STL 字节数。' +
         '可以直接给 brief（需求原文），工具会从里面取线体长/宽、「N 层」缓存层数，不必逐项填 params；params 显式给了就以 params 为准。' +
-        'layers≥2 出立体缓存（底层输送 + 多层托架 + 升降机构），layers=1 是普通输送线。会落盘成工程。',
+        'layers≥2 出立体缓存（底层输送 + 多层托架 + 升降机构），layers=1 是普通输送线。' +
+        '缓存塔：给 process=\'buffer-tower\' 或直接给 design/config（design.config.bufferTower 是权威来源），出 146 件塔身（16 层）；' +
+        '塔参数越界拒绝（不夹紧），process 与塔 design 冲突时显式拒绝而不是静默改建成 29 件底层输送线。' +
+        'design/config 只对塔有意义：非塔机型请把尺寸放进 params（config.conveyor 不会被读取，会显式拒）；' +
+        '塔也不要同时给 params（塔几何只认 config.bufferTower）。会落盘成工程。',
       inputSchema: BUILD_MACHINE_MODEL_SCHEMA,
       handler: async (args) => {
         if (args.process !== undefined && (typeof args.process !== 'string' || !args.process.trim())) {
@@ -1738,6 +1762,12 @@ export class AgentTools {
         }
         if (args.params !== undefined && args.params !== null && !isRecord(args.params)) {
           return { ok: false, code: 'INVALID_ARGUMENT', message: 'params 必须是对象' };
+        }
+        if (args.design != null && !isRecord(args.design)) {
+          return { ok: false, code: 'INVALID_ARGUMENT', message: 'design 必须是对象（design_machine 返回的完整方案）' };
+        }
+        if (args.config != null && !isRecord(args.config)) {
+          return { ok: false, code: 'INVALID_ARGUMENT', message: 'config 必须是对象（塔块在 config.bufferTower）' };
         }
         if (args.name !== undefined && (typeof args.name !== 'string' || !args.name.trim())) {
           return { ok: false, code: 'INVALID_ARGUMENT', message: 'name 必须是非空字符串' };
@@ -1749,9 +1779,13 @@ export class AgentTools {
           return { ok: false, code: 'INVALID_ARGUMENT', message: 'load 必须是布尔值' };
         }
         const result = await this.execute('build_machine_model', {
-          process: typeof args.process === 'string' ? args.process.trim() : 'conveyor',
+          // 不在这里塞缺省 'conveyor'：塔的 design/config 在场时由命令层统一判分派，
+          // 工具层先写死 conveyor 会把「只给 design」变成 process 冲突。
+          ...(typeof args.process === 'string' ? { process: args.process.trim() } : {}),
           ...(typeof args.brief === 'string' && args.brief.trim() ? { brief: args.brief.trim() } : {}),
           ...(isRecord(args.params) ? { params: args.params } : {}),
+          ...(isRecord(args.design) ? { design: args.design } : {}),
+          ...(isRecord(args.config) ? { config: args.config } : {}),
           ...(typeof args.name === 'string' ? { name: args.name.trim() } : {}),
           ...(args.load === false ? { load: false } : {})
         });
