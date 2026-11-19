@@ -120,6 +120,7 @@ import { captureLibraryScreenshot } from './library-screenshot.ts';
 import { checkAgentViewCapture } from './self-evidence-capture-check.ts';
 import { writeLastCrash } from './crash-report.ts';
 import { collectDiagnosis } from './diagnostics.ts';
+import { createStartupRecorder, STARTUP_PHASES, type StartupPhase } from './startup-metrics.ts';
 import {
   buildDiagnosisReport,
   currentDiagnosticOperation,
@@ -127,6 +128,79 @@ import {
   recordDiagnosticError,
   setDiagnosticOperation
 } from '../src/shared/diagnostics.ts';
+
+// —— 启动分段计时接线 ——
+// 口径边界见 electron/startup-metrics.ts：ready-to-show 才是首帧信号，did-finish-load 只记 loadMs。
+// 起点就是**下面这行**：main 模块求值点（main-module-evaluation）——静态 import 图已经跑完、
+// Electron 自身 bootstrap 更早已发生。所以回执里的数字**不含** Electron 冷启动、也不含静态 import 耗时，
+// 别把 readyMs 读成「进程起跑到 whenReady」。
+const startupRecorder = createStartupRecorder();
+let startupMetricsLogged = false;
+let startupReceiptTimer: ReturnType<typeof setTimeout> | null = null;
+/**
+ * 回执兜底上限：headless（xvfb / 无合成器 / --disable-gpu）下 ready-to-show 可能永远不来，
+ * 无限等就等于永远没有回执。headless 给 4 s（截图流程通常几秒内就 app.exit，兜底必须早于它），
+ * 有窗口的正常启动给 15 s（首帧慢的机器也够），到点打一条带 `degraded=` 的降级快照。
+ */
+const STARTUP_RECEIPT_FALLBACK_MS = Object.freeze({ headless: 4000, windowed: 15000 });
+
+/** mark 一律走这里：错序/时钟回退只打一行码，绝不把异常抛进 Electron 事件循环（reload / activate 不许崩）。 */
+function markStartup(phase: StartupPhase): void {
+  try {
+    startupRecorder.mark(phase);
+  } catch (error) {
+    console.log(`STARTUP_METRICS_ERROR ${(error as { code?: string }).code ?? 'UNKNOWN'}`);
+  }
+}
+
+/** 打回执或进程将退时都要清掉兜底定时器：不许 reload/退出之后再冒一条。 */
+function clearStartupReceiptTimer(): void {
+  if (startupReceiptTimer === null) return;
+  clearTimeout(startupReceiptTimer);
+  startupReceiptTimer = null;
+}
+
+/**
+ * 全进程只打一行 STARTUP_METRICS（reload / activate / 兜底定时器都不许刷第二份）。
+ * `trigger` 是「这次为什么能打」：正常是 extension 与 readyToShow 都齐了；降级是兜底定时器。
+ * 降级行把**触发点 + 缺哪个阶段 + 是否 headless** 写在同一行里，
+ * 免得「readyToShowMs 是 null」又被解释成「xvfb 没画、不是我们的问题」。
+ */
+function logStartupMetricsOnce(trigger: string): void {
+  if (startupMetricsLogged) return;
+  startupMetricsLogged = true;
+  clearStartupReceiptTimer();
+  const missing = STARTUP_PHASES.filter((phase) => !startupRecorder.has(phase));
+  const detail = missing.length === 0
+    ? `trigger=${trigger}`
+    : `trigger=${trigger} degraded=missing:${missing.join('+')} headless=${HEADLESS}`;
+  console.log(`STARTUP_METRICS ${JSON.stringify(startupRecorder.snapshot())} ${detail}`);
+}
+
+/** 正常路径：extension 与 readyToShow 都到齐才打；缺一个就等下一个事件或兜底定时器。 */
+function maybeLogStartupMetrics(trigger: string): void {
+  if (startupMetricsLogged) return;
+  if (!startupRecorder.has('extension') || !startupRecorder.has('readyToShow')) return;
+  logStartupMetricsOnce(trigger);
+}
+
+/**
+ * 有限兜底：窗口建好后挂一个定时器，只负责「到点还没齐就补一条降级回执」。
+ * - 有限：headless 4 s / 有窗口 15 s，绝不无限等；
+ * - 不拖住退出：`unref()`；
+ * - 不叠加：已打过或已有定时器直接返回（reload / activate 会再走一遍 createWindow）；
+ * - 打过就清：`logStartupMetricsOnce` 里 `clearStartupReceiptTimer()`。
+ */
+function armStartupReceiptFallback(): void {
+  if (startupMetricsLogged || startupReceiptTimer !== null) return;
+  const timeoutMs = HEADLESS ? STARTUP_RECEIPT_FALLBACK_MS.headless : STARTUP_RECEIPT_FALLBACK_MS.windowed;
+  const timer = setTimeout(() => {
+    startupReceiptTimer = null;
+    logStartupMetricsOnce(`fallback-timer:${timeoutMs}ms`);
+  }, timeoutMs);
+  (timer as unknown as { unref?: () => void }).unref?.();
+  startupReceiptTimer = timer;
+}
 
 const HEADLESS_SMOKE = process.argv.includes('--headless-smoke');
 const DIAGNOSE = process.argv.includes('--diagnose');
@@ -337,6 +411,7 @@ function installCrashHandlers(): void {
 async function runDiagnoseMode(): Promise<void> {
   try {
     await app.whenReady();
+    markStartup('ready');
     installCrashHandlers();
     setDiagnosticOperation('diagnose');
     const userDataPath = app.getPath('userData');
@@ -348,6 +423,9 @@ async function runDiagnoseMode(): Promise<void> {
     });
     console.log(`DIAGNOSE_OK fields=app,webgl,userDataPath,dataPack,packMetrics,packStats,kb,audit,recentErrors errors=${report.recentErrors.length}`);
     console.log(JSON.stringify(report, null, 2));
+    // 诊断模式不建窗口、也不注入扩展：这行只有 readyMs，其余段是 null（「没发生」不是 0）——
+    // 触发点写进 trigger，降级原因写进 degraded=missing:*，读的人不用猜。
+    logStartupMetricsOnce('diagnose-no-window');
     app.exit(0);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -1318,6 +1396,15 @@ function createWindow(): BrowserWindow {
       `SECURITY_WINDOW window=main preload_sandbox=true context_isolation=true node_integration=false ` +
         `no_sandbox_switch=${app.commandLine.hasSwitch('no-sandbox')} sandbox_disabled_reason=${NO_SANDBOX_REASON ?? 'none'}`
     );
+    // 只记「加载完成」：这不是首帧，别拿它冒充 paint（首帧由 ready-to-show 记 readyToShow）。
+    markStartup('load');
+  });
+
+  // 首帧信号：Electron 在渲染进程画过第一帧后才触发；once 保证重开窗口（activate）不重复注册。
+  window.once('ready-to-show', () => {
+    markStartup('readyToShow');
+    // 首帧可能晚于扩展注入（xvfb / --disable-gpu），所以这里也要试一次：两边任一后到都能凑齐。
+    maybeLogStartupMetrics('readyToShow+extension');
   });
 
   window.webContents.on('will-navigate', (event, url) => {
@@ -1360,107 +1447,111 @@ function createWindow(): BrowserWindow {
           document.body.appendChild(script);
         })()`
       );
+      markStartup('extension');
     } catch (error) {
       recordDiagnosticError('EXTENSION_INJECT_FAILED', error);
       console.error('[desktop] 扩展脚本注入失败', error);
     }
-      if (HEADLESS_LINKAGE_SHOTS) {
-        const outputDir = process.env.AUTOMATIONCAD_SCREENSHOT_DIR
-          ? resolve(process.env.AUTOMATIONCAD_SCREENSHOT_DIR)
-          : resolve(desktopRoot(), '..', 'docs', 'desktop', 'screenshots');
-        try {
-          const result = await captureLinkageScreenshots(window, { outputDir });
-          if (parametric) await parametric.stop();
-          setTimeout(() => app.exit(result.failed > 0 ? 1 : 0), 100);
-        } catch (error) {
-          console.error('SMOKE_LINKAGE_SHOTS_FAIL', error);
-          if (parametric) await parametric.stop();
-          setTimeout(() => app.exit(1), 100);
-        }
+    // 启动回执：只有 extension 与 readyToShow 都到齐才打（缺一个就等首帧事件或兜底定时器），
+    // 重复 did-finish-load（reload）不会刷第二行。
+    maybeLogStartupMetrics('extension+readyToShow');
+    if (HEADLESS_LINKAGE_SHOTS) {
+      const outputDir = process.env.AUTOMATIONCAD_SCREENSHOT_DIR
+        ? resolve(process.env.AUTOMATIONCAD_SCREENSHOT_DIR)
+        : resolve(desktopRoot(), '..', 'docs', 'desktop', 'screenshots');
+      try {
+        const result = await captureLinkageScreenshots(window, { outputDir });
+        if (parametric) await parametric.stop();
+        setTimeout(() => app.exit(result.failed > 0 ? 1 : 0), 100);
+      } catch (error) {
+        console.error('SMOKE_LINKAGE_SHOTS_FAIL', error);
+        if (parametric) await parametric.stop();
+        setTimeout(() => app.exit(1), 100);
+      }
+      return;
+    }
+    if (HEADLESS_LIBRARY_SHOTS) {
+      const outputDir = process.env.AUTOMATIONCAD_SCREENSHOT_DIR
+        ? resolve(process.env.AUTOMATIONCAD_SCREENSHOT_DIR)
+        : resolve(desktopRoot(), '..', 'docs', 'desktop', 'screenshots');
+      try {
+        const result = await captureLibraryScreenshot(window, { outputDir, userDataRoot: app.getPath('userData') });
+        if (parametric) await parametric.stop();
+        setTimeout(() => app.exit(0), 100);
+        return;
+      } catch (error) {
+        console.error('SMOKE_LIBRARY_SHOTS_FAIL', error);
+        if (parametric) await parametric.stop();
+        setTimeout(() => app.exit(1), 100);
         return;
       }
-      if (HEADLESS_LIBRARY_SHOTS) {
-        const outputDir = process.env.AUTOMATIONCAD_SCREENSHOT_DIR
-          ? resolve(process.env.AUTOMATIONCAD_SCREENSHOT_DIR)
-          : resolve(desktopRoot(), '..', 'docs', 'desktop', 'screenshots');
-        try {
-          const result = await captureLibraryScreenshot(window, { outputDir, userDataRoot: app.getPath('userData') });
+    }
+    if (HEADLESS_CAPTURE_VIEW) {
+      try {
+        const result = await checkAgentViewCapture(window, app.getPath('userData'));
+        // 有空白视图时 check 里已经打过 VIEW_EMPTY / PARTIAL 明细，这里按失败退出，
+        // 不用「截图刚好不为空」把缺口糊过去。
+        if (!result.ok) {
           if (parametric) await parametric.stop();
-          setTimeout(() => app.exit(0), 100);
+          setTimeout(() => app.exit(1), 100);
           return;
-        } catch (error) {
-          console.error('SMOKE_LIBRARY_SHOTS_FAIL', error);
-          if (parametric) await parametric.stop();
-          setTimeout(() => app.exit(1), 100);
-          return;
         }
+        console.log(`AGENT_CAPTURE_SELF_CHECK_OK shots=${result.shots.length} home_gate=${result.homeGateRejected} distinct=${result.distinct}`);
+        if (parametric) await parametric.stop();
+        setTimeout(() => app.exit(0), 100);
+      } catch (error) {
+        console.error('AGENT_CAPTURE_SELF_CHECK_FAIL', error);
+        if (parametric) await parametric.stop();
+        setTimeout(() => app.exit(1), 100);
       }
-      if (HEADLESS_CAPTURE_VIEW) {
-        try {
-          const result = await checkAgentViewCapture(window, app.getPath('userData'));
-          // 有空白视图时 check 里已经打过 VIEW_EMPTY / PARTIAL 明细，这里按失败退出，
-          // 不用「截图刚好不为空」把缺口糊过去。
-          if (!result.ok) {
-            if (parametric) await parametric.stop();
-            setTimeout(() => app.exit(1), 100);
-            return;
-          }
-          console.log(`AGENT_CAPTURE_SELF_CHECK_OK shots=${result.shots.length} home_gate=${result.homeGateRejected} distinct=${result.distinct}`);
-          if (parametric) await parametric.stop();
-          setTimeout(() => app.exit(0), 100);
-        } catch (error) {
-          console.error('AGENT_CAPTURE_SELF_CHECK_FAIL', error);
-          if (parametric) await parametric.stop();
-          setTimeout(() => app.exit(1), 100);
-        }
-        return;
+      return;
+    }
+    if (HEADLESS_AGENT_SHOTS) {
+      const outputDir = process.env.AUTOMATIONCAD_SCREENSHOT_DIR
+        ? resolve(process.env.AUTOMATIONCAD_SCREENSHOT_DIR)
+        : resolve(desktopRoot(), '..', 'docs', 'desktop', 'screenshots');
+      try {
+        const result = await captureAgentScreenshots(window, { outputDir });
+        if (parametric) await parametric.stop();
+        setTimeout(() => app.exit(result.failed > 0 ? 1 : 0), 100);
+      } catch (error) {
+        console.error('SMOKE_AGENT_SHOTS_FAIL', error);
+        if (parametric) await parametric.stop();
+        setTimeout(() => app.exit(1), 100);
       }
-      if (HEADLESS_AGENT_SHOTS) {
-        const outputDir = process.env.AUTOMATIONCAD_SCREENSHOT_DIR
-          ? resolve(process.env.AUTOMATIONCAD_SCREENSHOT_DIR)
-          : resolve(desktopRoot(), '..', 'docs', 'desktop', 'screenshots');
-        try {
-          const result = await captureAgentScreenshots(window, { outputDir });
-          if (parametric) await parametric.stop();
-          setTimeout(() => app.exit(result.failed > 0 ? 1 : 0), 100);
-        } catch (error) {
-          console.error('SMOKE_AGENT_SHOTS_FAIL', error);
-          if (parametric) await parametric.stop();
-          setTimeout(() => app.exit(1), 100);
-        }
-        return;
+      return;
+    }
+    if (HEADLESS_WIZARD_SHOTS) {
+      const outputDir = process.env.AUTOMATIONCAD_SCREENSHOT_DIR
+        ? resolve(process.env.AUTOMATIONCAD_SCREENSHOT_DIR)
+        : resolve(desktopRoot(), '..', 'docs', 'desktop', 'screenshots');
+      try {
+        const result = await captureDesignWizardScreenshots(window, { outputDir });
+        if (parametric) await parametric.stop();
+        setTimeout(() => app.exit(result.failed > 0 ? 1 : 0), 100);
+      } catch (error) {
+        console.error('SMOKE_WIZARD_SHOTS_FAIL', error);
+        if (parametric) await parametric.stop();
+        setTimeout(() => app.exit(1), 100);
       }
-      if (HEADLESS_WIZARD_SHOTS) {
-        const outputDir = process.env.AUTOMATIONCAD_SCREENSHOT_DIR
-          ? resolve(process.env.AUTOMATIONCAD_SCREENSHOT_DIR)
-          : resolve(desktopRoot(), '..', 'docs', 'desktop', 'screenshots');
-        try {
-          const result = await captureDesignWizardScreenshots(window, { outputDir });
-          if (parametric) await parametric.stop();
-          setTimeout(() => app.exit(result.failed > 0 ? 1 : 0), 100);
-        } catch (error) {
-          console.error('SMOKE_WIZARD_SHOTS_FAIL', error);
-          if (parametric) await parametric.stop();
-          setTimeout(() => app.exit(1), 100);
-        }
-        return;
+      return;
+    }
+    if (HEADLESS_MACHINE_SCREENSHOTS) {
+      const outputDir = process.env.AUTOMATIONCAD_SCREENSHOT_DIR
+        ? resolve(process.env.AUTOMATIONCAD_SCREENSHOT_DIR)
+        : resolve(desktopRoot(), '..', 'docs', 'desktop', 'screenshots');
+      try {
+        const result = await captureMachineScreenshots(window, { outputDir });
+        if (parametric) await parametric.stop();
+        setTimeout(() => app.exit(result.failed > 0 ? 1 : 0), 100);
+      } catch (error) {
+        console.error('SMOKE_MACHINE_SHOTS_FAIL', error);
+        if (parametric) await parametric.stop();
+        setTimeout(() => app.exit(1), 100);
       }
-      if (HEADLESS_MACHINE_SCREENSHOTS) {
-        const outputDir = process.env.AUTOMATIONCAD_SCREENSHOT_DIR
-          ? resolve(process.env.AUTOMATIONCAD_SCREENSHOT_DIR)
-          : resolve(desktopRoot(), '..', 'docs', 'desktop', 'screenshots');
-        try {
-          const result = await captureMachineScreenshots(window, { outputDir });
-          if (parametric) await parametric.stop();
-          setTimeout(() => app.exit(result.failed > 0 ? 1 : 0), 100);
-        } catch (error) {
-          console.error('SMOKE_MACHINE_SHOTS_FAIL', error);
-          if (parametric) await parametric.stop();
-          setTimeout(() => app.exit(1), 100);
-        }
-        return;
-      }
-      if (HEADLESS_SCREENSHOTS) {
+      return;
+    }
+    if (HEADLESS_SCREENSHOTS) {
       const outputDir = process.env.AUTOMATIONCAD_SCREENSHOT_DIR
         ? resolve(process.env.AUTOMATIONCAD_SCREENSHOT_DIR)
         : resolve(desktopRoot(), '..', 'docs', 'desktop', 'screenshots');
@@ -5760,6 +5851,7 @@ async function bootstrap(): Promise<void> {
   });
 
   await app.whenReady();
+  markStartup('ready');
 
   const updateChannelFile = join(app.getPath('userData'), 'update-preferences.json');
   const updateAvailability = updateRuntimeAvailability();
@@ -5868,6 +5960,15 @@ async function bootstrap(): Promise<void> {
 
   packRegistry = registry;
   mainWindow = createWindow();
+  markStartup('window');
+  // 窗口已经存在，事件随时可能到（也可能永远不到，headless）：挂有限兜底，避免「回执永远不来」。
+  armStartupReceiptFallback();
+  // 最后一道保险：headless 截图流程几秒内就 app.exit，而 app.exit 不触发 before-quit/will-quit，
+  // 兜底定时器可能还没到点。进程退出时补一条降级回执（trigger=process-exit）；已打过就是 no-op。
+  // 注意：这是 best-effort —— stdout 在硬退出时可能被截断，主路径仍是定时器与两个事件。
+  process.once('exit', () => {
+    if (!startupMetricsLogged) logStartupMetricsOnce('process-exit');
+  });
   mainWindow.on('closed', () => { mainWindow = null; });
 
   commandBus = createAgentCommandBus(registry, new RendererBridge(() => mainWindow), {

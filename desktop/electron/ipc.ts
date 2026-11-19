@@ -35,6 +35,7 @@ import {
   writeCanvasSchemes
 } from '../src/canvas/draft-store.ts';
 import { recordDiagnosticError, setDiagnosticOperation } from '../src/shared/diagnostics.ts';
+import { readOptionalJson } from '../src/shared/optional-json.ts';
 import { isUsablePricebookItem, validatePricebook } from '../src/cost/pricebook.ts';
 import { CostExportError, planExportName } from '../src/cost/export.ts';
 import { costEstimationDisabledResult } from '../src/modules/cost-estimation-gate.ts';
@@ -376,8 +377,15 @@ function plcHistoryFile(): string {
 
 function readPlcGenHistory(): PlcHistoryEntry[] {
   try {
-    return parsePlcHistory(JSON.parse(readFileSync(plcHistoryFile(), 'utf8')));
+    const read = readOptionalJson(plcHistoryFile(), parsePlcHistory);
+    // 首启还没有历史文件：missing → value 为 null → 返回空数组，**不记诊断**（真损坏才留痕）
+    if (read.reason === 'invalid') {
+      recordDiagnosticError('PLC_HISTORY_READ_FAILED', read.error, { site: 'desktop/electron/ipc.ts' });
+      return [];
+    }
+    return read.value ?? [];
   } catch (error) {
+    // 权限/IO 类错误（EACCES/EISDIR…）不被静音，仍按读失败留痕
     recordDiagnosticError('PLC_HISTORY_READ_FAILED', error, { site: 'desktop/electron/ipc.ts' });
     return [];
   }
