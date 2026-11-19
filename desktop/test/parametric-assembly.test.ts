@@ -92,6 +92,35 @@ test('compileOps：装配输出 ops 与每实体 base 变换', () => {
   assert.equal(compiled.ops.length, 2);
 });
 
+test('compileOps：件号源标识保真（默认路径逐字透传，不 trim），校验仍按 trim 判空判重', () => {
+  const padded = assembly([
+    instance({ id: '  tray-1  ', name: '托板', partId: 'TRAY-01' }),
+    instance({ id: 'tower-post-01', name: '立柱', transform: { x: 100, y: 0, z: 0, rz: 0 } }),
+    instance({ id: 'tray 1', name: '内部空格', transform: { x: 0, y: 100, z: 0, rz: 0 } }),
+    instance({ id: '托板-01', name: '非 ASCII', transform: { x: 0, y: 0, z: 50, rz: 0 } })
+  ]);
+  assert.deepEqual(validateAssembly(padded), [], '带首尾空格的件号 trim 后非空，校验照旧放行（校验口径不动）');
+  const compiled = compileOps(padded);
+  assert.ok(!Array.isArray(compiled));
+  assert.deepEqual(
+    compiled.instances.map((item) => item.id),
+    ['  tray-1  ', 'tower-post-01', 'tray 1', '托板-01'],
+    '默认路径件号逐字透传：桌面层不许替调用方改写源标识（内部空格 / 非 ASCII 同样原样）'
+  );
+
+  // 另一面：校验仍按 trim 判重（'p1' 与 ' p1 ' 视为同一件号 → 报重复），但编译输出逐字保留源串；
+  // 首尾空白件号在 identityStep 入口会被内核 400 点名拒绝，所以两条口径不会各自改写。
+  const duplicates = assembly([instance({ id: 'p1', name: 'A' }), instance({ id: ' p1 ', name: 'B' })]);
+  assert.match(validateAssembly(duplicates).join('\n'), /重复/);
+  const compiledDuplicates = compileOps(duplicates);
+  assert.ok(!Array.isArray(compiledDuplicates));
+  assert.deepEqual(
+    compiledDuplicates.instances.map((item) => item.id),
+    ['p1', ' p1 '],
+    '判重按 trim、透传按原值 —— 归一化只发生在校验里，不改写发给内核的字符串'
+  );
+});
+
 test('compileOps：实体顺序 + 实体内特征顺序稳定，ops 为拼接结果', () => {
   const source = assembly([
     instance({

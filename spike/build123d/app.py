@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-import argparse, copy, json, math, os, secrets, tempfile, threading, time, traceback
+import argparse, copy, json, math, os, secrets, shutil, tempfile, threading, time, traceback
 from typing import Any
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -210,8 +210,23 @@ def _identity_labels(instances: list[dict]) -> list[str]:
     不做字符替换（STL 文件名那套 safe 规则）：替换会让 label 与件表 id 漂移，
     回读门禁「件号 ↔ 实体」的严格交叉核对就失去意义；非 ASCII 由 OCCT 写成 `\\X2\\` 转义，
     回读时还原成原文，导出侧不需要也不应该改写字符。
+
+    件号**不兜底、也不归一化**：旧实现 `str(item.get("id") or f"part-{index + 1}")` 会把空件号编造成
+    `part-1`，而 `part-1` 可能恰好与真件号撞名，让「丢件」被读成「改名」——三方核对照样过。
+    入口（`identity_request_error`）已拦过一次；本函数也被单测直接调用，所以自己再拦一次，
+    **口径与入口逐条一致**（非字符串 / strip 后为空 / 首尾有填充空白 都抛）。
     """
-    return [str(item.get("id") or f"part-{index + 1}") for index, item in enumerate(instances)]
+    labels = []
+    for index, item in enumerate(instances):
+        raw = item.get("id") if isinstance(item, dict) else None
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError(f"identity 导出：instances[{index}].id 必须是字符串且非空，不得伪造件号")
+        if raw != raw.strip():
+            raise ValueError(
+                f"identity 导出：instances[{index}].id 首尾不得有空白（当前「{raw}」），请修正源件号"
+            )
+        labels.append(raw)
+    return labels
 
 
 def identity_request_error(payload: Any) -> str | None:
@@ -230,6 +245,31 @@ def identity_request_error(payload: Any) -> str | None:
     exports = payload.get("exports") or ["step"]
     if not isinstance(exports, list) or "step" not in exports:
         return "identityStep 需要 exports 包含 step"
+    # 件号是身份核对的第一性输入：必须在这里（**早于** mkdtemp 与建模）就拒绝，
+    # 而不是留到 _identity_labels 里编造 `part-{i+1}`。规则是：必须字符串 / 不能空或纯空白 /
+    # 首尾不得有填充空白（不自动 trim，让调用方修源件号）/ 不得重号。
+    # 前三条与 `_identity_labels` 逐条一致（那边是绕过入口时的最后一道）；
+    # 报错口径统一是 `instances[i]`：这是唯一能让调用方一眼定位到请求体哪个位置的说法。
+    seen: dict[str, int] = {}
+    for index, item in enumerate(instances):
+        raw = item.get("id") if isinstance(item, dict) else None
+        if not isinstance(raw, str):
+            return f"identityStep 需要 instances[{index}].id 是字符串（当前 {type(raw).__name__}）"
+        if not raw.strip():
+            return f"identityStep 需要 instances[{index}].id 非空（空串或纯空白都不许当件号）"
+        # 首尾填充空白**不是**这里能替调用方归一化的东西：自动 strip 会让「工程文档里的件号」
+        # 与「回执/identity label 里的件号」变成两个不同的字符串，按精确串 join 的下游就断了。
+        # 所以直接拒绝并点名，让调用方去修**源件号**；入口、`_identity_labels`、desktop 三层
+        # 都不改写字符（内部空格 / 非 ASCII 照原样透传）。
+        if raw != raw.strip():
+            return (
+                f"identityStep 需要 instances[{index}].id 首尾无空白（当前「{raw}」）："
+                f"请修正源件号，内核不自动 trim"
+            )
+        # 到这里的 id 已经是「原值 == strip 后」，判重就按原样字符串比：同一个件号才是重号。
+        if raw in seen:
+            return f"identityStep 需要 instances[{index}].id 唯一：与 instances[{seen[raw]}] 重复（「{raw}」）"
+        seen[raw] = index
     return None
 
 
@@ -409,52 +449,62 @@ class Handler(BaseHTTPRequestHandler):
                 shape, instance_volumes = build(payload.get("ops") or []), None
             built_ms = (time.perf_counter() - started) * 1000
             outdir = tempfile.mkdtemp(prefix="b123d-build-")
-            files = {}
-            for fmt in wants:
-                path = os.path.join(outdir, f"part.{fmt}")
-                t = time.perf_counter()
-                if fmt == "step":
-                    bd.export_step(shape, path)
-                else:
-                    bd.export_stl(shape, path, tolerance=0.1)
-                files[fmt] = {"path": path, "bytes": os.path.getsize(path), "ms": round((time.perf_counter() - t) * 1000, 1)}
-            # 逐件导出：干涉检查/运动学/零件树都需要独立实体，合并体只有一个网格
-            # 身份件号只在**制造导出完成之后**使用（见 write_identity_step）：这里只算字符串，不碰形状。
-            identity_labels = _identity_labels(instances) if identity_wanted and isinstance(instances, list) else []
-            if per_part and instances:
-                parts_meta = []
-                for index, (item, placed) in enumerate(zip(instances, placed_shapes)):
-                    raw_id = str(item.get("id") or f"part-{index + 1}")
-                    safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in raw_id)[:40]
-                    part_path = os.path.join(outdir, f"{index + 1:02d}-{safe}.stl")
-                    bd.export_stl(placed, part_path, tolerance=0.1)
-                    bb = placed.bounding_box()
-                    parts_meta.append({
-                        "id": raw_id,
-                        "name": str(item.get("name") or raw_id),
-                        "stl": {"path": part_path, "bytes": os.path.getsize(part_path)},
-                        "volumeMm3": round(placed.volume, 1),
-                        "solids": len(placed.solids()),
-                        "faces": len(placed.faces()),
-                        "bbox": [round(bb.size.X, 2), round(bb.size.Y, 2), round(bb.size.Z, 2)],
-                        "bboxMin": [round(bb.min.X, 2), round(bb.min.Y, 2), round(bb.min.Z, 2)],
-                        "bboxMax": [round(bb.max.X, 2), round(bb.max.Y, 2), round(bb.max.Z, 2)]
-                    })
-                files["parts"] = parts_meta
-            if identity_wanted:
-                # 制造 STEP/STL 已经导出（上面那一轮），此刻才给**独立复制体**打件号做非融合导出。
-                if len(placed_shapes) != len(identity_labels):
-                    raise ValueError("identity 导出：实例数与逐件形状数不一致")
-                files["identity"] = write_identity_step(outdir, placed_shapes, identity_labels)
-            stats = describe(shape, instance_volumes)
-            if merge_meta is not None:
-                stats["merge"] = merge_meta
-                # 逐件实体数只在 perPart 导出时才有；非 perPart 时**不要**写 0/null 冒充
-                # 「逐件实体合计 = 0」——那会让门禁的实体数上限变成 2，日志里的
-                # `partSolids=0` 也会被误读成「一块实体都没有」。
-                part_solids = [item.get("solids") for item in (files.get("parts") or [])]
-                if part_solids and all(isinstance(value, int) for value in part_solids):
-                    stats["partSolids"] = sum(part_solids)
+            # 失败路径必须自己收拾：mkdtemp 在建完模型之后、任何导出之前，
+            # 导出任一步抛错，这个目录里只剩半份产物（part.step + 逐件 STL），
+            # 而响应是 400、**没有 files** —— 客户端拿不到也不会来取，留着就是永久垃圾
+            # （本机实测曾积 145 个目录 / 142 MB）。成功路径**不删**：files[*].path
+            # 直接交给客户端去 copy，删除需要协议层配合（独立登记项，不在本轮）。
+            try:
+                files = {}
+                for fmt in wants:
+                    path = os.path.join(outdir, f"part.{fmt}")
+                    t = time.perf_counter()
+                    if fmt == "step":
+                        bd.export_step(shape, path)
+                    else:
+                        bd.export_stl(shape, path, tolerance=0.1)
+                    files[fmt] = {"path": path, "bytes": os.path.getsize(path), "ms": round((time.perf_counter() - t) * 1000, 1)}
+                # 逐件导出：干涉检查/运动学/零件树都需要独立实体，合并体只有一个网格
+                # 身份件号只在**制造导出完成之后**使用（见 write_identity_step）：这里只算字符串，不碰形状。
+                identity_labels = _identity_labels(instances) if identity_wanted and isinstance(instances, list) else []
+                if per_part and instances:
+                    parts_meta = []
+                    for index, (item, placed) in enumerate(zip(instances, placed_shapes)):
+                        raw_id = str(item.get("id") or f"part-{index + 1}")
+                        safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in raw_id)[:40]
+                        part_path = os.path.join(outdir, f"{index + 1:02d}-{safe}.stl")
+                        bd.export_stl(placed, part_path, tolerance=0.1)
+                        bb = placed.bounding_box()
+                        parts_meta.append({
+                            "id": raw_id,
+                            "name": str(item.get("name") or raw_id),
+                            "stl": {"path": part_path, "bytes": os.path.getsize(part_path)},
+                            "volumeMm3": round(placed.volume, 1),
+                            "solids": len(placed.solids()),
+                            "faces": len(placed.faces()),
+                            "bbox": [round(bb.size.X, 2), round(bb.size.Y, 2), round(bb.size.Z, 2)],
+                            "bboxMin": [round(bb.min.X, 2), round(bb.min.Y, 2), round(bb.min.Z, 2)],
+                            "bboxMax": [round(bb.max.X, 2), round(bb.max.Y, 2), round(bb.max.Z, 2)]
+                        })
+                    files["parts"] = parts_meta
+                if identity_wanted:
+                    # 制造 STEP/STL 已经导出（上面那一轮），此刻才给**独立复制体**打件号做非融合导出。
+                    if len(placed_shapes) != len(identity_labels):
+                        raise ValueError("identity 导出：实例数与逐件形状数不一致")
+                    files["identity"] = write_identity_step(outdir, placed_shapes, identity_labels)
+                stats = describe(shape, instance_volumes)
+                if merge_meta is not None:
+                    stats["merge"] = merge_meta
+                    # 逐件实体数只在 perPart 导出时才有；非 perPart 时**不要**写 0/null 冒充
+                    # 「逐件实体合计 = 0」——那会让门禁的实体数上限变成 2，日志里的
+                    # `partSolids=0` 也会被误读成「一块实体都没有」。
+                    part_solids = [item.get("solids") for item in (files.get("parts") or [])]
+                    if part_solids and all(isinstance(value, int) for value in part_solids):
+                        stats["partSolids"] = sum(part_solids)
+            except Exception:
+                # 与下面统一的 400 分支同一条路：先收拾目录再抛，响应里依旧没有 files。
+                shutil.rmtree(outdir, ignore_errors=True)
+                raise
             self._send(200, {"ok": True, "kernel": "build123d", "stats": stats, "buildMs": round(built_ms, 1), "files": files})
         except Exception as exc:  # noqa: BLE001
             self._send(400, {"ok": False, "error": str(exc), "trace": traceback.format_exc(limit=2)})

@@ -554,6 +554,9 @@ export function compileAssembly(assembly: AssemblyDoc): CompiledAssembly {
     if (!isRecord(instance)) continue;
     const ops = compileFeatureOps(Array.isArray(instance.features) ? instance.features : []);
     instances.push({
+      // 源标识保真：件号**逐字**透传（不带 identityStep 的默认路径必须原样，不许 trim）。
+      // 首尾空白的件号在 identityStep === true 时由**内核入口**直接 400 点名 instances[i]，
+      // 让调用方去修源件号；内核与这里都不替调用方改写字符串。
       id: typeof instance.id === 'string' ? instance.id : '',
       name: typeof instance.name === 'string' ? instance.name : '',
       ...(typeof instance.partId === 'string' && instance.partId.trim()
