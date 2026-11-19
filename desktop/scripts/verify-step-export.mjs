@@ -136,14 +136,17 @@ async function readHealth(port) {
  * 端口是先绑的（调用方健康检查只有 3 秒），所以启动后立刻查大概率还是 loading——必须轮询。
  */
 async function waitKernelReady(port) {
-  const deadline = Date.now() + KERNEL_READY_TIMEOUT_MS;
+  const startedAt = Date.now();
+  const deadline = startedAt + KERNEL_READY_TIMEOUT_MS;
   let last = null;
   while (Date.now() < deadline) {
     last = await readHealth(port);
-    if (last?.kernelState === 'ready' || last?.kernelState === 'failed') return last;
+    if (last?.kernelState === 'ready' || last?.kernelState === 'failed') {
+      return { health: last, elapsedMs: Date.now() - startedAt };
+    }
     await new Promise((done) => setTimeout(done, 500));
   }
-  return last;
+  return { health: last, elapsedMs: Date.now() - startedAt };
 }
 
 /** 只检查已有文件（回归：故意给一份 3 KB 假 STEP，必须 FAIL）。 */
@@ -191,13 +194,30 @@ async function buildAndVerify() {
 
   try {
     let started;
+    const startStartedAt = Date.now();
     try {
       started = await manager.start();
     } catch (error) {
-      started = { ok: false, status: 'unavailable', message: error instanceof Error ? error.message : String(error) };
+      // 不丢 code：抛出来的失败也要能看出是哪一类启动失败。
+      started = {
+        ok: false,
+        status: 'unavailable',
+        code: 'START_THREW',
+        message: error instanceof Error ? error.message : String(error)
+      };
     }
+    const startElapsedMs = Date.now() - startStartedAt;
     if (!started.ok) {
-      const reason = `内核不可用（status=${started.status}）：${started.message ?? '未知原因'}`;
+      // 启动失败必须报 code + 实测耗时：没有这两项时，0.36 s 的早退能被写成「3 秒超时」。
+      const detail =
+        `code=${started.code ?? '?'} status=${started.status} elapsed=${startElapsedMs}ms` +
+        (started.exitCode !== undefined ? ` exitCode=${started.exitCode}` : '') +
+        (started.signal ? ` signal=${started.signal}` : '') +
+        (started.stderrClass ? ` stderrClass=${started.stderrClass}` : '');
+      log(`start-failed ${detail}`);
+      const tailLines = String(started.stderrTail ?? '').trimEnd().split(/\r?\n/).filter(Boolean).slice(-12);
+      for (const line of tailLines) log(`stderr ${line}`);
+      const reason = `内核不可用（${detail}）：${started.message ?? '未知原因'}`;
       if (skipIfNoKernel) {
         await writeSkip(reason);
         return;
@@ -207,14 +227,16 @@ async function buildAndVerify() {
       return;
     }
 
-    const health = await waitKernelReady(started.port);
+    const ready = await waitKernelReady(started.port);
+    const health = ready.health;
     const kernelReady = health?.kernelState === 'ready';
     log(
       `kernel=${health?.kernel ?? '?'} version=${health?.version ?? '?'} state=${health?.kernelState ?? '?'} port=${started.port ?? '?'}` +
+        ` wait=${ready.elapsedMs}ms start=${startElapsedMs}ms` +
         (health?.error ? ` error=${health.error}` : '')
     );
     if (!kernelReady) {
-      const reason = `build123d 未加载（kernelState=${health?.kernelState ?? 'health 不可读'}）：${health?.error ?? '未知'}`;
+      const reason = `build123d 未加载（kernelState=${health?.kernelState ?? 'health 不可读'} 实测 ${ready.elapsedMs}ms/${KERNEL_READY_TIMEOUT_MS}ms）：${health?.error ?? '未知'}`;
       if (skipIfNoKernel) {
         await writeSkip(reason);
         return;

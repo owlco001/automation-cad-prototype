@@ -26,14 +26,44 @@ export interface ParametricStatusInfo {
   version?: string;
 }
 
+/** 启动失败的结构化分类：不读 stderr 原文也能定位（argparse / 缺包 / 占端口 / 早退 / 超时）。 */
+export type ParametricStartFailureCode =
+  | 'MODULE_DISABLED'
+  | 'COMMAND_NOT_FOUND'
+  | 'SPAWN_FAILED'
+  | 'PROCESS_EXITED'
+  | 'HEALTH_TIMEOUT'
+  | 'PORT_UNAVAILABLE';
+
+/** 子进程 stderr 的签名分类。 */
+export type ParametricStderrClass =
+  | 'argparse'
+  | 'missing-module'
+  | 'address-in-use'
+  | 'permission-denied'
+  | 'out-of-memory'
+  | 'traceback'
+  | 'empty'
+  | 'unknown';
+
 export interface ParametricStartInfo {
   ok: boolean;
   status: ParametricStatus;
   message: string;
-  code?: 'MODULE_DISABLED';
+  code?: ParametricStartFailureCode;
   port?: number;
   token?: string;
   version?: string;
+  /** 实测启动耗时（launch 开始 → ready 或失败定性），ms。 */
+  elapsedMs?: number;
+  /** 子进程自己的 exit code（早退场景）；spawn 失败或无 exit 时为 null。 */
+  exitCode?: number | null;
+  /** 终止信号（SIGKILL/SIGTERM…），正常 exit 为 null。 */
+  signal?: string | null;
+  /** stderr 结构化分类。 */
+  stderrClass?: ParametricStderrClass;
+  /** 已脱敏的 stderr 尾部（本次 token 的完整/分片/截断残片均替换为 [REDACTED]），≤ 4 KB。 */
+  stderrTail?: string;
 }
 
 export interface ParametricBuildOptions {
@@ -63,6 +93,11 @@ export interface ParametricManagerOptions {
   appRoot?: string;
   command?: string;
   isEnabled?: () => boolean;
+  /**
+   * 测试注入点：只替换 token 的随机源，长度与熵由注入方负责（默认 randomBytes(32).base64url）。
+   * 用于稳定复现「token 以 `-` 开头」这类必须对抗的边界，不改变生产默认值。
+   */
+  tokenFactory?: () => string;
   onStatus?: (state: ParametricStatusInfo) => void;
 }
 
@@ -75,6 +110,17 @@ interface ExitState {
   version: string;
   token: string;
   port: number;
+}
+
+/** waitHealthy 的三种结局：就绪 / 子进程自己死了 / 我们等不及。 */
+type HealthOutcome = { kind: 'ready'; version: string } | { kind: 'exited' } | { kind: 'timeout' };
+
+/** 一次 launch 期间子进程退出/失联的证据（exit 事件、close、spawn error 都汇到这里）。 */
+interface LaunchExitEvidence {
+  exited: boolean;
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  spawnError?: string;
 }
 
 const DEFAULT_IDLE_MS = 10 * 60 * 1000;
@@ -398,6 +444,92 @@ export async function runBrepInterferenceScript(options: {
   });
 }
 
+/** 上报的 stderr 尾部上限：证据要留，但不能无限缓存子进程输出。 */
+export const STDERR_TAIL_BYTES = 4096;
+/** 原始缓冲额外留一点余量：被裁剪的边界片段才能被识别成「本次 token 的残片」并抹掉。 */
+const STDERR_CAPTURE_HEADROOM_BYTES = 256;
+const REDACTED_TEXT = '[REDACTED]';
+
+const STDERR_SIGNATURES: ReadonlyArray<{ klass: ParametricStderrClass; hint: string; pattern: RegExp }> = [
+  // `--token -abc` 会被 argparse 当成选项名：`argument --token: expected one argument` → exit 2
+  {
+    klass: 'argparse',
+    hint: '参数解析失败（argparse 拒绝命令行：多半是 --token 的值以 - 开头）',
+    pattern: /expected one argument|unrecognized arguments|argument -{1,2}[A-Za-z][\w-]*: /
+  },
+  {
+    klass: 'missing-module',
+    hint: '缺包（ModuleNotFoundError：该解释器没装 build123d/OCP）',
+    pattern: /ModuleNotFoundError|No module named/
+  },
+  {
+    klass: 'address-in-use',
+    hint: '端口被占用（Address already in use）',
+    pattern: /Address already in use|EADDRINUSE|Errno (98|48|10048)/
+  },
+  { klass: 'permission-denied', hint: '权限不足（Permission denied）', pattern: /Permission denied|EACCES/ },
+  {
+    klass: 'out-of-memory',
+    hint: '内存不足或被 OOM 杀掉',
+    pattern: /MemoryError|Cannot allocate memory|Out of memory|Killed/
+  },
+  { klass: 'traceback', hint: 'Python traceback', pattern: /Traceback \(most recent call last\)/ }
+];
+
+/** 只看 stderr 签名就能把 argparse / 缺包 / 占端口 分开，不需要把原文塞进结果。 */
+export function classifySidecarStderr(text: string): { klass: ParametricStderrClass; hint: string } {
+  if (!text.trim()) return { klass: 'empty', hint: '' };
+  for (const signature of STDERR_SIGNATURES) {
+    if (signature.pattern.test(text)) return { klass: signature.klass, hint: signature.hint };
+  }
+  return { klass: 'unknown', hint: 'stderr 未匹配到已知签名' };
+}
+
+/**
+ * 子进程 stderr 的尾部缓存 + 本次 token 脱敏。
+ *
+ * 三条硬要求：只留尾部（4 KB，不能把整份输出攒在内存里）；本次 token 无论完整出现、
+ * 被 write 分片、还是被缓冲裁剪截断，都不得进入结果；脱敏后仍要留下可诊断的上下文。
+ */
+export class StderrTailCapture {
+  private raw = '';
+  private readonly limit = STDERR_TAIL_BYTES + STDERR_CAPTURE_HEADROOM_BYTES;
+  private readonly secret: string;
+
+  constructor(secret: string) {
+    this.secret = secret;
+  }
+
+  /** 每个 data 都走这里：先按完整 token 抹一次（分片跨界靠整段缓冲解决），再裁到上限。 */
+  push(chunk: string): void {
+    if (!chunk) return;
+    this.raw = this.scrub(`${this.raw}${chunk}`, false);
+    if (this.raw.length > this.limit) this.raw = this.raw.slice(-this.limit);
+  }
+
+  /** 上报用：补抹「裁剪边界只剩 token 后缀」的残片，再截到 4 KB。 */
+  tail(): string {
+    return this.scrub(this.raw, true).slice(-STDERR_TAIL_BYTES);
+  }
+
+  private scrub(text: string, stripHeadFragment: boolean): string {
+    if (!this.secret) return text;
+    let out = text;
+    // 缓冲被裁过之后，开头可能只剩 token 的后半截；长度 ≥6 的后缀才算（1~2 字符会误伤普通日志）。
+    if (stripHeadFragment) {
+      for (let cut = 1; cut + 6 <= this.secret.length; cut += 1) {
+        const fragment = this.secret.slice(cut);
+        if (out.startsWith(fragment)) {
+          out = `${REDACTED_TEXT}${out.slice(fragment.length)}`;
+          break;
+        }
+      }
+    }
+    if (out.includes(this.secret)) out = out.split(this.secret).join(REDACTED_TEXT);
+    return out;
+  }
+}
+
 export class ParametricManager {
   private readonly options: ParametricManagerOptions;
   private readonly idleMs: number;
@@ -418,7 +550,20 @@ export class ParametricManager {
   private stopping: Promise<void> | null = null;
   private buildChain: Promise<unknown> = Promise.resolve();
   private readonly statusListeners = new Set<(state: ParametricStatusInfo) => void>();
+  private readonly tokenFactory: () => string;
   private generation = 0;
+  /**
+   * 启动期标记：这段时间子进程退出属于「启动失败」，由 launch() 自己定性。
+   * 历史上子进程早退会在这里抢跑一次自动重启，把真因和真实尝试次数一起盖掉。
+   *
+   * 必须按 launch 作用域：stop() 之后立刻 start() 时，旧 launch 可能还卡在健康轮询里，
+   * 它的收尾若无条件清标记，会把新 launch 的「启动期」抹成「运行期崩溃」。
+   */
+  private launchSeq = 0;
+  private launchActiveSeq = 0;
+  private get launchActive(): boolean {
+    return this.launchActiveSeq !== 0;
+  }
 
   constructor(options: ParametricManagerOptions = {}) {
     this.options = options;
@@ -428,6 +573,8 @@ export class ParametricManager {
     this.healthIntervalMs = options.healthIntervalMs ?? DEFAULT_HEALTH_INTERVAL_MS;
     this.portStart = options.portStart ?? DEFAULT_PORT_START;
     this.portEnd = options.portEnd ?? DEFAULT_PORT_END;
+    // 熵不变：默认仍是 32 字节 CSPRNG → 43 字符 base64url，注入点只换随机源。
+    this.tokenFactory = options.tokenFactory ?? (() => randomBytes(32).toString('base64url'));
     if (options.onStatus) this.statusListeners.add(options.onStatus);
   }
 
@@ -583,7 +730,20 @@ export class ParametricManager {
     }
   }
 
+  /** 启动期边界：launchActive 覆盖整段 launch，子进程在此期间退出不算「运行期崩溃」。 */
   private async launch(isRestart: boolean, generation: number): Promise<ParametricStartInfo> {
+    const seq = ++this.launchSeq;
+    this.launchActiveSeq = seq;
+    try {
+      return await this.launchOnce(isRestart, generation, seq);
+    } finally {
+      // 只清理自己这一代：重叠时新 launch 的标记不能被旧 launch 的收尾抹掉。
+      if (this.launchActiveSeq === seq) this.launchActiveSeq = 0;
+    }
+  }
+
+  private async launchOnce(isRestart: boolean, generation: number, seq: number): Promise<ParametricStartInfo> {
+    const startedAt = Date.now();
     if (!isParametricImportEnabled(this.options.isEnabled)) {
       return { ok: false, status: 'unavailable', code: 'MODULE_DISABLED', message: PARAMETRIC_MODULE_DISABLED_MESSAGE };
     }
@@ -592,7 +752,10 @@ export class ParametricManager {
     }
     const spec = this.commandSpec();
     if (!spec) {
-      return this.failStart(isRestart, '建模内核不可用：未找到 Python 或 sidecar 脚本', generation);
+      return this.failStart(isRestart, '建模内核不可用：未找到 Python 或 sidecar 脚本', generation, {
+        code: 'COMMAND_NOT_FOUND',
+        elapsedMs: Date.now() - startedAt
+      });
     }
 
     let port: number | null = null;
@@ -603,7 +766,10 @@ export class ParametricManager {
       }
     }
     if (port === null) {
-      return this.failStart(isRestart, `建模内核不可用：${this.portStart}–${this.portEnd} 端口均被占用`, generation);
+      return this.failStart(isRestart, `建模内核不可用：${this.portStart}–${this.portEnd} 端口均被占用`, generation, {
+        code: 'PORT_UNAVAILABLE',
+        elapsedMs: Date.now() - startedAt
+      });
     }
     if (this.expectedStop || generation !== this.generation) {
       return { ok: false, status: 'stopped', message: this.state.message };
@@ -611,8 +777,10 @@ export class ParametricManager {
     if (!isParametricImportEnabled(this.options.isEnabled)) {
       return { ok: false, status: 'unavailable', code: 'MODULE_DISABLED', message: PARAMETRIC_MODULE_DISABLED_MESSAGE };
     }
-    const token = randomBytes(32).toString('base64url');
-    const args = [...spec.args, '--port', String(port), '--token', token];
+    const token = this.tokenFactory();
+    // 必须用 `--token=<值>`：随机 base64url 有 1/64 概率以 `-` 开头，而 `--token -abc`
+    // 会被 argparse 当成选项名 → `expected one argument` → exit 2（子进程在监听前就死）。
+    const args = [...spec.args, '--port', String(port), `--token=${token}`];
 
     let child: ChildProcess;
     try {
@@ -625,27 +793,63 @@ export class ParametricManager {
       });
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code ?? '未知错误';
-      return this.failStart(isRestart, `建模内核不可用：进程启动失败（${code}）`, generation);
+      return this.failStart(isRestart, `建模内核不可用：进程启动失败（${code}）`, generation, {
+        code: 'SPAWN_FAILED',
+        elapsedMs: Date.now() - startedAt
+      });
     }
 
     this.proc = child;
     this.port = port;
     this.token = token;
-    child.stdout?.resume();
-    child.stderr?.resume();
-    child.once('error', () => {
-      if (this.proc === child) this.proc = null;
-      if (!this.expectedStop) this.setStatus('unavailable', '建模内核不可用：进程启动失败');
-    });
-    child.once('exit', () => this.handleExit(child, isRestart));
 
-    const version = await this.waitHealthy(child, port);
-    if (!version) {
+    const exit: LaunchExitEvidence = { exited: false, code: null, signal: null };
+    const stderr = new StderrTailCapture(token);
+    const markExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+      if (exit.exited) return;
+      exit.exited = true;
+      exit.code = code;
+      exit.signal = signal;
+    };
+    child.stdout?.resume();
+    // stderr 原先直接 resume() 丢进 /dev/null：CI 里子进程为什么死永远查不出来。
+    // 现在只留 4 KB 尾缓冲，并且进结果前按本次 token（含分片/截断残片）脱敏。
+    child.stderr?.on('data', (chunk) => stderr.push(String(chunk)));
+    child.once('error', (error) => {
+      exit.spawnError = (error as NodeJS.ErrnoException).code ?? 'UNKNOWN';
+      markExit(null, null);
+      if (this.proc === child) this.proc = null;
+      // 启动期的定性由 launchOnce() 负责，这里不抢着改状态。
+      if (this.expectedStop || this.launchActive) return;
+      this.setStatus('unavailable', `建模内核不可用：进程启动失败（${exit.spawnError}）`);
+    });
+    child.once('exit', (code, signal) => {
+      markExit(code, signal);
+      this.handleExit(child, isRestart, { exit, stderr });
+    });
+
+    const health = await this.waitHealthy(child, port, exit);
+    const elapsedMs = Date.now() - startedAt;
+    if (health.kind !== 'ready') {
       if (this.proc === child) {
         this.proc = null;
         await this.killTree(child);
       }
-      return this.failStart(isRestart, '建模内核不可用：健康检查在 3 秒内未通过', generation);
+      const stderrTail = stderr.tail();
+      const classified = classifySidecarStderr(stderrTail);
+      return this.failStart(
+        isRestart,
+        this.describeStartFailure(isRestart, health, exit, elapsedMs, classified.hint),
+        generation,
+        {
+          code: health.kind === 'timeout' ? 'HEALTH_TIMEOUT' : exit.spawnError ? 'SPAWN_FAILED' : 'PROCESS_EXITED',
+          elapsedMs,
+          exitCode: exit.code,
+          signal: exit.signal,
+          stderrClass: classified.klass,
+          stderrTail
+        }
+      );
     }
 
     if (this.expectedStop || generation !== this.generation) {
@@ -656,10 +860,20 @@ export class ParametricManager {
       return { ok: false, status: 'stopped', message: this.state.message };
     }
 
-    const info: ExitState = { version, token, port };
+    // ready 之后立刻落下启动期标记：此后崩溃才是「运行期崩溃」，必须保留一次自动重启。
+    if (this.launchActiveSeq === seq) this.launchActiveSeq = 0;
+    const info: ExitState = { version: health.version, token, port };
     this.setStatus('ready', `参数化建模内核就绪（${info.version}）`, info.version);
     this.armIdleTimer();
-    return { ok: true, status: 'ready', message: this.state.message, port, token, version };
+    return {
+      ok: true,
+      status: 'ready',
+      message: this.state.message,
+      port,
+      token,
+      version: health.version,
+      elapsedMs: Date.now() - startedAt
+    };
   }
 
   /** B-Rep 精确干涉：复用同一个 Python 解释器（OCP 随 build123d 一起装）。 */
@@ -698,29 +912,65 @@ export class ParametricManager {
     return { command: python, args: [script] };
   }
 
-  private async waitHealthy(child: ChildProcess, port: number): Promise<string | null> {
+  /**
+   * 早退与超时必须分开：一种是子进程自己死了（code/signal/stderr 有话说），一种是我们等不及了。
+   * 以前两者都返回 null，被同一句写死的「健康检查在 3 秒内未通过」盖住。
+   */
+  private async waitHealthy(child: ChildProcess, port: number, exit: LaunchExitEvidence): Promise<HealthOutcome> {
     const deadline = Date.now() + this.healthTimeoutMs;
+    const hasExited = (): boolean => exit.exited || child.exitCode !== null || child.signalCode !== null;
     while (Date.now() < deadline) {
-      if (child.exitCode !== null || child.signalCode !== null) return null;
+      if (hasExited()) return { kind: 'exited' };
       try {
         const signal = AbortSignal.timeout(Math.min(500, this.healthIntervalMs));
         const response = await fetch(`http://127.0.0.1:${port}/health`, { signal });
         if (response.ok) {
           const payload = await this.readJson(response);
           if (payload?.ok === true) {
-            return typeof payload.version === 'string' && payload.version ? payload.version : 'unknown';
+            return {
+              kind: 'ready',
+              version: typeof payload.version === 'string' && payload.version ? payload.version : 'unknown'
+            };
           }
         }
       } catch (error) {
         // 启动期连接拒绝属于正常情况，继续重试。
-        console.debug(`[PARAMETRIC_HEALTH_RETRY]`, { site: 'desktop/electron/parametric.ts:485' }, error);
+        console.debug(`[PARAMETRIC_HEALTH_RETRY]`, { site: 'desktop/electron/parametric.ts:waitHealthy' }, error);
       }
+      if (hasExited()) return { kind: 'exited' };
       await delay(this.healthIntervalMs);
     }
-    return null;
+    // 预算用尽前再确认一次：刚好在这轮等待里死掉的子进程不能报成「超时」。
+    return hasExited() ? { kind: 'exited' } : { kind: 'timeout' };
   }
 
-  private handleExit(child: ChildProcess, wasRestartLaunch: boolean): void {
+  /** 两类失败必须给出不同的话，而且超时这句要用 healthTimeoutMs 实值。 */
+  private describeStartFailure(
+    isRestart: boolean,
+    outcome: HealthOutcome,
+    exit: LaunchExitEvidence,
+    elapsedMs: number,
+    stderrHint: string
+  ): string {
+    const prefix = isRestart ? '建模内核已崩溃' : '建模内核不可用';
+    if (outcome.kind === 'timeout') {
+      const seconds = Math.round(this.healthTimeoutMs / 1000);
+      return `${prefix}：健康检查在 ${seconds} 秒（${this.healthTimeoutMs} ms）内未通过，实测 ${elapsedMs} ms`;
+    }
+    if (exit.spawnError) {
+      return `${prefix}：进程启动失败（${exit.spawnError}），实测 ${elapsedMs} ms`;
+    }
+    const code = exit.code === null ? '未知' : String(exit.code);
+    const signal = exit.signal ?? '无';
+    const hint = stderrHint ? `；stderr：${stderrHint}` : '';
+    return `${prefix}：子进程已退出（code=${code} signal=${signal}，启动后 ${elapsedMs} ms）${hint}`;
+  }
+
+  private handleExit(
+    child: ChildProcess,
+    wasRestartLaunch: boolean,
+    evidence?: { exit: LaunchExitEvidence; stderr: StderrTailCapture }
+  ): void {
     if (this.proc !== child) return;
     this.proc = null;
     this.port = null;
@@ -729,6 +979,22 @@ export class ParametricManager {
       this.setStatus('stopped', '参数化建模内核已停止');
       return;
     }
+    const stderrTail = evidence ? evidence.stderr.tail() : '';
+    const classified = classifySidecarStderr(stderrTail);
+    if (classified.klass !== 'empty') {
+      // 只落分类 + 已脱敏尾部（token 在捕获阶段就替换成 [REDACTED]），尾部再截 600 字符防刷屏。
+      console.warn('[PARAMETRIC_SIDECAR_EXIT]', {
+        site: 'desktop/electron/parametric.ts:handleExit',
+        duringStart: this.launchActive,
+        code: evidence?.exit.code ?? null,
+        signal: evidence?.exit.signal ?? null,
+        stderrClass: classified.klass,
+        stderrTail: stderrTail.slice(-600)
+      });
+    }
+    // 启动期退出：定性（PROCESS_EXITED / SPAWN_FAILED、code、signal、stderr 分类）
+    // 全部由 launch() 给出。这里不重启、不改状态，否则重启会抢跑并把真因盖掉。
+    if (this.launchActive) return;
     if (!wasRestartLaunch && !this.restartUsed) {
       this.restartUsed = true;
       this.setStatus('starting', '建模内核意外退出，正在自动重启一次…');
@@ -744,13 +1010,27 @@ export class ParametricManager {
     this.setStatus('crashed', '建模内核已崩溃，参数化建模暂不可用');
   }
 
-  private failStart(isRestart: boolean, message: string, generation: number): ParametricStartInfo {
+  private failStart(
+    isRestart: boolean,
+    message: string,
+    generation: number,
+    evidence: Partial<ParametricStartInfo> = {}
+  ): ParametricStartInfo {
     if (this.expectedStop || generation !== this.generation) {
       return { ok: false, status: 'stopped', message: this.state.message };
     }
     const status: ParametricStatus = isRestart ? 'crashed' : 'unavailable';
     this.setStatus(status, message);
-    return { ok: false, status, message };
+    // 显式逐项赋值（不用 ...evidence）：tsconfig 开了 exactOptionalPropertyTypes，
+    // 展开 Partial<...> 会把 `code?: X` 变成 `X | undefined` 而不被接受。
+    const info: ParametricStartInfo = { ok: false, status, message };
+    if (evidence.code !== undefined) info.code = evidence.code;
+    if (evidence.elapsedMs !== undefined) info.elapsedMs = evidence.elapsedMs;
+    if (evidence.exitCode !== undefined) info.exitCode = evidence.exitCode;
+    if (evidence.signal !== undefined) info.signal = evidence.signal;
+    if (evidence.stderrClass !== undefined) info.stderrClass = evidence.stderrClass;
+    if (evidence.stderrTail !== undefined) info.stderrTail = evidence.stderrTail;
+    return info;
   }
 
   private setStatus(status: ParametricStatus, message: string, version?: string): void {

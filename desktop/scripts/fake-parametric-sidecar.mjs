@@ -1,17 +1,53 @@
 // 临时假 sidecar：验证 SMOKE_PARAMETRIC_SIDECAR_OK / SMOKE_PARAMETRIC_UI_OK
 import http from 'node:http';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const argv = process.argv.slice(2);
+/**
+ * 兼容两种形状：`--token <v>`（旧）与 `--token=<v>`（值以 `-` 开头时必须用这种，
+ * 否则 argparse 会把 `-xxx` 当成选项名并以 exit 2 退出）。
+ * 本 fake 只做解析，不做 argparse 的语义校验——参数形状由编排侧负责。
+ */
 const get = (name) => {
+  const inline = argv.find((arg) => arg.startsWith(`${name}=`));
+  if (inline !== undefined) return inline.slice(name.length + 1);
   const i = argv.indexOf(name);
   return i >= 0 ? argv[i + 1] : undefined;
 };
 const port = Number(get('--port') ?? 7430);
 const token = get('--token') ?? '';
 const version = '0.0.0-fake';
+
+// ---- 测试钩子（只读环境变量，不影响正常启动路径） ----
+// 记录真实 spawn 的 argv：用来断言参数形状，以及数清「启动了几次」。
+const argvDump = process.env.FAKE_SIDECAR_ARGV_DUMP;
+if (argvDump) appendFileSync(argvDump, `${JSON.stringify({ args: argv, pid: process.pid })}\n`, 'utf8');
+// 启动期失败注入：绑端口之前就退出，模拟真实 sidecar 的早退（如 argparse exit 2）。
+const failureExit = Number(process.env.FAKE_SIDECAR_EXIT_CODE ?? Number.NaN);
+if (Number.isInteger(failureExit)) {
+  const emit = (text) => process.stderr.write(text);
+  emit(process.env.FAKE_SIDECAR_STDERR
+    ? `${process.env.FAKE_SIDECAR_STDERR}\n`
+    : 'usage: app.py [-h] [--port PORT] [--token TOKEN]\napp.py: error: argument --token: expected one argument\n');
+  if (process.env.FAKE_SIDECAR_ECHO_TOKEN === '1' && token) {
+    // 故意拆成三片 write：制造跨 chunk 边界，验证脱敏不依赖单次 chunk 完整。
+    const first = Math.max(1, Math.floor(token.length / 3));
+    const second = Math.max(first + 1, Math.floor((token.length * 2) / 3));
+    for (const piece of [token.slice(0, first), token.slice(first, second), token.slice(second)]) {
+      emit(piece);
+      await new Promise((done) => setTimeout(done, 20));
+    }
+    emit('\n');
+  }
+  await new Promise((done) => setTimeout(done, 20));
+  process.exit(failureExit);
+}
+// 挂起注入：启动成功但永不监听（用于区分「真超时」与「早退」，目前无其它入口）。
+const hangMs = Number(process.env.FAKE_SIDECAR_HANG_MS ?? 0);
+if (hangMs > 0) await new Promise((done) => setTimeout(done, hangMs));
+
 const workDir = mkdtempSync(join(tmpdir(), 'automationcad-fake-parametric-'));
 const stlPath = join(workDir, 'model.stl');
 const stepPath = join(workDir, 'model.step');
