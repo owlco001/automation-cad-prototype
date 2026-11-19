@@ -1,74 +1,79 @@
 # AutomationCAD 下一会话交接
 
-更新时间：2026-11-19（**R10：代码 6 笔已全部推送（末笔 `e1d1138`）；CI 前两跑红 = 启动早退、真因未证；新 run `44516236961` 结论未出**）
+更新时间：2026-11-19（**R11 收口：三包 + 整改 + 复审全部完成，14 文件在工作树未提交；`sweep` 仍 fail；无 CI、无发版**）
 仓库 `owlco001/automation-cad-prototype`；工作目录 `/tmp/automation-cad-prototype`
 
 > 这是**短摘要**：只写「现在什么状态、下一步做什么」。
-> 本轮完整报告 → `docs/desktop/R10-ITERATION.md`；可移交验收记录 → `docs/desktop/R10-ACCEPTANCE.md`；PV 侧软件口径 → `docs/desktop/PV-BUFFER-ITERATION-HANDOFF.md`。
-> 不要再往本文件堆历史（旧 371 行原文见 `git show e480f57:HANDOFF-NEXT-SESSION.md`）。
+> 完整报告 → `docs/desktop/R11-ITERATION.md`；可移交验收记录 → `docs/desktop/R11-ACCEPTANCE.md`；
+> 通道口径与两条归零路线决策书 → `docs/desktop/R11-CHANNEL-SWEEP.md`；孤儿 sidecar 治理 → `docs/desktop/SIDECAR-DOCTOR.md`。
+> 不要在本文堆历史（R10 及更早见 `docs/desktop/R10-ITERATION.md`、`git show e480f57:HANDOFF-NEXT-SESSION.md`）。
 
 ## 现状（三句）
 
-- **代码状态**：`HEAD = origin/main`（最新一笔是文档同步提交，`git log --oneline -3` 复核），工作区干净。R10 代码共 **6 笔，全部已推**：`137a68d` 严格档 + 负向自证 → `0379e15` 豁免精确化 → `ba8020d` 启动计时 + ENOENT 静音 → `94ec7e6` 文档收口 → `9409f3e` CI 依赖前置 → **`e1d1138` sidecar 早退诊断 + 启动竞态（4 文件 +604/−32）**。
-- **CI 两次都未绿，原因不同**：
-  ① 首跑 run `44506016602`（head `94ec7e6`）：`featuretree-geometry` job 没跑 `npm ci`，`eval:tasks` import `adm-zip` 即 `ERR_MODULE_NOT_FOUND`，**一条断言都没跑到**；已由 `9409f3e` 修（setup-node 24 + `npm ci` 放在评测前、job 100 min、守卫 ⑦ 判依赖前置/顺序）。
-  ② 第二跑 run `44508941094`（job `135507781027`，head `9409f3e`）：`npm ci`、装配与体积步骤**都过了**，红在 `verify:step` —— sidecar 起来后**约 0.36 s 自行退出**（探测两个端口 7440/7435），旧实现把这次死亡上报成「健康检查在 3 秒内未通过」。**具体真因（Python 为何退出）仍未证**：旧代码 `child.stderr?.resume()` 吞掉全部 stderr，日志里没有任何 traceback；**不许把 0.36 s 读成内核慢**（本机 `start=559 ms`，预算 90/120 s）。
-- **所以既不能写「CI 已绿」，也不能写「改动全未提交」**：R10 代码 6 笔全在远端（最后一笔 `e1d1138` 随 `e2c3213` 推送），工作区干净；但 **`e1d1138` 触发的 run `44516236961` 尚未出结论**，CI 仍是前两次红的历史。**没有安装包发版。**
+- **代码状态**：`HEAD = 036b548`（= `origin/main`），**工作树 14 个文件未提交（8 改 6 新）** —— 这就是 R11 的全部交付，全部未推送、**无 CI run**。R10 的 6 笔（末笔 `e1d1138`）已在远端，不含本轮内容。
+- **三包落地并整改完毕**：A 升降通道口径收口（判据未改）、B 启动失败分类结构化透传、C 孤儿 sidecar 体检/回收；对抗审查 **P1 × 4 全闭**，复审「**有条件通过**」，余 P2 × 2 已在文档披露（§P2）。
+- **门禁本机全绿、结论未变**：3750/3747/3 skip/0 fail、tsc 0、定向 91/91、focused 416/416、`verify:step` 7/7、tower 16 层 23/23 与 8 层 16/16、eval 13/13 零 skip、`verify:channel` 2/16 层各 30/30、`build:ext` exit 0、smoke `SMOKE_OK`。**但 `sweep` 仍 fail、`feasible=false`；本机数字不是 CI 读数。**
 
-## 包 D 修复（已推送 `e1d1138`；CI 结论待 run `44516236961`）
+## R11 三包（细节见 R11-ITERATION.md §1）
 
-| 项 | 改了什么 | 证据 |
+| 包 | 改了什么 | 关键证据 |
 |---|---|---|
-| **错误诊断** | `waitHealthy` 三态 `ready / exited / timeout`；早退报 `code/signal/实测 ms`，超时用实值（不再写死「3 秒」）；stderr 4 KB 环形尾缓存，token 完整/分片/截断残片全 `[REDACTED]`；`classifySidecarStderr()` 分 `argparse / missing-module / address-in-use / permission-denied / out-of-memory / traceback / empty / unknown`；`ParametricStartInfo` 增 `elapsedMs/exitCode/signal/stderrClass/stderrTail` | 新增 6 例先红后绿（旧实现 0/6）；`verify:step` 失败路径实测带 `code/elapsed/stderrClass`，仍 exit 1 |
-| **启动期竞态** | `handleExit` 在启动期只记证据、不重启（一次 `start()` 只一个端口、一份结论）；`launchActiveSeq` 按 launch 作用域，`finally` 只清自己一代；ready 后崩溃仍自动重启一次 | 「stop 后立刻重启」用例：旧实现 spawns=3 / 终态 `crashed` 必红，新实现 spawns=2 / `unavailable` 绿；**P1 复审通过**（独立 probe 复跑一致） |
-| **verify 脚本** | 启动失败打印 `code status elapsed exitCode signal stderrClass` + 脱敏 stderr 尾；`start()` 抛错不丢 code（`START_THREW`）；`waitKernelReady` 回报实测 `wait=…ms`；**阈值与重试未改** | 假 python exit 2 → `EXIT=1` 且证据完整；真内核仍 7/7 |
+| **A** 通道口径 | `collectChannelPairs` **opt-in（默认 false）**、`SWEEP_EVIDENCE` 一行 JSON + 3 条正向自证、`counts` 严格 `{30,16,14}`、17 层回归 + 3 处变异自证（22→23 例） | 去重 60 = 15 层 × 4（派生一致）；口径改「每命中步 2 确认 + 1 待复核」= 135×3 = 405 |
+| **B** 启动失败分类 | 新增 `parametric-start-view.ts` 纯函数（6 字段逐项搬、**剥 port/token**）；`ipc.ts` 改调用；`d.ts` 6 字段 + 联合同集；UI 收 `signal` + 文案后缀（无新 DOM） | 8 例（含「payload 无 token/port」双查）；**message 文案零变化** → `parametric-sidecar` 22/22 未改 |
+| **C** 孤儿 sidecar | `sidecar-doctor.mjs`：默认 dry-run、三闸 `--kill`、**`startTicks` 身份闸**（发信号前复验）、认 `resources/parametric/app.py`（需 `--token`，`--resources-root` 可 pin）、`--min-age-min 0` 退 2 | 15 例；dry-run 列出 2 孤儿不杀；`--kill` 实测两个均回收、端口释放、复扫 0 |
 
-**确定性 bug（机制已实测，但不是这次 CI 红的已证根因）**：`--token` 与值分行传时，以 `-` 开头的 token 被 Python argparse 当选项名 → `exit 2`（真 `app.py`：分行 **exit 2** / `--token=<值>` **exit 0 并正常监听**；`parse_args()` 在任何 import/绑端口之前，所以症状必然是「~100 ms 自己退出」）。随机 43 字符 base64url 单个以 `-` 开头概率 1/64，**同一 job 两次都踩到 ≈2.6e-4，偏低**；原 stderr 已丢、无法回看 ⇒ 只能记「机制成立 + 签名一致」，**不得写成 CI 那次红的结论**，运行器侧瞬时故障仍并列可能。本次修的是**下次失败一定看得见**（`exited` 不再被误报成超时）。
+## 门禁（本机、同一棵树、串行；日志 `/root/.hermes/cache/scratch/cad-r11-final/`）
 
-## 终验实测（本机、同一棵树、串行；日志 `/root/.hermes/cache/scratch/cad-r10-final/*final2.log`）
-
-| 项 | 现行结果 |
+| 项 | 结果 |
 |---|---|
-| `npx tsc --noEmit` | **exit 0**，0 诊断（`tsc-final2.log`） |
-| 全量 `npm test` | **3726 tests / 3723 pass / 3 skip / 0 fail / 120,598.912448 ms**（`full-final2.log`） |
-| `npm run build:ext` | **exit 0**：extension 2,946,350 B / gzip 921,963 B / wasm 7,604,031 B / total 10,550,381 B（`build-final2.log`） |
-| `verify:step`（真内核） | **7/7**，`state=ready port=7449 wait=3212ms start=559ms`（`step-final2.log`） |
-| `verify:step-tower --levels 16 --require-full` | **23/23**，`identity=PASS(144/144)`、`exempt=2/14`、`declared=2 undeclared=0 stale=0`（`step16-final2.log`） |
-| `eval:tasks --require-full` | **13/13**，`skipped=0 env_skipped=0 undeclared_skips=0 degraded=false`（`eval-final2.log`） |
-| `parametric-sidecar.test.ts` / `ci-strict-gates.test.mjs` | **22/22** / **23/23** |
-
-- 本轮**未重跑**（上一轮同树实跑，改动后再引用需整轮重跑）：focused 415/415、smoke `SMOKE_OK`（0 FAIL / 4 个显式 SKIP）、`verify:channel` 2/16 层各 27/27、8 层 16/16、`regen` 61/61、kb 13/454/434,531。
-- 旧数字（3719/3716/117,094 ms、3717/3714/119,708 ms、3716/3713/126,150 ms）保留在 R10 报告作演进记录，**不再当结论**；本机数字一律不是 CI 读数。
+| `npx tsc --noEmit` | **exit 0**，0 诊断 |
+| 全量 `npm test` | **3750 tests / 3747 pass / 3 skip / 0 fail / 124,349.554638 ms**（= 基线 3726 + 24：B8 + C15 + A1） |
+| focused / 三包定向 | **416 / 416** · **91 / 91**（23+8+15+22+23） |
+| `verify:step`（真内核） | **7 / 7**，`state=ready port=7443 wait=3266ms start=681ms` |
+| `verify:step-tower` 16 层 / 8 层 | **23 / 23**（`identity=PASS(144/144)`、`exempt=2/14`）/ **16 / 16** |
+| `eval:tasks --require-full` | **13 / 13**，`skipped=0 degraded=false` |
+| `verify:channel --levels 2 / 16` | **30 / 30** · **30 / 30**（正向 16 / 负向 14，N1..N14），exit 0 |
+| `build:ext` / smoke | **exit 0**（total 10,551,020 B）/ **`SMOKE_OK`**、0 FAIL、4 显式 SKIP、`totalMs=468.234` |
+| `doctor:sidecar` | dry-run 2 孤儿（≈894 MB）；`--kill` **回收成功**（进程消失/端口释放/复扫 0），exit 0 |
 
 ## 结论限制（任何一轮都不许越过）
 
-1. 真实塔 **`feasible=false`**（`load-passes-shelf` + `stroke-shortfall`）；`verify:channel` 是诊断脚本，27/27 是尺子自证，不是结构/安全校验。
-2. **`sweep` 405 命中仍 fail，本轮未复跑**（16 层 42 对 / 270 确认 + 135 待复核），不得改判。
-3. **结构/安全/电气/PLC 未做**：`structure.accepted:false`、挠度/导向/防坠/安全回路未校核、IO 地址 `null`、`executable=false`。
-4. **占位顶点 ≠ 实体认证**：STEP 门禁只到「每件包络内 ≥1 个 B-Rep 顶点」+ 名字级声明，不是逐面/逐实体身份，不是制造验收。
+1. **升降通道未通**：`sweep` 仍 **fail** —— 16 层 **270 确认 + 135 待复核 = 405 步累计**，**去重 60 对**（全是 `lift-platform` × 托板族），`reviewStatus=fail`，**`feasible=false`**。
+2. **归零路径未实施**：台面缩回 240 mm / 托板开 240 缺口都是**机构变更 + 结构校核**（缺口 ≥240 与 `minBandOverlapXmm=1900` 冲突窗 80 mm），本轮只出决策书。**外移变体归零但 `feasible` 仍 false → 归零 ≠ 可行。**
+3. **承托结论不变**：rest `unsupported`、carried `diagnostic-only`；`verify:channel` 30/30 是**尺子自证**（诊断脚本，`feasible=false` 仍 exit 0），不是结构/安全验收。
+4. **STEP 只到名字/包络级**：每件包络内 ≥1 顶点 + 精确件号/宿主/声明件存在，**不是逐实体身份，不是制造验收**。
+5. **结构/安全/电气/PLC 未做**：`structure.accepted:false`、挠度/导向/防坠/安全回路未校核、IO `null`、`executable=false`。
+6. **无安装包、无 Release、无 CI 读数**：14 文件未提交未推送；本机数字一律不是 CI 证据。
+
+## P2（放行，不再改代码）
+
+- `applyKills` 的 `/proc` stat → `kill` 微秒窗：身份闸已压到微秒级，脚本头与 `SIDECAR-DOCTOR.md` 已披露。
+- `--resources-root` 写错时 **dry-run 仍 exit 0 静默零命中**（只 `--kill` 校验）：文档已写「先看 `scanned` / `sidecars` 计数再判空」。
 
 ## 下一会话顺序
 
-1. `git status --short` / `git log --oneline -6` → 确认工作区干净、`origin/main` 已含 `e1d1138`；**不要 `git checkout --`、不要 amend、不要重排已推历史**。
-2. `gh run list --limit 3` → 取 `headSha = $(git rev-parse HEAD)` 的那个 run（首个是 `44516236961`，其后若再有文档提交则以最新为准）→ `gh run watch <id>`。
-3. 只有该 run **completed/success** 才能把「CI 已绿」写进这 4 份文档（同时记 run id 与 headSha）；**在它出结论前一律写「结论未出」**。若再红，先看 `verify:step` 的 `code/elapsed/exitCode/stderrClass/stderr 尾`（包 D 就是为这条），不要先改测试。
-4. 任何再次改源码/测试后按此顺序整轮重跑（同会话、同树、串行）：
+1. `git status --short` / `git log --oneline -3` → 确认工作树仍是**14 个 R11 文件**、`HEAD = origin/main = 036b548`。**不要 `git checkout --`、不要 `git stash`、不要 amend**（14 文件是唯一交付物）。
+2. **先要授权再提交**：按白名单逐个 add（A/B/C 三包 + 4 份文档 + 2 份新文档），**`git add -A` 禁用，`scratch/` 永不提交**；提交后 `git diff --check` 无输出。
+3. push 后才有 CI：`gh run list --limit 3` 取 `headSha = $(git rev-parse HEAD)` 的 run → `gh run watch <id>`。**出绿前一律写「无 CI 读数」**；若红，先看 `verify:step` 打的 `code/elapsed/exitCode/stderrClass/stderr 尾`（R10 包 D 就是为这条），不要先改测试。
+4. 任何再次改源码/测试后按此顺序整轮重跑（同树、串行）：
    ```bash
    cd /tmp/automation-cad-prototype/desktop
-   node --test test/parametric-sidecar.test.ts test/meta/ci-strict-gates.test.mjs   # 22 / 23
-   npx tsc --noEmit                                                                 # exit 0
-   npm run test:focused                                                             # 415/415
-   timeout -k 15 900 npm test                                                       # 3726/3723/3/0
-   npm run verify:step && npm run verify:step-tower -- --levels 16 --require-full   # 7/7 · 23/23
-   npm run eval:tasks -- --require-full                                             # 13/13 skipped=0
-   npm run build:ext && npm run smoke                                               # exit 0 / SMOKE_OK
-   git diff --check                                                                 # 无输出
+   node --test test/machine/buffer-tower-channel.test.mjs test/parametric/start-view.test.mjs \
+     test/meta/sidecar-doctor.test.mjs test/parametric-sidecar.test.ts test/meta/ci-strict-gates.test.mjs  # 91
+   npx tsc --noEmit                                                   # exit 0
+   npm run test:focused                                               # 416/416
+   timeout -k 15 900 npm test                                         # 3750/3747/3/0
+   npm run verify:step && npm run verify:step-tower -- --levels 16 --require-full
+   npm run verify:step-tower -- --levels 8 --require-full
+   npm run eval:tasks -- --require-full
+   AUTOMATIONCAD_PYTHON=/root/.venvs/b123d/bin/python npm run verify:channel -- --levels 2
+   AUTOMATIONCAD_PYTHON=/root/.venvs/b123d/bin/python npm run verify:channel -- --levels 16
+   npm run build:ext && npm run smoke && npm run doctor:sidecar
    ```
-5. 之后才是老欠账：升降通道（`sweep` 405→0）、逐实体 STEP 身份、结构/安全/电气/PLC。
-
-落库只 add 白名单文件：**当前工作区应为干净**；若还要改文档，只允许这 4 份 —— `HANDOFF-NEXT-SESSION.md`、`docs/desktop/{R10-ITERATION,R10-ACCEPTANCE,PV-BUFFER-ITERATION-HANDOFF}.md`。代码 4 文件已在 `e1d1138`（随 `e2c3213` 推送），**不要再提交代码、不要 amend**。**`scratch/` 永不提交，`git add -A` 禁用。**
+5. 之后才是老欠账：升降通道**拍板**（路线 ①缩回 240 / ②开 240 缺口，见 `R11-CHANNEL-SWEEP.md` §3，需结构校核）→ 结构/安全/电气/PLC → STEP 逐实体身份。
 
 ## 文档与 KB / 安全
 
-- 上述四份交接文档**都不在 `KB_DOC_FILES`**（`desktop/src/agent/kb/index.ts` 13 份）→ 改它们**不需要** `kb:build`，统计仍 13/454/434,531；改那 13 份中的任何一份必须重建，否则 `test/agent/kb-freshness.test.mjs` 会红。
+- R11 这几份文档**都不在 `KB_DOC_FILES`**（`src/agent/kb/index.ts`，13 份）→ 改它们**不需要** `kb:build`，统计仍 13/454/434,531；改那 13 份中的任何一份必须重建，否则 `test/agent/kb-freshness.test.mjs` 会红。
 - 不要删除或覆盖 `/tmp/automationcad-pv-buffer-live`、`/tmp/automationcad-pv-buffer-iter`，不要把其中密钥复制进仓库或文档。IO 草案地址 `null` 是有意设计。
+- 孤儿 sidecar 已回收（原 2040641/7431、2114164/7445）；以后怀疑残留先 `npm run doctor:sidecar -- --json` 看，再决定 `--kill`。

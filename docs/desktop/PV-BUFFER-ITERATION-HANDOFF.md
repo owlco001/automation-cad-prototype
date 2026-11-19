@@ -24,6 +24,7 @@
   **旧的 33 / 21 / 54 / 46 全部作废**；也不许写「72 条定向全绿」（50+22 只是清单相加）。
 - **判据与 fail-closed（现行，未改动）**：`inCollisionSet` / `panelSourceOfGeometry` 认**完整工件身份**（同 id + `role=workpiece` + `size`/`center`/`rotationZDeg` 一致，转角周期等价；同 id 托板/夹具、转 90° 的件都不算；`rotationZDeg` 非有限不算）。坏坐标：承托**行**非有限 → 该行剔除、`diagnostic-only` + `invalid-support-rows`（N13）；承托**面几何**非有限 → 不判可行、`witness=null` + `invalid-shelf-geometry`（N14，带未污染正控）；特征参数坏 → 并进同一码（`droppedPartIds`）。判据统一在 `feature-box.ts`。
 - **边界不变**：塔仍**没有真实多层升降通道**（层托板整块、台面在托板投影内），**`sweep` 405 = 270 确认 + 135 待复核仍 fail，本轮未复跑、不得改判**；`structure.accepted:false`、挠度/导向/防坠/安全回路/PLC 全未校核；`mode=verified` 只等于「行表来自几何 + 碰撞集里有同一工件身份的板」，**不等于可行**；`verify:channel` 是诊断脚本（`feasible=false` 仍 exit 0）。**没有通道/结构结论。**
+- **R11 现状（2026-11-19，14 文件未提交、未推送、无 CI）**：三包落地 + 整改复审「有条件通过」（通道口径收口 / 启动失败分类透传 / 孤儿 sidecar 治理，两个孤儿已回收），本机 3750/3747/3/0、`verify:channel` 2/16 层各 30/30、`tsc` 0；**`sweep` 仍 fail（405 步累计，去重 60 对）、`feasible=false`、无安装包** —— 详见 `R11-ITERATION.md` / `R11-ACCEPTANCE.md`。
 
 ## P2 整改（历史 · 2026-11-19 T3 复审后，落在 `920ea07`/`b85fab5`；源码现行，但整树证据已被本轮六笔叠加）
 
