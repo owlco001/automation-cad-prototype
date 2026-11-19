@@ -79,7 +79,7 @@ interface Bridge {
 | `search_components` | `q` | 无（直接读 registry） | ✅ 可用 |
 | `search_docs` | `query / limit?` | 无（直接读内嵌 `kb.json`） | ✅ 只读：来源 + 标题 + 摘要 + 分数；无命中返回空 |
 | `design_machine` | `brief / stationCount? / cyclePerMin?` | 无 | ✅ 只读：需求抽取 + 方案合成，不落盘、不改工程 |
-| `apply_machine_design` | `brief? / design? / name? / overwrite? / withBom? / withPlc?` | `apply_machine_design` | ✅ 写：brief 与 design 二选一；校验后写 `machine/<id>.json` + `active.json`，默认追加 BOM，可选 PLC `io-map.csv`；需确认、可撤销、刷新 3D |
+| `apply_machine_design` | `brief? / design? / name? / overwrite? / withBom? / withPlc?` | `apply_machine_design` | ✅ 写：brief 与 design 二选一；校验后写 `machine/<id>.json` + `active.json`，默认追加 BOM，可选 PLC `io-map.csv`；需确认、可撤销、刷新 3D。默认生成参数化整机几何（`geometry.json` / `model.stl` / `model.gltf` / `sidecar-assembly.json`，`withGeometry=true`），`withSolids=true` 且 build123d 可用时再实体化出 STEP。**件数口径必须点名**：`geometry.json` 是**碰撞几何**（缓存塔含板，16 层 147 刚体，2/8 层 49/91），STL/glTF/sidecar（→STEP）是**制造导出**（塔按 `machineExportParts()` 剔除板件，16 层 146，与 BOM 96 行 / qty 146 同口径） |
 | `list_machine_library` | 无 | `list_machine_library` | ✅ 只读：`{items:[{id,name,version,sizeBytes,source,updatedAt}],total}`，空库返回空数组 |
 | `save_machine_to_library` | `id? / name? / version? / overwrite?` | `save_machine_to_library` | ✅ 写：打包 `.machine.zip` 入库，缺省取当前 active 机型；同名返回 `LIBRARY_EXISTS` + `hint`，绝不自动覆盖 |
 | `load_machine_from_library` | `id` | `load_machine_from_library` | ✅ 写：写回 `machine/<id>.json` + `active.json`，`bom.csv` 回填 `bomDraft.items`，并 `applyMachineConfig` 刷 3D |
@@ -111,7 +111,7 @@ interface Bridge {
 
 `get_bom` 的 BOM 由「当前 CAD 零件 + 已插入占位件」生成：序号递增、名称/型号取零件名、数量 1、材料 `—`，并带 `note` 说明这是简化 BOM。没有模型时返回空数组。
 
-`run_interference_check` 的承托/通道口径（`requirePanel:true`）：回执只给几何诊断读数 —— `panelSupport.*.claim` / `panelFeasibility.diagnosticOnly` 按「行表是否来自几何」判，生产塔的板只是只读占位体（`workpiecePlaceholder`、`inCollisionSet:false`，不进 `parts`），`claim` 恒 `diagnostic-only`；本次生产塔实测的 `verdict=unsupported`、`feasible=false`；`verified` 只属于 M1 夹具件表（`test-support/m1-channel-fixture.mjs`，152 件）。几何里没有板、或机型不是缓存塔一律 `INVALID_ARGUMENT`（不做「查不到 → 绿」）；回执里 `panelChannelNote`/`panelFeasibility.note` 自带「首层能托住 ≠ 多层可行、净跨/走廊需结构确认」的边界，这些字段不是结构验收，不能据此对外称可落地。
+`run_interference_check` 的承托/通道口径（`requirePanel:true`）：回执只给几何诊断读数 —— `panelSupport.*.claim` / `panelFeasibility.diagnosticOnly` 按「行表是否来自几何」+「板是否在碰撞件集」判。**生产塔几何现在包含真实板**（`workpiece-plate` 是 `geometry.parts` 里的普通 `GeomPart`，`role=workpiece`、`moving=false`；`workpiecePlaceholder` 是同一件的投影；`inCollisionSet` 按完整工件身份派生（同 id + `role=workpiece` + box `size`/`center` 在 ±EPS 内一致 + `rotationZDeg` 有限且与占位体周期等价，缺一不算），不认手写 flag；**只同 id 不够**：id 相同但 role/尺寸/中心/朝向不符的件不是同一件成员（同 id 的托板/夹具件、同尺寸同中心但转 90° 的件都不算同一块板），所以 `mode` 可以是 `verified` —— 但 `verified` 只说明「行表来自几何 + 碰撞集里有同一工件身份的这块板（含朝向）」，**不是结构可行/承载认证**。该塔实测：`rest` 承托 `unsupported`（覆盖 100% 但只有 1 条 1200 整带）、`carried` 是 `diagnostic-only`（板**不随**塔轴移动、`carriedShiftSource='missing'`）、`feasible=false`，blockers 为 `load-passes-shelf`（带实测自由上升 witness）+ `stroke-shortfall`。板只在占位体里（`parts` 里没有同一工件身份的件 —— id 相同但 role/尺寸/中心/朝向不符也不算同一件成员）或行表来自调用方（`rowsSource='caller'`）时仍是 `diagnostic-only`。几何里没有板、或机型不是缓存塔一律 `INVALID_ARGUMENT`（不做「查不到 → 绿」）；回执里 `panelChannelNote`/`panelFeasibility.note` 自带「首层能托住 ≠ 多层可行、净跨/走廊需结构确认」的边界，这些字段不是结构验收，不能据此对外称可落地。
 
 `capture_view` / 位姿化干涉的真机自检（本机 xvfb 实跑通过，四个视图全覆盖）：
 
