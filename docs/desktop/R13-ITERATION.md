@@ -59,7 +59,7 @@
 | venv 自证 | 先跑 `"$FT_PY" -c 'import build123d; print(...)'`，让「venv 指错」自己红，**不靠**用例文件的三级回退链兜 |
 | 证据链 | `node --test --test-reporter=tap --test-reporter-destination=/tmp/identity-export.tap <file>` → `node scripts/verify-identity-export-tap.mjs /tmp/identity-export.tap`；producer/consumer **同一文件**（守卫判路径相等） |
 | 校验器 | 计划 `1..N` == `ok/not ok` 记录数 == `# tests`；`pass/fail/skip/todo/cancelled` 逐项对账；记录编号连续、不重名；**6 个具名真实用例**（R12 基线 `a4b57e4` 的「内核：…」6 条）必须有 passed 记录；`tests ≤ 1` 或全为文件名记录 = 壳子必拒；未知结构 fail-closed |
-| **不钉总条数** | 只钉这 6 个名字 + 计数自洽（B 已把内核用例加到 9，24 条照过） |
+| **不钉总条数** | 只钉这 6 个名字 + 计数自洽；允许继续增加用例，当前全文件 24 条实跑通过 |
 | 禁止 | 步骤内出现 `--test-name-pattern` / `--test-skip-pattern` / `--test-only` 即红；`echo`/`printf`/`cat`/`grep`/`ℹ …` 摘要当证据即红 |
 | 预算（口径必须精确） | 该 job **step 级 `timeout-minutes` 实测合计 97 min**（10+5+10+10+12+20+10+5+5+10）；`ci.yml` 注释里写的最坏情形预算是 **102 min**；job `timeout-minutes` 是 **105**。关系是 `Σstep 97 ≤ 注释预算 102 ≤ job 105`，**不是**「实际总步骤超时从 97 涨到 102」 |
 | node 口径 | `--test-reporter=tap` 顶层格式在 **v24.22.3（CI）与 v26.7.0（本机）实测一致**，两版都真文件跑过并通过校验 |
