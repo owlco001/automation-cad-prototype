@@ -3,7 +3,7 @@
 // 两边一旦漂移，界面会显示一套、文档写另一套，而且都不会报错。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,9 +16,11 @@ const script = join(desktopRoot, 'scripts', 'machine-design-cli.mjs');
 const caseFile = join(repoRoot, 'docs', 'desktop', 'eval', 'machine-case.json');
 
 const BRIEF = '六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅';
+const SIX_BRIEF = BRIEF;
+const FOUR_BRIEF = '四工位点胶机，节拍 25 件/分钟';
 
 /**
- * 同步跑 CLI —— 本文件唯一的子进程入口。
+ * 同步跑 CLI —— 本文件唯一的**同步**子进程入口。
  *
  * 为什么闸门必须下在子进程上（实测过，不是保险）：
  *   - `test(..., { timeout })` 与 `--test-timeout` 都靠 runner 的**进程内定时器**，而
@@ -35,8 +37,100 @@ const CLI_TIMEOUT_MS = (() => {
   return Number.isFinite(raw) && raw > 0 ? raw : 180_000;
 })();
 
-function runCli(args, { timeoutMs = CLI_TIMEOUT_MS } = {}) {
-  return execFileSync(process.execPath, [script, ...args], {
+const argsKey = (args) => JSON.stringify(args);
+
+/**
+ * 每次 CLI 调用都起一个进程、跑一遍求解器；同一组参数在多处用到时（例如六工位
+ * `--layout-compliance 40` 被 3 条用例、4 处引用），跑第二遍拿到的必然还是同一份结果。
+ * 这里按「参数完全一致」记忆化：断言一条都不改，只是不再重复付求解器的钱。
+ *
+ * 只记忆**成功**的调用：失败用例（退出 2 / 超时）本来就是毫秒级，且错误对象不该被复用。
+ */
+const stdoutCache = new Map();
+
+/**
+ * 昂贵参数集（单次 6~26 s，实测见 cad-opt-pkg-e.md 的计时表）。
+ * 启动时并行预跑，用例里 `await` 同一份结果 —— 三条求解在 8 核上互不排队，
+ * 墙钟约等于最慢的那一条，而不是三条之和。
+ */
+const HEAVY_ARG_SETS = [
+  ['--brief', SIX_BRIEF, '--with-geometry', '--layout-compliance', '40'],
+  ['--brief', SIX_BRIEF, '--with-geometry', '--layout-compliance', '35'],
+  ['--brief', FOUR_BRIEF, '--with-geometry', '--max-clearance']
+];
+
+const heavyRuns = new Map();
+
+/**
+ * 异步跑 CLI（只用于预跑的昂贵参数）。
+ *
+ * 与 runCli 的区别只在「怎么等」：这里 await，所以事件循环不被占死，多条求解可以真并行。
+ * 闸门一条不少：同样的 `timeout + SIGKILL`，到点子进程被硬杀、promise 以超时错误 reject。
+ */
+function runCliAsync(args, { timeoutMs = CLI_TIMEOUT_MS } = {}) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(process.execPath, [script, ...args], {
+      cwd: desktopRoot,
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, timeoutMs);
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      rejectPromise(error);
+    });
+    child.on('close', (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        resolvePromise(stdout);
+        return;
+      }
+      const error = new Error(`CLI 退出 code=${code} signal=${signal}${stderr ? `：${stderr.slice(0, 400)}` : ''}`);
+      error.status = code;
+      error.signal = signal;
+      error.stderr = stderr;
+      error.timedOut = timedOut;
+      rejectPromise(error);
+    });
+  });
+}
+
+for (const args of HEAVY_ARG_SETS) {
+  const key = argsKey(args);
+  const run = runCliAsync(args);
+  // 没被任何用例 await 到（例如 --test-name-pattern 只跑小用例）时不该变成 unhandledRejection
+  run.catch(() => {});
+  heavyRuns.set(key, run);
+}
+
+/** 取预跑结果；参数不在 HEAVY_ARG_SETS 里就是写错了，直接炸而不是静默再跑 26 s。 */
+async function heavyStdout(args) {
+  const key = argsKey(args);
+  const run = heavyRuns.get(key);
+  if (!run) throw new Error(`这组参数没有预跑，请先加进 HEAVY_ARG_SETS：${key}`);
+  return run;
+}
+
+const heavyJson = async (args) => JSON.parse(await heavyStdout(args));
+
+function runCli(args, { timeoutMs = CLI_TIMEOUT_MS, noCache = false } = {}) {
+  const key = argsKey(args);
+  if (heavyRuns.has(key)) {
+    // 昂贵参数被同步调用会把并行预跑变成串行再跑一遍，必须走 await heavyStdout
+    throw new Error(`昂贵参数必须 await heavyStdout，不能同步重跑：${key}`);
+  }
+  const hit = noCache ? undefined : stdoutCache.get(key);
+  if (hit !== undefined) return hit;
+  const stdout = execFileSync(process.execPath, [script, ...args], {
     cwd: desktopRoot,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -45,6 +139,8 @@ function runCli(args, { timeoutMs = CLI_TIMEOUT_MS } = {}) {
     // 硬杀：CLI 卡在内核探测 / sidecar HTTP 时 SIGTERM 可能被忽略
     killSignal: 'SIGKILL'
   });
+  if (!noCache) stdoutCache.set(key, stdout);
+  return stdout;
 }
 
 test('machine-design-cli 输出的方案与 machine-case.json 一致', { timeout: 120_000 }, () => {
@@ -203,25 +299,25 @@ test('--move 后给出该件最近邻居（贴合/重叠为 0），与插入口�
   assert.ok(far.nearGapMm > 100, `挪远后间隙应大于 100，实际 ${far.nearGapMm}`);
 });
 
-test('声明叠装链后：未声明贴面为 0，但真重叠与最大可行间距结论不许变', { timeout: 240_000 }, () => {
+test('声明叠装链后：未声明贴面为 0，但真重叠与最大可行间距结论不许变', { timeout: 240_000 }, async () => {
   const read = (brief, extra) => {
     const stdout = runCli(['--brief', brief, '--with-geometry', ...extra]);
     return JSON.parse(stdout).geometry;
   };
-  const four = read('四工位点胶机，节拍 25 件/分钟', ['--clearance', '20']);
+  const four = read(FOUR_BRIEF, ['--clearance', '20']);
   assert.equal(four.interference.undeclaredTouching, 0, '叠装链应全部声明');
   // 覆盖率反向检查：贴合对总数钉死。生成器以后新增构件却没写声明规则时，这个数会变，测试报警。
   assert.equal(four.interference.touching, 57, '四工位贴合对总数漂了：要么新增了构件，要么声明规则漏了');
   assert.equal(four.interference.suspects, 0);
 
   // 声明不能把真重叠洗掉：40 mm 排布仍未收敛、最大可行间距仍是 25
-  const maxc = read('四工位点胶机，节拍 25 件/分钟', ['--max-clearance']);
+  const maxc = await heavyJson(['--brief', FOUR_BRIEF, '--with-geometry', '--max-clearance']).then((doc) => doc.geometry);
   assert.equal(maxc.maxClearance.feasibleMm, 25, '最大可行间距必须仍是 25');
-  const l40 = read('四工位点胶机，节拍 25 件/分钟', ['--layout-compliance', '40']);
+  const l40 = read(FOUR_BRIEF, ['--layout-compliance', '40']);
   assert.equal(l40.layoutCompliance.converged, false, '40 mm 仍必须报不收敛');
   assert.equal(l40.layoutCompliance.suspects, 2, '40 mm 的真重叠仍必须报出来');
 
-  const six = read('六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅', []);
+  const six = read(SIX_BRIEF, []);
   assert.equal(six.interference.undeclaredTouching, 0);
   assert.equal(six.interference.touching, 102, '六工位贴合对总数漂了：查新增构件是否漏声明');
   assert.equal(six.interference.suspects, 8, '六工位原有重叠不能被声明洗掉');
@@ -370,7 +466,7 @@ test('排布求解器不得在两张布局之间来回挪：必须识别活锁�
   const run = (args) => JSON.parse(runCli([...args])).geometry.layoutCompliance;
 
   // 40 mm：实测会在 st1/st4-rotary-1-table 的 z 上来回 +13/-13，直到轮数用尽
-  const forty = run(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--layout-compliance', '40']);
+  const forty = run(['--brief', FOUR_BRIEF, '--with-geometry', '--layout-compliance', '40']);
   assert.equal(forty.converged, false);
   assert.match(forty.stopReason, /来回挪|回到第 \d+ 轮/, '必须点明是来回挪，而不是含糊说“没进展”');
   assert.match(forty.stopReason, /第 \d+ 轮回到了第 \d+ 轮/, '要说清是在哪两轮之间循环');
@@ -394,9 +490,9 @@ test('排布求解器不得在两张布局之间来回挪：必须识别活锁�
   assert.equal(twenty.suspects, 0);
 });
 
-test('--max-clearance 二分出四工位的最大可行间距 = 25 mm，且该值复算确实收敛', { timeout: 300_000 }, () => {
-  const stdout = runCli(['--brief', '四工位点胶机，节拍 25 件/分钟', '--with-geometry', '--max-clearance']);
-  const maxClearance = JSON.parse(stdout).geometry.maxClearance;
+test('--max-clearance 二分出四工位的最大可行间距 = 25 mm，且该值复算确实收敛', { timeout: 300_000 }, async () => {
+  const document = await heavyJson(['--brief', FOUR_BRIEF, '--with-geometry', '--max-clearance']);
+  const maxClearance = document.geometry.maxClearance;
   assert.equal(maxClearance.feasibleMm, 25, `实际 ${maxClearance.feasibleMm}`);
   assert.ok(maxClearance.probes.length >= 3, '二分至少探测 3 次');
   // 探测记录必须自洽：25 通过、26 不通过（否则结论不可信）
@@ -406,35 +502,35 @@ test('--max-clearance 二分出四工位的最大可行间距 = 25 mm，且该�
 });
 
 
-test('工位级建议：只有跨工位的间距问题才可能给建议', { timeout: 300_000 }, () => {
+test('工位级建议：只有跨工位的间距问题才可能给建议', { timeout: 300_000 }, async () => {
   const read = (brief, threshold) => {
     const stdout = runCli(['--brief', brief, '--with-geometry', '--layout-compliance', String(threshold)]);
     return JSON.parse(stdout).geometry.layoutCompliance;
   };
 
   // 四工位 40 mm：剩下的 2 处是重叠，不是间距 → 没有建议可说
-  const four = read('四工位点胶机，节拍 25 件/分钟', 40);
+  const four = read(FOUR_BRIEF, 40);
   assert.equal(four.clearance, 0);
   assert.ok(four.suspects > 0);
   assert.equal((four.advice ?? []).length, 0, '没有间距问题时不该硬凑建议');
 
   // 六工位 40 mm：59 处间距问题，全是跨工位，且每条推完都会撞 → actionable=false
-  const six = read('六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅', 40);
+  const six = (await heavyJson(['--brief', SIX_BRIEF, '--with-geometry', '--layout-compliance', '40'])).geometry.layoutCompliance;
   assert.ok(six.advice.length > 0);
   assert.ok(six.advice.every((item) => item.intraScope === false), '六工位应当全是跨工位问题');
   assert.ok(six.advice.every((item) => item.actionable === false), '这台机器推哪都撞，不应有可执行建议');
   assert.ok(six.advice.every((item) => item.overlapsAfter > 0), '要给出预计会撞几对');
 });
 
-test('建议的可执行性：actionable 只给「跨工位且推完不撞」的条目', { timeout: 300_000 }, () => {
-  const brief = '六工位锁螺丝机，节拍 20 件/分钟，每工位 1 套汇川 750W 伺服 + 1 个 SMC 气爪 + 1 个到位检测 + 安全光栅';
-  const read = (threshold) => {
-    const stdout = runCli(['--brief', brief, '--with-geometry', '--layout-compliance', String(threshold)]);
-    return JSON.parse(stdout).geometry.layoutCompliance;
+test('建议的可执行性：actionable 只给「跨工位且推完不撞」的条目', { timeout: 300_000 }, async () => {
+  const brief = SIX_BRIEF;
+  const read = async (threshold) => {
+    const document = await heavyJson(['--brief', brief, '--with-geometry', '--layout-compliance', String(threshold)]);
+    return document.geometry.layoutCompliance;
   };
 
   for (const threshold of [35, 40]) {
-    const layout = read(threshold);
+    const layout = await read(threshold);
     assert.ok(layout.advice.length > 0, `${threshold} mm 应当有建议`);
     for (const item of layout.advice) {
       // 三条互相印证：内部问题不可执行；三轴两向都撞的也不可执行
@@ -449,7 +545,7 @@ test('建议的可执行性：actionable 只给「跨工位且推完不撞」的
   }
 
   // 这台机器在两个阈值下都推不出「零代价」的整站挪：应当如实说「往哪推都会撞」
-  const forty = read(40);
+  const forty = await read(40);
   assert.ok(forty.advice.filter((item) => !item.intraScope).every((item) => item.actionable === false),
     '40 mm 下这台六工位机器不该有可执行建议');
   assert.ok(forty.advice.some((item) => item.overlapsAfter > 0), '应当报出「推哪都撞」的预计对数');
@@ -460,7 +556,8 @@ test('CLI 子进程到点被硬杀（真正的闸门在子进程上，不在 {ti
   let failure = null;
   try {
     // 1ms 必然超时：正常单条 CLI 约 0.4s，这条件下不许"静默跑完"
-    runCli(['--brief', BRIEF], { timeoutMs: 1 });
+    // noCache：这组参数与首条用例相同，吃了记忆化就成了「断言缓存」而不是「断言闸门」
+    runCli(['--brief', BRIEF], { timeoutMs: 1, noCache: true });
   } catch (error) {
     failure = error;
   }
@@ -484,6 +581,12 @@ test('cli.test.mjs 里同步子进程都带 timeout 与 killSignal（防止有�
   const code = source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
   assert.match(code, /timeout: timeoutMs/, 'runCli 必须把 timeout 传给子进程');
   assert.match(code, /killSignal: 'SIGKILL'/, 'runCli 必须硬杀超时子进程');
+  // 预跑昂贵参数走的是异步 spawn（不占事件循环），但闸门不许因此变松：
+  // 它必须自己带计时器 + SIGKILL，否则一个卡死的求解能把整个套件挂住 180 s 以上。
+  assert.equal((code.match(/\bspawn\s*\(/g) ?? []).length, 1, '异步入口只允许 runCliAsync 里那一次 spawn');
+  assert.match(code, /const timer = setTimeout\(/, 'runCliAsync 必须给子进程装超时计时器');
+  assert.match(code, /child\.kill\('SIGKILL'\)/, 'runCliAsync 到点必须 SIGKILL 子进程');
+  assert.match(code, /clearTimeout\(timer\)/, 'runCliAsync 子进程结束后必须清掉计时器');
 });
 
 test('静态守卫负例（行为式）：扫描函数对三种同步子进程都必须咬，且不误报字符串/属性', () => {
