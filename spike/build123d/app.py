@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-import argparse, json, math, os, secrets, tempfile, threading, time, traceback
+import argparse, copy, json, math, os, secrets, tempfile, threading, time, traceback
 from typing import Any
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -204,6 +204,79 @@ def build_assembly(instances) -> tuple[object, list[dict], list, dict]:
     return combined, volumes, shapes, merge_meta
 
 
+def _identity_labels(instances: list[dict]) -> list[str]:
+    """件号：统一取 instance.id（**不是** name / partId），与 `files.parts[].id` 同一表达式、同一字符串。
+
+    不做字符替换（STL 文件名那套 safe 规则）：替换会让 label 与件表 id 漂移，
+    回读门禁「件号 ↔ 实体」的严格交叉核对就失去意义；非 ASCII 由 OCCT 写成 `\\X2\\` 转义，
+    回读时还原成原文，导出侧不需要也不应该改写字符。
+    """
+    return [str(item.get("id") or f"part-{index + 1}") for index, item in enumerate(instances)]
+
+
+def identity_request_error(payload: Any) -> str | None:
+    """`identityStep` 的前置条件。缺省/false/非布尔一律返回 None —— 既有路径逐字不变。
+
+    只接受 JSON `true`（Python `True`）：`"true"`/1 之类一律按「未要求」处理，
+    失败方向是**没有** identity 文件（门禁判红），不会产生假绿。
+    """
+    if not isinstance(payload, dict) or payload.get("identityStep") is not True:
+        return None
+    instances = payload.get("instances")
+    if not isinstance(instances, list) or not instances:
+        return "identityStep 需要非空 instances（逐件装配）"
+    if payload.get("perPart") is not True:
+        return "identityStep 需要 perPart: true（逐件元数据是身份核对的前提）"
+    exports = payload.get("exports") or ["step"]
+    if not isinstance(exports, list) or "step" not in exports:
+        return "identityStep 需要 exports 包含 step"
+    return None
+
+
+def write_identity_step(outdir: str, parts: list, labels: list[str]) -> dict:
+    """导出伴随身份 STEP：独立复制体 + 非融合 `Compound(children=...)`，根 label = assembly。
+
+    边界（写清，别升级成验收）：这是**另一次**导出，不是制造 STEP 的替代或证明。
+    即使件号、实体计数、包络全对，也不证明两者内部拓扑/形状等价。它只支持
+    「导出侧身份」核对，不是制造认证、也不是逐实体拓扑认证。
+
+    两条硬约束：
+      1) 必须在制造导出**之后**调用。`fuse` 会继承 `parts[0].label`（实测），label 若早于
+         合并，制造 STEP 会凭空长出一个冒名 PRODUCT；
+      2) 只给 `deepcopy` 出来的复制体打 label，绝不回写 `placed_shapes` —— 那些形状还被
+         逐件 STL 与合并体共用，打标签会污染制造侧产物。
+    失败一律抛异常（调用方已有 400 路径），**不返回** `ok:true` 缺文件。
+    """
+    if len(parts) != len(labels):
+        raise ValueError("identity 导出：件与件号数量不一致")
+    children = []
+    for part, label in zip(parts, labels):
+        if not label:
+            raise ValueError("identity 导出：件号不能为空")
+        clone = copy.deepcopy(part)
+        clone.label = label
+        children.append(clone)
+    compound = bd.Compound(children=children)
+    compound.label = "assembly"
+    path = os.path.join(outdir, "identity.step")
+    started = time.perf_counter()
+    bd.export_step(compound, path)
+    ms = round((time.perf_counter() - started) * 1000, 1)
+    size = os.path.getsize(path) if os.path.exists(path) else 0
+    if size <= 0:
+        raise ValueError(f"identity.step 导出失败或为空文件：{path}")
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        text = handle.read()
+    # products/solids 只是**说明性自报统计**（门禁必须回读文件，不得据此判绿）。
+    return {
+        "path": path,
+        "bytes": size,
+        "ms": ms,
+        "products": text.count("PRODUCT("),
+        "solids": text.count("MANIFOLD_SOLID_BREP"),
+    }
+
+
 def _extent(shape) -> tuple[float, float, float, float, float, float]:
     """(minX, minY, minZ, maxX, maxY, maxZ)，用于合并前后的包络校验。"""
     bb = shape.bounding_box()
@@ -321,6 +394,10 @@ class Handler(BaseHTTPRequestHandler):
             for item in wants:
                 if item not in ("step", "stl"):
                     raise ValueError(f"不支持的导出格式：{item}")
+            identity_error = identity_request_error(payload)
+            if identity_error:
+                raise ValueError(identity_error)
+            identity_wanted = isinstance(payload, dict) and payload.get("identityStep") is True
             started = time.perf_counter()
             instances = payload.get("instances")
             per_part = bool(payload.get("perPart"))
@@ -342,6 +419,8 @@ class Handler(BaseHTTPRequestHandler):
                     bd.export_stl(shape, path, tolerance=0.1)
                 files[fmt] = {"path": path, "bytes": os.path.getsize(path), "ms": round((time.perf_counter() - t) * 1000, 1)}
             # 逐件导出：干涉检查/运动学/零件树都需要独立实体，合并体只有一个网格
+            # 身份件号只在**制造导出完成之后**使用（见 write_identity_step）：这里只算字符串，不碰形状。
+            identity_labels = _identity_labels(instances) if identity_wanted and isinstance(instances, list) else []
             if per_part and instances:
                 parts_meta = []
                 for index, (item, placed) in enumerate(zip(instances, placed_shapes)):
@@ -362,6 +441,11 @@ class Handler(BaseHTTPRequestHandler):
                         "bboxMax": [round(bb.max.X, 2), round(bb.max.Y, 2), round(bb.max.Z, 2)]
                     })
                 files["parts"] = parts_meta
+            if identity_wanted:
+                # 制造 STEP/STL 已经导出（上面那一轮），此刻才给**独立复制体**打件号做非融合导出。
+                if len(placed_shapes) != len(identity_labels):
+                    raise ValueError("identity 导出：实例数与逐件形状数不一致")
+                files["identity"] = write_identity_step(outdir, placed_shapes, identity_labels)
             stats = describe(shape, instance_volumes)
             if merge_meta is not None:
                 stats["merge"] = merge_meta

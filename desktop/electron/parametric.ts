@@ -69,6 +69,11 @@ export interface ParametricStartInfo {
 export interface ParametricBuildOptions {
   /** 装配体逐件导出 STL（零件树、干涉检查用） */
   perPart?: boolean;
+  /**
+   * 伴随身份 STEP（identity.step）：默认不发送，只有 `=== true` 才进请求体。
+   * 这是**门禁用的额外产物**，不是制造 STEP 的替代或拓扑证明；App 正常建模不请求它。
+   */
+  identityStep?: boolean;
 }
 
 export interface ParametricBuildResult {
@@ -675,7 +680,10 @@ export class ParametricManager {
               : { ops: compileOps(doc) }),
             exports: ['step', 'stl'],
             // 逐件导出：零件树/干涉检查需要独立实体，合并体只有一个网格
-            ...(options.perPart === true ? { perPart: true } : {})
+            ...(options.perPart === true ? { perPart: true } : {}),
+            // 伴随身份 STEP：严格 `=== true` 才透传，默认/false/truthy-非布尔一律不发送。
+            // 内核侧据此额外导出一份带件号的非融合 Compound；不是制造 STEP 的证明。
+            ...(options.identityStep === true ? { identityStep: true } : {})
           }),
           signal: controller.signal
         });
