@@ -1,74 +1,65 @@
 # AutomationCAD 下一会话交接
 
-更新时间：2026-11-19（**R12 收口：STEP 伴生身份件 + 原始装配树回读门禁；本机 12 道门禁全绿；通道仍 fail、无安装包/Release**）
+更新时间：2026-11-20（**R13 本机终验与独立窄复核通过；推送与同 SHA CI 按仓库外最终回执实查**）
 仓库 `owlco001/automation-cad-prototype`；工作目录 `/tmp/automation-cad-prototype`
 
 > 这是**短摘要**：只写「现在什么状态、下一步做什么」。
-> 完整口径 → `docs/desktop/R12-STEP-IDENTITY.md`（能力合同 + 审查证据 + 验收）；一页回执 → `docs/desktop/R12-ACCEPTANCE.md`；
-> 通道口径与归零决策 → `docs/desktop/R11-CHANNEL-SWEEP.md`；孤儿 sidecar → `docs/desktop/SIDECAR-DOCTOR.md`。
-> 不要在本文堆历史（R11 及更早见 `docs/desktop/R11-ITERATION.md`、`R10-ITERATION.md`）。
+> 本轮全文 → `docs/desktop/R13-ITERATION.md`（能力合同 + 审查/整改/复审/C2 收口 + 读数 + 登记项）；一页回执 → `docs/desktop/R13-ACCEPTANCE.md`（§4 最终门禁）；
+> 上一轮口径 → `docs/desktop/R12-STEP-IDENTITY.md` / `R12-ACCEPTANCE.md`；通道与归零决策 → `docs/desktop/R11-CHANNEL-SWEEP.md`。
 
-## 现状
+## 现状（截至本文件写入）
 
-- **代码索引**：R12 = 两笔 **`1671f36`**（P1，身份件导出，5 文件）+ **`b9f377a`**（P2，原始装配树回读与门禁，4 文件），共 9 文件（4 改 5 新）；**`10c2224`** 是 R12 之前的基线。**`b9f377a` 不是最终 HEAD**：本轮另有 5 份文档随后的提交，交付 HEAD 以 `git rev-parse HEAD` 实查为准，推送状态以 `git status -sb` / `git log origin/main..HEAD` 实查为准。
-- **能力**：`/build` 可**选择性**多导出一份非融合 `identity.step`（默认关闭；`identityStep === true` 且 `perPart` + 非空 `instances` + `exports` 含 `step` 才生效）。**原制造默认路径不变**：不请求就没有这份文件，原制造导出调用与默认请求字段保持原样；不声称跨请求文件逐字节一致。
-- **门禁**：`verify-step-tower` 的 build 路径**强制**请求它，按 occt **原始装配节点实例**回读（不重命名、不去重），追加 4 条判据（产物完整性 / 三方件号集合 / 逐件实体数与包络 / 并集核对与污染）。容差**固定 1 mm**（`--tolerance` 不继承），两侧**同一份 OCCT 网格口径**，归属走 **realpath + 拒 identity 软链**；`--file` 模式 `entityIdentity = NOT_APPLICABLE`（不计入 ok、非验收）。
-- **审查**：P1 × 3（异口径 / 软链 / 容差放大）**全闭**；M7 变异初报 7/7 不实 → 复审复跑 6/7 → 补 `unionDeltaMm === null` 断言 → 最终亲跑 7/7（首轮 6/7 保留在案）。
+- **代码索引**：基线 `a4b57e4`（R12 收口）。本轮共 15 文件：代码 **8 改 + 2 新**，文档 **3 改 + 2 新**（含 `README.md` 的测试基线数字）。**交付 HEAD / 推送 / CI 以 Git 与仓库外 readback 为准**。
+  - A：`desktop/scripts/pv-buffer-regenerate.mjs` + `test/machine/pv-buffer-regenerate.test.mjs`
+  - B：`spike/build123d/app.py`、`desktop/src/parametric/features.ts`、`test/parametric/identity-export.test.mjs`、`test/parametric-assembly.test.ts`
+  - C：`.github/workflows/ci.yml`、`test/meta/ci-strict-gates.test.mjs` + 新 `scripts/verify-identity-export-tap.mjs`、`test/meta/identity-export-tap.test.mjs`
+- **能力（A1 口径分层）**：`modelClaim{slots:8,aligned:true,source:'project-parts'}` 与 `productClaim{slots:16,aligned:false,basis:'cross-model-unverified',coveredBy:'verify:step-tower --levels 16',saveReloadCovered:false}` 并存。`modelClaim.slots` 来自**请求参数 `params.layers`**（不是 `--levels`、不是几何、不是件表）；`crossModelEquality` 是信息位，不作塔可行性门禁，只受 `scopeSplit` 的派生自洽检查。检查 61→64，单测 26→33。
+- **能力（B①②）**：默认路径件号**原文**透传（`features.ts` 回到 base，只剩 3 行注释）；`identityStep === true` 严格路径对填充空白/非串/空/重号 → **400 点名 `instances[i]`**，不自动 trim；五个真实导出失败点统一 **400 + 无 files + 清目录**（**这是本轮明确的行为变更**，别写成「默认路径行为全都没变」）；成功路径保留产物。identity-export 12→24、assembly 25→26。
+- **能力（C2）**：`featuretree-geometry` job 新增独立步骤 —— `.venv-ft` 自证 → `node --test --test-reporter=tap --test-reporter-destination=/tmp/identity-export.tap` → 校验器解析**同一文件**（6 个具名内核用例必有 passed 记录，**不钉总数**）。预算口径：step 级合计 **97** ≤ `ci.yml` 注释预算 **102** ≤ job **105**。
+- **审查链**：首审「有条件通过」（0 P0 / 3 P1 / 4 P2）→ 三包整改 → 复审 **A / B / 解析器通过、C 守卫打回** → C2 单文件整改 → **独立窄复核通过**（50 条变异全红、39/39）。非阻断登记：`if: false # 注释` 的既有盲区与部分合法行尾注释过严判红，见最终审查报告。
 
-## 门禁（本机、同一棵树、串行；日志 `scratch/cad-r12-final/`）
+## 已实跑读数（本机、同树串行；日志 `scratch/cad-r13-final/`）
 
 | 项 | 结果 |
 |---|---|
-| `npx tsc --noEmit` | **exit 0**，0 诊断 |
-| 定向 4 文件 | **127 / 127**（identity-export 12 + step-entities 28 + verify-step-tower 65 + parametric-sidecar 22） |
-| `test:focused` | **424 / 424** |
-| 全量 `npm test` | **3798 tests / 3795 pass / 3 skip / 0 fail / 0 todo**，129,159.907445 ms（基线 3750/3747/3/0 → 增量 **+48** = 28 + 12 + 8） |
-| `verify:step`（真内核） | **7 / 7**，85 件 / 89 solids / 613 faces / 6000×1495×930 |
-| `verify-step-tower` 16 层 / 8 层 | **27 / 27**（`ids 146/146`、`solids 150/150`）/ **20 / 20**（`ids 90/90`、`solids 94/94`）；两档 `unionDelta 0/0/0`、`bboxMaxDelta 0.1823 mm`、`tol 1 mm(fixed)`、`pollution 0` |
-| `eval:tasks --require-full` | **13 / 13**，`skipped 0` / `degraded false` |
-| `verify:channel --levels 2 / 16` | 各 **30 / 30**（只证明关系断言） |
-| `build:ext` / `smoke` | **exit 0**（total 10,551,020 B）/ `SMOKE_OK`、4 条显式降级、0 FAIL |
-| `regen:pv-buffer` / `doctor:sidecar` | `ok=true checks=61 failed=0`（`slots 8` vs `claimed 16` 仍未解决）/ dry-run `scanned=347 targets=0 killed=0` |
+| `npx tsc --noEmit` | **exit 0**，0 诊断（`final-tsc.log` 0 字节） |
+| 定向 8 文件（`final-targeted.log`） | **237 / 237 pass / 0 skip**，21,974.2 ms |
+| `test:focused`（`final-focused.log`） | **431 / 431 pass / 0 skip**，32,005.9 ms |
+| 全量（`final-fulltest.log`） | **3834 tests / 3831 pass / 3 skip / 0 fail / 0 todo**，151,870.3 ms；增量 **+36**（见下） |
+| 唯一历史失败 | 性能用例 `5.01x`（首轮 3812 里那 1 条）；最终全量里**通过 = 未再现**，根因未定，不许写「已修复」 |
+| `verify:step` / tower 16 / tower 8 | **7 / 7** / **27 / 27**（ids 146/146、solids 150/150、unionΔ 0/0/0、tol 1 mm）/ **20 / 20**（ids 90/90、solids 94/94） |
+| `eval` / `channel` / `build:ext` / `smoke` | **13 / 13**（skipped 0） / 2·16 层各 **30/30** 但 `feasible=false`、`sweep` fail / exit 0 / `SMOKE_OK` + 4 SKIP + 2 unavailable |
+| `regen` / `doctor` / TAP 链 | `ok=true checks=64 failed=0`（隔离 userData） / dry-run `scanned=350, sidecars=0`（不在 CI） / `1..24`、`IDENTITY_TAP_OK`（**本机替身 venv + node 26，≠ 远端 CI**） |
 
-- **口径更正**：`verify-step-tower` 基线是 **57 reported**（55 个 `test(`），架构文档里「基线 47」已过期，不可用 `93−47` 当增量。
-- smoke 的 `STARTUP_METRICS totalMs=378.7` 只从 **module evaluation** 起算 —— 口径读数，**不可宣称提速**。
+- 增量对账：**+36** = regen +7（26→33）+ identity-export +12（12→24）+ assembly +1（25→26）+ ci-strict-gates +4（23→27）+ 新 TAP 12；3798+36 = **3834**。
+- 3 个 skip 都是环境缺失类（2 条 FreeCAD 未设 `AUTOMATIONCAD_FREECAD_REAL`、1 条 AABB/布尔对比无 build123d 的 Python），沿用 R12 解释。
 
-## CI 与回执
+## 最终核对
 
-- `ci.yml` **已有**（R12 未加步骤）：`verify:step-tower --levels 16 / 8 --require-full`、`verify:channel --levels 2 / 16`、`verify:step`、`eval:tasks --require-full`、`npm test`。**新身份检查随既有 tower 步骤进入 CI**，channel 仍独立自证；**`doctor:sidecar` 不在 CI**，只能按本机读数引用。
-- 远端基线已证：run **`44536871871` @ `10c2224` = 7/7 success** —— 那是 **R12 之前**的 run，**不是 R12 的 CI**。
-- **约定**：上表全部是本机读数。最终判定只认 `headSha == 交付 HEAD` 的 run，按 **job 级**读；红先分「基础设施步（apt/网络）」与「断言步」，后者才看 `verify:step` 的 `code/elapsed/exitCode/stderrClass`。回执由实跑写入 `scratch/FINAL-RECEIPT.json`，**任何文档都不预写 CI 成功**。
-
-## 结论限制（任何一轮都不许越过）
-
-1. **STEP 身份只到导出侧**：件号集合 + 实体计数 + ±1 mm 网格包络对上，**不等于**伴生 `identity.step` 与融合制造 STEP 的拓扑/形状等价；bbox 不是唯一几何指纹，网格偏折随 bbox（实测 0.1823 mm，<1 mm 非零）。**不是制造认证、不是逐实体拓扑认证。**
-2. **升降通道未通**：16 层 sweep **405 = 270 确认 + 135 待复核**、**去重 60 对**、`reviewStatus=fail`、**`feasible=false`**（blockers `load-passes-shelf` + `stroke-shortfall`，行程缺 16.5 mm）；2 层 19 步 / 18 确认 + 9 待复核 = 27 步累计 / 去重 4 对。`30/30` 是尺子自证，不是结构/安全验收。
-3. **真实多层取放未实现**，已有多层几何；两条归零路线（缩回 240 / 开 240 缺口）只是决策书，需机构变更 + 结构校核。
-4. **结构/安全/电气/PLC 未验收**：`structure.accepted:false`、挠度/导向/防坠/安全回路未校核、IO `null`、`executable=false`；侧车 `box`/`cylinder` 近似**不是**真实特征认证。
-5. **regen 有登记缺口**：`slotsFromGeometry=8` vs `claimedSlots=16`、`aligned=false`，只覆盖 8 储位 / 90 件缓存样机。
-6. **无安装包、无 Release**：`build:ext` 只是扩展产物与体积门禁，未签名、未打 tag。
+- **独立窄复核通过**，证据 `scratch/cad-r13-final-review.md`；本机全量已过，但仍保留首次性能失败与未定根因。
+- CI：只认最终回执内 `headSha == 交付 HEAD` 的 run，按 job 级读；已核既往 R11 `10c2224`/run `44536871871`、R12 `a4b57e4`/run `44558824879` 都不是 R13。
 
 ## 下一会话顺序
 
-1. `git status -sb` / `git log --oneline -4` → 确认交付 HEAD 与推送状态。**不要 `git checkout --`、不要 `git stash`、不要 amend**：改历史会让已证 run 与 SHA 脱钩。
-2. 提交按白名单逐个 add（R12 九文件 + 本轮 5 份文档：`HANDOFF-NEXT-SESSION.md`、`docs/desktop/{R12-STEP-IDENTITY,R12-ACCEPTANCE,PV-BUFFER-ITERATION-HANDOFF}.md`、`README.md`），**`git add -A` 禁用，`scratch/` 永不提交**；提交后 `git diff --check` 无输出。
-3. 任何再改源码/测试后按此顺序整轮重跑（同树、串行）：
-   ```bash
-   cd /tmp/automation-cad-prototype/desktop
-   export AUTOMATIONCAD_PYTHON=/root/.venvs/b123d/bin/python
-   node --test test/parametric/identity-export.test.mjs test/cad/step-entities.test.mjs \
-     test/parametric/verify-step-tower.test.mjs test/parametric-sidecar.test.ts   # 127
-   npx tsc --noEmit && npm run test:focused && npm test                            # 0 / 424 / 3798
-   npm run verify:step && npm run verify:step-tower -- --levels 16 --require-full
-   npm run verify:step-tower -- --levels 8 --require-full && npm run eval:tasks -- --require-full
-   npm run verify:channel -- --levels 2 && npm run verify:channel -- --levels 16
-   npm run build:ext && npm run smoke && npm run regen:pv-buffer && npm run doctor:sidecar -- --json
-   ```
-4. 推送后按 `headSha == HEAD` 找 run，按 job 级读；回执写 `scratch/FINAL-RECEIPT.json`。
-5. 之后才是老欠账：升降通道**拍板**（缩回 240 / 开 240 缺口，需结构校核）→ 结构/安全/电气/PLC → STEP 逐实体**拓扑**身份（本轮只做导出侧）。
+1. 先读三份：`R13-ITERATION.md` §3/§4/§5、`R13-ACCEPTANCE.md` §4、`scratch/cad-r13-rereview.md` §4.2（守卫缺口的 4 个变异）。
+2. `git status -sb` / `git log --oneline -5`：确认当前交付 HEAD 与远端 SHA，不把 R12 基线当 R13 最新提交。**不要 `git checkout --`、不要 `git stash`、不要 amend**。
+3. 需要再改源码/测试时，按 `R13-ITERATION.md` §8 同树串行整轮重跑（定向 8 文件 → `tsc` → focused → 全量 → 业务门禁逐条 → regen → doctor → TAP 链）。
+4. 按白名单**逐个** `git add`（A 2 / B 4 / C 2 + 2 新 + 文档），**`git add -A` 禁用**，`scratch/` 永不提交，提交后 `git diff --check` 无输出。
+5. 推送后找同 SHA run，按 job 级读；回执写**仓库外** `scratch/FINAL-RECEIPT.json`，**不为记录 CI 再推一笔**。
+6. 之后才是老欠账：通道**拍板**（405 → 0，需机构决策）→ 结构/安全/电气/PLC → 制造 0 字节 / 成功 temp 生命周期 → STEP 逐实体拓扑身份（D，本轮不纳）。
+
+## 结论限制（任何一轮都不许越过）
+
+1. **不是性能收益**：A 只改回执口径与判据；5.01x 未定根因，最终绿 ≠ 已修复。
+2. **不是塔覆盖**：`productClaim.aligned` 恒 false、`basis:'cross-model-unverified'`、`saveReloadCovered:false`；`crossModelEquality=true` 只是「本机几何数值恰好也是 16」；A2（塔进 regen 存取）**延期**。
+3. **不是拓扑等价**：伴生 `identity.step` 与融合制造 STEP 不是同一产物；件号/计数/±1 mm 包络对上只等于导出侧身份齐全（R12 边界原样有效）。
+4. **不是通道/结构可行**：`sweep` 405 步累计（270 确认 + 135 待复核）、去重 60 对、`reviewStatus=fail`、`feasible=false`；真实多层取放未实现；`structure.accepted:false`、IO `null`、`executable=false`；无安装包、无 Release。
+5. **不是覆盖完整**：C 只钉 6 个具名内核用例 + 计数自洽；删掉别的内核用例不会红。
+6. **D / D-lite 不纳本轮**：D 的判据在产物层没有定义域（融合抹平归属）；D-lite 待 146 件真塔面数探针成立后再议。
 
 ## 文档与 KB / 安全
 
-- R11/R12 这几份文档**都不在 `KB_DOC_FILES`**（`src/agent/kb/index.ts`，13 份）→ 改它们**不需要** `kb:build`，统计仍 13/454/434,531；改那 13 份中的任何一份必须重建，否则 `test/agent/kb-freshness.test.mjs` 会红。
-- 不要删除或覆盖 `/tmp/automationcad-pv-buffer-live`、`/tmp/automationcad-pv-buffer-iter`，不要把其中密钥复制进仓库或文档。IO 草案地址 `null` 是有意设计。
-- 怀疑残留 sidecar 先 `npm run doctor:sidecar -- --json` 看 `scanned` / `sidecars` 计数，再决定 `--kill`（默认 dry-run）。
+- 本轮四份文档（`R13-ITERATION.md`、`R13-ACCEPTANCE.md`、`HANDOFF-NEXT-SESSION.md`、`PV-BUFFER-ITERATION-HANDOFF.md`）**都不在 `KB_DOC_FILES`**（`desktop/src/agent/kb/index.ts`，13 份）→ 改它们**不需要** `kb:build`，统计仍 13/454/434,531；`README.md` 也不在 KB 名单里，改它不触发 `kb-freshness`。
+- 不删除/覆盖 `/tmp/automationcad-pv-buffer-live`、`/tmp/automationcad-pv-buffer-iter`；不把其中密钥复制进仓库或文档。IO 草案地址 `null` 是有意设计。
+- `doctor:sidecar` **不在 CI**，只能按本机读数引用；怀疑残留 sidecar 先跑 `npm run doctor:sidecar -- --json` 看 `scanned`/`sidecars`，再决定 `--kill`（默认 dry-run）。
+- 失败点用例自己建隔离 `TMPDIR`（前提是「目录数不增」这条断言可信）：不要为省事把它指到共享目录，否则别人的残留会让 `newDirs=[]` 变成噪声。

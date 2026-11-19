@@ -1,13 +1,17 @@
 # PV 缓存机迭代交接（软件侧）
 
-## 当前状态速览（2026-11-19 · **R10：代码 6 笔已全部推送（末笔 `e1d1138`）；CI 前两跑红（早退、真因未证）；新 run `44516236961` 结论未出**）
+## 当前状态速览（2026-11-20 · **R13：三包能力已落地，本机终验已过（全量 3834 / 3831 pass / 3 skip / 0 fail）；独立窄复核通过；CI 按最终同 SHA 回执实查**）
 
-> 本节只放**当前**状态。完整报告与此前各轮数字 → `docs/desktop/R10-ITERATION.md`；
+> 本节只放**当前**状态。完整报告与此前各轮数字 → `docs/desktop/R13-ITERATION.md`（本轮）、`R12-STEP-IDENTITY.md`、`R11-ITERATION.md`、`R10-ITERATION.md`；
 > 下面从「P2 整改（历史）」起的各节是**历史记录，原样保留、不逐段改写**（旧数字仍是那一轮的实测，只是不再是现状）。
 
-- **代码状态**：`HEAD = origin/main`（最新一笔为文档同步提交），**工作区干净**。R10 代码共 **6 笔，全部已推**
+- **R13 现状（2026-11-20，本机终验已过）**：基线仍是 `a4b57e4`（R12 收口）；本轮受验改动共 **15 文件**（8 代码改 + 2 新文件 + 3 文档改含 `README.md` 测试基线 + 2 新文档），**交付 SHA / 推送 / CI 以 Git 与仓库外 readback 为准**。三包：**A** 回执拆 `modelClaim`（本机 8 层，`aligned:true`；`slots` 来自请求参数 `params.layers`，不是 `--levels`/几何/件表）/ `productClaim`（塔 16 位，`aligned:false`、`basis:'cross-model-unverified'`、`saveReloadCovered:false`；`crossModelEquality` 只是信息位，不作塔可行性门禁、只受 `scopeSplit` 的派生自洽检查），regen 检查 61→64；**B** 件号默认路径原文透传、`identityStep:true` 严格路径对填充/非串/空/重号 **400 点名 `instances[i]`**、五个真实导出失败点 400 + 无 files + 清目录（**本轮明确的行为变更**）、成功路径保留产物；**C** 真内核用例进 FT job，独立 TAP 文件 + 结构校验器（6 个具名用例，**不钉总数**），预算 Σstep 97 ≤ 注释 102 ≤ job 105，禁过滤参数与 echo/grep 当证据。**审查链**：首审「有条件通过」（0 P0 / 3 P1 / 4 P2）→ 复审 **A / B / 解析器通过、C 守卫打回**（step 级 `continue-on-error:true` / `if:false` 下守卫零 finding）→ C2 单文件整改（16 条原反例全红、50 条变异全红、定向 39/39 复验）。**本机终验**（日志 `scratch/cad-r13-final/final-*`）：`tsc` exit 0、定向 8 文件 **237/237**（0 skip）、focused **431/431**、全量 **3834 / 3831 pass / 3 skip / 0 fail**（151,870 ms，增量 +36）；首轮那次 **5.01x 性能失败原样保留、根因未定**（最终绿只等于未再现）；tower 16 层 27/27、8 层 20/20、`eval` 13/13、`channel` 各 30/30 **但 `feasible=false`**、`regen` `checks=64 failed=0`、smoke `SMOKE_OK`（4 SKIP + 2 unavailable）、doctor dry-run 0 命中（不在 CI）。**独立窄复核通过**：原阻断已闭，50/50 变异判红、39/39 定向通过；既有 YAML 行尾条件注释盲区与部分行尾注释过严判红已登记，见 `cad-r13-final-review.md`；**CI 只认最终同 SHA 远端回执，不预写**。
+- **R12（2026-11-19，已入库 `1671f36`+`b9f377a`，末笔 `a4b57e4`）**：STEP **伴生身份件**（默认关闭的 `identity.step`）+ **原始装配树回读门禁**，本机 3798/3795/3/0、tower 16 层 27/27 与 8 层 20/20；远端 run **`44558824879` @ `a4b57e4`** success（`gh run view` 实测）；件号/计数/网格包络**不等于**制造 STEP 拓扑等价，**`sweep` 仍 fail、`feasible=false`、无安装包** —— 详见 `R12-STEP-IDENTITY.md` / `R12-ACCEPTANCE.md`。
+- **R11（历史快照，2026-11-19；已入库推送，不再是现状）**：三包落地 + 整改复审「有条件通过」（通道口径收口 / 启动失败分类透传 / 孤儿 sidecar 治理，两个孤儿已回收），当时本机 3750/3747/3/0、`verify:channel` 2/16 层各 30/30、`tsc` 0。那一版写的「14 文件未提交、未推送、无 CI」只是**提交前快照**——R11 的代码与文档此后已入库（收口末笔 **`10c2224`**，run **`44536871871`** 7/7 绿）。**`1c803f6` / run `44491644544` 是更早的 T9 优化轮，不属 R11 交付**（本文件下方引用它的段落是那一轮的历史记录）。**`sweep` 仍 fail（405 步累计，去重 60 对）、`feasible=false`、无安装包** 这条边界到今天未变 —— 详见 `R11-ITERATION.md` / `R11-ACCEPTANCE.md`。
+- **以下是 R10 轮快照（2026-11-19，历史记录）**：当时的 `HEAD = origin/main`、工作区干净、全量 3726 —— 这些现在都不成立，现测见上方 R13 条目。R10 代码共 **6 笔，全部已推**
   （`137a68d` / `0379e15` / `ba8020d` / `94ec7e6` / `9409f3e` / `e1d1138`）；包 D 的 4 文件（`electron/parametric.ts`、`scripts/{fake-parametric-sidecar,verify-step-export}.mjs`、`test/parametric-sidecar.test.ts`，+604/−32）在 `e1d1138`。含该笔的新 run `44516236961` **结论未出**。
   上轮远端 CI run **`44493445997`**（head `e480f57`）success 7/7 —— 只覆盖 `e480f57`。
+  **（这一条与下面「本轮 CI 两次都未绿」「本轮四包」「门禁状态」「启动计时」「测试清单」各条，全部是 2026-11-19 的 R10 历史快照，不是现状；现测见上方 R13 条目与 `R13-ITERATION.md` §4。）**
 - **本轮 CI 两次都未绿，原因不同**：首跑 run `44506016602`（head `94ec7e6`）是 `featuretree-geometry` job 没跑 `npm ci`，
   `eval:tasks` import `adm-zip` 即 `ERR_MODULE_NOT_FOUND`，**一条断言都没跑到**（已由 `9409f3e` 修）；
   第二跑 run `44508941094`（job `135507781027`，head `9409f3e`）依赖/装配/体积都过，红在 `verify:step` —— sidecar 起来后
@@ -24,8 +28,6 @@
   **旧的 33 / 21 / 54 / 46 全部作废**；也不许写「72 条定向全绿」（50+22 只是清单相加）。
 - **判据与 fail-closed（现行，未改动）**：`inCollisionSet` / `panelSourceOfGeometry` 认**完整工件身份**（同 id + `role=workpiece` + `size`/`center`/`rotationZDeg` 一致，转角周期等价；同 id 托板/夹具、转 90° 的件都不算；`rotationZDeg` 非有限不算）。坏坐标：承托**行**非有限 → 该行剔除、`diagnostic-only` + `invalid-support-rows`（N13）；承托**面几何**非有限 → 不判可行、`witness=null` + `invalid-shelf-geometry`（N14，带未污染正控）；特征参数坏 → 并进同一码（`droppedPartIds`）。判据统一在 `feature-box.ts`。
 - **边界不变**：塔仍**没有真实多层升降通道**（层托板整块、台面在托板投影内），**`sweep` 405 = 270 确认 + 135 待复核仍 fail，本轮未复跑、不得改判**；`structure.accepted:false`、挠度/导向/防坠/安全回路/PLC 全未校核；`mode=verified` 只等于「行表来自几何 + 碰撞集里有同一工件身份的板」，**不等于可行**；`verify:channel` 是诊断脚本（`feasible=false` 仍 exit 0）。**没有通道/结构结论。**
-- **R11 现状（2026-11-19，14 文件未提交、未推送、无 CI）**：三包落地 + 整改复审「有条件通过」（通道口径收口 / 启动失败分类透传 / 孤儿 sidecar 治理，两个孤儿已回收），本机 3750/3747/3/0、`verify:channel` 2/16 层各 30/30、`tsc` 0；**`sweep` 仍 fail（405 步累计，去重 60 对）、`feasible=false`、无安装包** —— 详见 `R11-ITERATION.md` / `R11-ACCEPTANCE.md`。
-- **R12 现状（2026-11-19）**：STEP **伴生身份件**（默认关闭的 `identity.step`）+ **原始装配树回读门禁**，本机 3798/3795/3/0、tower 16 层 27/27 与 8 层 20/20；件号/计数/网格包络**不等于**制造 STEP 拓扑等价，**`sweep` 仍 fail、`feasible=false`、无安装包** —— 详见 `R12-STEP-IDENTITY.md` / `R12-ACCEPTANCE.md`。
 
 ## P2 整改（历史 · 2026-11-19 T3 复审后，落在 `920ea07`/`b85fab5`；源码现行，但整树证据已被本轮六笔叠加）
 
