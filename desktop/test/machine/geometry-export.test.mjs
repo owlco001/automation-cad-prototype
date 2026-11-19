@@ -263,6 +263,84 @@ test('实体化：无内核回退 TS 网格；内核全部成功返回 STEP；�
   assert.match(thrown.message, /连接被拒绝/);
 });
 
+// ── 失败定位上下文（P1-6）─────────────────────────────────────────────────
+//
+// 内核 400 只回一句 Python 异常（`too many values to unpack (expected 2)`），没有件号/块下标/op。
+// 本组用例锁死「回退信息必须能定位到件」：块下标 + 全局件下标区间 + 件号清单 + op 计数，
+// 且成功路径不许凭空长出失败字段（否则 agent 会把绿当红/把红当绿）。
+test('失败定位 P1-6：块失败带块下标 / 件下标区间 / 件号 / op 计数；成功时不带 failedChunk', async () => {
+  const geometry = geometryFor('八工位锁螺丝机');
+  const bundle = geometryToSidecarAssemblies(geometry, { updatedAt: UPDATED_AT });
+  assert.ok(bundle.chunks.length >= 2);
+
+  const ok = await buildMachineSolids(bundle, async () => ({ ok: true, files: { step: { path: '/tmp/a.step' } } }));
+  assert.equal(ok.mode, 'solids');
+  assert.equal(ok.failedChunk, undefined, '成功路径不许带失败字段');
+
+  let call = 0;
+  const failed = await buildMachineSolids(bundle, async () => {
+    call += 1;
+    if (call === 2) return { ok: false, code: 'SIDECAR_BAD_REQUEST', message: 'too many values to unpack (expected 2)' };
+    return { ok: true, files: { step: { path: '/tmp/a.step' } } };
+  });
+  const chunk = bundle.chunks[1];
+  const firstId = chunk.instances[0].id;
+  const from = bundle.chunks[0].instances.length + 1;
+  assert.match(failed.message, /^第 2\/\d+ 块实体化失败（too many values to unpack \(expected 2\)）/);
+  assert.ok(failed.message.includes(firstId), `错误信息必须含件号（${firstId}）：${failed.message}`);
+  assert.match(failed.message, new RegExp(`件 #${from}–#${from + chunk.instances.length - 1}`));
+  assert.match(failed.message, /op \d+ 个（/);
+  assert.match(failed.message, /maxInstances=1/, '多件块要说明怎么缩到单件');
+
+  const located = failed.failedChunk;
+  assert.equal(located.index, 2);
+  assert.equal(located.total, bundle.chunks.length);
+  assert.equal(located.instanceFrom, from);
+  assert.equal(located.instanceTo, from + chunk.instances.length - 1);
+  assert.deepEqual(located.partIds, chunk.instances.map((instance) => instance.id));
+  assert.equal(located.code, 'SIDECAR_BAD_REQUEST');
+  const expectedOps = {};
+  for (const instance of chunk.instances) {
+    for (const feature of instance.features) expectedOps[feature.type] = (expectedOps[feature.type] ?? 0) + 1;
+  }
+  assert.deepEqual(located.ops, expectedOps, 'op 计数必须来自这一块的真实特征，不是估的');
+});
+
+test('失败定位 P1-6：单件块给单下标（不给区间/缩块提示），原异常文本不被吞', async () => {
+  const geometry = geometryFor('八工位锁螺丝机');
+  const single = geometryToSidecarAssemblies(geometry, { updatedAt: UPDATED_AT, maxInstances: 1 });
+  const target = 7;
+  let call = 0;
+  const failed = await buildMachineSolids(single, async () => {
+    call += 1;
+    if (call === target) throw new Error('连接被拒绝');
+    return { ok: true, files: { step: { path: '/tmp/a.step' } } };
+  });
+  const id = single.chunks[target - 1].instances[0].id;
+  assert.equal(failed.failedChunk.index, target);
+  assert.equal(failed.failedChunk.instanceFrom, target);
+  assert.equal(failed.failedChunk.instanceTo, target);
+  assert.match(failed.message, new RegExp(`件 #${target}（件号 ${id}`));
+  assert.match(failed.message, /连接被拒绝/);
+  assert.ok(!failed.message.includes('maxInstances=1'), '单件块不该再让调用方缩块');
+});
+
+test('失败定位 P1-6：sidecar 特征派生异常带件号 + 下标，原错误挂在 cause 上', () => {
+  const geometry = geometryFor();
+  const broken = { ...geometry, parts: [geometry.parts[0], { ...geometry.parts[1], shape: { type: 'box' } }] };
+  const secondId = geometry.parts[1].id;
+  assert.throws(
+    () => geometryToSidecarAssemblies(broken, { updatedAt: UPDATED_AT }),
+    (error) => {
+      assert.match(error.message, /^件 #2（件号 /);
+      assert.ok(error.message.includes(secondId), `错误信息必须含件号（${secondId}）：${error.message}`);
+      assert.match(error.message, /派生 sidecar 特征失败/);
+      assert.ok(error.cause instanceof Error, '原异常必须保留在 cause 上，便于回到原始栈');
+      return true;
+    }
+  );
+});
+
 // ── 制造导出 vs 碰撞几何：缓存塔板件（review P1） ────────────────────────────
 //
 // 口径：缓存塔的板（`workpiece-plate` / `role=workpiece`）是**碰撞与工艺占位刚体**，

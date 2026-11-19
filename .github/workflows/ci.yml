@@ -855,6 +855,18 @@ jobs:
           export AUTOMATIONCAD_PYTHON="$PWD/../.venv-ft/bin/python"
           npm run verify:step-tower -- --levels 16
           npm run verify:step-tower -- --levels 8
+      # 通道自证（非结构验收）：`verify:channel` 是纯 Node 几何诊断，不起 Electron、不进
+      # build123d 内核（输入是现构造的件表 + `panel-channel.ts` 纯函数），所以不需要上面的
+      # venv，放在本 job 里只是跟着层数基线一起跑、几秒级。
+      # 它证明的是「尺子还准」：正向 13 + 负向 14（该红的会红、该拒的会拒）；不是结构验收——
+      # 输出里 feasible:false / 承托 diagnostic-only 才是当前真实结论。
+      # 退出码语义（脚本自带，未改）：0 = 诊断跑通（含 feasible:false）/ 1 = 负向自证或数值断言失败 / 2 = 用法错误。
+      - name: 通道自证（非结构验收）：2 层 + 16 层
+        timeout-minutes: 5
+        run: |
+          cd desktop
+          npm run verify:channel -- --levels 2
+          npm run verify:channel -- --levels 16
       # AABB 初筛 vs 真实布尔：量出「把圆柱当方块」与「看不见孔」两种误差方向
       - name: AABB 初筛与真实布尔的误差
         timeout-minutes: 10

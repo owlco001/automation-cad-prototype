@@ -420,6 +420,40 @@ export interface SidecarAssemblyBundle {
   approximated: string[];
 }
 
+// ── 失败定位上下文 ─────────────────────────────────────────────────────────
+//
+// sidecar 的 400 只回一句 Python 异常（例如 `too many values to unpack (expected 2)`），
+// 不带件号、不带块下标、不带 op 序号；agent 拿着这句话无法自修（内核进程不在本仓，
+// 这里也不猜「到底是哪个 op 炸的」）。所以错误信息只贴**确定已知**的坐标：
+// 第几块、件在导出件表里的全局顺序下标、这一块的件号清单、这一块的 op 序列/计数。
+//
+// 下标口径：`件 #k` 从 1 起，等于该实体在 `geometryToSidecarAssemblies` 里 push 的顺序
+// （也就是 sidecar `instances[]` 的顺序）；与「第 n/m 块」同一套人话编号。
+
+function instanceLabel(index: number, instance: Pick<PartInstance, 'id' | 'name'>): string {
+  const name = instance.name && instance.name !== instance.id ? `，${instance.name}` : '';
+  return `件 #${index + 1}（件号 ${instance.id}${name}）`;
+}
+
+/** 件内 op 序列（带件内下标）：`op0:box → op1:cylinder`；无特征时给 `无 op`。 */
+export function featureOpSequence(features: readonly FeatureNode[]): string {
+  if (!features || features.length === 0) return '无 op';
+  return features.map((feature, index) => `op${index}:${feature.type}`).join(' → ');
+}
+
+function opTally(instances: readonly PartInstance[]): { total: number; text: string; byType: Record<string, number> } {
+  const byType: Record<string, number> = {};
+  let total = 0;
+  for (const instance of instances) {
+    for (const feature of instance.features ?? []) {
+      total += 1;
+      byType[feature.type] = (byType[feature.type] ?? 0) + 1;
+    }
+  }
+  const text = Object.entries(byType).map(([type, count]) => `${type}×${count}`).join('、');
+  return { total, text: `${total} 个${text ? `（${text}）` : '（无 op）'}`, byType };
+}
+
 export function geometryToSidecarAssemblies(
   geometry: MachineGeometry,
   options: { updatedAt?: string; maxInstances?: number } = {}
@@ -428,8 +462,18 @@ export function geometryToSidecarAssemblies(
   const updatedAt = options.updatedAt ?? new Date().toISOString();
   const instances: PartInstance[] = [];
   const approximated: string[] = [];
-  for (const part of machineExportParts(geometry)) {
-    const { features, approximated: approx } = partSidecarFeatures(part);
+  for (const [index, part] of machineExportParts(geometry).entries()) {
+    let derived: { features: FeatureNode[]; approximated: boolean };
+    try {
+      derived = partSidecarFeatures(part);
+    } catch (error) {
+      // 件表本身坏了（形状缺字段/类型不认识）：报错必须带件号与下标，否则只知道「导不出」。
+      const cause = error instanceof Error ? error.message : String(error);
+      const wrapped = new Error(`${instanceLabel(index, part)} 派生 sidecar 特征失败：${cause}`);
+      (wrapped as Error & { cause?: unknown }).cause = error;
+      throw wrapped;
+    }
+    const { features, approximated: approx } = derived;
     if (approx) approximated.push(part.id);
     instances.push({
       id: part.id,
@@ -465,6 +509,38 @@ export interface MachineSolidsReport {
   /** 每块 sidecar 返回的 STEP 临时文件路径（成功时）。 */
   stepFiles: string[];
   message: string;
+  /** 回退时定位到的那一块（成功时不出现）：下标从 1 起，件号/op 与 message 同源。 */
+  failedChunk?: {
+    index: number;
+    total: number;
+    /** 块内首/末件的全局顺序下标（从 1 起，= sidecar instances[] 顺序）。 */
+    instanceFrom: number;
+    instanceTo: number;
+    partIds: string[];
+    ops: Record<string, number>;
+    code?: string;
+  };
+}
+
+/**
+ * 块失败的可读定位。**只报已知坐标**：内核异常文本里没有件名/op 序号，
+ * 所以给「第几块 + 件下标区间 + 件号清单 + op 计数」，并说明怎么缩到单件。
+ */
+function describeChunkFailure(
+  chunk: AssemblyDoc,
+  start: number,
+  index: number,
+  total: number,
+  detail: string
+): string {
+  const count = chunk.instances.length;
+  const from = start + 1;
+  const positions = count <= 1 ? `件 #${from}` : `件 #${from}–#${from + count - 1}`;
+  const ids = chunk.instances.map((instance) => instance.id);
+  const shown = ids.length <= 6 ? ids.join('、') : `${ids.slice(0, 6).join('、')}…等 ${ids.length} 件`;
+  const ops = opTally(chunk.instances);
+  const narrow = count > 1 ? `；要定位到具体件，用 maxInstances=1 重出 sidecar 逐件重跑` : '';
+  return `第 ${index + 1}/${total} 块实体化失败（${detail}）· 定位：${positions}（件号 ${shown}）· op ${ops.text}${narrow}，已回退为 TS 网格（STL/glTF）`;
 }
 
 /**
@@ -479,6 +555,7 @@ export async function buildMachineSolids(
     return { mode: 'mesh-fallback', chunks: bundle.chunks.length, built: 0, stepFiles: [], message: '参数化建模内核未接入，已回退为 TS 网格（STL/glTF）' };
   }
   const stepFiles: string[] = [];
+  let start = 0;
   for (const [index, chunk] of bundle.chunks.entries()) {
     let result: SolidBuildResult;
     try {
@@ -487,14 +564,25 @@ export async function buildMachineSolids(
       result = { ok: false, message: error instanceof Error ? error.message : String(error) };
     }
     if (!result.ok) {
+      const instances = chunk.instances.length;
       return {
         mode: 'mesh-fallback',
         chunks: bundle.chunks.length,
         built: index,
         stepFiles: [],
-        message: `第 ${index + 1}/${bundle.chunks.length} 块实体化失败（${result.message ?? result.code ?? '未知原因'}），已回退为 TS 网格（STL/glTF）`
+        message: describeChunkFailure(chunk, start, index, bundle.chunks.length, result.message ?? result.code ?? '未知原因'),
+        failedChunk: {
+          index: index + 1,
+          total: bundle.chunks.length,
+          instanceFrom: start + 1,
+          instanceTo: start + instances,
+          partIds: chunk.instances.map((instance) => instance.id),
+          ops: opTally(chunk.instances).byType,
+          ...(result.code ? { code: result.code } : {})
+        }
       };
     }
+    start += chunk.instances.length;
     const step = result.files?.step;
     const path = step && typeof step === 'object' && typeof (step as { path?: unknown }).path === 'string'
       ? (step as { path: string }).path
