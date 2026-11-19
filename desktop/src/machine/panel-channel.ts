@@ -52,6 +52,8 @@
 
 import type { ConveyorPart } from './conveyor-assembly.ts';
 import type { GeomPart, GeomShape, Vec3 } from './geometry.ts';
+// 特征/件盒判据与 machine-geometry 共用同一份实现（T3 P1-1）：本文件不再自算局部盒。
+import { inspectTransform, parsePartLocalBox, worldBoxFromLocal } from './feature-box.ts';
 import {
   buildBufferTowerParts,
   bufferTowerParamsFromConfig,
@@ -593,79 +595,43 @@ export function resolvePanelSupport(input: {
  * 适配器：ConveyorPart / GeomPart → 承托面盒
  * ------------------------------------------------------------------ */
 
-function rotate2(x: number, y: number, rzDeg: number): [number, number] {
-  if (!Number.isFinite(rzDeg) || Math.abs(rzDeg) < 1e-9) return [x, y];
-  const rad = (rzDeg * Math.PI) / 180;
-  return [x * Math.cos(rad) - y * Math.sin(rad), x * Math.sin(rad) + y * Math.cos(rad)];
-}
-
-/**
- * 单条特征 → 局部 AABB，三态（**不许把两种 null 混成一个**）：
- * - `box`：参数有限、量得出盒；
- * - `none`：**本来就没有实体外形**（减材料特征 holes/counterbore/slot/fillet，或未知类型）——
- *   这类特征不参与外形，跳过是政策，不是坏输入；
- * - `invalid`：这条特征**声明了实体外形但参数读不出**（非有限 / 退化）——
- *   不能量盒，也不能拿同件其余特征拼一个偏小的盒（那会让自由上升偏大）。
- *
- * 旧实现把后两种都返回 `null`，于是「参数坏」的件在适配器里被当成「无实体特征」静默删行：
- * 最低遮挡换人、witness 偏大（105 而不是 98.5），且没有任何诊断码（最终复审 P2-2）。
+/*
+ * 单条特征 / 单件的局部盒判据**不在本文件里**：走 `feature-box.ts` 的 `parsePartLocalBox`，
+ * 世界盒换算（rotateAboutZ + worldBoxFromLocal）**也不在本文件里**：同一份实现由
+ * `machine-geometry.ts`（碰撞/包络/3D）与本文件（承托面行表）共用（review P2 第二轮
+ * 把两份手写 `rotate2` / `rotateLocal` 合成一份 —— 真件表 `rz≠0` 的件为 0，分开写漂移了
+ * 也没有用例会断）。
+ * 抽走之前两处各写一套，同一个件表会给出相反结论（未知类型这边当"无外形"跳过、
+ * 那边抛 INVALID_PART_GEOMETRY；suppressed 这边根本没读），见 T3 复审 P1-1。
+ * 本文件只剩"遇到坏输入怎么办"：整件剔除并记 `droppedPartIds` → `invalid-shelf-geometry`
+ * （逐件剔除，**不中断整张行表** —— 结构级坏件也一样）。
  */
-type FeatureLocalBox =
-  | { kind: 'box'; min: Vec3; max: Vec3 }
-  | { kind: 'none' }
-  | { kind: 'invalid' };
 
-function featureLocalBox(node: ConveyorPart['features'][number]): FeatureLocalBox {
-  const params = node.params as Record<string, unknown>;
-  if (node.type === 'box') {
-    const length = Number(params.length);
-    const width = Number(params.width);
-    const height = Number(params.height);
-    if (![length, width, height].every((value) => Number.isFinite(value))) return { kind: 'invalid' };
-    return { kind: 'box', min: [-length / 2, -width / 2, -height / 2], max: [length / 2, width / 2, height / 2] };
-  }
-  if (node.type === 'cylinder') {
-    const radius = Number(params.diameter) / 2;
-    const length = Number(params.height);
-    const rawAxis = params.axis;
-    // 轴向只认三个枚举值；缺省按 z（既有口径），声明了别的值就是参数坏了 —— 不拿 'z' 顶替
-    const axis = rawAxis === undefined ? 'z' : rawAxis;
-    // 半径/长度必须有限且为正，否则量不出实体盒（旧实现静默返回 null = 丢件）
-    if (!Number.isFinite(radius) || !Number.isFinite(length) || radius <= 0 || length <= 0) return { kind: 'invalid' };
-    if (axis !== 'x' && axis !== 'y' && axis !== 'z') return { kind: 'invalid' };
-    let center: Vec3 = [0, 0, 0];
-    if (params.at !== undefined) {
-      // 旧实现用 `Number(value) || 0` 把 NaN 悄悄变 0：那是编坐标，必须改成「读不出」
-      if (!Array.isArray(params.at) || params.at.length < 3) return { kind: 'invalid' };
-      const at = params.at.map((value) => Number(value));
-      if (!at.every((value) => Number.isFinite(value))) return { kind: 'invalid' };
-      center = [at[0] ?? 0, at[1] ?? 0, at[2] ?? 0];
-    }
-    const half: Vec3 = axis === 'x' ? [length / 2, radius, radius] : axis === 'y' ? [radius, length / 2, radius] : [radius, radius, length / 2];
-    return {
-      kind: 'box',
-      min: [center[0] - half[0], center[1] - half[1], center[2] - half[2]],
-      max: [center[0] + half[0], center[1] + half[1], center[2] + half[2]]
-    };
-  }
-  return { kind: 'none' }; // 减材料特征不参与外形
-}
-
-/** `supportRowsFromConveyorPartsDetailed` 的结果：行表 + **因参数坏而量不出盒**的件号 */
+/** `supportRowsFromConveyorPartsDetailed` 的结果：行表 + **量不出盒**的件号 */
 export interface SupportRowsFromConveyorPartsResult {
   rows: PanelSupportPart[];
   /**
-   * 有实体外形特征、但特征参数读不出（非有限 / 退化）→ 量不出包围盒、**已剔除**的件号。
-   * 与「只有减材料特征、本来就不成行」的件不同：后者不进这里（`rows` 里也不会出现，政策未变）。
+   * 量不出包围盒、**已剔除**的件号：特征参数读不出（非有限 / 退化 / 未知类型 / 轴向不认识 /
+   * `at` 读不出）—— 判据与 `machine-geometry` 抛 `INVALID_PART_GEOMETRY` 是**同一份实现**
+   * （`feature-box.ts`），所以「这边剔了」和「那边抛了」是同一组件。
+   * **唯一例外**：整件没有实体外形（`no-solid-feature`，全是减材料/压缩特征）不进这里 ——
+   * 它不是坏输入、也不是承托面，只是不成行（几何侧要当碰撞体，故那边抛）。
    * 调用方（`resolveChannelFeasibility`）必须把它当 `invalid-shelf-geometry` 处理，不许当「这件不存在」。
    */
   droppedPartIds: string[];
 }
 
 /**
- * `ConveyorPart → 承托面盒`。算法与 `machine-geometry.partWorldBounds` **同口径**
- * （实体特征并集包围盒 + 绕 Z 旋转后的 AABB）；两者对同一件表必须逐件相等，
- * 由 `buffer-tower-channel.test.mjs` 的「逐件盒一致」用例锁住，避免两套包络漂移。
+ * `ConveyorPart → 承托面盒`（实体特征并集包围盒 + 绕 Z 旋转后的 AABB）。
+ * 局部盒与世界盒换算**都不是**本文件算的：`parsePartLocalBox` / `worldBoxFromLocal`
+ * （`feature-box.ts`）与 `machine-geometry.partWorldBounds` 是同一段代码；
+ * 这里只做落位（`round2`）与随动位移（`shiftMm`）这两条**消费政策**。
+ * 三条可证实的约束（都有用例，不靠措辞）：
+ *   - `buffer-tower-channel.test.mjs`「逐件盒一致」：同一件表，两处逐件 min/max 相等；
+ *   - `buffer-tower-model.test.mjs`「交叉一致性」：同一组坏特征，两处都判坏（且原因码相同）；
+ *   - 本文件不再读 `node.type` 做政策判断 —— 减材料白名单只在 `feature-box.ts` 定义一次。
+ * **例外只有一条**：整件没有实体外形（`no-solid-feature`）时本文件不成行、不记 dropped，
+ * 几何侧仍抛 —— 那条在 `buffer-tower-model.test.mjs` 里也被显式断言，不是"漏了"。
  *
  * 返回 `{ rows, droppedPartIds }`：`droppedPartIds` 是「参数坏、量不出盒」被剔除的件，
  * 调用方拿它置 `invalid-shelf-geometry`。只想要行表的老调用方用下面的
@@ -681,51 +647,34 @@ export function supportRowsFromConveyorPartsDetailed(
   const droppedPartIds: string[] = [];
   for (const part of parts) {
     if (exclude.has(part.id)) continue;
-    let min: Vec3 = [Infinity, Infinity, Infinity];
-    let max: Vec3 = [-Infinity, -Infinity, -Infinity];
-    let solids = 0;
-    let invalid = false;
-    for (const node of part.features) {
-      const box = featureLocalBox(node);
-      if (box.kind === 'invalid') {
-        // 一件里有一条实体特征量不出盒 → 整件都量不出（不许拿其余特征拼一个偏小的盒）
-        invalid = true;
-        break;
-      }
-      if (box.kind === 'none') continue;
-      solids += 1;
-      for (let axis = 0; axis < 3; axis += 1) {
-        min[axis] = Math.min(min[axis] ?? Infinity, box.min[axis] ?? 0);
-        max[axis] = Math.max(max[axis] ?? -Infinity, box.max[axis] ?? 0);
-      }
-    }
-    if (invalid) {
+    // 与 machine-geometry 同一份判据（含未知类型 / suppressed / 退化零盒 / NaN 参数）。
+    // 一件里有一条实体特征量不出盒 → 整件都量不出（不许拿其余特征拼一个偏小的盒）。
+    const local = parsePartLocalBox(part.features);
+    if (local.kind === 'invalid') {
+      // **唯一的政策差异**（有意保留，已用例锁死）：「整件没有实体外形」不是坏输入 ——
+      // 它本来就不是承托面，不成行、不记 dropped。几何侧不同：那种件还要当碰撞体，量不出盒就必须抛。
+      if (local.fault === 'no-solid-feature') continue;
       droppedPartIds.push(part.id);
       continue;
     }
-    // 只有减材料特征/无特征：本来就不成行（政策未变，不记入 dropped）
-    if (solids === 0) continue;
-    const rz = part.transform.rz ?? 0;
-    const localCenter: Vec3 = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
-    const offset = rotate2(localCenter[0], localCenter[1], rz);
-    const rad = (rz * Math.PI) / 180;
-    const cos = Math.abs(Math.cos(rad));
-    const sin = Math.abs(Math.sin(rad));
-    const hx = (max[0] - min[0]) / 2;
-    const hy = (max[1] - min[1]) / 2;
-    const half: Vec3 = [hx * cos + hy * sin, hx * sin + hy * cos, (max[2] - min[2]) / 2];
-    const cx = part.transform.x + offset[0];
-    const cy = part.transform.y + offset[1];
-    const cz = part.transform.z + localCenter[2];
+    // 结构级坏件（review P2 第二轮）：transform 缺字段时旧代码读 `part.transform.rz` 抛 TypeError，
+    // 整张行表中断。这里是逐件诊断通道，政策是「只剔这一件」，与几何侧的抛错同义。
+    const transform = inspectTransform(part.transform);
+    if (!transform.ok) {
+      droppedPartIds.push(part.id);
+      continue;
+    }
+    const { min, max } = local;
+    const world = worldBoxFromLocal(transform.transform, { min, max });
     const dz = LIFT_FOLLOW_PATTERN.test(part.id) ? shift : 0;
     rows.push({
       id: part.id,
-      minX: round2(cx - half[0]),
-      maxX: round2(cx + half[0]),
-      minY: round2(cy - half[1]),
-      maxY: round2(cy + half[1]),
-      minZ: round2(cz - half[2] + dz),
-      maxZ: round2(cz + half[2] + dz)
+      minX: round2(world.min[0]),
+      maxX: round2(world.max[0]),
+      minY: round2(world.min[1]),
+      maxY: round2(world.max[1]),
+      minZ: round2(world.min[2] + dz),
+      maxZ: round2(world.max[2] + dz)
     });
   }
   return { rows, droppedPartIds };
@@ -733,7 +682,7 @@ export function supportRowsFromConveyorPartsDetailed(
 
 /**
  * 只要行表的老入口（`verify-channel` / 逐件盒一致性用例用）。
- * **诊断不能走这条**：它把「参数坏、量不出盒」的件和「本来没有实体外形」的件一样藏起来，
+ * **诊断不能走这条**：`rows` 里看不到「量不出盒被剔除」的件（与"本来就不成行"的件一样缺席），
  * 判据一侧要用 `supportRowsFromConveyorPartsDetailed` 拿 `droppedPartIds`。
  */
 export function supportRowsFromConveyorParts(

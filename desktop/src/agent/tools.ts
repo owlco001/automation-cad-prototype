@@ -27,7 +27,12 @@ import { completeDesign } from '../design/synthesis.ts';
 import { validatePricebook, type Pricebook } from '../cost/pricebook.ts';
 import { buildClarify } from '../machine/clarify.ts';
 import { summarizeGeometry } from '../machine/geometry.ts';
-import { partWorldBounds, resolveMachineGeometry, type ResolvedMachineGeometry } from '../machine/machine-geometry.ts';
+import {
+  MachinePartGeometryError,
+  partWorldBounds,
+  resolveMachineGeometry,
+  type ResolvedMachineGeometry
+} from '../machine/machine-geometry.ts';
 import { buildConveyorParts, conveyorEnvelope, type ConveyorPart } from '../machine/conveyor-assembly.ts';
 import {
   BufferTowerConfigError,
@@ -1189,6 +1194,102 @@ function mainBreakerRating(
   return undefined;
 }
 
+/**
+ * 件表几何坏数据 → 工具回执。**不能落到 `INTERNAL_ERROR`**（T3 复审 P2-4）：
+ * `INTERNAL_ERROR` 的 hint 是"不要改参数、反馈现场日志"，而件表坏恰恰是数据要修，
+ * 未来件表可导入时那会把 agent 引向"报软件缺陷"。
+ *
+ * 分派口径：按 `code === 'INVALID_PART_GEOMETRY'` 判（不是 `instanceof` 单一路径），
+ * 因为错误可能跨模块实例/序列化边界回到这里 —— `instanceof` 只在同一份模块实例下成立。
+ * 回执带 `partId` / `fault` / 特征定位，调用方不必再解析中文文案。
+ */
+export function machinePartGeometryFailure(error: MachinePartGeometryError): {
+  ok: false;
+  code: 'INVALID_ARGUMENT';
+  message: string;
+  partId: string;
+  fault: string;
+  featureIndex: number;
+  featureId: string;
+  featureType: string;
+  hint: string;
+} {
+  const where = error.featureIndex >= 0
+    ? `第 ${error.featureIndex + 1} 条特征 ${error.featureId}（type=${error.featureType}）`
+    : '整件（没有任何可量的实体外形）';
+  return {
+    ok: false,
+    code: 'INVALID_ARGUMENT',
+    message: error.message,
+    partId: error.partId,
+    fault: error.fault,
+    featureIndex: error.featureIndex,
+    featureId: error.featureId,
+    featureType: error.featureType,
+    hint: `件表数据本身不合法（不是软件缺陷、也不是调用参数错）：零件 ${error.partId} 的 ${where} `
+      + `几何量不出，原因码 ${error.fault}。修件表参数，或把该特征显式标成 suppressed（内核编译时本来就跳过它）`
+      + '—— 不要当成内部异常重试。'
+  };
+}
+
+/**
+ * 判断一个异常是不是"件表几何坏"：`instanceof` 或「code 命中且上下文字段齐全」都算。
+ * 第二个分支是给跨模块实例/序列化回来的错误用的；字段不齐就不认（不猜）。
+ */
+export function isMachinePartGeometryError(error: unknown): error is MachinePartGeometryError {
+  if (error instanceof MachinePartGeometryError) return true;
+  if (typeof error !== 'object' || error === null) return false;
+  const candidate = error as Partial<Record<'code' | 'partId' | 'fault' | 'featureIndex' | 'message', unknown>>;
+  return candidate.code === 'INVALID_PART_GEOMETRY'
+    && typeof candidate.partId === 'string'
+    && typeof candidate.fault === 'string'
+    && typeof candidate.featureIndex === 'number'
+    && typeof candidate.message === 'string';
+}
+
+/**
+ * `design_machine` 的失败分类（catch 里唯一的出口，单独成函数是为了能用例直接断言）。
+ *
+ * 四种情况必须分开，不能一律 INVALID_ARGUMENT：
+ *   - `BufferTowerConfigError.code === 'NOT_IMPLEMENTED'`：参数合法但本期几何不支持（双塔/每层多位）；
+ *   - `MachinePartGeometryError`（code=INVALID_PART_GEOMETRY）：**件表数据坏**，不是软件缺陷 ——
+ *     回 INVALID_ARGUMENT 并带件号/原因码/特征定位，让调用方修件表而不是"反馈日志"（T3 P2-4）；
+ *   - 其余 `RangeError`：调用方参数越界（容量算式/层距/进料长度…），记 RANGE 日志，回 INVALID_ARGUMENT；
+ *   - 其它异常：**程序内部缺陷**。以前也回 INVALID_ARGUMENT，调用方会去改参数，
+ *     而真正该做的是报缺陷——这里回 INTERNAL_ERROR 并给 hint，日志单独一条。
+ */
+export function classifyDesignMachineFailure(error: unknown):
+  | { ok: false; code: 'NOT_IMPLEMENTED'; message: string }
+  | ReturnType<typeof machinePartGeometryFailure>
+  | { ok: false; code: 'INVALID_ARGUMENT'; message: string }
+  | { ok: false; code: 'INTERNAL_ERROR'; message: string; hint: string } {
+  const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof BufferTowerConfigError && error.code === 'NOT_IMPLEMENTED') {
+    console.warn('[DESIGN_MACHINE_NOT_IMPLEMENTED]', { site: 'desktop/src/agent/tools.ts:design_machine' }, message);
+    return { ok: false, code: 'NOT_IMPLEMENTED', message };
+  }
+  if (isMachinePartGeometryError(error)) {
+    console.warn(
+      '[DESIGN_MACHINE_INVALID_PART_GEOMETRY]',
+      { site: 'desktop/src/agent/tools.ts:design_machine', partId: error.partId, fault: error.fault, featureId: error.featureId },
+      message
+    );
+    return machinePartGeometryFailure(error);
+  }
+  if (error instanceof RangeError) {
+    // 缓存参数越界（RangeError）与内部程序缺陷分开记日志，回执 code 保持不变以免破坏调用方。
+    console.warn('[DESIGN_MACHINE_RANGE_REJECTED]', { site: 'desktop/src/agent/tools.ts:design_machine' }, message);
+    return { ok: false, code: 'INVALID_ARGUMENT', message };
+  }
+  console.warn('[DESIGN_MACHINE_FAILED]', { site: 'desktop/src/agent/tools.ts:design_machine' }, message);
+  return {
+    ok: false,
+    code: 'INTERNAL_ERROR',
+    message,
+    hint: '这是软件内部异常（不是参数问题）：请不要改参数重试，直接反馈现场日志与机型 brief'
+  };
+}
+
 export class AgentTools {
   private readonly registry: PackRegistry;
   private readonly commands: AgentCommandExecutor | undefined;
@@ -1569,32 +1670,7 @@ export class AgentTools {
             question: clarify.question
           };
         } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          // 三种情况必须分开，不能一律 INVALID_ARGUMENT：
-          // - `BufferTowerConfigError.code === 'NOT_IMPLEMENTED'`：参数合法但本期几何不支持（双塔/每层多位）；
-          // - 其余 `RangeError`：调用方参数越界（容量算式/层距/进料长度…），记 RANGE 日志，回 INVALID_ARGUMENT；
-          // - 其它异常：**程序内部缺陷**。以前也回 INVALID_ARGUMENT，调用方会去改参数，
-          //   而真正该做的是报缺陷——这里回 INTERNAL_ERROR 并给 hint，日志单独一条。
-          if (error instanceof BufferTowerConfigError && error.code === 'NOT_IMPLEMENTED') {
-            console.warn('[DESIGN_MACHINE_NOT_IMPLEMENTED]', { site: 'desktop/src/agent/tools.ts:design_machine' }, message);
-            return { ok: false, code: 'NOT_IMPLEMENTED', message };
-          }
-          if (error instanceof RangeError) {
-            // 缓存参数越界（RangeError）与内部程序缺陷分开记日志，回执 code 保持不变以免破坏调用方。
-            console.warn('[DESIGN_MACHINE_RANGE_REJECTED]', { site: 'desktop/src/agent/tools.ts:design_machine' }, message);
-            return {
-              ok: false,
-              code: 'INVALID_ARGUMENT',
-              message
-            };
-          }
-          console.warn('[DESIGN_MACHINE_FAILED]', { site: 'desktop/src/agent/tools.ts:design_machine' }, message);
-          return {
-            ok: false,
-            code: 'INTERNAL_ERROR',
-            message,
-            hint: '这是软件内部异常（不是参数问题）：请不要改参数重试，直接反馈现场日志与机型 brief'
-          };
+          return classifyDesignMachineFailure(error);
         }
       }
     });

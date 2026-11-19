@@ -67,6 +67,8 @@ import {
   type MachineGeometryOptions,
   type Vec3
 } from './geometry.ts';
+// 特征/件盒判据与 panel-channel 共用同一份实现（T3 P1-1）：这里不再保留第二套 featureLocalBox。
+import { inspectTransform, parsePartLocalBox, worldBoxFromLocal, type FeatureGeometryFault } from './feature-box.ts';
 
 /** 几何来源：三种——输送类参数化整机、缓存塔塔身、工位生成器代理体。 */
 export type MachineGeometrySource = 'conveyor-assembly' | 'buffer-tower-assembly' | 'station-generator';
@@ -157,62 +159,140 @@ export function conveyorParamsFromConfig(config: MachineConfig): ConveyorParams 
 
 type LocalBox = { min: Vec3; max: Vec3 };
 
-/** 特征在零件局部坐标里的外形盒（box 居中；cylinder 按轴 + at 偏移）。 */
-function featureLocalBox(node: ConveyorPart['features'][number]): { kind: 'box' | 'cylinder'; axis: 'x' | 'y' | 'z'; box: LocalBox } | null {
-  const params = node.params as Record<string, unknown>;
-  if (node.type === 'box') {
-    const length = Number(params.length);
-    const width = Number(params.width);
-    const height = Number(params.height);
-    if (![length, width, height].every((value) => Number.isFinite(value))) return null;
-    return {
-      kind: 'box',
-      axis: 'z',
-      box: { min: [-length / 2, -width / 2, -height / 2], max: [length / 2, width / 2, height / 2] }
-    };
+/**
+ * 量不出件盒的**原因码**：进 `MachinePartGeometryError.fault` 与错误文案，调用方可据此分派。
+ * 字符串集合本身定义在 `feature-box.ts`（那边是与 `panel-channel` 共用的同一份判据实现），
+ * 这里只做类型别名 —— 两处各写一套原因码正是 T3 复审 P1-1 的根因。
+ */
+export type PartGeometryFault = FeatureGeometryFault;
+
+/**
+ * 件盒量不出来 → **fail-closed**，抛这个错。
+ *
+ * 为什么必须抛而不是返回 null / 零盒（最终复审 P2-2、本轮 P1-2）：
+ *   - 旧实现在特征参数坏时 `return null`，调用方 `continue` → 该特征被**静默丢弃**，件盒偏小；
+ *   - `Number(v) || 0` 把 `at` 里的 NaN 悄悄变 0 —— 那是编坐标；
+ *   - 一件量不出几何的零件变成 `[0,0,0]` 的零体积点，无诊断码。
+ * 三种都在「不报错地给出一个看起来正常的数」，下游（干涉/包络/通道 witness/BOM 校验）
+ * 拿到的是一个假件。所以这里改成：要么给出真实的盒，要么带件号/特征号/原因码报错。
+ *
+ * `code` 固定为 `INVALID_PART_GEOMETRY`。判据本身与 `panel-channel` **共用 `feature-box.ts`
+ * 的同一份实现**（不是"口径对齐"而是同一段代码）：差别只在遇到坏输入之后怎么办 ——
+ * 那边没有诊断通道，所以剔件并把件号塞进 `invalid-shelf-geometry`，这边抛。
+ * 「同一组坏特征在两处的结论一致」由 `test/machine/buffer-tower-model.test.mjs` 的
+ * 交叉一致性用例直接断言（不是靠文档措辞）。**唯一例外**：件里完全没有实体特征时，
+ * 通道侧只是"不成行"（它不是承托面），这边仍抛 `no-solid-feature`（碰撞体必须量得出盒）——
+ * 那条政策差异也在同一个用例文件里被显式断言。
+ */
+export class MachinePartGeometryError extends Error {
+  readonly code = 'INVALID_PART_GEOMETRY' as const;
+  /** 量不出盒的件号（= ConveyorPart.id，与 BOM/STEP 件号同一套） */
+  readonly partId: string;
+  readonly fault: PartGeometryFault;
+  /** 出问题的特征下标；件级故障（no-solid-feature / degenerate-box）为 -1 */
+  readonly featureIndex: number;
+  readonly featureId: string;
+  readonly featureType: string;
+
+  constructor(input: {
+    partId: string;
+    fault: PartGeometryFault;
+    detail: string;
+    featureIndex?: number;
+    featureId?: string;
+    featureType?: string;
+  }) {
+    const where = input.featureIndex === undefined || input.featureIndex < 0
+      ? `零件 ${input.partId}`
+      : `零件 ${input.partId} 的第 ${input.featureIndex + 1} 条特征 ${input.featureId}（type=${input.featureType}）`;
+    super(
+      `${where} 的几何量不出（INVALID_PART_GEOMETRY / ${input.fault}）：${input.detail}。`
+        + '不按旧口径静默丢特征、不拿 0 顶替、不给零盒——请修参数，'
+        + '或在建造器/导入侧把这条特征显式标成 suppressed（内核编译时本来就跳过它）'
+    );
+    this.name = 'MachinePartGeometryError';
+    this.partId = input.partId;
+    this.fault = input.fault;
+    this.featureIndex = input.featureIndex ?? -1;
+    this.featureId = input.featureId ?? '';
+    this.featureType = input.featureType ?? '';
   }
-  if (node.type === 'cylinder') {
-    const radius = Number(params.diameter) / 2;
-    const length = Number(params.height);
-    const axis = params.axis === 'x' || params.axis === 'y' ? params.axis : 'z';
-    const at = Array.isArray(params.at) ? (params.at as unknown[]).map((value) => Number(value) || 0) : [0, 0, 0];
-    if (!Number.isFinite(radius) || !Number.isFinite(length) || radius <= 0 || length <= 0) return null;
-    const half: Vec3 = axis === 'x' ? [length / 2, radius, radius] : axis === 'y' ? [radius, length / 2, radius] : [radius, radius, length / 2];
-    const center: Vec3 = [at[0] ?? 0, at[1] ?? 0, at[2] ?? 0];
-    return {
-      kind: 'cylinder',
-      axis,
-      box: {
-        min: [center[0] - half[0], center[1] - half[1], center[2] - half[2]],
-        max: [center[0] + half[0], center[1] + half[1], center[2] + half[2]]
-      }
-    };
-  }
-  return null; // holes / slot 是减材料特征，不参与外形
 }
 
-/** 零件实体特征的并集包围盒 + 「是否全部为同轴圆柱」。 */
-function partSolidBox(part: ConveyorPart): { box: LocalBox; cylinders: { axis: 'x' | 'y' | 'z'; radius: number }[] } {
-  let min: Vec3 = [Infinity, Infinity, Infinity];
-  let max: Vec3 = [-Infinity, -Infinity, -Infinity];
-  const cylinders: { axis: 'x' | 'y' | 'z'; radius: number }[] = [];
-  let solids = 0;
-  for (const node of part.features) {
-    const parsed = featureLocalBox(node);
-    if (!parsed) continue;
-    solids += 1;
-    for (let axis = 0; axis < 3; axis += 1) {
-      min[axis] = Math.min(min[axis] ?? Infinity, parsed.box.min[axis] ?? 0);
-      max[axis] = Math.max(max[axis] ?? -Infinity, parsed.box.max[axis] ?? 0);
-    }
-    if (parsed.kind === 'cylinder') {
-      cylinders.push({ axis: parsed.axis, radius: Number((node.params as Record<string, unknown>).diameter) / 2 });
-    } else {
-      cylinders.push({ axis: parsed.axis, radius: -1 }); // 有长方体特征 → 不是纯圆柱件
-    }
+/** 一件的实体特征解析结果：并集盒 + 圆柱清单 + 参与外形的特征（供缸体/活塞杆拆件用）。 */
+interface PartSolidGeometry {
+  box: LocalBox;
+  cylinders: { axis: 'x' | 'y' | 'z'; radius: number }[];
+  features: { node: ConveyorPart['features'][number]; parsed: { kind: 'box' | 'cylinder'; axis: 'x' | 'y' | 'z'; box: LocalBox } }[];
+}
+
+type PartSolidParse =
+  | { kind: 'ok'; geometry: PartSolidGeometry }
+  | {
+    kind: 'invalid';
+    fault: PartGeometryFault;
+    detail: string;
+    /** 出问题的特征下标；件级故障为 -1 */
+    featureIndex: number;
+    featureId: string;
+    featureType: string;
+  };
+
+/**
+ * 零件实体特征的并集包围盒 + 「是否全部为同轴圆柱」的材料。
+ *
+ * 判据**不在本文件里**：整件解析走 `feature-box.ts` 的 `parsePartLocalBox`，那份实现由
+ * `panel-channel`（承托面行表）与本文件共用，所以「未知类型 / suppressed / 退化零盒 /
+ * NaN 参数」在同一件表上不可能出现两种结论（T3 复审 P1-1）。本函数只把共享结果落成本文件
+ * 的消费形状（圆柱清单 + 供拆件的特征表）。
+ */
+function parsePartSolids(part: ConveyorPart): PartSolidParse {
+  const parsed = parsePartLocalBox(part.features);
+  if (parsed.kind === 'invalid') {
+    return {
+      kind: 'invalid',
+      fault: parsed.fault,
+      detail: parsed.detail,
+      featureIndex: parsed.featureIndex,
+      featureId: parsed.featureId,
+      featureType: parsed.featureType
+    };
   }
-  if (solids === 0) return { box: { min: [0, 0, 0], max: [0, 0, 0] }, cylinders: [] };
-  return { box: { min, max }, cylinders };
+  const cylinders: { axis: 'x' | 'y' | 'z'; radius: number }[] = [];
+  const features: PartSolidGeometry['features'] = [];
+  for (const entry of parsed.features) {
+    features.push({
+      node: entry.node,
+      parsed: { kind: entry.box.shape, axis: entry.box.axis, box: { min: entry.box.min, max: entry.box.max } }
+    });
+    // 有长方体特征 → 不是纯圆柱件（radius = -1）；圆柱取 diameter/2，与旧口径同一个数
+    cylinders.push({ axis: entry.box.axis, radius: entry.box.shape === 'cylinder' ? entry.radius : -1 });
+  }
+  return { kind: 'ok', geometry: { box: { min: parsed.min, max: parsed.max }, cylinders, features } };
+}
+
+/** 取件盒；量不出就抛 —— 消费方没有「静默回落」这条路。 */
+function requirePartSolids(part: ConveyorPart): PartSolidGeometry {
+  // 结构级坏件（review P2，第二轮）：`part.transform` 缺失时 `part.transform.rz` 会抛 TypeError，
+  // 件号丢失并被归成 INTERNAL_ERROR。transform 是件级数据，同样必须按 INVALID_ARGUMENT 分类。
+  const transform = inspectTransform(part?.transform);
+  if (!transform.ok) {
+    throw new MachinePartGeometryError({
+      partId: String(part?.id ?? '?'),
+      fault: 'malformed-part',
+      detail: transform.detail
+    });
+  }
+  const parsed = parsePartSolids(part);
+  if (parsed.kind === 'ok') return parsed.geometry;
+  throw new MachinePartGeometryError({
+    partId: part.id,
+    fault: parsed.fault,
+    detail: parsed.detail,
+    featureIndex: parsed.featureIndex,
+    featureId: parsed.featureId,
+    featureType: parsed.featureType
+  });
 }
 
 const round2 = (value: number): number => Math.round(value * 100) / 100;
@@ -624,26 +704,27 @@ export function conveyorJointReason(a: string, b: string): string | null {
   return null;
 }
 
-/** 零件在世界坐标里的外形盒（并集包围盒 + 绕 Z 旋转后的中心偏移）。 */
+/**
+ * 零件在世界坐标里的外形盒（并集包围盒 + 绕 Z 旋转后的中心偏移）。
+ *
+ * 件盒量不出（`INVALID_PART_GEOMETRY`）时**抛错**，不回落旧静默路径：这里没有诊断通道，
+ * 而返回零盒/偏小的盒都会让干涉、包络、通道 witness 一起变成假数据。
+ * 需要「逐件记账」而不是整体失败时，调用方应先自己 `try/catch` 并把件号记进报表
+ * （本模块的消费方 `conveyorGeometryFromParts` 选择整机 fail-closed）。
+ */
 export function partWorldBounds(part: ConveyorPart): { min: Vec3; max: Vec3; center: Vec3; half: Vec3 } {
-  const { box } = partSolidBox(part);
-  const rz = part.transform.rz ?? 0;
-  const local: Vec3 = [(box.min[0] + box.max[0]) / 2, (box.min[1] + box.max[1]) / 2, (box.min[2] + box.max[2]) / 2];
-  const rotated = rotateLocal(local, rz);
-  const hx = (box.max[0] - box.min[0]) / 2;
-  const hy = (box.max[1] - box.min[1]) / 2;
-  const rad = (rz * Math.PI) / 180;
-  const cos = Math.abs(Math.cos(rad));
-  const sin = Math.abs(Math.sin(rad));
-  // 绕 Z 旋转后的世界 AABB（与 interference.partBounds 同口径；rz=0 时就是原尺寸）
-  const half: Vec3 = [hx * cos + hy * sin, hx * sin + hy * cos, (box.max[2] - box.min[2]) / 2];
-  const center: Vec3 = [part.transform.x + rotated[0], part.transform.y + rotated[1], part.transform.z + local[2]];
-  return {
-    min: [center[0] - half[0], center[1] - half[1], center[2] - half[2]],
-    max: [center[0] + half[0], center[1] + half[1], center[2] + half[2]],
-    center,
-    half
-  };
+  return worldBoundsOfBox(part, requirePartSolids(part).box);
+}
+
+/**
+ * 由「已量出的局部盒」算世界盒：`partWorldBounds` 与拆件映射共用一个实现。
+ *
+ * 旋转 + 平移 + 旋转后 AABB **不在本文件里**：走 `feature-box.ts` 的 `worldBoxFromLocal`，
+ * 与 `panel-channel` 的承托面行表是同一段代码（review P2 第二轮把两份手写 `rotateLocal` /
+ * `rotate2` 合成一份）。本文件只保留消费政策（坏件抛错）。
+ */
+function worldBoundsOfBox(part: ConveyorPart, box: LocalBox): { min: Vec3; max: Vec3; center: Vec3; half: Vec3 } {
+  return worldBoxFromLocal(part.transform, box);
 }
 
 /** 整机装配里所有真实连接（每对只出一条；只出「装配上确实相接」的对）。 */
@@ -712,9 +793,10 @@ export interface MappedSolid {
 
 /** 把一件整机零件拆成几何刚体：默认 1:1，只有「同轴双径圆柱」按缸体/活塞杆拆两件。 */
 function mappedSolids(part: ConveyorPart): MappedSolid[] {
-  const features = part.features
-    .map((node) => ({ node, parsed: featureLocalBox(node) }))
-    .filter((entry): entry is { node: ConveyorPart['features'][number]; parsed: NonNullable<ReturnType<typeof featureLocalBox>> } => entry.parsed !== null);
+  // 与 partWorldBounds 用**同一个**三态解析：参数坏 / 类型不认识 → 当场抛 INVALID_PART_GEOMETRY。
+  // 旧实现在这里 `.filter(parsed !== null)`，坏特征被静默剔掉，件盒偏小且无诊断码。
+  const solid = requirePartSolids(part);
+  const features = solid.features;
 
   // 只认「全部实体特征都是同轴 Z 向圆柱、且恰好两种直径」的件（顶升气缸就是这一种）。
   const allZCylinders = features.length >= 2
@@ -753,8 +835,8 @@ function mappedSolids(part: ConveyorPart): MappedSolid[] {
     ];
   }
 
-  const { box, cylinders } = partSolidBox(part);
-  const bounds = partWorldBounds(part);
+  const { box, cylinders } = solid;
+  const bounds = worldBoundsOfBox(part, box);
   return [{
     id: part.id,
     name: part.name,
@@ -909,13 +991,6 @@ function actuatorOfPart(id: string): string | undefined {
   return undefined;
 }
 
-function rotateLocal(center: Vec3, rz: number): [number, number] {
-  if (!Number.isFinite(rz) || Math.abs(rz) < 1e-9) return [center[0], center[1]];
-  const rad = (rz * Math.PI) / 180;
-  const cos = Math.cos(rad);
-  const sin = Math.sin(rad);
-  return [center[0] * cos - center[1] * sin, center[0] * sin + center[1] * cos];
-}
 
 /* ------------------------------------------------------------------ *
  * 唯一入口

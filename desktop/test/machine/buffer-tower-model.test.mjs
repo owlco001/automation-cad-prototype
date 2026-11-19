@@ -31,8 +31,21 @@ import {
   bufferTowerSlots
 } from '../../src/machine/buffer-tower-assembly.ts';
 import { buildConveyorParts, conveyorAssembly, conveyorEnvelope } from '../../src/machine/conveyor-assembly.ts';
-import { resolveMachineGeometry, towerLiftAxis } from '../../src/machine/machine-geometry.ts';
+import {
+  MachinePartGeometryError,
+  conveyorGeometryFromParts,
+  partWorldBounds,
+  resolveMachineGeometry,
+  towerLiftAxis
+} from '../../src/machine/machine-geometry.ts';
 import { geometryToGltf, geometryToSidecarAssemblies, geometryToStl, geometryTriangleCount } from '../../src/machine/geometry-export.ts';
+import { parsePartLocalBox } from '../../src/machine/feature-box.ts';
+import { supportRowsFromConveyorPartsDetailed } from '../../src/machine/panel-channel.ts';
+import {
+  classifyDesignMachineFailure,
+  isMachinePartGeometryError,
+  machinePartGeometryFailure
+} from '../../src/agent/tools.ts';
 import { saveProject, openProject } from '../../electron/projects.ts';
 
 const TOWER_ROOT = mkdtempSync(join(tmpdir(), 'buffer-tower-model-'));
@@ -438,4 +451,527 @@ test('接线：几何入口与整机建模用同一个判别函数（不许两�
   const builders = readFileSync(new URL('../../src/machine/model-builders.ts', import.meta.url), 'utf8');
   assert.match(builders, /export function resolveModelDispatch/);
   assert.match(builders, /isBufferTowerConfig\(/, '分派也必须用同一个判别函数');
+});
+
+/* ---------------- 7. 件盒三态（P1-2）：坏数据不再被静默编成几何 ---------------- *
+ *
+ * machine-geometry 的件盒解析与 panel-channel.featureLocalBox 同一判据：
+ * `box/cylinder | none（减材料/压缩）| invalid（读不出/类型不认识）`。
+ * 旧口径（本轮被替换的四处）：
+ *   - 参数非有限 → 返回 null，调用方 continue → 特征被静默丢弃、件盒偏小；
+ *   - `Number(v) || 0` → at 里的 NaN 悄悄变 0（编坐标）；
+ *   - 未知类型 → 与减材料合并，静默当「无实体」；
+ *   - `solids === 0` → `[0,0,0]` 零盒（一件量不出几何的零件变成零体积点）。
+ * 下面每个反例都直接断言「现在会抛 INVALID_PART_GEOMETRY」而不是「给个数」。
+ * ------------------------------------------------------------------ */
+
+/** 夹具：一条普通输送线（2400×1200，默认层数）。不动仓库数据，全部在内存里改件。 */
+function conveyorFixture(overrides = {}) {
+  const builder = pickModelBuilder('conveyor');
+  const normalized = normalizeModelParams(builder, { lengthMm: 2400, widthMm: 1200, ...overrides });
+  assert.equal(normalized.ok, true, normalized.message);
+  const params = toConveyorParams(normalized.params);
+  const config = {
+    id: 'p12-fixture',
+    name: '件盒三态夹具',
+    stations: ['上料'],
+    actuators: [],
+    sensors: [],
+    formId: 'belt-line',
+    // 让唯一入口也走参数化整机（否则会回落工位生成器，两条入口比的就不是同一台机器）
+    conveyor: { lengthMm: params.lengthMm, widthMm: params.widthMm }
+  };
+  return { params, config, parts: buildConveyorParts(params) };
+}
+
+/** 把某个件的特征树换掉（其余件原样）。 */
+function replaceFeatures(parts, partId, features) {
+  assert.ok(parts.some((part) => part.id === partId), `夹具里没有件 ${partId}`);
+  return parts.map((part) => (part.id === partId ? { ...part, features } : part));
+}
+
+const partById = (parts, id) => {
+  const part = parts.find((entry) => entry.id === id);
+  assert.ok(part, `夹具里没有件 ${id}`);
+  return part;
+};
+
+const boxFeature = (id, length, width, height, extra = {}) => ({
+  id, type: 'box', name: '型材', params: { length, width, height }, ...extra
+});
+
+test('件盒三态·NaN 参数：不再静默丢特征，抛 INVALID_PART_GEOMETRY', () => {
+  const { params, config, parts } = conveyorFixture();
+  const broken = replaceFeatures(parts, 'rail-left', [boxFeature('rail-left-body', Number.NaN, params.frameSectionMm, params.frameSectionMm)]);
+  const target = partById(broken, 'rail-left');
+  assert.throws(
+    () => partWorldBounds(target),
+    (error) => error instanceof MachinePartGeometryError
+      && error.code === 'INVALID_PART_GEOMETRY'
+      && error.fault === 'non-finite-param'
+      && error.partId === 'rail-left'
+      && error.featureId === 'rail-left-body'
+      && error.featureIndex === 0
+      && /rail-left/.test(error.message)
+  );
+  // 消费方整机入口也必须 fail-closed（旧口径是「这件小一圈，别处照算」）
+  assert.throws(() => conveyorGeometryFromParts(broken, config, params), (error) => error instanceof MachinePartGeometryError && error.partId === 'rail-left');
+
+  // 圆柱 at 里的 NaN：旧实现 `Number(v) || 0` 会把它变成 0（编坐标），现在读不出就报错
+  const cylinderPart = parts.find((part) => part.features.some((feature) => feature.type === 'cylinder'));
+  assert.ok(cylinderPart, '夹具里必须有圆柱件（滚筒/导柱）');
+  const node = cylinderPart.features.find((feature) => feature.type === 'cylinder');
+  const badAt = replaceFeatures(parts, cylinderPart.id, [{ ...node, params: { ...node.params, at: [0, Number.NaN, 0] } }]);
+  assert.throws(
+    () => partWorldBounds(partById(badAt, cylinderPart.id)),
+    (error) => error.fault === 'invalid-at' && /NaN/.test(error.message)
+  );
+});
+
+test('件盒三态·未知类型：不并入「减材料」，抛 unknown-feature-type（件盒不许偏小）', () => {
+  const { params, config, parts } = conveyorFixture();
+  // 一块合法型材 + 一条内核还不认识的加材料特征（prism）：旧口径把它当无实体丢掉，
+  // 件盒只剩 40 宽（真实外形 80 宽）；现在必须报错，不能给出偏小的盒。
+  const broken = replaceFeatures(parts, 'rail-left', [
+    boxFeature('rail-left-body', params.lengthMm, params.frameSectionMm, params.frameSectionMm),
+    { id: 'rail-left-prism', type: 'prism', name: '未知加材料特征', params: { length: params.lengthMm, width: 80, height: 80 } }
+  ]);
+  assert.throws(
+    () => partWorldBounds(partById(broken, 'rail-left')),
+    (error) => error instanceof MachinePartGeometryError
+      && error.fault === 'unknown-feature-type'
+      && error.featureIndex === 1
+      && error.featureId === 'rail-left-prism'
+      && /prism/.test(error.message)
+  );
+  assert.throws(() => conveyorGeometryFromParts(broken, config, params), (error) => error.fault === 'unknown-feature-type');
+  // 四个减材料类型仍是政策跳过（既不报错，也不撑大件盒）
+  const subtractive = replaceFeatures(parts, 'rail-left', [
+    boxFeature('rail-left-body', params.lengthMm, params.frameSectionMm, params.frameSectionMm),
+    ...['holes', 'counterbore', 'slot', 'fillet'].map((type) => ({ id: `rail-left-${type}`, type, name: type, params: {} }))
+  ]);
+  assert.doesNotThrow(() => conveyorGeometryFromParts(subtractive, config, params));
+});
+
+test('件盒三态·suppressed：与内核同口径跳过；唯一实体特征被压缩时不再给零盒', () => {
+  const { params, config, parts } = conveyorFixture();
+  const section = params.frameSectionMm;
+  // 正控（skip 口径）：压缩的大块特征不参与外形 —— 内核编译时也跳过（features.ts:139/484）
+  const withSuppressed = replaceFeatures(parts, 'rail-left', [
+    boxFeature('rail-left-body', params.lengthMm, section, section),
+    boxFeature('rail-left-guard', params.lengthMm, 400, 400, { suppressed: true })
+  ]);
+  const bounds = partWorldBounds(partById(withSuppressed, 'rail-left'));
+  assert.deepEqual(
+    [bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1], bounds.max[2] - bounds.min[2]],
+    [params.lengthMm, section, section],
+    '被压缩的特征不许撑大件盒'
+  );
+  assert.doesNotThrow(() => conveyorGeometryFromParts(withSuppressed, config, params));
+
+  // 反例：唯一实体特征被压缩 → 件里没有任何实体外形。旧口径给 [0,0,0] 零盒（件成零体积点）。
+  const onlySuppressed = replaceFeatures(parts, 'rail-left', [boxFeature('rail-left-body', params.lengthMm, section, section, { suppressed: true })]);
+  assert.throws(
+    () => partWorldBounds(partById(onlySuppressed, 'rail-left')),
+    (error) => error instanceof MachinePartGeometryError
+      && error.fault === 'no-solid-feature'
+      && error.partId === 'rail-left'
+      && error.featureIndex === -1
+  );
+  assert.throws(() => conveyorGeometryFromParts(onlySuppressed, config, params), (error) => error.fault === 'no-solid-feature');
+});
+
+test('件盒三态·零尺寸：零厚/零盒都判退化，不给零体积点', () => {
+  const { params, config, parts } = conveyorFixture();
+  const section = params.frameSectionMm;
+  // (a) 三轴里有一轴为 0 → 并集盒退化（旧口径照收，件变成一张零体积的“纸”）
+  const zeroThickness = replaceFeatures(parts, 'rail-left', [boxFeature('rail-left-body', params.lengthMm, section, 0)]);
+  assert.throws(
+    () => partWorldBounds(partById(zeroThickness, 'rail-left')),
+    (error) => error instanceof MachinePartGeometryError
+      && error.fault === 'degenerate-box'
+      && /三轴都必须 > 0/.test(error.message)
+  );
+  assert.throws(() => conveyorGeometryFromParts(zeroThickness, config, params), (error) => error.fault === 'degenerate-box');
+
+  // (b) 件里只有减材料特征 → 无实体外形可量（旧口径 `solids === 0` 给 [0,0,0] 零盒）
+  const noSolid = replaceFeatures(parts, 'rail-left', [{ id: 'rail-left-holes', type: 'holes', name: '安装孔', params: { positions: [[0, 0]] } }]);
+  assert.throws(
+    () => partWorldBounds(partById(noSolid, 'rail-left')),
+    (error) => error.fault === 'no-solid-feature' && /零盒/.test(error.message)
+  );
+});
+
+test('正控：正常件的几何结果不变（两条入口同一份几何、包络与逐件盒仍从零件表派生）', () => {
+  const { params, config, parts } = conveyorFixture();
+  const direct = conveyorGeometryFromParts(parts, config, params);
+  const resolved = resolveMachineGeometry(config);
+  assert.equal(direct.parts.length, parts.length, '件数不变（一件拆两件的只有同轴双径圆柱）');
+  // 唯一入口与直接映射必须给出**同一份**几何（本轮只改坏数据的判定，不改正常件的数）
+  assert.deepEqual(direct, resolved.geometry);
+  assert.deepEqual(direct.envelope, conveyorEnvelope(parts).map((value) => Math.round(value)));
+  // 逐件盒与特征声明一致：rail-left 的外形盒 = 线体长 × 截面 × 截面
+  const rail = partWorldBounds(partById(parts, 'rail-left'));
+  assert.deepEqual(
+    [rail.max[0] - rail.min[0], rail.max[1] - rail.min[1], rail.max[2] - rail.min[2]],
+    [params.lengthMm, params.frameSectionMm, params.frameSectionMm]
+  );
+  // 每件都量得出盒（没有一件掉到零盒/静默丢特征）
+  for (const part of parts) {
+    const box = partWorldBounds(part);
+    for (const axis of [0, 1, 2]) assert.ok(box.max[axis] > box.min[axis], `${part.id} 的轴 ${axis} 尺寸必须 > 0`);
+  }
+});
+
+/* ---------------- 8. 两处判据是同一份实现（T3 P1-1）：交叉一致性 ---------------- *
+ *
+ * 复审结论是「`machine-geometry` 与 `panel-channel` 同口径」这句话当时是假的：
+ * 同一份件表，碰撞侧对未知类型/退化盒**抛 INVALID_PART_GEOMETRY**，承托侧却当「无外形」跳过，
+ * `suppressed` 在 panel-channel 里根本没有被读过 —— 一处失败、一处继续算偏小的盒，且两处都不告警。
+ * 现在判据只有 `feature-box.ts` 一份实现，本节直接断言**同一组坏特征在两处结论一致**：
+ *   ① `parsePartLocalBox`（两个消费者的共用输入）判 invalid + 原因码；
+ *   ② `machine-geometry.partWorldBounds` 抛同一个原因码；
+ *   ③ `panel-channel.supportRowsFromConveyorPartsDetailed` 把该件剔进 `droppedPartIds`（行表里没有它）。
+ * 另加正控：正常件/被压缩件/减材料件，两处的盒逐字段相等（没有"这边算大、那边算小"的漂移）。
+ * ------------------------------------------------------------------ */
+
+const round2 = (value) => Math.round(value * 100) / 100;
+
+/** 世界 AABB → 与 panel-channel 行表同形状（它也 round2）。 */
+function geometryRowOf(part) {
+  const box = partWorldBounds(part);
+  return {
+    minX: round2(box.min[0]), maxX: round2(box.max[0]),
+    minY: round2(box.min[1]), maxY: round2(box.max[1]),
+    minZ: round2(box.min[2]), maxZ: round2(box.max[2])
+  };
+}
+
+const rowFields = (row) => ({
+  minX: row.minX, maxX: row.maxX, minY: row.minY, maxY: row.maxY, minZ: row.minZ, maxZ: row.maxZ
+});
+
+/** 捕获抛出（要求确实抛了，没抛就是回归）。 */
+function thrownBy(fn) {
+  try {
+    fn();
+  } catch (error) {
+    return error;
+  }
+  assert.fail('必须抛 INVALID_PART_GEOMETRY，实际没抛（静默给了个数）');
+}
+
+test('交叉一致性·坏特征：同一组坏特征在 machine-geometry 与 panel-channel 结论一致', () => {
+  const { params, config, parts } = conveyorFixture();
+  const section = params.frameSectionMm;
+  const length = params.lengthMm;
+  // 每条用例只换 rail-left 的特征树，其余件原样。
+  // `channel` 字段 = 承托侧遇到这条坏特征时的政策：
+  //   - `drop`：剔件（→ invalid-shelf-geometry），与几何侧抛错同义；
+  //   - `skip`：整件没有实体外形 → 不成行、不记 dropped（唯一被保留的政策差异，几何侧仍抛）。
+  const cases = [
+    {
+      label: 'NaN 参数（旧口径静默丢特征）',
+      fault: 'non-finite-param',
+      channel: 'drop',
+      features: [boxFeature('rail-left-body', Number.NaN, section, section)]
+    },
+    {
+      label: '未知类型 prism（旧口径当无外形跳过 → 件盒偏小）',
+      fault: 'unknown-feature-type',
+      channel: 'drop',
+      features: [
+        boxFeature('rail-left-body', length, section, section),
+        { id: 'rail-left-prism', type: 'prism', name: '未知加材料', params: { length, width: 80, height: 80 } }
+      ]
+    },
+    {
+      label: '零厚特征 → 并集盒退化（旧口径照收，件成零体积纸片）',
+      fault: 'degenerate-box',
+      channel: 'drop',
+      features: [boxFeature('rail-left-body', length, section, 0)]
+    },
+    {
+      label: '圆柱 at 含 NaN（旧口径 `Number(v) || 0` 编坐标）',
+      fault: 'invalid-at',
+      channel: 'drop',
+      features: [{
+        id: 'rail-left-pin',
+        type: 'cylinder',
+        name: '销轴',
+        params: { diameter: 20, height: length, axis: 'x', at: [0, Number.NaN, 0] }
+      }]
+    },
+    {
+      label: '圆柱轴向不认识（旧口径拿 z 顶替）',
+      fault: 'invalid-axis',
+      channel: 'drop',
+      features: [{
+        id: 'rail-left-pin',
+        type: 'cylinder',
+        name: '销轴',
+        params: { diameter: 20, height: length, axis: 'w', at: [0, 0, 0] }
+      }]
+    },
+    {
+      label: 'suppressed 唯一实体特征（旧 panel-channel 不读 suppressed）',
+      fault: 'no-solid-feature',
+      channel: 'skip',
+      features: [boxFeature('rail-left-body', length, section, section, { suppressed: true })]
+    },
+    {
+      label: '只有减材料特征（旧口径给 [0,0,0] 零盒）',
+      fault: 'no-solid-feature',
+      channel: 'skip',
+      features: [{ id: 'rail-left-holes', type: 'holes', name: '安装孔', params: { positions: [[0, 0]] } }]
+    }
+  ];
+
+  for (const entry of cases) {
+    const broken = replaceFeatures(parts, 'rail-left', entry.features);
+    const part = partById(broken, 'rail-left');
+
+    // ① 共用判据（两个消费者的同一份输入）：invalid + 同一个原因码
+    const shared = parsePartLocalBox(part.features);
+    assert.equal(shared.kind, 'invalid', `${entry.label}：共用判据必须判 invalid`);
+    assert.equal(shared.fault, entry.fault, `${entry.label}：共用判据原因码`);
+
+    // ② 碰撞/包络侧：抛，且原因码与共用判据一致
+    const error = thrownBy(() => partWorldBounds(part));
+    assert.ok(error instanceof MachinePartGeometryError, `${entry.label}：必须抛 MachinePartGeometryError`);
+    assert.equal(error.code, 'INVALID_PART_GEOMETRY');
+    assert.equal(error.partId, 'rail-left');
+    assert.equal(error.fault, shared.fault, `${entry.label}：抛出的原因码必须与共用判据一致`);
+    assert.equal(thrownBy(() => conveyorGeometryFromParts(broken, config, params)).fault, shared.fault,
+      `${entry.label}：整机几何入口也必须是同一个原因码`);
+
+    // ③ 承托/通道侧：判据相同（同一条 invalid），政策按上表
+    const derived = supportRowsFromConveyorPartsDetailed(broken);
+    assert.equal(derived.rows.some((row) => row.id === 'rail-left'), false, `${entry.label}：行表里不许再有该件`);
+    if (entry.channel === 'drop') {
+      assert.deepEqual(derived.droppedPartIds, ['rail-left'], `${entry.label}：panel-channel 必须把该件剔进 droppedPartIds`);
+      assert.equal(derived.rows.length, broken.length - 1, `${entry.label}：其余件仍各自成行（只剔坏件）`);
+    } else {
+      // 唯一保留的政策差异：整件没有实体外形 → 不是承托面，不成行；也不是"坏输入"，不记 dropped。
+      assert.deepEqual(derived.droppedPartIds, [], `${entry.label}：无实体外形的件不是坏输入，不许进 droppedPartIds`);
+      assert.equal(derived.rows.length, broken.length - 1, `${entry.label}：该件不成行，其余件照常`);
+    }
+  }
+
+  // 反例：正控不能被误伤 —— 合法件 + 减材料 + suppressed 大块特征 两处都不许报错
+  const healthy = replaceFeatures(parts, 'rail-left', [
+    boxFeature('rail-left-body', length, section, section),
+    { id: 'rail-left-holes', type: 'holes', name: '安装孔', params: { positions: [[0, 0]] } },
+    boxFeature('rail-left-guard', length, 400, 400, { suppressed: true })
+  ]);
+  assert.equal(parsePartLocalBox(partById(healthy, 'rail-left').features).kind, 'solid');
+  assert.doesNotThrow(() => conveyorGeometryFromParts(healthy, config, params));
+  assert.deepEqual(supportRowsFromConveyorPartsDetailed(healthy).droppedPartIds, []);
+});
+
+test('交叉一致性·正常件：同一件表两处的承托面盒逐字段相等（两套包络不许漂移）', () => {
+  const conveyor = conveyorFixture();
+  const towerParts16 = parts16().parts;
+  for (const [label, table] of [['输送线夹具', conveyor.parts], ['缓存塔 16 层', towerParts16]]) {
+    const derived = supportRowsFromConveyorPartsDetailed(table);
+    assert.deepEqual(derived.droppedPartIds, [], `${label}：正常件表不允许有被剔除的件`);
+    const rowsById = new Map(derived.rows.map((row) => [row.id, row]));
+    for (const part of table) {
+      const row = rowsById.get(part.id);
+      assert.ok(row, `${label}：${part.id} 必须有行`);
+      assert.deepEqual(rowFields(row), geometryRowOf(part), `${label}：${part.id} 两处盒必须逐字段相等`);
+    }
+  }
+});
+
+test('交叉一致性·suppressed/减材料：两处都不参与外形，盒逐字段相等（不许一边撑大一边不撑）', () => {
+  const { params, parts } = conveyorFixture();
+  const section = params.frameSectionMm;
+  const withExtras = replaceFeatures(parts, 'rail-left', [
+    boxFeature('rail-left-body', params.lengthMm, section, section),
+    // 压缩的大块特征：内核编译时跳过 → 两处的盒都只能是 body 那一条
+    boxFeature('rail-left-guard', params.lengthMm, 400, 400, { suppressed: true }),
+    // 减材料特征：政策跳过，不撑大也不报错
+    { id: 'rail-left-holes', type: 'holes', name: '安装孔', params: {} },
+    { id: 'rail-left-slot', type: 'slot', name: '长槽', params: {} }
+  ]);
+  const part = partById(withExtras, 'rail-left');
+  const derived = supportRowsFromConveyorPartsDetailed([part]);
+  assert.deepEqual(derived.droppedPartIds, [], '合法件（含 suppressed/减材料）不许被剔');
+  assert.equal(derived.rows.length, 1);
+  const row = derived.rows[0];
+  assert.deepEqual(rowFields(row), geometryRowOf(part), '两处的盒必须逐字段相等');
+  assert.equal(round2(row.maxY - row.minY), round2(section), '被压缩的 400 宽特征不许撑大承托面');
+  assert.equal(round2(row.maxZ - row.minZ), round2(section));
+  assert.equal(round2(row.maxX - row.minX), round2(params.lengthMm));
+});
+
+test('判据只有一份实现：panel-channel 不再自算局部盒、减材料白名单只定义一次', () => {
+  const panel = readFileSync(new URL('../../src/machine/panel-channel.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(panel, /function featureLocalBox/, 'panel-channel 不许再有第二套特征判据');
+  assert.match(panel, /parsePartLocalBox\(part\.features\)/, 'panel-channel 必须走共用判据');
+  const geometry = readFileSync(new URL('../../src/machine/machine-geometry.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(geometry, /function featureLocalBox/, 'machine-geometry 不许再有第二套特征判据');
+  assert.match(geometry, /parsePartLocalBox\(part\.features\)/, 'machine-geometry 必须走共用判据');
+  // 白名单/原因码只在 feature-box.ts 定义
+  for (const [name, source] of [['machine-geometry', geometry], ['panel-channel', panel]]) {
+    assert.doesNotMatch(source, /new Set\(\['holes', 'counterbore', 'slot', 'fillet'\]\)/, `${name} 不许再定义一份减材料白名单`);
+  }
+  // 世界盒换算（review P2 第二轮）：rotateLocal / rotate2 两份手写实现必须已并入 feature-box.ts
+  const featureBox = readFileSync(new URL('../../src/machine/feature-box.ts', import.meta.url), 'utf8');
+  assert.match(featureBox, /export function rotateAboutZ/, '旋转只有 feature-box.ts 一份');
+  assert.match(featureBox, /export function worldBoxFromLocal/, '世界盒换算只有 feature-box.ts 一份');
+  assert.match(featureBox, /export function inspectTransform/, 'transform 结构检查在同源模块里');
+  for (const [name, source] of [['machine-geometry', geometry], ['panel-channel', panel]]) {
+    assert.doesNotMatch(source, /function rotateLocal|function rotate2/, `${name} 不许再有第二份手写旋转`);
+    assert.match(source, /worldBoxFromLocal/, `${name} 必须走共用世界盒换算`);
+  }
+});
+
+test('结构级坏件（P2）：features 非数组 / 元素 null / params 缺 / transform 缺 → INVALID_ARGUMENT，通道只剔该件', () => {
+  const { params, config, parts } = conveyorFixture();
+  const cases = [
+    { label: 'features=undefined', fault: 'malformed-part', featureLevel: true, mutate: (part) => ({ ...part, features: undefined }) },
+    { label: 'features=null', fault: 'malformed-part', featureLevel: true, mutate: (part) => ({ ...part, features: null }) },
+    { label: 'features 是字符串', fault: 'malformed-part', featureLevel: true, mutate: (part) => ({ ...part, features: 'rail-left-body' }) },
+    { label: 'features=[null]', fault: 'malformed-feature', featureLevel: true, mutate: (part) => ({ ...part, features: [null] }) },
+    {
+      label: '特征缺 params',
+      fault: 'malformed-feature',
+      featureLevel: true,
+      mutate: (part) => ({ ...part, features: [{ id: 'rail-left-body', type: 'box', name: '型材' }] })
+    },
+    { label: 'transform 缺', fault: 'malformed-part', featureLevel: false, mutate: (part) => ({ ...part, transform: undefined }) },
+    {
+      label: 'transform.rz=NaN',
+      fault: 'malformed-part',
+      featureLevel: false,
+      mutate: (part) => ({ ...part, transform: { ...part.transform, rz: Number.NaN } })
+    }
+  ];
+  for (const entry of cases) {
+    const broken = parts.map((part) => (part.id === 'rail-left' ? entry.mutate(part) : part));
+    const target = broken.find((part) => part.id === 'rail-left');
+
+    // ① 共用判据：结构级坏件同样是 invalid + 固定原因码（transform 不在 parsePartLocalBox 的输入里，
+    //    那两条只断言下面 ②③④ —— 不把「查不到」说成「查过且通过」）。
+    if (entry.featureLevel) {
+      const shared = parsePartLocalBox(target.features);
+      assert.equal(shared.kind, 'invalid', `${entry.label}：共用判据必须判 invalid（旧口径 TypeError）`);
+      assert.equal(shared.fault, entry.fault, `${entry.label}：共用判据原因码`);
+    }
+
+    // ② 几何/包络侧：抛 MachinePartGeometryError（件号 + 原因码），不是 TypeError
+    const error = thrownBy(() => partWorldBounds(target));
+    assert.ok(error instanceof MachinePartGeometryError, `${entry.label}：必须抛 MachinePartGeometryError（收到 ${error}）`);
+    assert.equal(error.code, 'INVALID_PART_GEOMETRY');
+    assert.equal(error.partId, 'rail-left');
+    assert.equal(error.fault, entry.fault, `${entry.label}：结构级坏件的原因码`);
+    assert.throws(
+      () => conveyorGeometryFromParts(broken, config, params),
+      (thrown) => thrown instanceof MachinePartGeometryError && thrown.fault === entry.fault,
+      `${entry.label}：整机几何入口同样 fail-closed`
+    );
+
+    // ③ 错误分类：结构级坏件 = 件表数据坏 → INVALID_ARGUMENT（旧口径 TypeError → INTERNAL_ERROR）
+    const classified = classifyDesignMachineFailure(error);
+    assert.equal(classified.code, 'INVALID_ARGUMENT', `${entry.label}：不许落 INTERNAL_ERROR`);
+    assert.equal(classified.partId, 'rail-left');
+    assert.equal(classified.fault, entry.fault);
+    assert.match(classified.hint, /件表数据本身不合法/);
+
+    // ④ 通道侧：只剔这一件，其余件照常成行（旧口径整张行表 TypeError 中断）
+    const derived = supportRowsFromConveyorPartsDetailed(broken);
+    assert.deepEqual(derived.droppedPartIds, ['rail-left'], `${entry.label}：通道只剔坏件`);
+    assert.equal(derived.rows.some((row) => row.id === 'rail-left'), false);
+    assert.equal(derived.rows.length, broken.length - 1, `${entry.label}：其余件不许跟着消失`);
+  }
+});
+
+test('世界盒换算·rz≠0：合成旋转件两处逐字段相等（旋转分支不再无覆盖）', () => {
+  const { parts } = conveyorFixture();
+  const base = partById(parts, 'rail-left');
+  const rz = 30;
+  // 局部盒中心偏到 (60, 20)：rz≠0 时「中心偏移也要旋转」，rz=0 分支看不出差别。
+  const rotated = {
+    ...base,
+    transform: { x: 120, y: -80, z: 260, rz },
+    features: [{ id: 'rail-left-pin', type: 'cylinder', name: '偏置销轴', params: { diameter: 40, height: 100, axis: 'z', at: [60, 20, 0] } }]
+  };
+  const world = partWorldBounds(rotated);
+  const derived = supportRowsFromConveyorPartsDetailed([rotated]);
+  assert.deepEqual(derived.droppedPartIds, []);
+  assert.deepEqual(rowFields(derived.rows[0]), geometryRowOf(rotated), 'rz≠0 时两处盒必须逐字段相等');
+
+  // 变异自证：旋转真的参与换算（否则这条用例对 rz≠0 分支零约束）
+  const rad = (rz * Math.PI) / 180;
+  const expectedCenterX = 120 + 60 * Math.cos(rad) - 20 * Math.sin(rad);
+  const expectedCenterY = -80 + 60 * Math.sin(rad) + 20 * Math.cos(rad);
+  const expectedHalfX = 20 * Math.cos(rad) + 20 * Math.sin(rad);
+  assert.equal(round2(world.center[0]), round2(expectedCenterX), '中心必须绕 Z 旋转');
+  assert.equal(round2(world.center[1]), round2(expectedCenterY));
+  assert.equal(round2(world.half[0]), round2(expectedHalfX), 'AABB 半宽必须按 |cos|/|sin| 撑开');
+  const straight = partWorldBounds({ ...rotated, transform: { ...rotated.transform, rz: 0 } });
+  assert.notEqual(round2(world.center[0]), round2(straight.center[0]), 'rz≠0 与 rz=0 的盒必须不同');
+  assert.notEqual(round2(world.half[0]), round2(straight.half[0]));
+  assert.equal(round2(straight.half[0]), 20, 'rz=0 时半宽就是原尺寸');
+
+  // 整表交叉一致性：所有件统一转 17°，两处逐件逐字段相等（不只挑一件）
+  const allRotated = parts.map((part) => ({ ...part, transform: { ...part.transform, rz: 17 } }));
+  const rowsById = new Map(supportRowsFromConveyorPartsDetailed(allRotated).rows.map((row) => [row.id, row]));
+  for (const part of allRotated) {
+    assert.deepEqual(rowFields(rowsById.get(part.id)), geometryRowOf(part), `${part.id}：rz=17 时两处盒必须相等`);
+  }
+});
+
+/* ---------------- 9. 错误分类（T3 P2-4）：件表坏 ≠ 软件缺陷 ---------------- */
+
+test('错误分类：INVALID_PART_GEOMETRY 映射 INVALID_ARGUMENT（带件号/原因码/特征定位），不落 INTERNAL_ERROR', () => {
+  const { params, config, parts } = conveyorFixture();
+  const broken = replaceFeatures(parts, 'rail-left', [boxFeature('rail-left-body', Number.NaN, params.frameSectionMm, params.frameSectionMm)]);
+  const error = thrownBy(() => conveyorGeometryFromParts(broken, config, params));
+  assert.ok(error instanceof MachinePartGeometryError);
+
+  const result = machinePartGeometryFailure(error);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'INVALID_ARGUMENT', '件表坏必须按调用方输入错分类，不是 INTERNAL_ERROR');
+  assert.equal(result.partId, 'rail-left');
+  assert.equal(result.fault, 'non-finite-param');
+  assert.equal(result.featureIndex, 0);
+  assert.equal(result.featureId, 'rail-left-body');
+  assert.equal(result.featureType, 'box');
+  assert.match(result.message, /rail-left/);
+  // hint 必须指向"修件表"，不能再是"反馈现场日志"
+  assert.match(result.hint, /件表数据本身不合法/);
+  assert.match(result.hint, /suppressed/);
+  assert.doesNotMatch(result.hint, /反馈现场日志/);
+
+  // 分派按 code 判（跨模块实例/序列化回来的也认），字段不齐不猜
+  assert.equal(isMachinePartGeometryError(error), true);
+  assert.equal(isMachinePartGeometryError({ code: 'INVALID_PART_GEOMETRY', partId: 'p-1', fault: 'degenerate-box', featureIndex: -1, message: 'x' }), true);
+  assert.equal(isMachinePartGeometryError({ code: 'INVALID_PART_GEOMETRY' }), false, '缺上下文的同 code 对象不许当证据');
+  assert.equal(isMachinePartGeometryError(new RangeError('越界')), false);
+  assert.equal(isMachinePartGeometryError({ code: 'INTERNAL_ERROR', message: 'x' }), false);
+
+  // 分类顺序（catch 的唯一出口）：几何坏 → INVALID_ARGUMENT；其余三类不许被它吃掉
+  const viaClassifier = classifyDesignMachineFailure(error);
+  assert.equal(viaClassifier.code, 'INVALID_ARGUMENT');
+  assert.equal(viaClassifier.partId, 'rail-left', '分类器必须把件号带出来');
+  assert.equal(viaClassifier.fault, 'non-finite-param');
+  assert.equal(classifyDesignMachineFailure(new BufferTowerConfigError('NOT_IMPLEMENTED', '双塔本期不支持')).code, 'NOT_IMPLEMENTED',
+    'NOT_IMPLEMENTED 仍是 NOT_IMPLEMENTED，不许被几何分支抢走');
+  assert.equal(classifyDesignMachineFailure(new RangeError('层距越界')).code, 'INVALID_ARGUMENT', '范围参数错仍是 INVALID_ARGUMENT');
+  const internal = classifyDesignMachineFailure(new TypeError('constructor 里少个字段'));
+  assert.equal(internal.code, 'INTERNAL_ERROR', '真软件缺陷仍必须是 INTERNAL_ERROR');
+  assert.match(internal.hint, /反馈现场日志/);
+  // 只带 code 的伪造对象走 INVALID_ARGUMENT 会缺上下文，故分类器要求字段齐全：这种情况落 INTERNAL_ERROR（不猜）
+  assert.equal(classifyDesignMachineFailure({ code: 'INVALID_PART_GEOMETRY' }).code, 'INTERNAL_ERROR');
+
+  // 接线：design_machine 的 catch 里，几何坏分支必须在 INTERNAL_ERROR 之前，且返回走上面这个映射
+  const source = readFileSync(new URL('../../src/agent/tools.ts', import.meta.url), 'utf8');
+  const geometryBranch = source.indexOf('[DESIGN_MACHINE_INVALID_PART_GEOMETRY]');
+  const internalBranch = source.indexOf('[DESIGN_MACHINE_FAILED]');
+  assert.ok(geometryBranch > 0, 'design_machine 必须为件表几何坏单独记一条日志');
+  assert.ok(internalBranch > geometryBranch, '几何坏分支必须排在 INTERNAL_ERROR 之前');
+  assert.match(source, /return machinePartGeometryFailure\(error\)/, '几何坏分支必须返回 INVALID_ARGUMENT 回执');
 });
