@@ -51,10 +51,35 @@ import {
 } from '../modules/parametric-gate.ts';
 import { isParametricHistoryEnabled } from '../modules/parametric-history-gate.ts';
 
+/** stderr 分类：与主进程 `ParametricStderrClass` 同值域（渲染层不 import 主进程模块）。 */
+export type ParametricUiStderrClass =
+  | 'argparse'
+  | 'missing-module'
+  | 'address-in-use'
+  | 'permission-denied'
+  | 'out-of-memory'
+  | 'traceback'
+  | 'empty'
+  | 'unknown';
+
 export interface ParametricUiStatus {
   status: 'stopped' | 'starting' | 'ready' | 'unavailable' | 'crashed';
   message: string;
   version?: string;
+  /** 启动失败分类（只在失败路径由主进程给出）。 */
+  stderrClass?: ParametricUiStderrClass;
+  /** 实测启动耗时（launch 开始 → ready 或失败定性），ms。 */
+  elapsedMs?: number;
+  /** 子进程 exit code；spawn 失败或无 exit 为 null。 */
+  exitCode?: number | null;
+  /**
+   * 终止信号（SIGKILL/SIGTERM…），正常 exit 为 null。
+   *
+   * 为什么渲染层也要收：`parametric.ts` 的 SIGKILL/OOM 崩溃路径**没有 exit code**（`exitCode=null`），
+   * 信号只在 `signal` 字段里。旧实现不收这个字段，于是「被杀」在界面上只剩「分类 + 耗时」，
+   * 与「健康检查超时」看起来一模一样。
+   */
+  signal?: string | null;
 }
 
 export interface ParametricBuildLike {
@@ -509,12 +534,35 @@ export function initParametricUi(options: ParametricUiOptions): ParametricUiHand
     return validateFeatures(currentAssembly());
   }
 
+  /**
+   * 失败分类后缀，形如 `分类=argparse · 实测 96 ms · exit=2` / `… · signal=SIGKILL`。
+   *
+   * 与 `electron/parametric-start-view.ts` 的 `describeStartFailure` **同形**：字段名、顺序
+   * （分类 → 实测 → signal|exit）与优先级（有 signal 就不报 exit，因为同一进程不会两者都有）逐条一致。
+   * 渲染层不能 import 主进程目录，所以是**同形副本**而非共用实现 —— 两份的一致性由
+   * `test/parametric/start-view.test.mjs` 的「UI 副本锁形」一条守住。
+   *
+   * 空串 = 不追加，所以没有证据字段的旧路径 message 文案逐字不变。
+   */
+  function startFailureSuffix(status: ParametricUiStatus): string {
+    if (status.status !== 'unavailable' && status.status !== 'crashed') return '';
+    const parts: string[] = [];
+    if (status.stderrClass !== undefined) parts.push(`分类=${status.stderrClass}`);
+    if (status.elapsedMs !== undefined) parts.push(`实测 ${status.elapsedMs} ms`);
+    if (status.signal !== undefined && status.signal !== null) parts.push(`signal=${status.signal}`);
+    else if (status.exitCode !== undefined && status.exitCode !== null) parts.push(`exit=${status.exitCode}`);
+    return parts.join(' · ');
+  }
+
   function refreshState(): void {
     const label = STATUS_LABELS[statusView.status];
+    const suffix = startFailureSuffix(statusView);
+    // 分类只做 message 后缀（不新增 DOM 节点/CSS）：容器文本与 title 共用同一句。
+    const message = suffix ? `${statusView.message} · ${suffix}` : statusView.message;
     stateLabel.textContent = label;
-    stateMessage.textContent = statusView.message;
+    stateMessage.textContent = message;
     stateDot.dataset.state = statusView.status;
-    stateDot.title = statusView.message;
+    stateDot.title = message;
   }
 
   function refreshFooter(): void {
@@ -805,10 +853,15 @@ export function initParametricUi(options: ParametricUiOptions): ParametricUiHand
       if (status.status !== 'stopped') return;
       setStatus({ status: 'starting', message: '正在启动参数化建模内核…' });
       const started = await parametric.start();
+      // 失败证据（分类/耗时/exit）逐项透传，message 本身不动：分类段只在 refreshState 里追加。
       setStatus({
         status: started.status,
         message: started.message,
-        ...(started.version ? { version: started.version } : {})
+        ...(started.version ? { version: started.version } : {}),
+        ...(started.stderrClass ? { stderrClass: started.stderrClass } : {}),
+        ...(started.elapsedMs !== undefined ? { elapsedMs: started.elapsedMs } : {}),
+        ...(started.exitCode !== undefined ? { exitCode: started.exitCode } : {}),
+        ...(started.signal !== undefined ? { signal: started.signal } : {})
       });
     } catch (error) {
       setStatus({

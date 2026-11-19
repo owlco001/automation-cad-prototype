@@ -231,9 +231,29 @@ interface DesktopParametricStatusInfo {
   version?: string;
 }
 
+type DesktopParametricStderrClass =
+  | 'argparse'
+  | 'missing-module'
+  | 'address-in-use'
+  | 'permission-denied'
+  | 'out-of-memory'
+  | 'traceback'
+  | 'empty'
+  | 'unknown';
+
 interface DesktopParametricStartResult extends DesktopParametricStatusInfo {
   ok: boolean;
-  code?: 'MODULE_DISABLED';
+  code?: 'MODULE_DISABLED' | 'COMMAND_NOT_FOUND' | 'SPAWN_FAILED' | 'PROCESS_EXITED' | 'HEALTH_TIMEOUT' | 'PORT_UNAVAILABLE';
+  /** 实测启动耗时（launch 开始 → ready 或失败定性），ms。 */
+  elapsedMs?: number;
+  /** 子进程自己的 exit code（早退场景）；spawn 失败或无 exit 时为 null。 */
+  exitCode?: number | null;
+  /** 终止信号（SIGKILL/SIGTERM…），正常 exit 为 null。 */
+  signal?: string | null;
+  /** stderr 结构化分类：argparse / 缺包 / 占端口 / 权限 / OOM / traceback / 空 / 未知。 */
+  stderrClass?: DesktopParametricStderrClass;
+  /** 已脱敏的 stderr 尾部（token 已替换为 [REDACTED]），≤ 4 KB。 */
+  stderrTail?: string;
 }
 
 interface DesktopParametricBuildResult {

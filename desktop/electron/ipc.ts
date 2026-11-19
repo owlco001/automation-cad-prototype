@@ -85,6 +85,7 @@ import { AUDIT_DISPLAY_LIMIT, limitAuditEntries } from '../src/agent/audit-view.
 import type { AgentProgressEvent } from '../src/agent/feedback.ts';
 import type { FeatureDoc } from '../src/parametric/features.ts';
 import type { ParametricManager, ParametricStartInfo } from './parametric.ts';
+import { toPublicStartResult, type PublicParametricStartResult } from './parametric-start-view.ts';
 import { createZip } from '../src/shared/zip.ts';
 import {
   exportSelectedCadAsPortableArchive,
@@ -1037,12 +1038,9 @@ export function registerIpcHandlers(context: IpcContext): PackRegistry {
   const getParametric = (): ParametricManager | null => context.getParametric();
   const unavailableStatus = { status: 'unavailable' as const, message: '参数化建模内核不可用' };
   const parametricEnabled = (): boolean => isParametricImportEnabled(context.isParametricImportEnabled);
-  const publicStart = (info: ParametricStartInfo): Omit<ParametricStartInfo, 'port' | 'token'> => ({
-    ok: info.ok,
-    status: info.status,
-    message: info.message,
-    ...(info.version ? { version: info.version } : {})
-  });
+  // 结构化失败证据（code/elapsedMs/exitCode/signal/stderrClass/stderrTail）逐项透传到渲染层，
+  // 仍剥掉 port/token；纯函数在 electron/parametric-start-view.ts，可脱离 Electron 单测。
+  const publicStart = (info: ParametricStartInfo): PublicParametricStartResult => toPublicStartResult(info);
   const parametric = getParametric();
   parametric?.onStatus((state) => broadcast('parametric:status-changed', state));
   handle('parametric:status', () => {
