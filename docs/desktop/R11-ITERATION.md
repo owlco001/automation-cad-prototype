@@ -1,10 +1,10 @@
 # R11 迭代（2026-11-19）：三包落地 + 整改 + 复审
 
-**状态：三包全部落地并整改完毕，复审「有条件通过」；`sweep` 仍 fail、`feasible=false`；未提交、未推送、无 CI、无安装包。** 本文件是本轮完整报告；可移交摘要见 `R11-ACCEPTANCE.md`，通道口径与两条归零路线的决策书见 `R11-CHANNEL-SWEEP.md`。
+**状态：三包全部落地并整改完毕，复审「有条件通过」；`sweep` 仍 fail、`feasible=false`；4 笔已推（末笔 `1d2bad6` = `origin/main`）；CI run `44533462036` attempt1 红在 apt 基础设施、attempt2 7/7 绿；无安装包、无 Release。** 本文件是本轮完整报告；可移交摘要见 `R11-ACCEPTANCE.md`，通道口径与两条归零路线的决策书见 `R11-CHANNEL-SWEEP.md`。
 
-- 仓库 `/tmp/automation-cad-prototype` @ `main 036b548`；工作树 = **14 文件（8 改 6 新）**，全部未提交
+- 仓库 `/tmp/automation-cad-prototype` @ `main 1d2bad6`（= `origin/main`）；工作树**干净**；R11 交付 = **4 笔已推**（`9faa2a6` / `16a48cc` / `e3dcc33` / `1d2bad6`，基线 `036b548`；合计 14 文件 = 8 改 6 新）
 - 证据目录 `/root/.hermes/cache/scratch/cad-r11-final/`（`scratch/` 永不提交）
-- 本机数字**不是** CI 读数；本轮一次 CI 都没跑（没有 push）
+- 本机门禁数字**不是** CI 读数；CI 只给 job 级结论（§3.1）
 
 ---
 
@@ -90,6 +90,18 @@
 - `STARTUP_METRICS totalMs=468.234` 零点仍 = **main 模块求值起点**，不含 Electron bootstrap 与静态 import；是**口径读数**，不是性能提升宣称（无跨版本对照）。
 - 4 个 SKIP 均带原因：`SMOKE_PLACEHOLDER_DIMS_SKIP reason=no-webgl`、`SMOKE_PARAMETRIC_SIDECAR_SKIP`、`SMOKE_PARAMETRIC_UI_SKIP`、`SMOKE_DRAWINGS_UI_SKIP`。
 
+### 3.1 CI（远端，run `44533462036` @ `1d2bad6`）
+
+| 次 | 结论 | 关键点 |
+|---|---|---|
+| attempt1 | **failure**（6/7 job 绿） | `Qt + OCCT 视口`（job `135592595132`）红在步 3「安装 Qt6 + OCCT 开发包 + Xvfb」：`security.ubuntu.com` 取 `libocct-modeling-data` / `libocct-modeling-algorithms` / `libocct-ivtk-dev` / `libocct-data-exchange-dev` `7.9.2+dfsg-4` 全部 `Connection failed`（另有多次 `503 Service Unavailable`），`E: Unable to fetch some archives` → **exit 100**；步 4「配置与编译（OCCT=ON）」、步 5「OCCT 视口自检（xvfb）」**skipped** |
+| attempt2 | **success 7/7** | 同 job 重跑（job `135600296583`，13:39:45→13:42:04）：apt 装成（`Setting up libocct-*-dev:amd64 (7.9.2+dfsg-4)`）→ `-- OCCT AIS 视口：启用` → xvfb 视口自检通过；其余 6 job 同 attempt1 |
+
+- **attempt1 是基础设施瞬时故障，不是断言红**：红在 apt 网络步，编译步与自检步 skipped，**代码/测试一条都没被执行**。日志 `ci-qt-failure.log`；**这条红如实保留作证据，不得改写成「从未红过」或「CI 一次就绿」。**
+- attempt2 的绿**只挂 `1d2bad6`**。CI 的 7 个 job：`tsc + unit tests`（内含 `npm test`、`eval:agent`、`eval:tasks`）、`FeatureTree real geometry (build123d)`、`Electron smoke (xvfb)`、`Qt client build`、`Qt + OCCT 视口`、`Qt 客户端（Windows 编译）`、`Qt + OCCT（Windows 编译）`。
+- **CI 不跑 `verify:channel` / `verify:step-tower` / `doctor:sidecar`** → §3 表里这些数字仍只能按本机读数引用。
+- **CI 绿不改通道结论**：`sweep` 仍 fail、`feasible=false`（§4）。
+
 ---
 
 ## 4. 结论边界（任何一轮都不许越过）
@@ -99,11 +111,11 @@
 3. **两条归零路未实施**：缩回 240 mm / 开 240 缺口都是机构变更 + 结构校核，本轮只出决策书；且「归零 ≠ 可行」已由外移变体实测（0+0 / pass，`feasible` 仍 false）。
 4. **承托结论不变**：rest `unsupported`、carried `diagnostic-only`；27→30 条只说明尺子更细，不改变承托判定。
 5. **STEP 只到名字/包络级**：每件包络内 ≥1 个 B-Rep 顶点 + 精确件号/宿主/声明件存在，**不是逐面/逐实体身份，不是制造验收**；`structure.accepted:false`、IO `null`、`executable=false` 未动。
-6. **无安装包、无 Release、无 CI**：本轮 14 文件全部未提交未推送，因此没有任何远端读数；本机数字一律不是 CI 证据。
+6. **CI 只有 job 级绿，且不覆盖通道尺子**：`44533462036` attempt2 7/7 挂 `1d2bad6`，但**同 run 的 attempt1 红过**（apt 503，0 断言跑到，已重跑）；`verify:channel` / `verify:step-tower` / `doctor:sidecar` 不在 CI 内。**无安装包、无 Release**：`build:ext` 只是扩展产物与体积门禁，未签名、未打 tag。
 
 ## 5. 未做 / 下一轮
 
-- 提交与推送（需授权）；push 后才会有 CI，届时按 `HANDOFF-NEXT-SESSION.md` 的顺序看 `verify:step` 证据。
+- 提交/推送/CI 已收口：4 笔在 `origin/main`，CI `44533462036` attempt2 7/7（attempt1 红在 apt 网络步，见 §3.1）；再改代码后重跑，判定口径不变（只认 `headSha = $(git rev-parse HEAD)` 的 run）。
 - 升降通道归零：等老王拍板路线 ①/② 并补结构校核（承托判据看不见的部分：悬臂挠度/扭转、缺口局部刚度、断辊）。
 - 结构/安全/电气/PLC、STEP 逐实体身份 —— 仍未动。
 - `--resources-root` 写错时 dry-run 静默零命中（P2，文档已披露，未改代码）。

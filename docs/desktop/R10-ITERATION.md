@@ -8,9 +8,9 @@
    `git show e480f57:docs/desktop/PV-BUFFER-ITERATION-HANDOFF.md`（245 行）。数字/结论按 commit 与 CI run 复核，不以本文件的转述为准。
 
 - 仓库：`owlco001/automation-cad-prototype`；工作目录 `/tmp/automation-cad-prototype`
-- 代码状态：`HEAD = origin/main`（最新一笔为文档同步提交，`git log --oneline -3` 复核），**工作区干净**；R10 代码共 **6 笔，全部已推**（`137a68d` / `0379e15` / `ba8020d` / `94ec7e6` / `9409f3e` / `e1d1138`，末笔 sidecar 诊断/竞态修复 4 文件 +604/−32）；含 `e1d1138` 的新 run `44516236961`（head `e2c3213`）**结论未出**
+- 代码状态：`HEAD = origin/main`（最新一笔为文档同步提交，`git log --oneline -3` 复核），**工作区干净**；R10 代码共 **6 笔，全部已推**（`137a68d` / `0379e15` / `ba8020d` / `94ec7e6` / `9409f3e` / `e1d1138`，末笔 sidecar 诊断/竞态修复 4 文件 +604/−32）；含 `e1d1138` 的新 run `44516236961`（head `e2c3213`）最终 **cancelled**（Qt 视口 job cancelled，其余 6 job success；被后续 push 的 run `44516497660` @ `036b548` **7/7 success** 取代——该 run 含 `e1d1138` 全部内容，即 R10 代码的远端最终绿证据）
 - 上轮远端 CI：run **`44493445997`**（head `e480f57`）**success，7/7 job** —— 只覆盖 `e480f57`
-- 本轮状态：**终验已完成（见 §2）**；**CI 两次都未绿，原因不同**：首跑 `44506016602`（head `94ec7e6`）是 `featuretree-geometry` 没跑 `npm ci` → `Cannot find package 'adm-zip'`（**断言一条没跑到**，已由 `9409f3e` 修）；第二跑 `44508941094`（head `9409f3e`，job `135507781027`）依赖与装配都过，红在 `verify:step` —— sidecar 起来后**约 0.36 s 自行退出**（两个端口 7440/7435），旧实现误报成「健康检查在 3 秒内未通过」，**具体真因未证**（stderr 被丢）。修正已在 `e1d1138` 推送（§1 包 D）；其触发的**新 run `44516236961` 结论未出**，只有该 run 才算数。**不许写「CI 全绿」。无安装包发版。**
+- 本轮状态：**终验已完成（见 §2）**；**CI 两次都未绿，原因不同**：首跑 `44506016602`（head `94ec7e6`）是 `featuretree-geometry` 没跑 `npm ci` → `Cannot find package 'adm-zip'`（**断言一条没跑到**，已由 `9409f3e` 修）；第二跑 `44508941094`（head `9409f3e`，job `135507781027`）依赖与装配都过，红在 `verify:step` —— sidecar 起来后**约 0.36 s 自行退出**（两个端口 7440/7435），旧实现误报成「健康检查在 3 秒内未通过」，**具体真因未证**（stderr 被丢）。修正已在 `e1d1138` 推送（§1 包 D）；其触发的 run `44516236961` 最终 cancelled，**由 run `44516497660` @ `036b548`（7/7 success，含 `e1d1138`）作为 R10 代码的远端最终绿证据**。
 
 ## 1. 本轮三包（改了什么）＋ 包 D（已推送 `e1d1138`）
 
