@@ -70,6 +70,9 @@ jobs:
       # t12-step-export 会真起 build123d 出 STEP；runner 没内核时该例打印 SKIP（不计 pass，
       # 也不计 fail），日志里必须能看到 `TASK_EVAL t12-step-export SKIP`。
       # 不加 `|| true`：TASK_EVAL_SUMMARY 里 failed>0 时脚本本身 exit 1，这里必须跟着红。
+      # 本 job 是**非严格档**，故意如此：这里没有 build123d，t12 恒 SKIP，加 --require-full
+      # 只会假红（比不接更糟）。严格档在 featuretree-geometry job（那个 job 先装了内核）。
+      # 守卫：desktop/test/meta/ci-strict-gates.test.mjs（读 run 命令，不认注释）。
       - name: 任务级评测（末态断言，失败即红）
         timeout-minutes: 10
         run: |
@@ -812,10 +815,12 @@ jobs:
   featuretree-geometry:
     name: FeatureTree real geometry (build123d)
     runs-on: ubuntu-latest
-    # 步骤预算（最坏情形）：安装 build123d ~10 + 装配 10 + 体积 10 + STEP 12 + 缓存塔 20 + AABB 10
-    # = 72 min，另加 checkout/setup-python 的 1~2 min；job 级 75 min 必须 ≥ 步骤合计，
-    # 否则最后一步会在跑完断言前被掐断，表现成「红但原因误导」（60 < 62 就是旧口径的错）。
-    timeout-minutes: 75
+    # 步骤预算（最坏情形）：安装 build123d ~10 + 装配 10 + 体积 10 + STEP 12 + 缓存塔 20
+    # + 任务级评测（严格档）10 + 严格档负向自证 5 + AABB 10 = 87 min，另加 checkout/setup-python 的 1~2 min；
+    # job 级 90 min 必须 ≥ 步骤合计，否则最后一步会在跑完断言前被掐断，表现成「红但原因误导」
+    # （60 < 62 就是旧口径的错；加了严格评测后旧的 75 min 也不够了；再加负向自证后 82 也不够了）。
+    # 加 step 必须同时改这里 —— desktop/test/meta/ci-strict-gates.test.mjs ⑥ 会判红。
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -853,8 +858,58 @@ jobs:
           . .venv-ft/bin/activate
           cd desktop
           export AUTOMATIONCAD_PYTHON="$PWD/../.venv-ft/bin/python"
-          npm run verify:step-tower -- --levels 16
-          npm run verify:step-tower -- --levels 8
+          # --require-full：本次必须完整验证，SKIP 即 exit 1。没有它时脚本按老约定
+          # 「显式跳过不是失败」返回 0，于是内核缺失/件建不出来只留一行 STEP_VERIFY SKIP，
+          # job 照样绿 —— 门禁看着在，实际什么都没验（本轮修的就是这个）。
+          npm run verify:step-tower -- --levels 16 --require-full
+          npm run verify:step-tower -- --levels 8 --require-full
+      # 任务级评测严格档：本 job 有 build123d，t12-step-export 必须真出 STEP。
+      # 与 unit job 那条的区别只有一个 flag：`--require-full` —— 任何跳过都算不通过
+      # （TASK_EVAL_REQUIRE_FULL skipped=N + exit 1），而不是只打一行 SKIP 就绿。
+      # 只在本 job 跑：unit 没有内核，严格档在那儿是必然假红。
+      - name: 任务级评测（严格档：任何跳过都不算通过）
+        timeout-minutes: 10
+        run: |
+          . .venv-ft/bin/activate
+          cd desktop
+          AUTOMATIONCAD_PYTHON="$PWD/../.venv-ft/bin/python" npm run eval:tasks -- --require-full
+      # 严格档负向自证（R10 review P1）：严格档不能只在「有内核时绿」，必须证明「缺内核就红」。
+      # 受控缺内核 = 指向一个绝对不存在的解释器，**不卸载共享 .venv-ft**（后面还有步骤要用它）：
+      #   parametric.ts resolvePython() 对绝对路径只做 existsSync + 可执行判定，不存在就返回 null，
+      #   **不会**回退到 PATH 里的 python3 或任何 venv（:243-245）；commandSpec() 拿到 null 就 failStart
+      #   （:593-596）→ verify-step-tower 看到 started.ok=false 走 SKIP 分支。
+      #   同时清空 AUTOMATIONCAD_PARAMETRIC_CMD：它优先级高于 python 解析（:683），不清就可能有旁路。
+      # 两臂对照（同一次受控缺内核）：
+      #   非严格档 exit 0  —— 旧约定「显式跳过不是失败」，这条同时挡住「崩了但恰好 exit 1」的假绿；
+      #   严格档   exit 1  —— --require-full 的全部意义。
+      # 日志再钉三件事：真用了受控解释器（python=$MISSING_PY，证明没回退）、真走了 SKIP、真没起内核。
+      - name: 严格档负向自证（受控缺内核：SKIP 必须 exit 1）
+        timeout-minutes: 5
+        run: |
+          cd desktop
+          MISSING_PY=/nonexistent/automationcad-negative-kernel/python3
+          LOOSE=0
+          AUTOMATIONCAD_PARAMETRIC_CMD= AUTOMATIONCAD_PYTHON="$MISSING_PY" \
+            node scripts/verify-step-tower.mjs --levels 8 --skip-if-no-kernel --json > /tmp/tower-neg-loose.log 2>&1 || LOOSE=$?
+          STRICT=0
+          AUTOMATIONCAD_PARAMETRIC_CMD= AUTOMATIONCAD_PYTHON="$MISSING_PY" \
+            node scripts/verify-step-tower.mjs --levels 8 --skip-if-no-kernel --require-full --json > /tmp/tower-neg-strict.log 2>&1 || STRICT=$?
+          cat /tmp/tower-neg-loose.log /tmp/tower-neg-strict.log
+          # 两臂都必须真用了受控解释器（PATH/venv 不许兜住），且都没起内核
+          grep -q "python=$MISSING_PY" /tmp/tower-neg-loose.log
+          grep -q "python=$MISSING_PY" /tmp/tower-neg-strict.log
+          ! grep -q "kernel port=" /tmp/tower-neg-loose.log /tmp/tower-neg-strict.log
+          # 非严格臂：exit 0 + 自证「同一次缺内核，松档就是绿的」（否则这条自证说明不了严格档有用）
+          test "$LOOSE" -eq 0
+          grep -q "SKIP 退出码 = 0" /tmp/tower-neg-loose.log
+          # 严格臂：exit 1，且必须是「SKIP + skipped:true + exitCode:1」，不是 FAIL、也不是别的错
+          test "$STRICT" -eq 1
+          grep -q "SKIP 内核未跑" /tmp/tower-neg-strict.log
+          grep -q "SKIP 退出码 = 1" /tmp/tower-neg-strict.log
+          grep -q '"skipped":true' /tmp/tower-neg-strict.log
+          grep -q '"exitCode":1' /tmp/tower-neg-strict.log
+          ! grep -q "STEP_TOWER FAIL" /tmp/tower-neg-strict.log
+          echo "STRICT_NEGATIVE_SELFPROOF ok loose=0 strict=1 kernel=masked"
       # 通道自证（非结构验收）：`verify:channel` 是纯 Node 几何诊断，不起 Electron、不进
       # build123d 内核（输入是现构造的件表 + `panel-channel.ts` 纯函数），所以不需要上面的
       # venv，放在本 job 里只是跟着层数基线一起跑、几秒级。
