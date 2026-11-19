@@ -1,14 +1,21 @@
 # PV 缓存机迭代交接（软件侧）
 
-## 当前状态速览（2026-11-19 · HEAD `1c803f6` = `origin/main`，工作区干净；本轮门禁 16:44–16:51 跑在六笔提交之前、同一棵树；**远端 CI run `44491644544` 对 `1c803f6` 7/7 全绿**。上一轮 `da6a1c4` / `dec1373` 的 final6 数字已作废）
+## 当前状态速览（2026-11-19 · **R10 收口轮：终验已全部通过，改动待提交/推送**）
 
-- **代码状态**：HEAD `1c803f6`（`chore: rebuild kb index after machine refactor`）= `origin/main`（**已推送**）；六笔 `afe65a9` → `f81b697` → `0cb7e1a` → `fa7e215` → `faf2665` → `1c803f6` 全在远端，**远端 CI 已跑过**。`git status --short` **无输出**。最后一次源码/测试改动是 **16:44:46**（`feature-box.ts`、`verify-step-tower.mjs`），本轮门禁日志 **16:46:53–16:50:58** 跑在其后 → 这批数字就是这六笔的证据；六笔 commit 16:54:25–16:54:36，CI 在其后。**历史**：上一轮 `920ea07`/`b85fab5`/`8037e11`/`dec1373`（final6，10:04–10:10）与 `114e024` + 21 M + 1 ?? 提交前快照都不再是现状。
-- **门禁状态（现行，2026-11-19 16:44–16:51）**：focused **405/405**（12,282 ms）、全量 **3659（3656 pass / 3 skip / 0 fail，116,728 ms）**、`tsc --noEmit` exit 0、kb **13 docs / 454 chunks / 434,531 B**、`verify:channel` **2/16 各 27/27**、`verify:step-tower` 8 层 **13/13** / 16 层 **20/20**（含逐件身份 88/88、144/144）、`verify:step` **7/7**（85 件 / 1,930,477 B）、regen **61/61**、`build:ext` **2,946,350 B / gzip 921,963 B / total 10,550,381 B**。**定向集本轮没单跑**（旧 target 205/205 是 `da6a1c4` 树的历史数）。**CI 已在远端跑通（run `44491644544`，head `1c803f6`，7/7 job 全绿）**：`FeatureTree` job 里 16/8 层 `verify:step-tower`（20/20、13/13）与**本轮新增的 `verify:channel --levels 2 / 16`** 都真实执行并通过，`tsc + unit tests` job 绿。**该 run 只覆盖 `1c803f6`**；本轮之后再提交的 docs-only commit 在 push 前没有自己的 run。final6 与 final5 只作历史。
-- **测试清单（`grep -cE "^[[:space:]]*test\("` 静态现测，条数不是通过数）**：`panel-channel` **50**、`buffer-tower-channel` **22**、`interference-panel-diagnostics` **10**、`geometry-export` **17**、`verify-step-tower` **46**、`pv-buffer-regenerate` **26**、`eval-tasks` **7**。**旧写的 33 / 21 / 54 作废**。**也不许写「72 条定向全绿」**：50+22 只是清单相加；可引用的是本轮 focused **405/405** 与全量 **3659**。
-- **通道门禁（本轮，P2 整改 + 逐件身份之后）**：`verify:channel` 自证 **27/27**（正向 13 / 负向 14，**N1..N14**）at `--levels 2` 与 `--levels 16`，两次 exit 0、`TOWER_CHANNEL_RESULT ok`（`cad-opt-gate-vc2.log` / `vc16.log`，16:47:18 / 16:47:22）；本轮不再跑 8 层档。N14（生产几何承托件 `center.x/z=NaN` → `invalid-shelf-geometry` + `witness=null` + `feasible=false`，同一条带未污染正控）判据未变。**CI 侧**：`fa7e215` 已把这两档加进 `ci.yml` 的 `featuretree-geometry` job，run `44491644544` ✓。
-- **判据与 fail-closed**：`inCollisionSet` / `panelSourceOfGeometry` 认**完整工件身份**（同 id + `role=workpiece` + `size`/`center`/`rotationZDeg` 一致，转角周期等价；同 id 托板/夹具、转 90° 的件都不算；`rotationZDeg` 非有限不算）。坏坐标：承托**行**非有限 → 该行剔除、`diagnostic-only` + `invalid-support-rows`（N13）；承托**面几何**非有限 → 不判可行、`witness=null` + `invalid-shelf-geometry`（N14），**不拿其余可读承托面顶替**。P2-2 把「特征参数坏 → 行表静默丢件」也并进同一码（`droppedPartIds`）。**`f81b697` 之后**：判据统一在 `feature-box.ts`，未知特征类型 → `unknown-feature-type`（不再静默当无实体），`suppressed === true` 与内核同口径跳过，结构级坏件 → `malformed-part`/`malformed-feature` → `INVALID_PART_GEOMETRY` → `INVALID_ARGUMENT`（通道只剔该件，不再整表中断）。
-- **其它门禁数字（本轮，16:44–16:51）**：focused 405/405、全量 3659（3656 pass / 3 skip / 0 fail，116,728 ms）、STEP 塔 8 层 13/13（9 内核 + 3 逐件身份 + 导出边界 N/A）、16 层 20/20（9 内核 + 3 逐件身份 + 8 导出边界）、`verify:step` 85 件 7/7、regen 61/61、`build:ext` 2,946,350 B / gzip 921,963 B、kb 13 / 454 / 434,531 B、`tsc` exit 0。**final6 那套（370 / 3614 / 10-10 / 17-17 / 58 / 2,941,695 B）作历史。**
-- **边界不变**：塔仍**没有真实多层升降通道**（层托板整块、台面在托板投影内，`sweep` 405 = 270 确认 + 135 待复核，本轮 vc2/vc16 日志仍写「真实塔 sweep 仍 fail」），结构 `accepted:false`、挠度/导向/防坠/安全回路/PLC 全部未校核；`mode=verified` 只等于「行表来自几何 + 碰撞集里有同一工件身份的板」，不等于可行。**没有通道/结构结论**。CI 上跑 `verify:channel` 也不改变这一点。
+> 本节只放**当前**状态。完整报告与此前各轮数字 → `docs/desktop/R10-ITERATION.md`；
+> 下面从「P2 整改（历史）」起的各节是**历史记录，原样保留、不逐段改写**（旧数字仍是那一轮的实测，只是不再是现状）。
+
+- **代码状态**：基线 `HEAD = e480f57`（`docs: record optimization round gates and close stale claims`）= `origin/main`；
+  上轮远端 CI run **`44493445997`**（head `e480f57`）**success，7/7 job**。**本轮改动全部未提交**，`git status --short` 非空；终验已于 2026-11-19 跑完（全部门禁 `exit 0`，见下），但**还没有本轮自己的 CI run**（推送后另起，只认新 run 的 `headSha`）。
+- **本轮三包**（细节见 R10 报告 §1）：① **严格 CI + 负向自证** —— `featuretree-geometry` 的两条 `verify:step-tower` 与 `eval:tasks` 加 `--require-full`（SKIP 即 exit 1），新增「受控缺内核」负向自证步骤（松档 exit 0 / 严格档 exit 1），job 预算 75→90 min，守卫 `test/meta/ci-strict-gates.test.mjs` 读真 `ci.yml`；
+  ② **逐件豁免精确化** —— `verify-step-tower.mjs` 用 `OCCLUSION_DECLARED_HOSTS` 做精确件号 → 唯一合法宿主（不做族前缀/正则），双向闭合 + 声明件**必备**（`declaredPresence:'required'`，fail-closed），身份检查 5→6 项，**名字级、非实体认证**；
+  ③ **启动计时口径** —— 新增 `electron/startup-metrics.ts`（零点 = **main 模块求值**，`atMs/totalMs/sincePreviousMs` 同口径，raw 判回退、舍入只在写出，`readyToShow` 可晚到）+ `src/shared/optional-json.ts`（只静音 `ENOENT`，`ipc.ts` 的 PLC 历史读取改用它）。
+- **门禁状态（终验实测，2026-11-19，日志 `/root/.hermes/cache/scratch/cad-r10-final/`）**：全量 **3717 tests / 3714 pass / 3 skip / 0 fail（119,708.889571 ms）**、focused **415/415（13,094.83 ms）**、`tsc` exit 0、`build:ext` exit 0（extension 2,946,350 B / gzip 921,963 B）、Electron smoke **`SMOKE_OK`**（0 FAIL / 4 个明确 SKIP）、`verify:step-tower` **8 层 16/16、16 层 23/23**（9 内核 + 6 身份 + 1 条边界 N/A / + 8 条边界）、`verify:channel` 2/16 层各 **27/27**、`eval:tasks --require-full` **13/13（skipped=0）**、`regen` **61/61**、kb **13/454/434,531**。**本轮仍无 CI run**：推送后另起，只把「CI 已绿」写到那个 SHA 上。**无安装包发版。**
+  **启动计时**：`STARTUP_METRICS totalMs=373.254`，零点 = main 模块求值起点 —— 是**口径读数**，不是性能提升宣称。
+- **测试清单（`grep -cE "^[[:space:]]*test\("` 静态现测，条数不是通过数）**：`panel-channel` **50**、`buffer-tower-channel` **22**、`interference-panel-diagnostics` **10**、`geometry-export` **17**、`verify-step-tower` **56**（静态清单；**实跑 57/57**，文件含动态子测试）、`pv-buffer-regenerate` **26**、`eval-tasks` **7**、`startup-metrics` **19**（18→19）、`ci-strict-gates` **21**、`optional-json` **8**。
+  **旧的 33 / 21 / 54 / 46 全部作废**；也不许写「72 条定向全绿」（50+22 只是清单相加，从没有一条命令跑出过）。
+- **判据与 fail-closed（现行，未改动）**：`inCollisionSet` / `panelSourceOfGeometry` 认**完整工件身份**（同 id + `role=workpiece` + `size`/`center`/`rotationZDeg` 一致，转角周期等价；同 id 托板/夹具、转 90° 的件都不算；`rotationZDeg` 非有限不算）。坏坐标：承托**行**非有限 → 该行剔除、`diagnostic-only` + `invalid-support-rows`（N13）；承托**面几何**非有限 → 不判可行、`witness=null` + `invalid-shelf-geometry`（N14，带未污染正控），**不拿其余可读承托面顶替**；特征参数坏 → 并进同一码（`droppedPartIds`）。判据统一在 `feature-box.ts`：未知特征类型 → `unknown-feature-type`，`suppressed === true` 与内核同口径跳过，结构级坏件 → `malformed-part`/`malformed-feature` → `INVALID_PART_GEOMETRY` → `INVALID_ARGUMENT`（通道只剔该件）。
+- **边界不变**：塔仍**没有真实多层升降通道**（层托板整块、台面在托板投影内），**`sweep` 405 = 270 确认 + 135 待复核仍 fail，本轮未复跑、不得改判**；`structure.accepted:false`、挠度/导向/防坠/安全回路/PLC 全未校核；`mode=verified` 只等于「行表来自几何 + 碰撞集里有同一工件身份的板」，**不等于可行**；`verify:channel` 是诊断脚本（`feasible=false` 仍 exit 0），上 CI 也不改变这一点。**没有通道/结构结论。**
 
 ## P2 整改（历史 · 2026-11-19 T3 复审后，落在 `920ea07`/`b85fab5`；源码现行，但整树证据已被本轮六笔叠加）
 
@@ -20,7 +27,7 @@ T3 第二轮复审判定 **P2-1 / P2-2 / P2-5 均通过，无新增 P0/P1**；�
 | **P2-2** `ConveyorPart` 行表在 fail-closed 前静默丢件 | `featureLocalBox` 三态 `box\|none\|invalid`；新导出 `supportRowsFromConveyorPartsDetailed()` → `{rows, droppedPartIds}`；`invalidShelfIds = 行内非有限 ∪ dropped` → `invalid-shelf-geometry` + `witness=null`；`at` 不再 `Number(v)\|\|0`、未知 `axis` 不再默认 `z` | `panel-channel` 47→**50** | `panel-channel` 50/50；`buffer-tower-channel` 22/22；`verify:channel --levels 2` 27/27；`tsc --noEmit` exit 0 |
 | **P2-5** 导出边界押在字面量 + 来源标签上 | `machineExportParts` 改三层身份（共享件号 `WORKPIECE_PART_ID` / role / 与占位体 box 位姿同一，任一命中）+ 装配件窗口（`parts.length > assemblyPartCount`）；来源标签降级为整机放行信号（与 `workpiecePlaceholder` 投影二者有其一即可，都缺才走「窗口外全是静止不挂轴的板」结构兜底）；`verify-step-tower` 新增**导出边界门禁 8 条**（146 实例 == `assemblyPartCount`、不含板、件号与 146 件表逐件一致、内核输入仍 146），build 起内核前先判，`--file` 模式也判 | `geometry-export` 12→**14**、`verify-step-tower` 27→**31** | 两文件 45/45；塔相关 7 文件 147/147；`tsc --noEmit` exit 0；CLI `--file` 桩 STEP 回执 `exportBoundary.ok=true`（整体仍 exit 1，桩本身不合格）；`--skip-if-no-kernel` 路径先判边界后 SKIP |
 
-**残留限制（现行，2026-11-19 17:05）**：
+**残留限制（历史 · 2026-11-19 17:05，T9 轮口径；R10 的当前状态只看文首）**：
 1. **CI 已跑，覆盖 `1c803f6`**：run `44491644544` 7/7 绿，`featuretree-geometry` job 里 `ci.yml:856-857` 的 16/8 层 `verify:step-tower` **已真实执行**（16 层 20/20、8 层 13/13），**新增的 `verify:channel --levels 2 / 16` 也已执行并通过**（`fa7e215` 加的 step），`tsc + unit tests` job 绿。**尚未覆盖**：本轮之后提交的 docs-only commit 在 push 前没有自己的 run。**仍未接严格档**：两个 `verify:step-tower` step 与 `eval:tasks` 都没带 `--require-full`（SKIP / `degraded=true` 在 CI 上仍算绿）。告警只有两类、均非致命：多个 job 的 `##[warning]Node.js 20 is deprecated`、Windows Qt job 里一处 `powershell is not supported`；**无 `##[error]`**。
 2. **导出边界已实跑，但仍不是板专属的端到端内核证明**：内核 9 项检查吃 `buildBufferTowerParts()` 的 146 件表与焊出的 solids，结构上看不见板；8 条导出边界走 `resolveMachineGeometry` → `machineExportParts` → `geometryToSidecarAssemblies`（**脚本级、不经内核输出、不核对内核 STEP**）。本轮 16 层 `verify:step-tower` **20/20** = 9 内核 + 3 逐件身份 + 8 边界；8 层 **13/13** = 9 内核 + 3 逐件身份 + 1 条显式 N/A；`--skip-if-no-kernel` 分支这些都不打印（该分支「绿」不带证据）。所以「STEP 只出 146 件」是 sidecar/STL/glTF 单测 + 已实跑的脚本级断言，**不是端到端内核证明**。
 3. **无结构/通道结论**：`feasible=false`、`sweep` 405、`structure.accepted:false`；`verify:channel` 是诊断脚本（`feasible=false` 而 exit 0），N1..N14 是「尺子自证」，不是结构验收——上 CI 也不改变这一点。
@@ -216,6 +223,9 @@ T3 第二轮复审判定 **P2-1 / P2-2 / P2-5 均通过，无新增 P0/P1**；�
 - 不要说「BOM/STEP 一件不动」：BOM/成本/容量不变是真的，制造导出件集也确实等于装配件数（146），但**碰撞几何是 147**（含板），修复前 STEP/STL/glTF 还真的多出过这块板。说件数时必须点名口径（碰撞 / 制造导出）。
 
 ## 下一步建议
+
+> **注意：本节是 T9 轮写的建议**（对应 `1c803f6` / run `44491644544`），保留原文不改数字。
+> R10 轮的当前状态与终验顺序见文首、`HANDOFF-NEXT-SESSION.md` 与 `docs/desktop/R10-ITERATION.md` §2。
 
 1. **门禁已跑完、六笔已推送、CI 已绿**（本轮 16:44–16:51 对应 `1c803f6`；远端 run `44491644544` 对 `1c803f6` 7/7 绿）：focused 405/405、全量 3659（3656 pass / 3 skip / 0 fail，116,728 ms）、tsc exit 0、kb 13/454/434,531、`verify:channel` 2/16 各 27/27、`verify:step-tower` 8 层 13/13 / 16 层 20/20、`verify:step` 7/7、regen 61/61、`build:ext` 2,946,350 B / gzip 921,963 B。**这些不需要重跑**（`1c803f6` 只动 `kb.json`；CI 已独立复核到同一棵树的门禁步骤）；**只有改了源码/测试才必须整轮重跑**，命令照抄、全部在**同一次会话、同一棵树**上跑完：
    ```bash
