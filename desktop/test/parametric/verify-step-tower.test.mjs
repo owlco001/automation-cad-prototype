@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   TOWER_16,
+  DECLARED_PRESENCE_POLICY,
   buildTowerExportFacts,
   cylinderAllowanceMm,
   deriveOccludedParts,
@@ -23,6 +24,8 @@ import {
   evaluateExportBoundary,
   evaluatePartIdentity,
   evaluateStepTower,
+  isDeclaredOccludable,
+  OCCLUSION_DECLARED_HOSTS,
   readBinaryStlBBox,
   readStepVertexPoints,
   unionBoxes
@@ -55,6 +58,14 @@ const TRIANGLES = [
   [[0, 0, 0], [10, 0, 0], [0, 20, 0]],
   [[-5, -5, -30], [10, 20, 40], [0, 0, 0]]
 ];
+
+/**
+ * 合成件表（nx×ny×nz 网格，没有 lift-chain）显式选择「声明件可选」策略。
+ *
+ * 这是**调用方给的策略入参**，不是门禁按件表自己推断的同源过滤：真实 CLI（16 层塔 /
+ * 8 层输送基线两个目标）一律传 `required`，合成件表在这里显式 opt-out。
+ */
+const SYNTHETIC_PRESENCE = Object.freeze({ declaredPresence: DECLARED_PRESENCE_POLICY.OPTIONAL });
 
 test('readBinaryStlBBox：二进制 STL 的顶点包络精确到坐标', () => {
   const box = readBinaryStlBBox(binaryStl(TRIANGLES));
@@ -897,7 +908,7 @@ test('deriveOccludedParts：包络被更大件完全包住才算「被包住」�
 
 test('evaluatePartIdentity：件表每件都在 STEP 顶点集里有证人 → 绿；缺顶点证据判红（不许静默略过）', () => {
   const { facts, stepVertices } = syntheticGrid();
-  const result = evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: facts.parts, stepVertices });
+  const result = evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: facts.parts, stepVertices, ...SYNTHETIC_PRESENCE });
   assert.equal(result.ok, true, JSON.stringify(result.checks));
   assert.equal(result.required, facts.parts.length, '网格件没有任何一件被包住');
   assert.equal(result.occluded.length, 0);
@@ -906,17 +917,18 @@ test('evaluatePartIdentity：件表每件都在 STEP 顶点集里有证人 → �
   assert.match(result.checks[0].expected, new RegExp(`${facts.expectedParts} 件`), '期望值必须从件表派生');
 
   // 缺证据 ≠ 通过：没给顶点集 / 给空数组都判红并明说
-  const missing = evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: facts.parts });
+  const missing = evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: facts.parts, ...SYNTHETIC_PRESENCE });
   assert.equal(missing.ok, false);
   assert.match(missing.checks[0].actual, /未提供\/为空/);
   assert.match(missing.checks[0].actual, /缺证据不等于通过/);
-  assert.equal(evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: facts.parts, stepVertices: [] }).ok, false);
+  assert.equal(evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: facts.parts, stepVertices: [], ...SYNTHETIC_PRESENCE }).ok, false);
 
   // 件表件数对不上（少一件）也必须红
   const short = evaluatePartIdentity({
     expectedParts: facts.expectedParts,
     parts: facts.parts.slice(0, -1),
-    stepVertices
+    stepVertices,
+    ...SYNTHETIC_PRESENCE
   });
   assert.equal(short.ok, false);
   assert.match(short.checks[0].actual, /件表 \d+ ≠ 期望 \d+/);
@@ -931,7 +943,7 @@ test('变异自证：从 STEP 顶点集里扣掉 1 个内部件 → 旧断言全
   // 基线：旧 8 条 + 新 1 条全绿
   const before = evaluateStepTower(facts);
   assert.equal(before.ok, true, JSON.stringify(before.checks.filter((check) => !check.ok)));
-  assert.equal(evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: facts.parts, stepVertices }).ok, true);
+  assert.equal(evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: facts.parts, stepVertices, ...SYNTHETIC_PRESENCE }).ok, true);
 
   // 变异：这件在 STEP 里的边界整个不见了（等价于 fuse 把它丢了）
   const removed = new Set(boxCorners(targetPart.stlBBox).map((corner) => corner.join(',')));
@@ -947,7 +959,7 @@ test('变异自证：从 STEP 顶点集里扣掉 1 个内部件 → 旧断言全
   assert.equal(byLabel.get('逐件 STL 件数').ok, true);
 
   // 新证据：必须变红，并且点名是哪一件（不是"少了一件"这种没法排查的结论）
-  const identity = evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: facts.parts, stepVertices: mutated });
+  const identity = evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: facts.parts, stepVertices: mutated, ...SYNTHETIC_PRESENCE });
   assert.equal(identity.ok, false, '丢了 1 个内部实体仍然是绿 = 门禁没堵上');
   assert.deepEqual(identity.unwitnessed, [target], '只应该有这一件缺证');
   assert.match(identity.checks[0].actual, /缺证 1 件（grid-1-1-0）/);
@@ -956,30 +968,39 @@ test('变异自证：从 STEP 顶点集里扣掉 1 个内部件 → 旧断言全
 
 test('被包住件（结构上无法用顶点判据看见）：由件表派生剔除，宿主一变就必须自己拿证人', () => {
   // 宿主/被包住件放在网格之外，避免它与网格件形成别的包含关系（判据要逐件精确，不要含混）
+  // 件号取**声明表里实证过的那一对**（lift-chain-left ∈ lift-post-left）：豁免必须同时是
+  // 「结构上被包住」+「声明过且宿主合法」，随便一件被包住不再自动获得豁免。
   const hostBBox = { min: [600, 600, -50], max: [900, 900, 400] };
   const guestBBox = { min: [700, 700, 100], max: [760, 760, 160] };
-  const host = { id: 'host-post', stlBBox: hostBBox, kernelBBox: { min: [...hostBBox.min], max: [...hostBBox.max] }, solids: 1 };
-  const guest = { id: 'inside-chain', stlBBox: guestBBox, kernelBBox: { min: [...guestBBox.min], max: [...guestBBox.max] }, solids: 1 };
+  const host = { id: 'lift-post-left', stlBBox: hostBBox, kernelBBox: { min: [...hostBBox.min], max: [...hostBBox.max] }, solids: 1 };
+  const guest = { id: 'lift-chain-left', stlBBox: guestBBox, kernelBBox: { min: [...guestBBox.min], max: [...guestBBox.max] }, solids: 1 };
   const { facts, stepVertices } = syntheticGrid({ extraParts: [host, guest] });
 
   // 真实的 fuse 行为：被完全包住的件边界被吞掉，STEP 里只剩宿主的顶点
   const swallowed = stepVertices.filter((vertex) => boxCorners(guestBBox).every(
     (corner) => corner.some((value, axis) => Math.abs(value - vertex[axis]) > 1e-6)
   ));
-  const result = evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: facts.parts, stepVertices: swallowed });
+  const result = evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: facts.parts, stepVertices: swallowed, ...SYNTHETIC_PRESENCE });
   assert.equal(result.ok, true, JSON.stringify(result.checks));
-  assert.deepEqual(result.occluded, ['inside-chain'], '被包住件必须由件表派生出来并逐件列名');
-  assert.match(result.checks[0].note, /inside-chain∈host-post/);
+  assert.deepEqual(result.occluded, ['lift-chain-left'], '被包住件必须由件表派生出来并逐件列名');
+  assert.match(result.checks[0].note, /lift-chain-left∈lift-post-left/);
+
+  // 同一几何、只是件号没被声明 → 不再自动豁免（旧实现只看几何，任何件号都吃配额）
+  const renamed = facts.parts.map((part) => (part.id === 'lift-chain-left' ? { ...part, id: 'inside-chain' } : part));
+  const undeclared = evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: renamed, stepVertices: swallowed, ...SYNTHETIC_PRESENCE });
+  assert.equal(undeclared.ok, false, '件号未声明 = 不许占豁免名额');
+  assert.deepEqual(undeclared.exemption.undeclared.map((entry) => entry.id), ['inside-chain']);
+  assert.match(undeclared.checks[3].actual, /inside-chain/);
 
   // 变异：宿主挪走（不再包含它）→ 这件不再"结构上被包住"，必须自己拿证人 → 红
   const moved = facts.parts.map((part) => (
-    part.id === 'host-post'
+    part.id === 'lift-post-left'
       ? { ...part, stlBBox: { min: [600, 600, 600], max: [900, 900, 1000] }, kernelBBox: { min: [600, 600, 600], max: [900, 900, 1000] } }
       : part
   ));
-  const mutated = evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: moved, stepVertices: swallowed });
+  const mutated = evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: moved, stepVertices: swallowed, ...SYNTHETIC_PRESENCE });
   assert.equal(mutated.ok, false, '宿主不再包住它，就不能再被剔除');
-  assert.ok(mutated.unwitnessed.includes('inside-chain'));
+  assert.ok(mutated.unwitnessed.includes('lift-chain-left'));
   assert.equal(mutated.occluded.length, 0);
 });
 
@@ -1074,7 +1095,7 @@ test('变异自证（P1-2）：1 个大件 + 20 个小件 —— 覆盖判据 re
     parts.push({ id: `tiny-${index}`, stlBBox: { min: [x, y, 0], max: [x + 30, y + 30, 30] }, solids: 1 });
   }
   const stepVertices = parts.flatMap((part) => boxCorners(part.stlBBox));
-  const result = evaluatePartIdentity({ expectedParts: parts.length, parts, stepVertices });
+  const result = evaluatePartIdentity({ expectedParts: parts.length, parts, stepVertices, ...SYNTHETIC_PRESENCE });
 
   assert.equal(result.requested, 21);
   assert.equal(result.occluded.length, 20);
@@ -1086,7 +1107,7 @@ test('变异自证（P1-2）：1 个大件 + 20 个小件 —— 覆盖判据 re
   assert.equal(result.exemption.overCap, true);
   assert.equal(result.checks[1].ok, false);
   assert.match(result.checks[1].actual, /20 件（超上限 18 件/);
-  assert.equal(result.ok, false, '豁免能被数据放大 = 逐件身份门禁整体失效');
+  assert.equal(result.ok, false, '豁免能被数据放大 = 逐件占位覆盖门禁整体失效');
   // 逐件列名 + 包住者件号 + 每轴尺寸比回显（不是"20 件"这种查不动的结论）
   assert.match(result.checks[1].label, /被包住件豁免上限/);
   assert.match(result.checks[1].note, /tiny-0∈big-box\(/);
@@ -1105,7 +1126,7 @@ test('变异自证（P2）：146 件里 145 条同号 ghost —— 豁免按件�
     parts.push({ id: 'ghost', stlBBox: { min: [x, y, 0], max: [x + 30, y + 30, 30] }, solids: 1 });
   }
   const stepVertices = boxCorners(host.stlBBox);
-  const result = evaluatePartIdentity({ expectedParts: parts.length, parts, stepVertices });
+  const result = evaluatePartIdentity({ expectedParts: parts.length, parts, stepVertices, ...SYNTHETIC_PRESENCE });
 
   assert.equal(result.requested, 146);
   assert.equal(result.required, 1, '按件号去重时就是这个症状：146 件里只有 1 件需要拿证人');
@@ -1114,7 +1135,8 @@ test('变异自证（P2）：146 件里 145 条同号 ghost —— 豁免按件�
   assert.deepEqual(result.exemption.duplicateIds, ['ghost']);
   assert.equal(result.exemption.maxExempt, 14);
   assert.equal(result.exemption.overCap, true, '145 条 > 14 上限：按件数计就不可能漏');
-  assert.equal(result.checks.length, 3);
+  // 6 条：覆盖 + 上限 + 件号唯一性 + 豁免声明 + 死声明 + 声明件存在性（optional 下恒绿）
+  assert.equal(result.checks.length, 6);
 
   // 件号唯一性单列一条：即便将来 cap 又被改回按件号计，这条也自己判红。
   const uniqueness = result.checks.find((check) => check.label.includes('件号唯一性'));
@@ -1125,7 +1147,7 @@ test('变异自证（P2）：146 件里 145 条同号 ghost —— 豁免按件�
 
   // 对照：件号改唯一后唯一性那条转绿，但「按件数计」的上限照样红 —— 两道防线各自独立成立。
   const uniqueParts = parts.map((part, index) => (index === 0 ? part : { ...part, id: `ghost-${index}` }));
-  const unique = evaluatePartIdentity({ expectedParts: uniqueParts.length, parts: uniqueParts, stepVertices });
+  const unique = evaluatePartIdentity({ expectedParts: uniqueParts.length, parts: uniqueParts, stepVertices, ...SYNTHETIC_PRESENCE });
   assert.deepEqual(unique.exemption.duplicateIds, []);
   assert.equal(unique.exemption.count, 145);
   assert.equal(unique.exemption.overCap, true);
@@ -1157,13 +1179,19 @@ for (const label of ['8 层基线', '16 层塔']) {
     assert.equal(parts.length, expectedParts, `${label} 件表件数必须与门禁口径一致`);
 
     const { boxes, stepVertices } = identityFactsFromParts(parts);
-    const result = evaluatePartIdentity({ expectedParts, parts: boxes, stepVertices });
+    // 真实件表（8 层 / 16 层）是**当前门禁目标**：声明件策略按真实 CLI 的 required 判。
+    const result = evaluatePartIdentity({
+      expectedParts,
+      parts: boxes,
+      stepVertices,
+      declaredPresence: DECLARED_PRESENCE_POLICY.REQUIRED
+    });
     assert.equal(result.ok, true, JSON.stringify(result.checks));
     assert.deepEqual([...result.occluded].sort(), ['lift-chain-left', 'lift-chain-right'], '真机只有链条被导柱包住');
     assert.equal(result.required, expectedParts - 2);
     assert.equal(result.exemption.maxExempt, Math.floor(expectedParts * 0.1));
     assert.equal(result.exemption.overCap, false);
-    assert.equal(result.checks.length, 3, '覆盖 + 豁免上限 + 件号唯一性三条证据一条都不能少');
+    assert.equal(result.checks.length, 6, '覆盖 + 上限 + 件号唯一性 + 豁免声明 + 死声明 + 声明件存在性六条证据一条都不能少');
     assert.equal(result.checks[1].ok, true);
     // 逐件回显包住者 + 每轴比（实测 8 层最小 1.082、16 层 1.324）
     assert.match(result.checks[1].note, /lift-chain-left∈lift-post-left\(/);
@@ -1172,8 +1200,18 @@ for (const label of ['8 层基线', '16 层塔']) {
       assert.ok(detail.minRatio >= 1.05, `${detail.id} 每轴尺寸比必须 ≥1.05（实测 ${detail.minRatio}）`);
     }
 
+    // 身份约束（P2 逐件豁免）：真件表 2 件全部命中声明表，宿主与声明一致，无死声明
+    assert.equal(result.exemption.declared, 2, '真件表被包住的 2 件必须都是声明过的件号');
+    assert.deepEqual(result.exemption.undeclared, [], '真件表里没有未声明的被包住件');
+    assert.deepEqual(result.exemption.staleDeclared, [], '声明表两件都真被包住，没有死条目');
+    assert.deepEqual(result.exemption.hostMismatch, [], '宿主与声明一一对应');
+    assert.equal(result.exemption.capUsed, 2, 'cap 用量仍是 2（原 10% 上限不变）');
+    assert.equal(result.exemption.maxExempt, Math.floor(expectedParts * 0.1), '10% 上限一个字没改');
+    assert.equal(result.checks[3].ok, true);
+    assert.equal(result.checks[4].ok, true);
+
     // 变异：把一件缩进导柱里（等于 STL 包络异常变小/被宿主吞掉）→ 豁免数 +1，仍在上限内；
-    // 再说明上限不是摆设：1+20 场景在上面的变异自证里已经判红。
+    // 但它是**未声明**件号 ⇒ 身份检查必须判红（cap 放行、身份不放行 = 这才是逐件豁免）。
     const host = boxes.find((box) => box.id === 'lift-post-left');
     assert.ok(host, '件表里必须有这个宿主');
     const hostBox = host.stlBBox;
@@ -1183,10 +1221,18 @@ for (const label of ['8 层基线', '16 层塔']) {
       max: [0, 1, 2].map((axis) => hostBox.max[axis] - inset[axis])
     };
     const extra = boxes.map((box) => (box.id === 'tray-rail-2-left' ? { ...box, stlBBox: shrinkInto } : box));
-    const inflated = evaluatePartIdentity({ expectedParts, parts: extra, stepVertices });
+    const inflated = evaluatePartIdentity({
+      expectedParts,
+      parts: extra,
+      stepVertices,
+      declaredPresence: DECLARED_PRESENCE_POLICY.REQUIRED
+    });
     assert.equal(inflated.exemption.count, 3, '缩进导柱里的那件必须由件表派生为被包住');
     assert.equal(inflated.exemption.overCap, false, '3 件仍在上限内（上限按 10% 派生，不是零容忍）');
     assert.ok(inflated.exemption.details.some((detail) => detail.id === 'tray-rail-2-left' && detail.host === 'lift-post-left'));
+    assert.deepEqual(inflated.exemption.undeclared.map((entry) => entry.id), ['tray-rail-2-left']);
+    assert.equal(inflated.checks[3].ok, false, 'cap 没超但件号没声明 → 身份检查必须红');
+    assert.equal(inflated.ok, false, '未声明的被包住件 = 吃配额，整条门禁必须红');
   });
 }
 
@@ -1279,4 +1325,274 @@ test('P2-② 判据核对：8/16 层真件表的立柱族都只有 4 件/0 重�
     assert.equal(derived.levelsFromGeometry, layers, `${label}：层数由托板族派生`);
     assert.deepEqual(derived.errors, []);
   }
+});
+
+/* ---------------------------------------------------------------------------
+ * P2 逐件豁免（R10）：比例配额 → 点名声明 + 合法宿主 + 双向闭合
+ *
+ * 架构漏洞：只按**件族前缀**（`lift-chain*`）放行，等于给「批造同族件号」开新口子 ——
+ * 造 12 个 `lift-chain-ghost-*` 缩进导柱里，配额（10%）照样被吃满，逐件身份门禁整体失效。
+ * 所以声明表必须是「精确件号 → 精确合法宿主」的映射，且双向闭合：
+ *   - 被包住但没声明（或宿主不是声明的那个）→ 红；
+ *   - 声明了却没被包住（死条目）→ 红。
+ * 10% cap 与每轴 1.05 一个字不改，退化成第二道闸（defense in depth）。
+ * ------------------------------------------------------------------------- */
+
+/** 造一件「世界坐标包络」件，给下面几个对抗用例复用。 */
+function boxPart(id, min, max) {
+  return { id, stlBBox: { min: [...min], max: [...max] }, kernelBBox: { min: [...min], max: [...max] }, solids: 1 };
+}
+
+test('声明表形状：只有实证的两条链 + 各自合法宿主，族前缀不算（lift-chain-ghost 不许自动入表）', () => {
+  assert.deepEqual({ ...OCCLUSION_DECLARED_HOSTS }, {
+    'lift-chain-left': 'lift-post-left',
+    'lift-chain-right': 'lift-post-right'
+  }, '声明表 = 件号 → 唯一合法宿主；不许按族前缀、不许带件数/层数');
+  for (const id of ['lift-chain-left', 'lift-chain-right']) {
+    assert.equal(isDeclaredOccludable(id), true, `${id} 是实证过的豁免件`);
+  }
+  // 前缀族匹配会把下面这些自动收进来 —— 逐件身份门禁因此必须用精确件号
+  for (const id of [
+    'lift-chain', 'lift-chain-ghost', 'lift-chain-ghost-left', 'lift-chain-left-ghost',
+    'lift-chain-left-2', 'lift-chain-left:2', 'lift-chain-左', 'lift-post-left', 'inside-chain'
+  ]) {
+    assert.equal(isDeclaredOccludable(id), false, `${id} 不是声明件号：族前缀不许进白名单`);
+  }
+  assert.equal(isDeclaredOccludable(undefined), false);
+  assert.equal(isDeclaredOccludable(Object.prototype), false, '不许走原型链（hasOwnProperty 而不是 in）');
+});
+
+test('对抗（配额吃满）：12 个 lift-chain 族 ghost 缩进导柱里 → cap 放行，声明检查必须逐件点名判红', () => {
+  const extras = [boxPart('lift-post-left', [800, 800, -50], [1140, 1140, 400])];
+  const ghostIds = [];
+  for (let index = 0; index < 12; index += 1) {
+    const x = 820 + (index % 4) * 40;
+    const y = 820 + Math.floor(index / 4) * 40;
+    const id = `lift-chain-ghost-${index}`;
+    ghostIds.push(id);
+    extras.push(boxPart(id, [x, y, 10], [x + 20, y + 20, 30]));
+  }
+  // 140 件网格 + 1 宿主 + 12 ghost = 153 件 ⇒ cap = 15，12 条 ghost 吃得下（旧实现全绿）
+  const { facts, stepVertices } = syntheticGrid({ nx: 7, ny: 5, nz: 4, extraParts: extras });
+  const result = evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: facts.parts, stepVertices, ...SYNTHETIC_PRESENCE });
+
+  assert.equal(result.requested, 153, '件数由件表派生（140 + 1 + 12）');
+  assert.equal(result.exemption.count, 12);
+  assert.equal(result.exemption.maxExempt, Math.floor(153 * 0.1));
+  assert.equal(result.exemption.overCap, false, 'cap 没超：挡住它的是声明约束，不是 10% 比例');
+  assert.deepEqual(result.exemption.undeclared.map((entry) => entry.id).sort(), ghostIds.slice().sort());
+  assert.equal(result.exemption.declared, 0);
+  assert.equal(result.checks[3].ok, false, '未声明的被包住件必须判红');
+  assert.match(result.checks[3].actual, /未声明 12 件/);
+  assert.match(result.checks[3].actual, /lift-chain-ghost-0/);
+  assert.equal(result.ok, false, 'ghost 吃配额 = 逐件占位覆盖门禁失效（旧实现这里 ok:true）');
+  // cap/1.05 的旧口径一个字没改：证人豁免仍按「结构上被包住」剔除，声明检查单独判红
+  assert.equal(result.required, 153 - 12);
+  assert.equal(result.checks[4].ok, true, '没有任何死声明（这两条链的件号不在件表里）');
+});
+
+test('对抗（宿主冒名）：件号对、宿主被换掉 → 判红（声明是「件号→宿主」映射，不是件号清单）', () => {
+  const extras = [
+    boxPart('lift-post-right', [800, 800, -50], [1140, 1140, 400]),
+    boxPart('lift-post-left', [-1140, -1140, -50], [-800, -800, 400]),
+    // 两条链互换了导柱：件号是声明过的，宿主不是
+    boxPart('lift-chain-left', [900, 900, 0], [910, 912, 300]),
+    boxPart('lift-chain-right', [-940, -940, 0], [-930, -938, 300])
+  ];
+  const { facts, stepVertices } = syntheticGrid({ nx: 7, ny: 5, nz: 4, extraParts: extras });
+  const result = evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: facts.parts, stepVertices, ...SYNTHETIC_PRESENCE });
+
+  assert.equal(result.exemption.count, 2);
+  assert.deepEqual(result.exemption.undeclared, [], '件号都声明过 → 红的原因必须是宿主');
+  const mismatched = result.exemption.hostMismatch
+    .map((entry) => `${entry.id}∈${entry.host}(应∈${entry.expectedHost})`)
+    .sort();
+  assert.deepEqual(mismatched, [
+    'lift-chain-left∈lift-post-right(应∈lift-post-left)',
+    'lift-chain-right∈lift-post-left(应∈lift-post-right)'
+  ]);
+  assert.equal(result.checks[3].ok, false);
+  assert.match(result.checks[3].actual, /宿主冒名 2 件/);
+  assert.match(result.checks[3].actual, /lift-chain-left∈lift-post-right/);
+  assert.equal(result.exemption.overCap, false, '不是被 cap 挡住的：2/15');
+  assert.equal(result.ok, false);
+});
+
+test('对抗（死声明）：链条还在件表里但不再被导柱包住 → 判红（白名单不许留空位、不许靠多声明扩容）', () => {
+  const parts = buildConveyorParts(BASELINE_8);
+  const { boxes } = identityFactsFromParts(parts);
+  // 只把两条链挪出导柱（模拟几何调整后「声明还在、事情没发生」），其余件表原样
+  const movedBoxes = boxes.map((box) => (String(box.id).startsWith('lift-chain-')
+    ? { ...box, stlBBox: { min: [9000, 9000, 0], max: [9010, 9012, 300] } }
+    : box));
+  const stepVertices = movedBoxes.flatMap((item) => boxCorners(item.stlBBox));
+  // 真实 8 层件表：两条链都在件表里、只是不再被包住 → 死声明红（存在性不红）。
+  const result = evaluatePartIdentity({
+    expectedParts: parts.length,
+    parts: movedBoxes,
+    stepVertices,
+    declaredPresence: DECLARED_PRESENCE_POLICY.REQUIRED
+  });
+
+  assert.equal(result.exemption.count, 0, '没有任何件被包住');
+  assert.deepEqual(result.exemption.staleDeclared.slice().sort(), ['lift-chain-left', 'lift-chain-right']);
+  assert.equal(result.checks[4].ok, false, '死声明必须判红');
+  assert.match(result.checks[4].actual, /死声明 2 件/);
+  assert.match(result.checks[4].actual, /lift-chain-left/);
+  assert.equal(result.checks[3].ok, true, '红的原因只能是死声明，不是未声明件/冒名宿主');
+  assert.equal(result.checks[0].ok, true, '覆盖判据本身是绿的：死声明是身份检查抓出来的');
+  assert.equal(result.ok, false);
+});
+
+test('对抗（链式包裹）：lift-chain 被另一个 lift-chain 包住 → 同族不放宽，仍然判红', () => {
+  const extras = [
+    boxPart('lift-post-right', [800, 800, -50], [1140, 1140, 400]),
+    boxPart('lift-chain-right', [850, 850, 0], [1090, 1090, 350]),
+    boxPart('lift-chain-left', [880, 880, 20], [1060, 1060, 320])
+  ];
+  const { facts, stepVertices } = syntheticGrid({ nx: 7, ny: 5, nz: 4, extraParts: extras });
+  const result = evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: facts.parts, stepVertices, ...SYNTHETIC_PRESENCE });
+
+  assert.equal(result.exemption.count, 2, '两件都是「结构上被包住」，旧实现会两件一起免掉');
+  assert.deepEqual(
+    result.exemption.details.map((detail) => `${detail.id}∈${detail.host}`).sort(),
+    ['lift-chain-left∈lift-post-right', 'lift-chain-right∈lift-post-right']
+  );
+  assert.ok(!result.exemption.details.some((detail) => detail.host === 'lift-chain-right'),
+    '同族豁免件不许给别人当宿主（链式豁免仍被 derive 禁掉）');
+  assert.deepEqual(result.exemption.hostMismatch.map((entry) => entry.id), ['lift-chain-left'],
+    '同族嵌套不构成合法宿主：lift-chain-left 只能挂 lift-post-left');
+  assert.equal(result.checks[3].ok, false);
+  assert.equal(result.ok, false);
+  assert.equal(result.exemption.overCap, false, '2/15：不是 cap 挡住的');
+});
+
+/* ---------------------------------------------------------------------------
+ * R10 P2-1 整改：声明件必备（review 反例：删链 + 同步改 expectedParts 曾能 ok=true）
+ *
+ * 为什么必须单独判：expectedParts 与 parts 来自**同一个构造器**，覆盖判据只能发现
+ * 「表里有、STEP 里没有」，发现不了「表里没有」。删链后件数、包络、实体数全部自洽，
+ * 旧五条检查全绿。存在性策略由调用方显式给：真实 CLI（8/16 层目标）传 required，
+ * 无链合成件表传 optional —— 不是按件表同源过滤。
+ * ------------------------------------------------------------------------- */
+
+/** 真实 8 层件表 + 世界坐标包络（被包住件的顶点按真实 fuse 行为扣掉）。 */
+function baseline8Identity() {
+  const parts = buildConveyorParts(BASELINE_8);
+  return { parts, ...identityFactsFromParts(parts) };
+}
+
+test('反例（P2-1 两条链都删）：expectedParts 同步改成 88 → 覆盖/死声明全绿，声明件存在性必须红', () => {
+  const { boxes, stepVertices } = baseline8Identity();
+  assert.equal(boxes.length, 90);
+  const withoutChains = boxes.filter((box) => box.id !== 'lift-chain-left' && box.id !== 'lift-chain-right');
+  assert.equal(withoutChains.length, 88, '删掉两条链后件表就是 88 件（与构造器同源，旧口径抓不到）');
+
+  const result = evaluatePartIdentity({
+    expectedParts: withoutChains.length,
+    parts: withoutChains,
+    stepVertices,
+    declaredPresence: DECLARED_PRESENCE_POLICY.REQUIRED
+  });
+
+  // 旧证据全部自洽：件数 88/88、每件都有证人、没有被包住件、没有死声明、没有未声明件。
+  assert.equal(result.checks[0].ok, true, '覆盖判据看不见"表里没有"（这正是 review P2-1 的反例）');
+  assert.equal(result.checks[1].ok, true);
+  assert.equal(result.checks[2].ok, true);
+  assert.equal(result.checks[3].ok, true);
+  assert.equal(result.checks[4].ok, true, '链条不在件表里时死声明判据本来就不响');
+  // 唯一红的是存在性：两条链是当前目标的必备件。
+  assert.equal(result.checks[5].ok, false);
+  assert.match(result.checks[5].label, /声明件必须在件表里/);
+  assert.match(result.checks[5].actual, /声明件缺席 2 件/);
+  assert.deepEqual(result.exemption.missingDeclared.slice().sort(), ['lift-chain-left', 'lift-chain-right']);
+  assert.equal(result.ok, false, '删链 + 同步改件数绝不许放行（旧实现 ok=true）');
+});
+
+test('反例（P2-1 单链缺失）：只删 lift-chain-left → 只点名这一件，仍然红', () => {
+  const { boxes, stepVertices } = baseline8Identity();
+  const withoutLeft = boxes.filter((box) => box.id !== 'lift-chain-left');
+  assert.equal(withoutLeft.length, 89);
+
+  const result = evaluatePartIdentity({
+    expectedParts: withoutLeft.length,
+    parts: withoutLeft,
+    stepVertices,
+    declaredPresence: DECLARED_PRESENCE_POLICY.REQUIRED
+  });
+
+  assert.deepEqual(result.exemption.missingDeclared, ['lift-chain-left'], '缺席名单必须精确到件号');
+  assert.equal(result.checks[5].ok, false);
+  assert.match(result.checks[5].actual, /声明件缺席 1 件（lift-chain-left）/);
+  // 剩余件表本身是自洽的：红只能来自存在性，不是覆盖/死声明。
+  assert.equal(result.checks[0].ok, true);
+  assert.equal(result.checks[4].ok, true);
+  assert.equal(result.ok, false);
+});
+
+test('反例（P2-1 宿主缺失）：链条在件表里、宿主被删 → 关系判据红（存在性仍绿）', () => {
+  const { boxes } = baseline8Identity();
+  const withoutHost = boxes.filter((box) => box.id !== 'lift-post-left');
+  assert.equal(withoutHost.length, 89);
+  // 宿主没了，链条的边界不再被吞：这里把两条链自己的顶点也放进 STEP（最有利于放行的姿态）。
+  const stepVertices = withoutHost.flatMap((box) => boxCorners(box.stlBBox));
+
+  const result = evaluatePartIdentity({
+    expectedParts: withoutHost.length,
+    parts: withoutHost,
+    stepVertices,
+    declaredPresence: DECLARED_PRESENCE_POLICY.REQUIRED
+  });
+
+  assert.equal(result.checks[0].ok, true, '链条自己拿得到证人：覆盖判据是绿的');
+  assert.equal(result.checks[5].ok, true, '两条链都在件表里：存在性不红');
+  assert.deepEqual(result.exemption.hostMismatch, [], '没有冒名宿主（是宿主整件缺失）');
+  assert.deepEqual(result.exemption.staleDeclared, ['lift-chain-left'], '声明的宿主没了 ⇒ 声明不再落地');
+  assert.equal(result.checks[4].ok, false);
+  assert.match(result.checks[4].actual, /死声明 1 件（lift-chain-left）/);
+  assert.equal(result.ok, false);
+});
+
+test('策略是显式入参（fail-closed）：无链合成件表默认 required 判红，显式 optional 才放行', () => {
+  const { facts, stepVertices } = syntheticGrid();
+
+  // 不传策略 = required（fail-closed）：门禁不许因为件表里没有声明件就悄悄放宽。
+  const defaulted = evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: facts.parts, stepVertices });
+  assert.equal(defaulted.exemption.declaredPresence, DECLARED_PRESENCE_POLICY.REQUIRED);
+  assert.deepEqual(defaulted.exemption.missingDeclared.slice().sort(), ['lift-chain-left', 'lift-chain-right']);
+  assert.equal(defaulted.checks[5].ok, false);
+  assert.equal(defaulted.ok, false, '默认策略必须严格，忘了传不许变成静默通过');
+
+  // 合成件表显式 opt-out：这是调用方给的策略，不是门禁按件表推断。
+  const optional = evaluatePartIdentity({
+    expectedParts: facts.expectedParts,
+    parts: facts.parts,
+    stepVertices,
+    declaredPresence: DECLARED_PRESENCE_POLICY.OPTIONAL
+  });
+  assert.equal(optional.exemption.declaredPresence, DECLARED_PRESENCE_POLICY.OPTIONAL);
+  assert.deepEqual(optional.exemption.missingDeclared.slice().sort(), ['lift-chain-left', 'lift-chain-right']);
+  assert.equal(optional.checks[5].ok, true, 'optional 下存在性不判，但缺席名单仍然回显');
+  assert.match(optional.checks[5].note, /不是从件表推断出来/);
+  assert.equal(optional.ok, true, JSON.stringify(optional.checks.filter((check) => !check.ok)));
+
+  // 非法策略值必须当场报错，不许退化成某个默认方向。
+  assert.throws(
+    () => evaluatePartIdentity({ expectedParts: facts.expectedParts, parts: facts.parts, stepVertices, declaredPresence: 'auto' }),
+    /declaredPresence 必须是/
+  );
+});
+
+test('CLI（P2-1）：真实 --file 路径把 declaredPresence=required 写进回执（策略由 CLI 提供）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'step-tower-cli-'));
+  const stepPath = join(dir, 'stub.step');
+  writeFileSync(stepPath, stubStepText());
+  const run = runCli(['--file', stepPath, '--json']);
+  assert.equal(run.status, 1, '桩 STEP 本身红，但回执里必须带策略');
+  const line = run.stdout.split('\n').find((row) => row.startsWith('STEP_TOWER_JSON '));
+  assert.ok(line, `必须输出 JSON 回执：\n${run.stdout}`);
+  const payload = JSON.parse(line.slice('STEP_TOWER_JSON '.length));
+  assert.equal(payload.partIdentity.exemption.declaredPresence, DECLARED_PRESENCE_POLICY.REQUIRED);
+  assert.deepEqual(payload.partIdentity.exemption.missingDeclared, [], '146 件真件表两条链都在');
+  assert.match(run.stdout, /STEP_TOWER_IDENTITY FAIL .*missing=0 policy=required/);
 });

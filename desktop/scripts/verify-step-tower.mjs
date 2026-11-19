@@ -53,8 +53,13 @@
  * 逐件列出。实测：8 层 90 件、16 层 146 件各只有 2 件命中（`lift-chain-*` 在 `lift-post-*`
  * 里），其余 88/90、144/146 件的证人都落在 0.05mm 内（门禁给 ±1mm，余量 20 倍）。
  *
+ * **判别力边界（写清，不假装变成实体认证）**：第 6 类证据只到「件表里的精确件号 + 合法宿主 +
+ * 声明件确实存在」+「每件包络内 ≥1 个 B-Rep 顶点」。**它不是材质/拓扑/几何一致性认证**：
+ * 把任意一件改名成 `lift-chain-left` 再塞进 `lift-post-left`，本门禁照样放行（review P2-2 的
+ * W1）。这是占位顶点判据本身的边界 —— 它挡的是数据放大与批造件号，不挡源码级伪造。
+ *
  * 豁免不能无上限（review P1-2）：豁免集是"必须有证人"的补集，如果它可以被数据放大，
- * 逐件身份门禁就整体失效 —— 实测（修复前）1 个大件 + 20 个小件可得 `required=1 / ok=true`。
+ * 逐件占位覆盖门禁就整体失效 —— 实测（修复前）1 个大件 + 20 个小件可得 `required=1 / ok=true`。
  * 所以豁免口加四条硬约束（`evaluatePartIdentity` + `deriveOcclusionAudit`）：
  *   1) 件数上限：豁免件数 ≤ 件数 × 10%（向下取整），超一条即判红（21 件件表上限 = 2）。
  *      **按 entries（件）计数**，不是按件号 —— 重号件表曾经一票多免（146 件 / 145 条同号）；
@@ -62,6 +67,19 @@
  *   3) 严格包住：三轴包含（±tolerance）+ 每轴宿主尺寸 > 客体尺寸 ×1.05（同尺寸/近似同尺寸
  *      的两件不许互相"包住"）+ 三轴尺寸和差 > tolerance；
  *   4) 件号唯一：重号件表直接判红（Map 键身份不成立，"一条豁免掩盖多条"必须现形）。
+ *   5) **豁免声明**（精确件号 + 合法宿主 + 双向闭合 + 声明件必备）：被包住只是必要条件，
+ *      还必须「件号 ∈ `OCCLUSION_DECLARED_HOSTS`」且「宿主 == 声明里的那个」；反过来，声明了
+ *      却没被包住也是红（死条目 / 白名单空位）。**不许用件族前缀**当白名单：`lift-chain*`
+ *      前缀会把 `lift-chain-ghost-*` 这类新造件号自动收进来，12 条 ghost 即可吃满 10% 配额。
+ *      声明表只收实证过的两条链，件数/层数不写死（`lift-chain-left∈lift-post-left`、
+ *      `lift-chain-right∈lift-post-right`，8/16 两条构造器同源）。当前门禁的两个真实目标
+ *      （16 层塔 / 8 层输送基线）都含这两条链，所以它们**必备**：声明件缺席即红。review P2-1
+ *      的反例是「expectedParts 与 parts 同源，删链 + 同步改件数 → ok=true」—— 覆盖判据只能
+ *      发现「表里有、STEP 里没有」，发现不了「表里没有」，所以这条必须单独判。
+ *      存在性策略由**真实 CLI 显式传 `declaredPresence:'required'`**；`optional` 只给无链的
+ *      合成件表（测试）显式选择 —— 不许由件表自己推断（那等于「按件表过滤掉声明再自比较」）。
+ *      1)~4) 原样保留：10% cap 与每轴 1.05 仍是第二道闸（defense in depth），只是不再单独
+ *      决定通过 —— 任一条件不成立整条判红。
  * 回执逐件列名并回显包住者件号与每轴尺寸比（`lift-chain-left∈lift-post-left(4.00/3.33/1.08)`）。
  * 1.05 这个阈值是实测定的：真机两处命中最小轴比是 8 层 z 轴 1.082、16 层 z 轴 1.324；
  * review 建议的"每轴 ≥1.5"会直接误杀 8 层（1.082）。
@@ -137,7 +155,7 @@ const SOLID_FLOOR_RATIO = 0.6;
 /** 顶点包络默认容差（mm）。 */
 const DEFAULT_TOLERANCE_MM = 1;
 /**
- * 「被包住件」豁免上限：≤ 件数 × 10%（向下取整）。豁免是逐件身份门禁的缺口，不许被数据放大。
+ * 「被包住件」豁免上限：≤ 件数 × 10%（向下取整）。豁免是逐件占位覆盖的缺口，不许被数据放大。
  * 真机实测 90 件 2 件 / 146 件 2 件（1.1% / 1.4%），上限留了 4~7 倍余量。
  */
 const OCCLUSION_MAX_EXEMPT_RATIO = 0.1;
@@ -147,6 +165,38 @@ const OCCLUSION_MAX_EXEMPT_RATIO = 0.1;
  * 所以 review 建议的 1.5 会直接误杀；1.05 只挡「同尺寸/近似同尺寸互相包住」这一种伪造。
  */
 const OCCLUSION_MIN_AXIS_RATIO = 1.05;
+
+/**
+ * 豁免**声明表**（P2）：件号 → 唯一合法宿主件号。
+ *
+ * 为什么**不用件族前缀**白名单：`lift-chain*` 前缀匹配等于把 `lift-chain-ghost-left` 这类
+ * **新造件号**自动收进豁免集 —— 批造 12 个同族 ghost 缩进导柱里就能把 10% 配额吃满，
+ * 「逐件占位覆盖门禁」的门就换到了旁边（这是本轮的架构漏洞，不是措辞问题）。所以这里只点名
+ * **实证过的两条链**（8/16 两条构造器同源：`conveyor-assembly.ts:2195`、
+ * `buffer-tower-assembly.ts:554`），并把宿主钉死；件数/层数一律不写死，件表里有没有这两件、
+ * 被谁包住，全部由件表本身判。
+ *
+ * 双向闭合（只加约束，不放宽任何数）：被包住但没声明（或宿主不是声明的那个）判红；
+ * 声明了却没被包住（死条目）也判红。10% cap 与每轴 1.05 原样保留作第二道闸。
+ */
+export const OCCLUSION_DECLARED_HOSTS = Object.freeze({
+  'lift-chain-left': 'lift-post-left',
+  'lift-chain-right': 'lift-post-right'
+});
+
+/**
+ * 该件号是否被声明为可豁免：**精确匹配**（`hasOwnProperty`，不走原型链、不做前缀/正则）。
+ * `lift-chain-ghost-*` / `lift-chain-left-2` / `lift-chain-left:2` 一律 false。
+ */
+export function isDeclaredOccludable(id) {
+  if (typeof id !== 'string') return false;
+  return Object.prototype.hasOwnProperty.call(OCCLUSION_DECLARED_HOSTS, id);
+}
+
+/** 该件的唯一合法宿主件号；未声明返回 null。 */
+export function declaredOcclusionHost(id) {
+  return isDeclaredOccludable(id) ? OCCLUSION_DECLARED_HOSTS[id] : null;
+}
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const KERNEL_READY_TIMEOUT_MS = 120_000;
@@ -785,6 +835,22 @@ export function deriveOccludedParts(entries, toleranceMm = DEFAULT_TOLERANCE_MM)
 }
 
 /**
+ * 声明件**存在性**策略（review P2-1 整改）。
+ *
+ * `required`：`OCCLUSION_DECLARED_HOSTS` 里的件号必须出现在件表里 —— 当前门禁的两个真实目标
+ *   （16 层缓存塔 / 8 层输送基线）都含这两条链，缺一件即红。真实 CLI（build 与 --file 两条路）
+ *   显式传 `declaredPresence: 'required'`。
+ * `optional`：只供**无链合成件表**（测试里 nx×ny×nz 网格）显式选择。它是调用方给的策略入参，
+ *   不是从件表「自己算出来」的同源过滤 —— 门禁不会因为件表里恰好没有声明件就悄悄放宽。
+ *
+ * 默认 `required`（fail-closed）：调用方忘了传策略时按「声明件必备」判，不许静默放过。
+ */
+export const DECLARED_PRESENCE_POLICY = Object.freeze({
+  REQUIRED: 'required',
+  OPTIONAL: 'optional'
+});
+
+/**
  * 逐件 B-Rep 占位覆盖判定（纯函数，可喂合成 facts）：
  *   件表里每一件（被包住件除外）在整机 STEP 的顶点集里至少有一个落在自己包络内的顶点。
  *
@@ -794,16 +860,27 @@ export function deriveOccludedParts(entries, toleranceMm = DEFAULT_TOLERANCE_MM)
  *   3) 严格包住（每轴尺寸比 ≥ 1.05，见 `deriveOcclusionAudit`）。
  * 回执逐件列名 + 回显包住者件号与每轴尺寸比，另有一条独立检查记录豁免上限。
  *
+ * **判别力边界**：这套证据认证的是「精确件号 + 合法宿主 + 声明件存在」，逐件只到「包络内
+ * ≥1 个顶点」。它不是材质/拓扑/实体认证，也不挡源码级把任意件改名成 chain 件号（review P2-2）。
+ *
  * facts:
- *   expectedParts  件表件数（由 `buildBufferTowerParts` / `buildConveyorParts` 派生）
- *   parts          [{id, stlBBox, kernelBBox?}]  逐件包络
- *   stepVertices   [[x,y,z], ...]               整机 STEP 的 B-Rep 顶点（readStepVertexPoints）
- *   toleranceMm    默认 1（与顶点并集同一容差，不新增阈值）
+ *   expectedParts   件表件数（由 `buildBufferTowerParts` / `buildConveyorParts` 派生）
+ *   parts           [{id, stlBBox, kernelBBox?}]  逐件包络
+ *   stepVertices    [[x,y,z], ...]               整机 STEP 的 B-Rep 顶点（readStepVertexPoints）
+ *   toleranceMm     默认 1（与顶点并集同一容差，不新增阈值）
+ *   declaredPresence 'required'（默认）| 'optional' —— 由真实 CLI / 合成件表调用方显式决定
  */
 export function evaluatePartIdentity(facts) {
   const tolerance = Number.isFinite(facts?.toleranceMm) ? facts.toleranceMm : DEFAULT_TOLERANCE_MM;
   const parts = Array.isArray(facts?.parts) ? facts.parts : [];
   const expectedParts = Number(facts?.expectedParts);
+  const declaredPresence = facts?.declaredPresence ?? DECLARED_PRESENCE_POLICY.REQUIRED;
+  if (declaredPresence !== DECLARED_PRESENCE_POLICY.REQUIRED && declaredPresence !== DECLARED_PRESENCE_POLICY.OPTIONAL) {
+    throw new Error(
+      `evaluatePartIdentity：declaredPresence 必须是 'required' 或 'optional'（收到 ${JSON.stringify(facts?.declaredPresence)}）`
+    );
+  }
+  const requireDeclaredPresence = declaredPresence === DECLARED_PRESENCE_POLICY.REQUIRED;
   const vertices = Array.isArray(facts?.stepVertices) ? facts.stepVertices : null;
   // `index` 让「谁是第几件」独立于件号：重号件表里按件号去重 = 一票多免（review P2 反例）。
   const entries = parts.map((part, index) => ({ index, id: String(part?.id ?? '?'), box: partBox(part) }));
@@ -818,6 +895,29 @@ export function evaluatePartIdentity(facts) {
   const idCounts = new Map();
   for (const entry of entries) idCounts.set(entry.id, (idCounts.get(entry.id) ?? 0) + 1);
   const duplicateIds = [...idCounts].filter(([, count]) => count > 1).map(([id]) => id);
+  // 豁免声明（P2）：件号 → 合法宿主。三类红各自独立成立，互不掩盖：
+  //   undeclared   被包住但件号没声明（含按族前缀冒充同族的 ghost）；
+  //   hostMismatch 件号声明了，宿主却不是声明的那个（宿主冒名）；
+  //   staleDeclared 件号真在件表里、却没被包住（死条目 = 白名单空位，靠多声明扩容）。
+  const declaredIds = Object.keys(OCCLUSION_DECLARED_HOSTS);
+  const declaredEntries = entries.filter((entry) => isDeclaredOccludable(entry.id) && entry.box);
+  const declaredDetails = audit.details.filter((detail) => isDeclaredOccludable(detail.id));
+  const undeclaredDetails = audit.details.filter((detail) => !isDeclaredOccludable(detail.id));
+  const hostMismatchDetails = declaredDetails.filter((detail) => declaredOcclusionHost(detail.id) !== detail.host);
+  const declaredHits = declaredDetails.filter((detail) => declaredOcclusionHost(detail.id) === detail.host);
+  // 声明件**存在性**（review P2-1 整改）：覆盖判据只能发现「件表里有、STEP 里没有」，
+  // 发现不了「件表里根本没有」—— expectedParts 与 parts 同源时，删链 + 同步改件数能一路绿。
+  // 所以当前真实目标（16 层塔 / 8 层输送）把两条链声明为**必备**：缺席即红。
+  // `optional` 只由无链合成件表的调用方显式选择，不由件表自己推断。
+  const missingDeclaredIds = declaredIds.filter((id) => !entries.some((entry) => entry.id === id));
+  // 死声明只判「件表里确实有这件」的情形：件表里根本没有这件时，由上面的「声明件必备」
+  // 单独判红（review P2-1：以前这里写「缺件由覆盖判据自己红」，实测不成立，已删掉该说法）。
+  const staleDeclaredIds = declaredIds.filter((id) => {
+    const present = declaredEntries.filter((entry) => entry.id === id).length;
+    if (present === 0) return false;
+    const hit = declaredDetails.filter((detail) => detail.id === id).length;
+    return hit < present;
+  });
   // 防御性复验：即使 derive 将来被改坏，这两类"假豁免"也必须自己现形。
   const chainedHosts = audit.details.filter((detail) => audit.occludedIndices.has(detail.hostIndex));
   const weakHosts = audit.details.filter((detail) => !(detail.minRatio >= OCCLUSION_MIN_AXIS_RATIO));
@@ -855,7 +955,7 @@ export function evaluatePartIdentity(facts) {
     expected: `豁免 ≤ ${maxExempt} 件（件数 ${parts.length} × ${OCCLUSION_MAX_EXEMPT_RATIO} 向下取整）；`
       + `每件必须被「非豁免件」严格包住（三轴包含 ±${tolerance}mm，且每轴尺寸比 ≥ ${OCCLUSION_MIN_AXIS_RATIO}）`,
     actual: `${exemptCount} 件`
-      + `${overCap ? `（超上限 ${exemptCount - maxExempt} 件：豁免集是「必须有证人」的补集，无上限 = 逐件身份门禁整体失效）` : ''}`
+      + `${overCap ? `（超上限 ${exemptCount - maxExempt} 件：豁免集是「必须有证人」的补集，无上限 = 逐件占位覆盖门禁整体失效）` : ''}`
       + `${chainedHosts.length ? `；链式豁免 ${chainedHosts.length} 件（${shortList(chainedHosts.map((detail) => `${detail.id}∈${detail.host}`))}）` : ''}`
       + `${weakHosts.length ? `；非严格包住 ${weakHosts.length} 件（${shortList(weakHosts.map((detail) => `${detail.id}∈${detail.host}`))}）` : ''}`,
     note: occludedIds.length
@@ -877,9 +977,64 @@ export function evaluatePartIdentity(facts) {
     note: `${entries.length} 件 / ${idCounts.size} 个不同件号`
   };
 
+  // 豁免声明单列一条（P2）：豁免不再由「几何上被包住」单独决定 ——
+  // 被包住只是必要条件，还要**件号被点名**且**宿主就是声明的那个**。
+  // 架构漏洞在这里闭合：改用 `lift-chain*` 前缀族白名单的话，`lift-chain-ghost-*` 会被
+  // 自动收进来，10% 配额照样被吃满（这条检查就是那个反例的守卫）。
+  // 边界：这是**名字级**的精确件号/宿主声明约束，不是材质/拓扑/实体认证（review P2-2）。
+  const identityCheck = {
+    label: '被包住件豁免声明（精确件号 + 合法宿主，名字级，不是实体认证）',
+    ok: undeclaredDetails.length === 0 && hostMismatchDetails.length === 0,
+    expected: `豁免集只允许声明过的 ${declaredIds.length} 件（${declaredIds.map((id) => `${id}∈${OCCLUSION_DECLARED_HOSTS[id]}`).join('/')}）：`
+      + '件号精确匹配、宿主必须是声明的那个；未声明件 / 冒名宿主一律判红',
+    actual: `${declaredHits.length} 件命中声明`
+      + `${undeclaredDetails.length
+        ? `；未声明 ${undeclaredDetails.length} 件（${shortList(undeclaredDetails.map((detail) => `${detail.id}∈${detail.host}`))}）`
+        : ''}`
+      + `${hostMismatchDetails.length
+        ? `；宿主冒名 ${hostMismatchDetails.length} 件（${shortList(hostMismatchDetails.map((detail) => `${detail.id}∈${detail.host}`))}）`
+        : ''}`,
+    note: undeclaredDetails.length === 0 && hostMismatchDetails.length === 0
+      ? `声明的宿主：${declaredIds.map((id) => `${id}∈${OCCLUSION_DECLARED_HOSTS[id]}`).join(' ')}`
+      : '「结构上被包住」只是必要条件：未声明件吃配额 = 占位覆盖门禁失效；宿主冒名 = 声明被换掉'
+  };
+
+  // 双向闭合（另一向）：声明了却没发生 = 白名单空位。留着空位就等于允许「多声明几个」来
+  // 把将来的假设名件号提前占位 —— 声明必须与件表实证一一对应，否则判红。
+  const staleCheck = {
+    label: '豁免声明不许有死条目（声明了就必须真被包住）',
+    ok: staleDeclaredIds.length === 0,
+    expected: '声明表里的件号只要出现在件表里，就必须真的被「声明的宿主」包住；'
+      + '声明了没发生 = 空位；声明件**缺席**（件表里根本没有）由下一条「声明件必备」单独判 —— '
+      + '不再声称「缺件由覆盖判据自己红」（review P2-1 实测不成立）',
+    actual: staleDeclaredIds.length === 0
+      ? (missingDeclaredIds.length > 0
+        ? `无死声明（缺席 ${missingDeclaredIds.length} 件由「声明件必须在件表里」单独判）`
+        : `${declaredIds.length} 条声明全部落地（件表里都在且被声明的宿主包住）`)
+      : `死声明 ${staleDeclaredIds.length} 件（${shortList(staleDeclaredIds)}）`,
+    note: `声明表 ${declaredIds.length} 条；命中 ${declaredHits.length} 件；缺席 ${missingDeclaredIds.length} 件`
+  };
+
+  // 声明件存在性单列一条（review P2-1）：当前真实目标的两条链是**必备**。
+  // 只判「件表里有没有」，不看 STEP 顶点/件数 —— 这三者同源时只有这一条看得见「表里没有」。
+  // 策略由调用方显式给：真实 CLI 传 required，无链合成件表传 optional（不是同源自过滤）。
+  const presenceCheck = {
+    label: '声明件必须在件表里（当前塔/输送目标：两条链必备）',
+    ok: !requireDeclaredPresence || missingDeclaredIds.length === 0,
+    expected: requireDeclaredPresence
+      ? `声明表 ${declaredIds.length} 件必须全部出现在件表里（${declaredIds.join('/')}）`
+      : `策略=optional（合成件表）：不要求声明件出现；件表里若含声明件仍按死声明判`,
+    actual: missingDeclaredIds.length === 0
+      ? `声明件 ${declaredIds.length}/${declaredIds.length} 在件表里`
+      : `声明件缺席 ${missingDeclaredIds.length} 件（${shortList(missingDeclaredIds)}）`,
+    note: requireDeclaredPresence
+      ? '删掉声明件 + 同步改 expectedParts 也不会放行（review P2-1：expectedParts 与 parts 同源，覆盖判据看不见"表里没有"）'
+      : 'optional 是调用方显式给的策略入参，不是从件表推断出来的同源过滤'
+  };
+
   return {
-    ok: check.ok && exemptionCheck.ok && uniquenessCheck.ok,
-    checks: [check, exemptionCheck, uniquenessCheck],
+    ok: check.ok && exemptionCheck.ok && uniquenessCheck.ok && identityCheck.ok && staleCheck.ok && presenceCheck.ok,
+    checks: [check, exemptionCheck, uniquenessCheck, identityCheck, staleCheck, presenceCheck],
     required: required.length,
     requested: parts.length,
     unwitnessed: unwitnessed.map((entry) => entry.id),
@@ -887,10 +1042,23 @@ export function evaluatePartIdentity(facts) {
     witnessCount,
     exemption: {
       count: exemptCount,
+      // cap 用量（= 被包住件数，按 entries 计）；10% 上限与 1.05 比例这一轮一个字没改。
+      capUsed: exemptCount,
       uniqueCount: occluded.size,
       duplicateIds,
       maxExempt,
       overCap,
+      declared: declaredHits.length,
+      // 存在性策略与缺席名单：读回执的自动化不必猜「这次是否要求两条链都在」。
+      declaredPresence,
+      missingDeclared: missingDeclaredIds.slice(),
+      undeclared: undeclaredDetails.map((detail) => ({ id: detail.id, host: detail.host })),
+      hostMismatch: hostMismatchDetails.map((detail) => ({
+        id: detail.id,
+        host: detail.host,
+        expectedHost: declaredOcclusionHost(detail.id)
+      })),
+      staleDeclared: staleDeclaredIds.slice(),
       details: audit.details.map((detail) => ({
         id: detail.id,
         host: detail.host,
@@ -948,9 +1116,15 @@ if (flag('--help') || flag('-h')) {
 退出码：0 全过（或显式 SKIP 且未给 --require-full）/ 1 任一断言失败、建模失败，
 或给了 --require-full 时发生 SKIP / 2 参数或证据文件不合法（含 --file 与 --require-full 同给）。
 
-豁免硬约束（逐件身份门禁的缺口，不允许被数据放大）：
+豁免硬约束（逐件占位覆盖的缺口，不允许被数据放大）：
   「被包住件」豁免 ≤ 件数×10%（向下取整，按件数计不是按件号）；宿主必须是非豁免件；
-  每轴尺寸比 ≥ 1.05；件号必须唯一（重号判红）；回执逐件列名并回显包住者件号与每轴尺寸比。`);
+  每轴尺寸比 ≥ 1.05；件号必须唯一（重号判红）；回执逐件列名并回显包住者件号与每轴尺寸比。
+  豁免声明：只有声明过的 2 件可豁免（lift-chain-left∈lift-post-left、lift-chain-right∈lift-post-right，
+  精确件号 + 合法宿主，不做族前缀匹配）；未声明件/冒名宿主判红，声明了没被包住（死条目）也判红；
+  当前塔/输送目标里这两条链是**必备**：声明件缺席即红（不是"缺件由件数兜底"）。
+  判别力边界：这是精确件号/宿主声明约束（**名字级**），不是材质/拓扑/实体认证；
+  把任意件改名成 chain 件号再塞进声明宿主仍会放行 —— 挡的是数据放大/批造件号，不挡源码级伪造。
+  回执行：STEP_TOWER_IDENTITY PASS exempt=2/9 declared=2 undeclared=0 stale=0 hostMismatch=0 missing=0`);
   process.exit(0);
 }
 
@@ -1115,15 +1289,18 @@ function inspectOnly(stepPath, partsDir) {
   // 导出边界（P2-5）不依赖内核：文件模式同样判，别让它成为「只有 build 模式才看」的缺口。
   const boundary = exportBoundaryOf(table);
   // 逐件 B-Rep 占位覆盖（P1-1）：文件模式同样判 —— 件表 + STEP 顶点都在手上，没有理由不看。
+  // 存在性策略由**真实 CLI 显式给 required**：8/16 两个真实目标都含两条链，缺席即红。
   const identity = evaluatePartIdentity({
     expectedParts: table.expectedParts,
     parts: partMetas,
     stepVertices: readStepVertexPoints(stepText),
-    toleranceMm: Number.isFinite(toleranceArg) ? toleranceArg : DEFAULT_TOLERANCE_MM
+    toleranceMm: Number.isFinite(toleranceArg) ? toleranceArg : DEFAULT_TOLERANCE_MM,
+    declaredPresence: DECLARED_PRESENCE_POLICY.REQUIRED
   });
   const checks = [...result.checks, ...identity.checks, ...boundary.checks];
   const ok = result.ok && identity.ok && boundary.ok;
   printChecks(checks);
+  logIdentityLine(identity);
   log(`${ok ? 'PASS' : 'FAIL'} file-check ${checks.filter((check) => check.ok).length}/${checks.length}`);
   if (!ok) process.exitCode = 1;
   if (jsonOutput) {
@@ -1154,6 +1331,24 @@ function printChecks(checks) {
   for (const check of checks) {
     log(`${check.ok ? 'PASS' : 'FAIL'} ${check.label} 期望=${check.expected} 实际=${check.actual}${check.note ? ` (${check.note})` : ''}`);
   }
+}
+
+/**
+ * 豁免一行回执（P2）：读日志的自动化不必再从六条 check 里拼结论。
+ * 形如 `STEP_TOWER_IDENTITY PASS exempt=2/9 declared=2 undeclared=0 stale=0 hostMismatch=0 missing=0 policy=required`。
+ */
+function logIdentityLine(identity) {
+  const exemption = identity?.exemption ?? {};
+  log(
+    `STEP_TOWER_IDENTITY ${identity?.ok ? 'PASS' : 'FAIL'} `
+      + `exempt=${exemption.capUsed ?? 0}/${exemption.maxExempt ?? 0} `
+      + `declared=${exemption.declared ?? 0} `
+      + `undeclared=${(exemption.undeclared ?? []).length} `
+      + `stale=${(exemption.staleDeclared ?? []).length} `
+      + `hostMismatch=${(exemption.hostMismatch ?? []).length} `
+      + `missing=${(exemption.missingDeclared ?? []).length} `
+      + `policy=${exemption.declaredPresence ?? '?'}`
+  );
 }
 
 /**
@@ -1337,11 +1532,13 @@ async function buildAndVerify() {
     });
     // 导出边界已在起内核前判过；这里只把它并入同一张回执，避免「内核绿、导出红」被分开读。
     // 逐件 B-Rep 占位覆盖（P1-1）同理：它是「STEP 里到底还有没有这件」的直接证据。
+    // 存在性策略由**真实 CLI 显式给 required**：8/16 两个真实目标都含两条链，缺席即红。
     const identity = evaluatePartIdentity({
       expectedParts: table.expectedParts,
       parts,
       stepVertices: readStepVertexPoints(stepText),
-      toleranceMm: Number.isFinite(toleranceArg) ? toleranceArg : DEFAULT_TOLERANCE_MM
+      toleranceMm: Number.isFinite(toleranceArg) ? toleranceArg : DEFAULT_TOLERANCE_MM,
+      declaredPresence: DECLARED_PRESENCE_POLICY.REQUIRED
     });
     const checks = [...result.checks, ...identity.checks, ...boundary.checks];
     const ok = result.ok && identity.ok && boundary.ok;
@@ -1352,6 +1549,7 @@ async function buildAndVerify() {
         `${identity.occluded.length ? `，被包住 ${identity.occluded.length}/上限 ${identity.exemption.maxExempt}` : ''}) ` +
         `stlUnion=${result.stlUnion ? result.stlUnion.min.map((v, a) => `${v.toFixed(1)}..${result.stlUnion.max[a].toFixed(1)}`).join(' ') : '(无)'}`
     );
+    logIdentityLine(identity);
     log(`${ok ? 'PASS' : 'FAIL'} verify-step-tower ${checks.filter((check) => check.ok).length}/${checks.length}`);
     if (!ok) process.exitCode = 1;
     if (jsonOutput) {
