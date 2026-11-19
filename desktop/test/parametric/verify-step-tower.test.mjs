@@ -1596,3 +1596,333 @@ test('CLI（P2-1）：真实 --file 路径把 declaredPresence=required 写进�
   assert.deepEqual(payload.partIdentity.exemption.missingDeclared, [], '146 件真件表两条链都在');
   assert.match(run.stdout, /STEP_TOWER_IDENTITY FAIL .*missing=0 policy=required/);
 });
+
+/* ---------------------------------------------------------------------------
+ * R12 第 7 类证据：逐实体身份（STEP_TOWER_ENTITY_IDENTITY）
+ *
+ * 为什么单列一段：这一层证的是「件表里每一件，在 identity 伴生成物里都有具名、包络、
+ * 实体数都对得上的实体」。它**不证明** identity.step 与融合制造 STEP 内部拓扑/形状等价，
+ * 也不认证材质/可制造性；bbox 只是包络核对。而 `--file` 只读一份 STEP，没有伴生成物，
+ * 所以那里必须显式 not-applicable —— 不许多出一条静默通过的绿项。
+ *
+ * 这里的用例全部**追加**：既有 47 例的断言一个字不动。
+ * ------------------------------------------------------------------------- */
+
+test('CLI（R12）：--file 的 entityIdentity 显式 not-applicable，既有证据条数一条不加', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'step-tower-entity-'));
+  const stepPath = join(dir, 'stub.step');
+  writeFileSync(stepPath, stubStepText());
+
+  const run = runCli(['--file', stepPath, '--json']);
+  assert.equal(run.status, 1, '桩 STEP 照旧整体红（文件模式不是验收门禁）');
+  assert.match(run.stdout, /STEP_TOWER_ENTITY_IDENTITY NOT-APPLICABLE/);
+
+  const line = run.stdout.split('\n').find((row) => row.startsWith('STEP_TOWER_JSON '));
+  assert.ok(line, `必须输出 JSON 回执：\n${run.stdout}`);
+  const payload = JSON.parse(line.slice('STEP_TOWER_JSON '.length));
+  assert.equal(payload.entityIdentity.applicable, false);
+  assert.equal(payload.entityIdentity.ok, null, '不适用必须留 null —— true 会被读成「验过了」');
+  assert.equal(payload.entityIdentity.verdict, 'NOT_APPLICABLE');
+  assert.match(payload.entityIdentity.reason, /not-applicable/);
+  // 既有文件模式证据 23 条（16 条 STEP/件/合并 + 4 条豁免/覆盖 + ... ）：加身份就等于改了文件模式语义
+  assert.equal(payload.checks.length, 23, `文件模式证据条数不许变（收到 ${payload.checks.length}）`);
+  assert.equal(
+    payload.checks.filter((check) => /身份伴生成物|身份件号集合|逐件实体数与包络|并集核对与制造件污染/.test(check.label)).length,
+    0,
+    '文件模式不许混进一条身份绿项（静默跳过同样不允许）'
+  );
+});
+
+test('CLI（R12）：--help 把第 7 类证据、fail-closed 与判别力边界写在同一张单子上', () => {
+  const run = runCli(['--help']);
+  assert.equal(run.status, 0, `--help 应 exit 0（收到 ${run.status}）\n${run.stderr}`);
+  assert.match(run.stdout, /STEP_TOWER_ENTITY_IDENTITY/);
+  assert.match(run.stdout, /entityIdentity = NOT-APPLICABLE/);
+  assert.match(run.stdout, /缺 files\.identity.*FAIL、exit 1/);
+  assert.match(run.stdout, /不是唯一几何指纹/);
+  assert.match(run.stdout, /本轮不加 --identity-step \/ --require-identity/);
+});
+
+test('CLI（R12）：--skip-if-no-kernel 时身份证据记「未验」，unverified 语义不变', () => {
+  const run = runCli(['--levels', '8', '--skip-if-no-kernel', '--python', '/nonexistent/python3', '--json']);
+  assert.equal(run.status, 0, '显式跳过沿用退出码 0');
+  assert.match(run.stdout, /SKIP 逐实体身份（第 7 类证据）= 未验/);
+  const line = run.stdout.split('\n').find((row) => row.startsWith('STEP_TOWER_JSON '));
+  assert.ok(line, `必须输出 JSON 回执：\n${run.stdout}`);
+  const payload = JSON.parse(line.slice('STEP_TOWER_JSON '.length));
+  assert.equal(payload.entityIdentity.verified, false);
+  assert.equal(payload.entityIdentity.ok, null, '未验不许写成绿');
+  assert.deepEqual(payload.unverified, ['kernel', 'step', 'perPartStl', 'partIdentity'], '既有 unverified 语义不变');
+});
+
+test('R12 接线（无内核）：缺 files.identity → 4 条身份 check 第 1 条红，且不是 not-applicable', async () => {
+  const gate = await import('../../scripts/verify-step-tower.mjs');
+  const parts = [
+    { id: 'a', bboxMin: [0, 0, 0], bboxMax: [10, 10, 10], solids: 1, volumeMm3: 1000 },
+    { id: 'b', bboxMin: [20, 0, 0], bboxMax: [30, 10, 10], solids: 1, volumeMm3: 1000 }
+  ];
+  const dir = mkdtempSync(join(tmpdir(), 'step-tower-entity-'));
+  const stepPath = join(dir, 'step.step');
+  writeFileSync(stepPath, stubStepText());
+
+  // 老内核：回执里根本没有 files.identity
+  const built = { ok: true, files: { parts, step: { path: stepPath } }, stats: { partSolids: 2 } };
+  const result = await gate.entityIdentityOf({
+    built,
+    table: { parts: parts.map((part) => ({ id: part.id })) },
+    stepPath,
+    step: { bbox: { min: [0, 0, 0], max: [30, 10, 10] } },
+    stepText: stubStepText()
+  });
+  assert.equal(result.checks.length, 4, '身份证据固定 4 条，缺产物也不许少一条');
+  assert.equal(result.ok, false, '缺身份产物必须 FAIL（fail-closed），不是 SKIP');
+  assert.equal(result.checks[0].ok, false);
+  assert.match(result.checks[0].actual, /缺 files\.identity/);
+  assert.equal(result.entityIdentity.applicable, true, 'build 语义下是「判了没通过」，不是不适用');
+  assert.ok(result.checks.slice(1).every((check) => check.ok === false), '没有回读时其余三条也不许绿');
+
+  // 回执里声称有 identity、磁盘上却没有 → 同样红（路径归属与真实 bytes 都要核）
+  const ghost = await gate.entityIdentityOf({
+    built: { ...built, files: { ...built.files, identity: { path: join(dir, 'identity.step'), bytes: 999 } } },
+    table: { parts: parts.map((part) => ({ id: part.id })) },
+    stepPath,
+    step: { bbox: { min: [0, 0, 0], max: [30, 10, 10] } },
+    stepText: stubStepText()
+  });
+  assert.equal(ghost.ok, false);
+  assert.match(ghost.checks[0].actual, /文件不存在/);
+});
+
+test('R12 接线（真 fixtures，无内核）：真 bytes 回读 → 4 条全绿；跨目录/非同请求 → 红', async () => {
+  const gate = await import('../../scripts/verify-step-tower.mjs');
+  const entities = await import('../../src/cad/step-entities.ts');
+  const occtimportjs = (await import('occt-import-js')).default;
+  const { readFileSync } = await import('node:fs');
+
+  const fixture = fileURLToPath(new URL('../fixtures/step-identity-3parts.step', import.meta.url));
+  const raw = readFileSync(fixture);
+  const dir = mkdtempSync(join(tmpdir(), 'step-tower-entity-'));
+  const identityPath = join(dir, 'identity.step');
+  writeFileSync(identityPath, raw);
+  // 制造侧必须是**真能导入的同一几何**：C7 之后并集核对比的是两份文件的同口径网格包络，
+  // 拿桩文本当制造 STEP 会（正确地）判「导入失败」。这里把 PRODUCT 名抹成 COMPOUND —— 正是
+  // fuse 之后件号消失的样子，几何与 identity 完全一致，且不触发 C8 污染判据。
+  // 同源替换只验证同口径读数与判据方向，不证明 fuse 产物与 compound 拓扑等价。
+  const mergedText = (text) => text.replace(/PRODUCT\('([^']*)','\1'/g, "PRODUCT('COMPOUND','COMPOUND'");
+  const stepPath = join(dir, 'step.step');
+  writeFileSync(stepPath, mergedText(raw.toString('utf8')));
+
+  const occt = await occtimportjs();
+  const readback = entities.readStepEntities(new Uint8Array(raw), occt);
+  assert.equal(readback.ok, true, readback.errors.join('；'));
+  const parts = readback.entities.map((entity) => ({
+    id: entity.leaf,
+    bboxMin: [...entity.bbox.min],
+    bboxMax: [...entity.bbox.max],
+    solids: entity.meshCount,
+    volumeMm3: 1
+  }));
+
+  const built = {
+    ok: true,
+    files: { identity: { path: identityPath, bytes: raw.length }, parts, step: { path: stepPath } },
+    stats: { partSolids: parts.reduce((sum, part) => sum + part.solids, 0) }
+  };
+  // 制造侧拓扑（VERTEX_POINT）包络：C7 之后它只作**参考**写进 JSON（不参与判定），
+  // 这里传真实值，好让「旧口径 vs 同口径」的差在回执里看得见。
+  const stepTextOfMerged = readFileSync(stepPath, 'utf8');
+  const vertices = readStepVertexPoints(stepTextOfMerged);
+  const vertexBox = unionBoxes(
+    vertices.map((point) => ({ min: [...point], max: [...point] }))
+  );
+  const args = {
+    table: { parts: parts.map((part) => ({ id: part.id })) },
+    stepPath,
+    step: { bbox: vertexBox ?? { min: [...readback.bbox.min], max: [...readback.bbox.max] } },
+    stepText: stepTextOfMerged
+  };
+
+  const green = await gate.entityIdentityOf({ built, ...args });
+  assert.equal(green.ok, true, JSON.stringify(green.checks));
+  assert.equal(green.entityIdentity.actualParts, 3);
+  assert.equal(green.entityIdentity.meshCount, 3);
+  // 同口径：两侧都是网格包络，Δ 应为 0；拓扑包络只作参考存在 JSON 里。
+  assert.deepEqual(green.entityIdentity.unionDeltaMm.map((value) => Number(value.toFixed(3))), [0, 0, 0]);
+  assert.ok(green.entityIdentity.mergedReadbackBBox, '必须给出制造侧同口径网格包络');
+  assert.ok(green.entityIdentity.identityBBox, '必须给出 identity 侧网格包络');
+  assert.equal(green.entityIdentity.mergedReadbackMeshCount, 3);
+  assert.deepEqual(green.entityIdentity.mergedReadbackErrors, []);
+
+  // 一行回执必须是真数字（CI 归档读的就是这一行）
+  const lines = [];
+  const original = console.log;
+  console.log = (line) => lines.push(String(line));
+  try {
+    gate.logEntityIdentityLine(green);
+  } finally {
+    console.log = original;
+  }
+  assert.match(lines.join('\n'), /STEP_TOWER_ENTITY_IDENTITY PASS ids=3\/3 unknown=0 dup=0 solids=3\/3 mesh=3 /);
+
+  // 越界：identity 被挪到别的目录（跨请求张冠李戴的最省事做法）→ 产物判据红
+  const elsewhere = mkdtempSync(join(tmpdir(), 'step-tower-entity-other-'));
+  const movedPath = join(elsewhere, 'identity.step');
+  writeFileSync(movedPath, raw);
+  const outside = await gate.entityIdentityOf({
+    built: { ...built, files: { ...built.files, identity: { path: movedPath, bytes: raw.length } } },
+    ...args
+  });
+  assert.equal(outside.ok, false);
+  assert.match(outside.checks[0].actual, /不同目录/);
+
+  // 把制造 STEP 自身当身份件 → 红（指向自身不算产物）
+  const alias = await gate.entityIdentityOf({
+    built: { ...built, files: { ...built.files, identity: { path: stepPath, bytes: raw.length } } },
+    ...args
+  });
+  assert.equal(alias.ok, false);
+  assert.match(alias.checks[0].actual, /制造 STEP 自身/);
+});
+
+/* ---------------------------------------------------------------------------
+ * R12/C7 补强（T3 复审 P1-2 / P1-3 / P2）：真实文件系统上的软链、`./` 写法、
+ * 制造 STEP 导入失败、身份容差不继承 CLI。全部**追加**，既有断言一字未改。
+ * ------------------------------------------------------------------------- */
+
+test('R12/P1-2（真文件）：软链越界与软链自指都判红，`./` 写法不假红', async () => {
+  const gate = await import('../../scripts/verify-step-tower.mjs');
+  const entities = await import('../../src/cad/step-entities.ts');
+  const occtimportjs = (await import('occt-import-js')).default;
+  const { readFileSync, symlinkSync } = await import('node:fs');
+
+  const fixture = fileURLToPath(new URL('../fixtures/step-identity-3parts.step', import.meta.url));
+  const raw = readFileSync(fixture);
+  const realDir = mkdtempSync(join(tmpdir(), 'step-tower-link-real-'));
+  const linkDir = mkdtempSync(join(tmpdir(), 'step-tower-link-alias-'));
+  const identityPath = join(realDir, 'identity.step');
+  writeFileSync(identityPath, raw);
+  const stepPath = join(realDir, 'step.step');
+  writeFileSync(stepPath, raw.toString('utf8').replace(/PRODUCT\('([^']*)','\1'/g, "PRODUCT('COMPOUND','COMPOUND'"));
+
+  const occt = await occtimportjs();
+  const readback = entities.readStepEntities(new Uint8Array(raw), occt);
+  const parts = readback.entities.map((entity) => ({
+    id: entity.leaf,
+    bboxMin: [...entity.bbox.min],
+    bboxMax: [...entity.bbox.max],
+    solids: entity.meshCount,
+    volumeMm3: 1
+  }));
+  const built = {
+    ok: true,
+    files: { parts, step: { path: stepPath } },
+    stats: { partSolids: parts.reduce((sum, part) => sum + part.solids, 0) }
+  };
+  const args = {
+    table: { parts: parts.map((part) => ({ id: part.id })) },
+    stepPath,
+    step: { bbox: { min: [...readback.bbox.min], max: [...readback.bbox.max] } },
+    stepText: readFileSync(stepPath, 'utf8')
+  };
+
+  // ① 软链到另一目录：字符串层面看不出越界，realpath 一眼看穿
+  //    真实 identity 放在 thirdDir，软链挂在 linkDir，制造 STEP 在 realDir —— 三处不同。
+  const thirdDir = mkdtempSync(join(tmpdir(), 'step-tower-link-target-'));
+  const realIdentity = join(thirdDir, 'identity.step');
+  writeFileSync(realIdentity, raw);
+  const escapedLink = join(linkDir, 'identity.step');
+  symlinkSync(realIdentity, escapedLink);
+  const escaped = await gate.entityIdentityOf({
+    built: { ...built, files: { ...built.files, identity: { path: escapedLink, bytes: raw.length } } },
+    ...args
+  });
+  assert.equal(escaped.ok, false);
+  assert.equal(escaped.entityIdentity.sameDir, false, '真实路径不同目录不许报 true');
+  assert.match(escaped.checks[0].actual, /不同目录|符号链接/);
+
+  // ② 软链指回制造 STEP 自身
+  const selfLink = join(realDir, 'self.step');
+  symlinkSync(stepPath, selfLink);
+  const self = await gate.entityIdentityOf({
+    built: { ...built, files: { ...built.files, identity: { path: selfLink, bytes: raw.length } } },
+    ...args
+  });
+  assert.equal(self.ok, false);
+  assert.match(self.checks[0].actual, /制造 STEP 自身|符号链接/);
+
+  // ③ `./` 只是写法差异：不许假红（旧实现报「不同目录 …/real/. vs …/real」）
+  const dotted = await gate.entityIdentityOf({
+    built: {
+      ...built,
+      files: {
+        ...built.files,
+        identity: { path: `${realDir}/./identity.step`, bytes: raw.length }
+      }
+    },
+    ...args
+  });
+  assert.equal(dotted.ok, true, JSON.stringify(dotted.checks));
+  assert.equal(dotted.entityIdentity.sameDir, true);
+  assert.equal(dotted.entityIdentity.toleranceMm, 1, '身份容差固定 1mm');
+  assert.equal(dotted.entityIdentity.tolerancePolicy, 'fixed');
+  assert.ok(dotted.entityIdentity.mergedReadbackBBox, 'JSON 必须有制造侧同口径包络');
+  assert.ok(dotted.entityIdentity.identityBBox, 'JSON 必须有 identity 侧网格包络');
+});
+
+test('R12/C7（真文件）：制造 STEP 导入失败 → 第 4 条红，缺边不退回旧口径', async () => {
+  const gate = await import('../../scripts/verify-step-tower.mjs');
+  const entities = await import('../../src/cad/step-entities.ts');
+  const occtimportjs = (await import('occt-import-js')).default;
+  const { readFileSync } = await import('node:fs');
+
+  const fixture = fileURLToPath(new URL('../fixtures/step-identity-3parts.step', import.meta.url));
+  const raw = readFileSync(fixture);
+  const dir = mkdtempSync(join(tmpdir(), 'step-tower-bad-merged-'));
+  const identityPath = join(dir, 'identity.step');
+  writeFileSync(identityPath, raw);
+  const stepPath = join(dir, 'step.step');
+  writeFileSync(stepPath, 'this is not a STEP file\n');
+
+  const occt = await occtimportjs();
+  const readback = entities.readStepEntities(new Uint8Array(raw), occt);
+  const parts = readback.entities.map((entity) => ({
+    id: entity.leaf,
+    bboxMin: [...entity.bbox.min],
+    bboxMax: [...entity.bbox.max],
+    solids: entity.meshCount,
+    volumeMm3: 1
+  }));
+  const result = await gate.entityIdentityOf({
+    built: {
+      ok: true,
+      files: { identity: { path: identityPath, bytes: raw.length }, parts, step: { path: stepPath } },
+      stats: { partSolids: parts.reduce((sum, part) => sum + part.solids, 0) }
+    },
+    table: { parts: parts.map((part) => ({ id: part.id })) },
+    stepPath,
+    // 故意继续传旧的拓扑包络：C7 之后它只作参考，不许拿它顶包络比较
+    step: { bbox: { min: [...readback.bbox.min], max: [...readback.bbox.max] } },
+    stepText: readFileSync(stepPath, 'utf8')
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.checks[3].ok, false, '制造 STEP 导入失败必须红在第 4 条');
+  assert.match(result.checks[3].actual, /同口径回读失败|导入失败/);
+  assert.equal(result.entityIdentity.mergedReadbackBBox, null);
+  assert.equal(result.entityIdentity.unionDeltaMm, null, '缺少制造侧网格包络，不许回退拓扑包络伪造零差');
+  assert.ok(result.entityIdentity.mergedReadbackErrors.length > 0);
+});
+
+test('R12/P1-3（源码结构守卫）：身份判据不接 CLI --tolerance，固定 1mm', async () => {
+  const { readFileSync } = await import('node:fs');
+  const source = readFileSync(
+    fileURLToPath(new URL('../../scripts/verify-step-tower.mjs', import.meta.url)),
+    'utf8'
+  );
+  // 身份事实对象（entityIdentityOf 里的 base）必须钉常量；旧写法是
+  // `toleranceMm: Number.isFinite(toleranceArg) ? toleranceArg : DEFAULT_TOLERANCE_MM`，
+  // 那会让 `--tolerance 20` 把 19.85mm 的口径差判绿（T3 E10）。
+  const identityBase = source.match(/const base = \{[\s\S]{0,1200}?\n  \};/);
+  assert.ok(identityBase, '找不到 entityIdentityOf 的 facts 对象');
+  assert.match(identityBase[0], /toleranceMm:\s*ENTITY_IDENTITY_TOLERANCE_MM/);
+  assert.doesNotMatch(identityBase[0], /toleranceArg/, '身份 facts 里不许出现 CLI 容差');
+});

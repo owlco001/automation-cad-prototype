@@ -85,6 +85,44 @@
  * review 建议的"每轴 ≥1.5"会直接误杀 8 层（1.082）。
  * 缺顶点证据（没解析出 VERTEX_POINT）判红，不静默略过 —— 与 merge 元数据缺失同口径。
  *
+ * 第 7 类证据（R12）：**逐实体身份**（`STEP_TOWER_ENTITY_IDENTITY`，与第 6 类的
+ * `STEP_TOWER_IDENTITY` 是两个不同标记，别混读）。
+ *
+ * 上面 1~6 类都到不了「整机 STEP 里这一件到底是不是这一件」：fuse 把 150 个逐件实体并成
+ * 104 个，内部边界根本不在产物里。R12 让内核在**同一个 /build 请求内**额外导出一份
+ * `identity.step`（`bd.Compound(children=placed)`，每个子节点 label=归一化件号，root
+ * label=assembly；**不 fuse、不做布尔**），门禁回读它做逐件绑定：
+ *   1) 身份伴生成物：`files.identity` 存在、与制造 STEP **同目录**、**不是制造 STEP 自身**、
+ *      实际 bytes>0、回读（occt-import-js 原始装配树）无结构错误、文本 `MANIFOLD_SOLID_BREP`
+ *      数 == 回读网格数；
+ *   2) 件号集合：**构建时真实件表 / `files.parts[]` / 回读装配路径叶** 三方严格相等，
+ *      missing / unknown / dup / 非法值全为 0（空集合一律判红，不许 `.every` 空转成绿）；
+ *   3) 逐件实体与包络：总实体 == 逐件 `solids` 合计 == `stats.partSolids`，**逐件**
+ *      `meshCount == 件表 solids`（防「实体从一件搬到另一件、总数不变」），逐件包络每轴
+ *      ≤ 容差、非退化（≥12 面、每轴 >0.1mm）；
+ *   4) 并集与污染：identity **网格包络** == 制造 STEP 的**同口径网格包络**（两份文件都过
+ *      occt-import-js、同一份回读参数，每轴 ≤ 容差；制造侧导入失败即红，**不**退回拓扑
+ *      `VERTEX_POINT` 包络）+ 制造 STEP 的 PRODUCT 名**不含任何件号**（fuse 会继承
+ *      `parts[0].label`，这条正是防它）。
+ * 缺 `files.identity`（旧内核 / 未请求 identityStep）**判红**，不是 SKIP、不是 exit 0。
+ *
+ * 回读的**受限格式契约**（不写成无条件事实）：本模块的「一 solid 一 mesh」只对这份
+ * compound 身份伴生成物成立（探针实测 3 件 3 mesh、146 件 154 solid→154 mesh、两实体件 3/3）；
+ * 普通 STEP（布尔并 / B 样条 / reader 偏折拆 mesh）下 `meshCount` 不能当 BRep 实体数，
+ * 所以回执里一律叫「回读网格数」，只在受限格式上与文本实体数双向对照。
+ *
+ * 判别力边界（**不许**升级成「制造认证 / 逐实体拓扑认证」）：这一层证明的是**导出侧身份**
+ * ——「件表里每一件，在 identity.step 里都有一个具名（装配路径叶逐字相等）、包络对得上、
+ * 实体数对得上的实体」。它**不证明** identity.step 与融合制造 STEP 内部拓扑或形状等价
+ * （两者不是同一产物，只做包络核对），也不认证材质/面法向/可制造性；bbox 只是包络核对，
+ * 不是唯一几何指纹。源码级伪造（改导出侧让 label 与几何无关）仍可过 —— 守的是数据放大、
+ * 批造件号、丢件、实体搬家、往 fuse 结果上贴标签。
+ *
+ * `--file` 模式：只读一份 STEP，没有 identity 伴生成物，所以第 7 类证据显式标
+ * `NOT_APPLICABLE`（日志 + JSON，不计入 ok、不新增绿项、退出码语义一个字不变）。
+ * 本轮**不加** `--require-identity` / `--identity-step` 旗标 —— 没有完整 expected 元数据的
+ * 半成品文件认证入口，宁可不开。
+ *
  * 走的是**生产同一条路**（与 App 里同一个 `ParametricManager`）：
  *   buildBufferTowerParts(16 层) / buildConveyorParts(8 层基线)
  *     → conveyorAssembly(doc) → ParametricManager.build({perPart:true})
@@ -119,12 +157,23 @@
  *     在文件模式里是空转，所以 `--file` + `--require-full` 直接按用法错误 exit 2
  *     （不让旗标静默失效，也不在回执里留一个不成立的严格档）。
  */
-import { existsSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import occtimportjs from 'occt-import-js';
+
 import { ParametricManager, resolvePython } from '../electron/parametric.ts';
 import { StepInspectError, describeInspection, inspectStep } from '../src/parametric/step-inspect.ts';
+import {
+  ENTITY_DEPTH_LIMIT,
+  ENTITY_IDENTITY_TOLERANCE_MM,
+  matchEntityIdentity,
+  readStepEntities,
+  readStepManifoldSolidCount,
+  readStepMeshEnvelope,
+  readStepProductNames
+} from '../src/cad/step-entities.ts';
 import { buildConveyorParts, conveyorAssembly, conveyorEnvelope } from '../src/machine/conveyor-assembly.ts';
 import { buildBufferTowerParts, bufferTowerParamsFromConfig } from '../src/machine/buffer-tower-assembly.ts';
 import { WORKPIECE_PART_ID, resolveMachineGeometry } from '../src/machine/machine-geometry.ts';
@@ -1124,7 +1173,26 @@ if (flag('--help') || flag('-h')) {
   当前塔/输送目标里这两条链是**必备**：声明件缺席即红（不是"缺件由件数兜底"）。
   判别力边界：这是精确件号/宿主声明约束（**名字级**），不是材质/拓扑/实体认证；
   把任意件改名成 chain 件号再塞进声明宿主仍会放行 —— 挡的是数据放大/批造件号，不挡源码级伪造。
-  回执行：STEP_TOWER_IDENTITY PASS exempt=2/9 declared=2 undeclared=0 stale=0 hostMismatch=0 missing=0`);
+  回执行：STEP_TOWER_IDENTITY PASS exempt=2/9 declared=2 undeclared=0 stale=0 hostMismatch=0 missing=0
+
+第 7 类证据（R12）：逐实体身份 STEP_TOWER_ENTITY_IDENTITY（与上面那一行是两个标记）
+  build 模式一律请求 perPart + identityStep，回读 identity 伴生成物（occt-import-js 原始
+  装配树，按**装配节点实例**分组，不重命名、不去重、不按件号合并），判 4 条：
+    1) 产物与回读完整性：realpath 后同目录、真实路径 ≠制造 STEP 自身、identity 路径不得是符号链接、实际 bytes>0、
+       无结构错误、文本实体数==回读网格数、Σ节点网格数==回读网格数；
+    2) 三方件号集合：真实件表 × files.parts[] × 回读路径叶 严格相等（missing/unknown/dup/非法值=0）；
+    3) 逐件实体数与包络：总实体==逐件合计==stats.partSolids、逐件 meshCount==件表 solids、
+       逐件包络每轴 ≤ 容差、非退化；
+    4) 并集核对与制造件污染：identity 网格包络 == 制造 STEP **同口径网格包络**（两份文件同一份
+       occt 回读参数；制造侧导入失败即红，不退回拓扑 VERTEX_POINT 包络），且制造 STEP 的
+       PRODUCT 名不含件号。
+  容差：身份判据**固定 1mm**，不继承 --tolerance（该旗标只服务旧判据；放大即假修）。
+  缺 files.identity（旧内核/未请求 identityStep）→ FAIL、exit 1，**不是 SKIP**。
+  判别力边界：这是**导出侧身份**（件名 + 包络 + 实体数三元绑定），不是制造认证；
+  不证明 identity.step 与融合制造 STEP 内部拓扑/形状等价，不认证材质/可制造性；
+  bbox 只叫包络核对，不是唯一几何指纹。
+  --file 模式：entityIdentity = NOT-APPLICABLE（只读一份 STEP，没有伴生成物；不计入 ok、
+  不新增绿项，退出码语义不变；本轮不加 --identity-step / --require-identity 旗标）。`);
   process.exit(0);
 }
 
@@ -1301,6 +1369,8 @@ function inspectOnly(stepPath, partsDir) {
   const ok = result.ok && identity.ok && boundary.ok;
   printChecks(checks);
   logIdentityLine(identity);
+  // 第 7 类证据在文件模式显式不适用：不给它一条静默通过的绿项，也不改这 8 条既有证据的语义
+  log(`STEP_TOWER_ENTITY_IDENTITY NOT-APPLICABLE ${ENTITY_IDENTITY_NOT_APPLICABLE}`);
   log(`${ok ? 'PASS' : 'FAIL'} file-check ${checks.filter((check) => check.ok).length}/${checks.length}`);
   if (!ok) process.exitCode = 1;
   if (jsonOutput) {
@@ -1322,6 +1392,8 @@ function inspectOnly(stepPath, partsDir) {
         checks: identity.checks
       },
       exportBoundary: { ok: boundary.ok, checks: boundary.checks },
+      // 第 7 类证据：文件模式 not-applicable（不是绿项、不计入 ok，也不新增退出码分支）
+      entityIdentity: { applicable: false, ok: null, verdict: 'NOT_APPLICABLE', reason: ENTITY_IDENTITY_NOT_APPLICABLE },
       checks
     })}`);
   }
@@ -1351,6 +1423,204 @@ function logIdentityLine(identity) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// 第 7 类证据（R12）：逐实体身份 —— identity 伴生成物回读
+// ---------------------------------------------------------------------------
+
+let stepOcctPromise = null;
+/**
+ * 只为回读 identity.step 起一次 occt-import-js（与 App 同一份 wasm）。
+ *
+ * **不复用** `parseOcctBuffer`：那条路在「网格名 == 节点名」时把路径叶剥掉、并把重名件
+ * 改写成 `-2` —— 正好会抹平本门禁要查的两类作弊（丢件号、重号件表）。
+ */
+function stepOcct() {
+  if (!stepOcctPromise) stepOcctPromise = occtimportjs();
+  return stepOcctPromise;
+}
+
+/**
+ * `realpathSync` 的 fail-soft 包装：解析不出来返回 null（下游回退到字符串规范化，仍然 fail-closed）。
+ * 归属判定必须用真实路径 —— 软链能把 identity 藏到别的目录，字符串比较看不出来。
+ */
+function safeRealpath(target) {
+  try {
+    return realpathSync(target);
+  } catch {
+    return null;
+  }
+}
+
+/** 读不出来的回读结果：结构上不可信，下游一律判红（不冒充「0 件」这个合法状态）。 */
+function unreadableReadback(reason) {
+  return {
+    ok: false,
+    errors: [reason],
+    entities: [],
+    meshCount: 0,
+    triangleCount: 0,
+    bbox: null,
+    rootName: null,
+    depthLimit: ENTITY_DEPTH_LIMIT
+  };
+}
+
+/**
+ * 收齐第 7 类证据的事实并判定。
+ *
+ * fail-closed：缺 `files.identity` / 路径不存在 / 读坏 / occt 起不来 —— 全部走判红，
+ * 不走 SKIP、不 exit 0。回执自报的 `identity.bytes/products/solids` **不参与判定**，
+ * 只打一行便于对账：门禁只认磁盘上的实际 bytes 与回读结果。
+ */
+export async function entityIdentityOf({ built, table, stepPath, step, stepText }) {
+  const identity = built?.files?.identity ?? null;
+  const identityPath = typeof identity?.path === 'string' && identity.path ? identity.path : null;
+  const reportedSolids = Number(built?.stats?.partSolids);
+
+  // ---- 制造 STEP 侧：同口径网格包络（C7）------------------------------------
+  // 旧实现把 `step.bbox`（拓扑 VERTEX_POINT 包络）当制造整体包络，圆柱/回转面的极值点不是
+  // 拓扑顶点，于是拿两边不同口径的数字互比、系统性差一个半径（16 层真塔 y 差 19.85mm）。
+  // 现在制造侧也过 occt-import-js 回读（与 identity 同一份参数、同一个已初始化模块）；
+  // 导入失败/读不出 → mergedBBox=null + 错误清单 → 第 4 条直接判红，退回旧口径是不允许的。
+  let mergedEnvelope = {
+    ok: false,
+    errors: ['制造 STEP 路径缺失，无法做同口径回读'],
+    bbox: null,
+    meshCount: 0,
+    triangleCount: 0
+  };
+  if (typeof stepPath === 'string' && stepPath && existsSync(stepPath)) {
+    try {
+      const mergedBytes = readFileSync(stepPath);
+      mergedEnvelope = readStepMeshEnvelope(new Uint8Array(mergedBytes), await stepOcct());
+    } catch (error) {
+      const reason = `制造 STEP 读不出来/回读抛错：${error instanceof Error ? error.message : String(error)}`;
+      log(`ENTITY 制造 STEP → 同口径回读失败：${reason}`);
+      mergedEnvelope = { ok: false, errors: [reason], bbox: null, meshCount: 0, triangleCount: 0 };
+    }
+  } else if (stepPath) {
+    log(`ENTITY 制造 STEP 不存在，判红：${stepPath}`);
+    mergedEnvelope = { ok: false, errors: [`制造 STEP 不存在：${stepPath}`], bbox: null, meshCount: 0, triangleCount: 0 };
+  }
+  log(
+    `ENTITY merged readback mesh=${mergedEnvelope.meshCount} `
+      + `bbox=${mergedEnvelope.bbox ? `${mergedEnvelope.bbox.min.map((v) => v.toFixed(1)).join(',')}..${mergedEnvelope.bbox.max.map((v) => v.toFixed(1)).join(',')}` : '(无)'}`
+      + `（同口径 occt 回读；拓扑 VERTEX_POINT 包络只作参考，不参与判定）`
+  );
+
+  // ---- 路径归属：realpath + 软链检测（P1-2）----------------------------------
+  // 只比字符串在两个方向都会错：软链能把 identity 藏到别的目录（sameDir 仍 true）、
+  // 也能指回制造 STEP 自身；而 `plain/./identity.step` 又是假红。归属判定一律用 realpath，
+  // 并且 identity 自身是符号链接就判红（真实归属不可信）。
+  const identityRealPath = identityPath && existsSync(identityPath) ? safeRealpath(identityPath) : null;
+  const stepRealPath = typeof stepPath === 'string' && stepPath && existsSync(stepPath)
+    ? safeRealpath(stepPath)
+    : null;
+  let identityIsSymlink = null;
+  if (identityPath && existsSync(identityPath)) {
+    try {
+      identityIsSymlink = lstatSync(identityPath).isSymbolicLink();
+    } catch {
+      identityIsSymlink = null;
+    }
+  }
+  log(
+    `ENTITY 归属 identity=${identityRealPath ?? '(未解析)'}`
+      + ` step=${stepRealPath ?? '(未解析)'} symlink=${identityIsSymlink === null ? '?' : String(identityIsSymlink)}`
+  );
+
+  const base = {
+    partTableIds: table.parts.map((part) => part.id),
+    parts: Array.isArray(built?.files?.parts) ? built.files.parts : [],
+    mergedBBox: mergedEnvelope.ok ? mergedEnvelope.bbox : null,
+    mergedReadbackErrors: mergedEnvelope.errors,
+    mergedReadbackMeshCount: mergedEnvelope.meshCount,
+    mergedVertexPointBBox: step?.bbox ?? null,
+    mergedProductNames: readStepProductNames(stepText),
+    identityPath,
+    stepPath: typeof stepPath === 'string' ? stepPath : null,
+    identityRealPath: identityRealPath,
+    stepRealPath: stepRealPath,
+    identityPathIsSymlink: identityIsSymlink,
+    identitySolids: null,
+    partSolids: Number.isFinite(reportedSolids) && reportedSolids > 0 ? reportedSolids : null,
+    identityBytes: 0,
+    // 身份判据自持 1mm（P1-3）：CLI `--tolerance` 服务的是旧判据（顶点并集那条本来就有按轴
+    // 20mm 的回转体外扩），递给身份门禁就成了「假修」后门（--tolerance 20 能把 19.85mm 判绿）。
+    // 这里一律传固定常量，CLI 值只在下面打一行说明它没被采纳。
+    toleranceMm: ENTITY_IDENTITY_TOLERANCE_MM
+  };
+  if (Number.isFinite(toleranceArg) && toleranceArg !== ENTITY_IDENTITY_TOLERANCE_MM) {
+    log(
+      `ENTITY 身份判据容差固定 ${ENTITY_IDENTITY_TOLERANCE_MM}mm：CLI --tolerance=${toleranceArg} 不继承`
+        + '（该旗标只服务旧判据；身份门禁不许被放大）'
+    );
+  }
+
+  if (identityPath === null) {
+    const reason = '内核回执没有 files.identity（旧内核或 identityStep 未被接受）：身份未验证，判红而不是 SKIP';
+    log(`ENTITY 缺产物 → FAIL：${reason}`);
+    return matchEntityIdentity({ ...base, readback: unreadableReadback(reason) });
+  }
+  if (!existsSync(identityPath)) {
+    const reason = `files.identity.path 指向的文件不存在：${identityPath}`;
+    log(`ENTITY 缺产物 → FAIL：${reason}`);
+    return matchEntityIdentity({ ...base, readback: unreadableReadback(reason) });
+  }
+
+  let rawBytes;
+  try {
+    rawBytes = readFileSync(identityPath);
+  } catch (error) {
+    const reason = `identity 文件读不出来：${error instanceof Error ? error.message : String(error)}`;
+    log(`ENTITY 读失败 → FAIL：${reason}`);
+    return matchEntityIdentity({ ...base, readback: unreadableReadback(reason) });
+  }
+
+  let readback;
+  try {
+    readback = readStepEntities(new Uint8Array(rawBytes), await stepOcct());
+  } catch (error) {
+    readback = unreadableReadback(`occt 回读抛错：${error instanceof Error ? error.message : String(error)}`);
+  }
+  // 只认磁盘内容：文本实体数从实际 bytes 数出来，不信回执自报的 products/solids
+  const identitySolids = readStepManifoldSolidCount(rawBytes.toString('utf8'));
+  log(
+    `ENTITY identity path=${identityPath} bytes=${rawBytes.length}`
+      + `（回执自报 ${String(identity?.bytes ?? '?')}）`
+      + ` 自报 products=${String(identity?.products ?? '?')} solids=${String(identity?.solids ?? '?')}`
+      + `（自报值不参与判定）`
+  );
+  return matchEntityIdentity({ ...base, readback, identitySolids, identityBytes: rawBytes.length });
+}
+
+/**
+ * 一行回执：`STEP_TOWER_ENTITY_IDENTITY PASS ids=146/146 unknown=0 dup=0 solids=150/150 …`。
+ * 与第 6 类的 `STEP_TOWER_IDENTITY` 是两个标记（后者只管「被包住件豁免」），别混读。
+ */
+export function logEntityIdentityLine(result) {
+  const summary = result?.entityIdentity ?? {};
+  const unionDelta = Array.isArray(summary.unionDeltaMm)
+    ? summary.unionDeltaMm.map((value) => Number(value).toFixed(2)).join('/')
+    : '(未算)';
+  const bboxMaxDelta = summary.bboxMaxDeltaMm === null || summary.bboxMaxDeltaMm === undefined
+    ? '(未算)'
+    : `${Number(summary.bboxMaxDeltaMm).toFixed(2)}mm`;
+  log(
+    `STEP_TOWER_ENTITY_IDENTITY ${result?.ok ? 'PASS' : 'FAIL'} `
+      + `ids=${summary.actualParts ?? 0}/${summary.expectedParts ?? 0} `
+      + `unknown=${(summary.unknownIds ?? []).length} dup=${(summary.duplicateIds ?? []).length} `
+      + `solids=${summary.actualSolids ?? '?'}/${summary.expectedSolids ?? '?'} mesh=${summary.meshCount ?? 0} `
+      + `unionDelta=${unionDelta} bboxMaxDelta=${bboxMaxDelta} pollution=${(summary.pollutionIds ?? []).length}`
+      + ` tol=${summary.toleranceMm ?? '?'}mm(${summary.tolerancePolicy ?? '?'})`
+  );
+}
+
+/** `--file` 模式的第 7 类证据结论：显式 not-applicable，不计入 ok、不冒充绿项。 */
+const ENTITY_IDENTITY_NOT_APPLICABLE =
+  '--file 只读一份 STEP，没有 identity 伴生成物：逐实体身份（第 7 类证据）not-applicable，'
+  + '不计入 ok、也不是通过；本轮未加 --identity-step/--require-identity 旗标，文件模式不做身份认证';
+
 /**
  * 显式跳过（`--skip-if-no-kernel`）：**不许表现为纯绿**。
  *
@@ -1376,6 +1646,7 @@ async function writeSkip(reason, boundary) {
         : '（显式跳过沿用退出码 0；CI 要按退出码归集请加 --require-full）')
   );
   log('SKIP 内核未跑 = true：build123d 不可用 ⇒ 整机 STEP / 逐件 STL / 逐件 B-Rep 占位覆盖 全部未验');
+  log(`SKIP 逐实体身份（第 7 类证据）= 未验：identity 伴生成物由内核同请求导出，内核没跑就没有产物`);
   log(`SKIP 导出边界（内核无关的 8 条）= ${boundaryJudged ? `本次已判，${boundary.ok ? '通过' : '不通过'}` : '未判'}`);
   log('SKIP 判定 = SKIPPED_NOT_VERIFIED：这是显式跳过，不代表通过；任何 STEP 结论都不可引用');
   if (process.env.GITHUB_STEP_SUMMARY) {
@@ -1414,6 +1685,8 @@ async function writeSkip(reason, boundary) {
       exitCode: skipExitCode,
       exportBoundaryVerified: boundaryJudged,
       exportBoundary: boundaryJudged ? { ok: boundary.ok, verified: true, checks: boundary.checks } : { ok: null, verified: false },
+      // 第 7 类证据：内核没跑就没有 identity 伴生成物 —— 未验，不是「不适用」也不是通过
+      entityIdentity: { ok: null, applicable: false, verified: false, reason: 'kernelRan=false：identity 伴生成物由内核同请求导出，本次没有产物' },
       unverified: ['kernel', 'step', 'perPartStl', 'partIdentity'],
       note: '显式跳过不等于通过：kernelRan=false ⇒ STEP/逐件 STL/逐件占位覆盖本次没有任何证据'
     })}`);
@@ -1476,7 +1749,9 @@ async function buildAndVerify() {
 
     log(`kernel port=${started.port ?? '?'}`);
     const buildStartedAt = Date.now();
-    const built = await manager.build(doc, { perPart: true });
+    // 第 7 类证据要求同一请求内多导出一份身份伴生成物：perPart + identityStep 一律请求。
+    // identityStep 被旧内核忽略 → 回执缺 files.identity → 身份判红（fail-closed，不是 SKIP）。
+    const built = await manager.build(doc, { perPart: true, identityStep: true });
     if (!built.ok) {
       console.error(`STEP_TOWER FAIL 建模失败 code=${built.code ?? '?'}：${built.message ?? '(无消息)'}`);
       process.exitCode = 1;
@@ -1540,8 +1815,11 @@ async function buildAndVerify() {
       toleranceMm: Number.isFinite(toleranceArg) ? toleranceArg : DEFAULT_TOLERANCE_MM,
       declaredPresence: DECLARED_PRESENCE_POLICY.REQUIRED
     });
-    const checks = [...result.checks, ...identity.checks, ...boundary.checks];
-    const ok = result.ok && identity.ok && boundary.ok;
+    // 第 7 类证据（R12）：回读 identity 伴生成物，做逐件身份绑定。
+    // 缺 files.identity / 文件不存在 / 读坏 → 判红（fail-closed），绝不 SKIP、绝不 exit 0。
+    const entity = await entityIdentityOf({ built, table, stepPath, step, stepText });
+    const checks = [...result.checks, ...identity.checks, ...boundary.checks, ...entity.checks];
+    const ok = result.ok && identity.ok && boundary.ok && entity.ok;
     printChecks(checks);
     log(
       `perpart files=${parts.length} stepSolids=${step.solids} partSolids=${built.stats?.partSolids ?? '?'} ` +
@@ -1550,6 +1828,7 @@ async function buildAndVerify() {
         `stlUnion=${result.stlUnion ? result.stlUnion.min.map((v, a) => `${v.toFixed(1)}..${result.stlUnion.max[a].toFixed(1)}`).join(' ') : '(无)'}`
     );
     logIdentityLine(identity);
+    logEntityIdentityLine(entity);
     log(`${ok ? 'PASS' : 'FAIL'} verify-step-tower ${checks.filter((check) => check.ok).length}/${checks.length}`);
     if (!ok) process.exitCode = 1;
     if (jsonOutput) {
@@ -1573,6 +1852,9 @@ async function buildAndVerify() {
             checks: identity.checks
           },
           exportBoundary: { ok: boundary.ok, checks: boundary.checks },
+          // 第 7 类证据独立字段（与旧 partIdentity 分开读；含实际 unionDelta / bboxMaxDelta /
+          // 期望与回读的件数实体数 / 错误件号）。ok:null 的旧内核场景不会到这里（judged 后判红）。
+          entityIdentity: entity.entityIdentity,
           allowances: result.allowances,
           minAllowance: result.minAllowance,
           maxAllowance: result.maxAllowance,
