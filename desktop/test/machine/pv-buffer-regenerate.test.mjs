@@ -36,6 +36,7 @@ import {
   parseArgs,
   planSummary,
   sanitizeProjectId,
+  slotClaims,
   slotsFromGeometryParts,
   slotsNote,
   terminateOwned,
@@ -199,13 +200,22 @@ test('启动命令把 userData 与端口放进环境变量（否则会写真实 
   assert.ok(noXvfb.args[0].endsWith(join('scripts', 'electron-run.mjs')));
 });
 
-test('计划里必须写明「8 层 = 8 储位 ≠ 16 位」，且盘上目录名走 sanitizeId', () => {
+test('计划里必须写明「8 层 = 8 储位 ≠ 16 位」，且两个口径分属两个作用域', () => {
   const plan = planSummary(parseArgs([]), {
     userData: '/tmp/u', port: 1, reportPath: '/tmp/r.json', runDir: '/tmp/run'
   });
   assert.equal(plan.expect.slotsFromGeometry, 8);
   assert.equal(plan.expect.claimedSlots, 16);
   assert.equal(plan.expect.slotsAligned, false);
+  // 口径分层：计划阶段就把「本机型」与「塔产品」写成两个作用域，不许再混在一个字段里
+  assert.equal(plan.expect.modelClaim.slots, 8, '本机型是 8 层 ⇒ 8 位');
+  assert.equal(plan.expect.modelClaim.aligned, null, '计划阶段没有几何，不许给自己签 true');
+  assert.equal(plan.expect.modelClaim.source, 'params-declared');
+  assert.equal(plan.expect.productClaim.slots, 16, '16 位是塔产品的口径');
+  assert.equal(plan.expect.productClaim.aligned, false);
+  assert.equal(plan.expect.productClaim.coveredBy, 'verify:step-tower --levels 16');
+  assert.equal(plan.expect.productClaim.saveReloadCovered, false);
+  assert.notEqual(plan.expect.modelClaim.slots, plan.expect.productClaim.slots, '8 层 ≠ 16 位这个事实仍在计划里');
   assert.equal(plan.params.layerPitchMm, 180);
   assert.equal(plan.projectDir, join('projects', sanitizeProjectId(BASELINE.name)));
   assert.equal(sanitizeProjectId('缓存 机'), '缓存-机');
@@ -542,6 +552,236 @@ test('储位回执：dry-run 没有零件表就写 null（不拿参数回声冒�
   assert.deepEqual(derived.errors, []);
 });
 
+// ---------------------------------------------------------------- 储位口径分层（A1）
+
+test('口径分层：本机型 modelClaim 与塔产品 productClaim 是两个作用域，谁也不许省', () => {
+  const slots = slotsFromGeometryParts(asParts(stackPartNames(8)), { layers: 8 });
+  assert.deepEqual(slots.modelClaim, { slots: 8, aligned: true, source: 'project-parts' });
+  assert.equal(slots.productClaim.slots, 16);
+  assert.equal(slots.productClaim.aligned, false, '几何 8 位 ≠ 塔产品 16 位：这个事实必须留着');
+  // P1-2：跨机型比较的口径固定写死——aligned 恒 false，basis 明示「跨机型未验证」
+  assert.equal(slots.productClaim.basis, 'cross-model-unverified');
+  assert.equal(slots.productClaim.crossModelEquality, false, '8 ≠ 16 的数值信息只放这里');
+  assert.equal(slots.productClaim.coveredBy, 'verify:step-tower --levels 16');
+  assert.equal(slots.productClaim.saveReloadCovered, false, '塔不走 regen 存库/读回，不许写成已覆盖');
+  // 旧读法（跨口径原样比较）仍为 false：两条口径都还在，没有被抹掉
+  assert.equal(slots.claimed, 16);
+  assert.equal(slots.aligned, false);
+  assert.notEqual(slots.modelClaim.slots, slots.productClaim.slots, '8 层 ≠ 16 位');
+
+  // 反例①：整层丢失 → **本机型** aligned 必须 false（这才是该红的门禁口径）
+  const wiped = slotsFromGeometryParts(
+    asParts(stackPartNames(8).filter((name) => !name.startsWith('第 3 层'))), { layers: 8 });
+  assert.equal(wiped.modelClaim.slots, 8);
+  assert.equal(wiped.modelClaim.aligned, false);
+  assert.equal(wiped.productClaim.slots, 16, '几何坏了也不许把塔的口径一起改掉');
+
+  // 反例②：派生不出来（层数非法）→ 两个作用域仍在，且「量不出来」不许记成 true
+  const broken = slotsFromGeometryParts(asParts(stackPartNames(8)), { layers: 1 });
+  assert.equal(broken.modelClaim.aligned, null);
+  assert.equal(broken.productClaim.aligned, false);
+  assert.equal(broken.productClaim.basis, 'cross-model-unverified');
+  assert.equal(broken.productClaim.crossModelEquality, null, '没有几何就不许说数值相等/不等');
+  assert.equal(broken.productClaim.saveReloadCovered, false);
+
+  // 反例③（P1-2 必测）：几何恰好数到 16 位 → 跨机型 aligned **仍须 false**，相等只作 detail。
+  // 为什么必须测：旧实现这里是 `aligned: fromGeometry === 16 ⇒ true`，回执就会写出
+  // 「塔产品声明 16 位，一致」——塔根本没走 regen 路径，那是结论型误导。
+  // 造法：每层多放一块托板（每层 2 位），派生值 16 位，但托板族「每层应 1 件」会报错（ok=false）。
+  const doubledTrays = [];
+  for (const name of stackPartNames(8)) {
+    doubledTrays.push(name);
+    if (/^第 \d+ 层托板$/.test(name)) doubledTrays.push(name);
+  }
+  const sixteen = slotsFromGeometryParts(asParts(doubledTrays), { layers: 8 });
+  assert.equal(sixteen.fromGeometry, 16, '几何确实是 16 位');
+  assert.equal(sixteen.modelClaim.aligned, false, '本机型声明仍是 8 位，16 位不叫「对齐」');
+  assert.equal(sixteen.productClaim.slots, 16);
+  assert.equal(sixteen.productClaim.aligned, false, 'P1-2：几何恰好 16 位也不许宣称塔已对齐');
+  assert.equal(sixteen.productClaim.basis, 'cross-model-unverified');
+  assert.equal(sixteen.productClaim.crossModelEquality, true, '数值相等只是 detail，不是覆盖结论');
+  assert.equal(sixteen.productClaim.saveReloadCovered, false);
+  assert.equal(sixteen.ok, false, '每层 2 块托板本身就不符族口径，不许因此变绿');
+
+  // 同理，纯函数的 16 位输入也不许把 aligned 翻成 true（旧断言在这里要求 true，本轮改口径）
+  const pure = slotClaims({ fromGeometry: 16 });
+  assert.equal(pure.productClaim.aligned, false, '跨机型比较永远不给 true');
+  assert.equal(pure.productClaim.basis, 'cross-model-unverified');
+  assert.equal(pure.productClaim.crossModelEquality, true);
+  assert.equal(pure.modelClaim.aligned, false, '16 ≠ 本机型 8，别拿塔的数值给自己签 true');
+
+  // 纯函数口径：默认值就是基线的两个作用域，非基线机型只动 modelClaim
+  assert.deepEqual(slotClaims().modelClaim, { slots: 8, aligned: null, source: 'project-parts' });
+  assert.deepEqual(slotClaims({ fromGeometry: 8, modelSlots: 16 }).modelClaim,
+    { slots: 16, aligned: false, source: 'project-parts' });
+});
+
+test('口径分层回执（真跑）：note 两个作用域都在，且仍写得出「8 层 ≠ 16 位」', () => {
+  const note = slotsNote(slotsFromGeometryParts(asParts(stackPartNames(8)), { layers: 8 }), parseArgs([]));
+  assert.deepEqual(note.modelClaim, { slots: 8, aligned: true, source: 'project-parts' });
+  assert.equal(note.productClaim.slots, 16);
+  assert.equal(note.productClaim.aligned, false);
+  assert.equal(note.productClaim.basis, 'cross-model-unverified');
+  assert.equal(note.productClaim.crossModelEquality, false);
+  assert.equal(note.productClaim.coveredBy, 'verify:step-tower --levels 16');
+  assert.equal(note.productClaim.saveReloadCovered, false);
+  // 事实不许只活在人的记忆里：receipt 文本必须同时给出两个口径与不等关系
+  assert.match(note.text, /8 个储位/);
+  assert.match(note.text, /不一致/);
+  assert.match(note.text, /modelClaim/);
+  assert.match(note.text, /productClaim/);
+  assert.match(note.text, /aligned=false/);
+  assert.match(note.text, /crossModelEquality=false/);
+  assert.match(note.text, /saveReloadCovered=false/);
+  assert.match(note.text, /不在本脚本路径上/);
+  assert.equal(note.slotsFromGeometry, 8);
+  assert.equal(note.claimedSlots, 16);
+});
+
+test('口径分层回执：几何恰好 16 位时也不许写出「塔一致 / 已覆盖 / 16 位完成」', () => {
+  // P1-2 的文案反例：数值相等只许写成「数值相等，与塔是否覆盖无关」
+  const doubledTrays = [];
+  for (const name of stackPartNames(8)) {
+    doubledTrays.push(name);
+    if (/^第 \d+ 层托板$/.test(name)) doubledTrays.push(name);
+  }
+  const note = slotsNote(slotsFromGeometryParts(asParts(doubledTrays), { layers: 8 }), parseArgs([]));
+  assert.equal(note.slotsFromGeometry, 16);
+  assert.equal(note.productClaim.aligned, false);
+  assert.equal(note.productClaim.crossModelEquality, true);
+  assert.match(note.text, /恰好也是 16/);
+  assert.match(note.text, /不构成塔的对齐或覆盖证据/);
+  assert.match(note.text, /crossModelEquality=true/);
+  // 任何一句「塔一致 / 已对齐 / 已覆盖 / 16 位完成」都是把跨机型比较当成了覆盖结论
+  assert.doesNotMatch(note.text, /一致/);
+  assert.doesNotMatch(note.text, /已对齐|已覆盖/);
+  assert.doesNotMatch(note.text, /16\s*位(已)?完成/);
+});
+
+test('口径分层回执（dry-run）：没有几何时两个作用域仍写全，modelClaim 不许冒充 true', () => {
+  const note = slotsNote(null, parseArgs(['--dry-run']));
+  assert.equal(note.modelClaim.slots, 8);
+  assert.equal(note.modelClaim.aligned, null, '没有几何就不许给自己签 true');
+  assert.equal(note.modelClaim.source, 'dry-run-no-parts');
+  assert.equal(note.productClaim.slots, 16);
+  assert.equal(note.productClaim.aligned, false);
+  assert.equal(note.productClaim.basis, 'cross-model-unverified');
+  assert.equal(note.productClaim.crossModelEquality, null, '没有几何就不许对数值相等下结论');
+  assert.equal(note.productClaim.saveReloadCovered, false);
+  assert.match(note.text, /不从几何派生/);
+  assert.match(note.text, /口径分层/);
+  assert.match(note.text, /crossModelEquality=null/);
+  assert.doesNotMatch(note.text, /已对齐|已覆盖|16\s*位(已)?完成/);
+
+  // 非基线机型：modelClaim 跟着层数走，productClaim 仍是塔的 16 位——两个口径不互相污染
+  const wide = slotsNote(null, parseArgs(['--layers', '16']));
+  assert.equal(wide.modelClaim.slots, 16);
+  assert.equal(wide.productClaim.slots, BASELINE.claimedSlots);
+  assert.equal(wide.productClaim.aligned, false, '层数参数写到 16 也不许把塔口径签成 true');
+  assert.equal(wide.productClaim.crossModelEquality, null);
+});
+
+test('盘上新增口径检查：本机型 aligned 必为 true，塔的 false 不产生失败项', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pv-regen-test-'));
+  try {
+    const good = verifyProjectDir(makeProjectFixture(root), parseArgs([]));
+    const byName = new Map(good.checks.items.map((item) => [item.name, item]));
+    for (const name of ['disk.slots.modelClaimAligned', 'disk.slots.scopeSplit', 'disk.slots.productClaimRegistered']) {
+      assert.ok(byName.has(name), `缺少检查项 ${name}`);
+      assert.equal(byName.get(name).ok, true,
+        `${name} 在基线上必须为 true：${JSON.stringify(byName.get(name).detail)}`);
+    }
+    // ③：塔的 aligned=false 只登记，绝不变成失败项
+    assert.deepEqual(failingNames(good.checks), []);
+    assert.equal(byName.get('disk.slots.modelClaimAligned').detail.modelClaim.aligned, true);
+    assert.equal(byName.get('disk.slots.modelClaimAligned').detail.slotsOk, true,
+      '门禁绿必须同时有 slots.ok 与 aligned，别只看乘积');
+    assert.equal(byName.get('disk.slots.scopeSplit').detail.modelVsProductEqual, false,
+      '8 层 ≠ 16 位这个事实仍在 detail 里可读');
+    assert.equal(byName.get('disk.slots.scopeSplit').detail.productClaim.basis, 'cross-model-unverified');
+    assert.equal(byName.get('disk.slots.scopeSplit').detail.derivedCrossModelEquality, false);
+    assert.equal(byName.get('disk.slots.derived').detail.aligned, false,
+      '旧数值对齐字段兼容保留，但只作 detail');
+    assert.match(byName.get('disk.slots.derived').detail.legacyAlignedScope, /不证明塔/,
+      'detail 必须自己写明旧 aligned 不证明塔覆盖，别让下一个人当成覆盖结论');
+    assert.equal(byName.get('disk.slots.productClaimRegistered').detail.aligned, false);
+    assert.equal(byName.get('disk.slots.productClaimRegistered').detail.crossModelEquality, false);
+    assert.equal(byName.has('disk.slots.productClaimAligned'), false,
+      '塔口径不许有「aligned 必须 true」的检查（那会把登记缺口变成门禁）');
+
+    // 反例：几何少一层 → 本机型那条红；塔的登记条目仍绿（它不判几何对齐）
+    const dirBad = makeProjectFixture(mkdtempSync(join(tmpdir(), 'pv-regen-test-')), {
+      names: stackPartNames(8).filter((name) => !name.startsWith('第 2 层'))
+    });
+    const badFailed = failingNames(verifyProjectDir(dirBad, parseArgs([])).checks);
+    assert.ok(badFailed.includes('disk.slots.modelClaimAligned'),
+      `本机型 aligned 必须红，实际 ${badFailed.join(',')}`);
+    assert.equal(badFailed.includes('disk.slots.productClaimRegistered'), false);
+    assert.equal(badFailed.includes('disk.slots.scopeSplit'), false, '作用域分层本身没坏，别连带红');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('盘上门禁（P2-1）：补偿错层（删第 3 层托板补第 9 层）乘积仍是 8，modelClaimAligned 不许绿', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pv-regen-test-'));
+  try {
+    // 90 件不变：第 3 层托板换成第 9 层托板 ⇒ 托板仍是 7 层，8 位乘积不变，
+    // 但几何已经「缺第 3 层 + 越界第 9 层」。旧判据只看乘积，会给这条门禁绿。
+    const compensated = stackPartNames(8)
+      .filter((name) => name !== '第 3 层托板')
+      .concat('第 9 层托板');
+    const dir = makeProjectFixture(root, { names: compensated });
+    const result = verifyProjectDir(dir, parseArgs([]));
+    const byName = new Map(result.checks.items.map((item) => [item.name, item]));
+
+    // 前提：乘积确实还是 8（否则这条反例就不是「补偿错层」了）
+    assert.equal(result.slots.fromGeometry, 8, '补偿后储位乘积仍是 8');
+    assert.equal(result.slots.modelClaim.aligned, true, '单看乘积确实「对齐」——所以必须靠 slots.ok 兜底');
+    assert.equal(result.slots.ok, false, '缺第 3 层 + 多第 9 层必须让派生自己红');
+    assert.equal(result.slots.errors.some((error) => /缺第 3 层/.test(error)), true);
+    assert.equal(result.slots.errors.some((error) => /多出第 9 层/.test(error)), true);
+
+    const gate = byName.get('disk.slots.modelClaimAligned');
+    assert.equal(gate.ok, false, 'P2-1：补偿错层不许拿 modelClaimAligned 的门禁绿');
+    assert.equal(gate.detail.slotsOk, false, 'detail 必须写出红因是 slots.ok，而不是乘积不等');
+    assert.equal(byName.get('disk.slots.levelsFromGeometry').ok, true,
+      'levelsFromGeometry 仍是 8（不是它抓的），证明是 modelClaimAligned 自己具备鉴别力');
+    assert.equal(result.checks.failed().length > 0, true, '整体必须红（退出码靠它）');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('检查条数只增不减：复刻主流程四个断言组，61 → 64（口径三条是增量，不是替换）', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pv-regen-test-'));
+  try {
+    const options = parseArgs([]);
+    const composed = createChecks();
+    // 与 main() 同序装配：host → build → record → scene → disk3.* → cleanup
+    composed.add('host.extensionReady', true);
+    composed.add('host.rendererIsolated', true);
+    assertBuildFacts(composed, buildFacts(baselineResult()), options);
+    assertRecordFacts(composed, baselineRecord(), options);
+    assertSceneFacts(composed, baselineScene(), options);
+    composed.add('scene.sessionOk', true);
+    const disk = verifyProjectDir(makeProjectFixture(root), options);
+    for (const item of disk.checks.items) composed.add(`disk3.${item.name}`, item.ok, item.detail);
+    composed.add('cleanup.noLeftoverProcess', true);
+
+    const names = composed.items.map((item) => item.name);
+    assert.deepEqual(failingNames(composed), []);
+    assert.equal(new Set(names).size, names.length, '检查名不许重复（重复会虚增条数）');
+    for (const suffix of ['disk.slots.modelClaimAligned', 'disk.slots.scopeSplit', 'disk.slots.productClaimRegistered']) {
+      assert.ok(names.includes(`disk3.${suffix}`), `真跑回执必须带 disk3.${suffix}`);
+    }
+    assert.equal(disk.checks.items.length, 29, '盘上校验 26 → 29（+3 口径检查）');
+    assert.equal(names.length, 64, `真跑回执 61 → 64，实际 ${names.length}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('--report 只能新建在本轮运行目录内：外部路径 / 已存在文件 / 软链都拒绝', () => {
   const { base, scratch } = makeScratch();
   try {
@@ -565,7 +805,7 @@ test('--report 只能新建在本轮运行目录内：外部路径 / 已存在�
   }
 });
 
-test('--dry-run：每次运行目录与报告都唯一，报告里写明储位不算 16', () => {
+test('--dry-run：每次运行目录与报告都唯一，报告里写明储位不算 16（两个作用域都在）', () => {
   const { base, scratch } = makeScratch();
   try {
     const reports = [];
@@ -585,6 +825,15 @@ test('--dry-run：每次运行目录与报告都唯一，报告里写明储位�
       assert.equal(written.plan.expect.claimedSlots, 16);
       assert.equal(written.plan.expect.slotsAligned, false);
       assert.match(written.note.text, /8 个储位/);
+      // 回执里两个作用域都不许省：本机型 8 位（无几何 ⇒ aligned=null）与塔产品 16 位
+      assert.equal(written.note.modelClaim.slots, 8);
+      assert.equal(written.note.modelClaim.aligned, null);
+      assert.equal(written.note.productClaim.slots, 16);
+      assert.equal(written.note.productClaim.aligned, false);
+      assert.equal(written.note.productClaim.saveReloadCovered, false);
+      assert.match(written.note.text, /口径分层/);
+      // 「8 层 ≠ 16 位」这个事实必须还能从回执读出来
+      assert.match(written.note.text, /两者不等|不一致/);
       // 报告只落在本轮运行目录里，没有别的散落文件
       assert.deepEqual(readdirSync(written.runDir).sort(), ['report.json']);
     }

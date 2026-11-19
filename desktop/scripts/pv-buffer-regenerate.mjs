@@ -15,9 +15,14 @@
  *     → 任一不符即非零退出；进程只按「本轮进程组 + 精确 ownership 证据」清理
  *
  * 明确的能力边界（不要读错）：
- *   - `layers: 8` 只等于 **8 个储位**（第 1 层是底层输送线），**不是 16 位**。16 位目前只存在于
- *     `bufferTower` 纯数据槽位模型里。本脚本不会把 8 层冒充 16 位，报告里固定打印
- *     `slotsFromGeometry=8 claimedSlots=16 aligned=false`。
+ *   - `layers: 8` 只等于 **8 个储位**（第 1 层是底层输送线），**不是 16 位**。16 位是**塔产品**
+ *     口径，只存在于 `bufferTower` 纯数据槽位模型里。本脚本不会把 8 层冒充 16 位，且回执把两个
+ *     口径分成两个作用域：`modelClaim {slots:8, aligned:true, source:'project-parts'}` 与
+ *     `productClaim {slots:16, aligned:false, basis:'cross-model-unverified',
+ *     crossModelEquality:false, coveredBy:'verify:step-tower --levels 16',
+ *     saveReloadCovered:false}`。只有 `modelClaim.aligned` 进门禁；`productClaim.aligned` **恒为
+ *     false**——本机几何即使恰好数到 16 也不能宣称「塔已对齐」（塔根本不在本脚本路径上），
+ *     数值相等只写进 `crossModelEquality`（true / false / null）当信息，**不翻转退出码**。
  *   - `slotsFromGeometry` 是**从盘上工程零件表派生的**（`slotsFromGeometryParts`：托板/托条/
  *     挡停/层光电四族逐层数，柱数派生塔数），不是 `params.layers` 回声；几何里整层丢件、
  *     每层件数不对、立柱不足 4 根都会让 `disk.slots.*` 红。
@@ -99,8 +104,17 @@ export const BASELINE = Object.freeze({
    * 工程零件表逐族数出来；这个函数只用来写计划里的「期望」与基线断言。
    */
   slotsFromLayers: (layers) => layers,
-  /** 配置声明的容量（16 位只存在于 bufferTower 纯数据槽位模型里，几何路径没有） */
-  claimedSlots: 16
+  /**
+   * **塔产品口径**的声明容量（16 位只存在于 bufferTower 纯数据槽位模型里，几何路径没有）。
+   *
+   * 这是 `productClaim.slots` 的唯一来源，**不是本机型的声明**——本机型的声明是
+   * `modelClaim.slots = slotsFromLayers(layers)`（8 层 ⇒ 8 位）。两个口径绝不在同一字段里
+   * 相减：旧实现把 16 当成本轮声明的 `claimedSlots`，于是 8 层机型的 `aligned` 恒为 false，
+   * 读的人会以为「8 层丢了 8 个储位」。分层后各作用域只跟自己那条声明比。
+   */
+  claimedSlots: 16,
+  /** 塔 16 位缺口的覆盖点：`verify-step-tower --levels 16`（该路径**不经过**工程库落盘） */
+  productCoveredBy: 'verify:step-tower --levels 16'
 });
 
 /** 有真实智能体结果、不允许被本脚本当 userData/报告落点的旧真实 PV 工程 */
@@ -442,7 +456,18 @@ export function planSummary(options, { userData, port, reportPath, runDir }) {
       slotsFromGeometry: BASELINE.slotsFromLayers(options.params.layers),
       slotsFromGeometrySource: 'params（计划阶段没有几何；运行期由盘上零件表派生，见 note/disk.slots.*）',
       claimedSlots: BASELINE.claimedSlots,
-      slotsAligned: BASELINE.slotsFromLayers(options.params.layers) === BASELINE.claimedSlots
+      slotsAligned: BASELINE.slotsFromLayers(options.params.layers) === BASELINE.claimedSlots,
+      /**
+       * 口径分层（A1）：计划阶段也把两个作用域分开写，别等运行期才分层。
+       * 本机型声明 = 参数层数（8 层 ⇒ 8 位）；计划阶段**没有几何**，所以 `modelClaim.aligned`
+       * 只能记 null —— 拿参数回声给自己签 true 正是旧实现的病，这里不重犯。
+       */
+      ...slotClaims({
+        fromGeometry: null,
+        modelSlots: BASELINE.slotsFromLayers(options.params.layers),
+        productSlots: BASELINE.claimedSlots,
+        source: 'params-declared'
+      })
     }
   };
 }
@@ -517,6 +542,48 @@ function slotLevelOf(part, family) {
 }
 
 /**
+ * 储位口径**分层**（A1）：本机型的 `modelClaim` 与塔产品的 `productClaim` 永远分两个作用域。
+ *
+ * 为什么必须分层：旧实现把**塔**的 16 位写进本机型的 `claimedSlots`，再让 8 层几何去减它，
+ * 得到的 `aligned=false` 既不是「8 层丢了 8 个储位」，也不是「塔容量虚标」——读的人只会得出
+ * 错结论。分层后各作用域只跟自己那条声明比：
+ *   - `modelClaim.aligned`：本轮几何派生值 == 本机型声明（8 层 ⇒ 8 位）。**只有这条配进门禁**。
+ *   - `productClaim.aligned`：**恒为 false**。这是跨机型比较（本机 8 层几何 vs 塔 16 位产品
+ *     容量），塔根本不在本脚本路径上，本机几何数到几都不能证明塔已对齐；`basis` 固定
+ *     `'cross-model-unverified'`，`saveReloadCovered:false` 写明塔没走「存库 → 盘上读回」。
+ *     数值是否恰好相等只写在 `crossModelEquality`（true / false / null）里当**信息**，
+ *     任何笔记/回执都不许据此写「塔一致 / 已覆盖 / 16 位完成」。
+ *
+ * 两个作用域都**不许省略**：几何派生失败（`fromGeometry === null`）时也原样给出来，
+ * `aligned` 记 null / false 并标 `basis`，绝不把「量不出来」冒充成 true。
+ */
+export function slotClaims({
+  fromGeometry = null,
+  modelSlots = BASELINE.slotsFromLayers(BASELINE.params.layers),
+  productSlots = BASELINE.claimedSlots,
+  source = 'project-parts'
+} = {}) {
+  const measured = typeof fromGeometry === 'number' && Number.isFinite(fromGeometry);
+  return {
+    modelClaim: {
+      slots: modelSlots,
+      aligned: measured ? fromGeometry === modelSlots : null,
+      source
+    },
+    productClaim: {
+      slots: productSlots,
+      // 跨机型比较永远不给 true：本机几何再怎么数，也证明不了塔走了存库/读回
+      aligned: false,
+      basis: 'cross-model-unverified',
+      // 纯信息位：数值恰好相等 ≠ 塔已覆盖（null = 本轮没有几何，量不出来）
+      crossModelEquality: measured ? fromGeometry === productSlots : null,
+      coveredBy: BASELINE.productCoveredBy,
+      saveReloadCovered: false
+    }
+  };
+}
+
+/**
  * `slotsFromGeometry` 的唯一派生口。**输入是零件表，不是 `params.layers`**：
  * - 层数：托板件族覆盖第 2..N 层（第 1 层是底层输送线，没有托板），再加回 `transferLevels`；
  * - 每层位数：每层托板件数（一块托板 = 一个储位），不乘 `params.slotsPerLevel`；
@@ -529,6 +596,10 @@ export function slotsFromGeometryParts(parts, options = {}) {
   const layers = Number(options.layers ?? BASELINE.params.layers);
   const transferLevels = Number(options.transferLevels ?? 1);
   const claimed = Number(options.claimed ?? BASELINE.claimedSlots);
+  /** 本机型声明口径：8 层 ⇒ 8 位（塔的 16 位不许混进来，见 slotClaims） */
+  const modelSlots = Number.isSafeInteger(Number(options.modelSlots))
+    ? Number(options.modelSlots)
+    : BASELINE.slotsFromLayers(layers);
   const list = (Array.isArray(parts) ? parts : []).filter((part) => part && typeof part === 'object');
   const errors = [];
   const layerTrace = [];
@@ -537,6 +608,8 @@ export function slotsFromGeometryParts(parts, options = {}) {
     errors.push(`层数参数无效（${options.layers}）：至少 2 层才有储位可派生`);
     return {
       ok: false, source: 'project-parts', partsCount: list.length, claimed,
+      // 几何派生不出来也必须给两个作用域：省略作用域本身比值为 null 更危险
+      ...slotClaims({ fromGeometry: null, modelSlots, productSlots: claimed }),
       fromGeometry: null, aligned: null, levelsFromGeometry: null, slotsPerLevelFromGeometry: null,
       towersFromGeometry: null, transferLevels, usableStorage: null, trayCount: null, layerTrace, errors
     };
@@ -623,7 +696,12 @@ export function slotsFromGeometryParts(parts, options = {}) {
     source: 'project-parts',
     partsCount: list.length,
     claimed,
+    // 两个作用域：modelClaim 才是本机型口径（进 `disk.slots.modelClaimAligned` 门禁），
+    // productClaim 是塔产品口径（登记，不判门禁）。
+    ...slotClaims({ fromGeometry, modelSlots, productSlots: claimed }),
     fromGeometry,
+    // ⚠️ 仅为兼容既有读法保留的**跨口径原样比较**（几何 vs 塔 16 位），只作 detail，
+    // 不许再用它判门禁、更不证明塔已覆盖——门禁看 modelClaim.aligned，覆盖看 saveReloadCovered。
     aligned: fromGeometry === null ? null : fromGeometry === claimed,
     levelsFromGeometry,
     slotsPerLevelFromGeometry,
@@ -645,24 +723,38 @@ export function slotsFromGeometryParts(parts, options = {}) {
  */
 export function slotsNote(slots, options) {
   const claimed = BASELINE.claimedSlots;
+  const modelSlots = BASELINE.slotsFromLayers(options.params.layers);
   if (!slots) {
-    const expected = BASELINE.slotsFromLayers(options.params.layers);
+    const expected = modelSlots;
     return {
       slotsFromGeometry: null,
       expectedSlotsFromParams: expected,
       claimedSlots: claimed,
       aligned: null,
       source: 'dry-run-no-parts',
+      // 本轮没有几何：modelClaim.aligned 只能记 null（不拿参数回声冒充 true），
+      // 但两个作用域都必须出现——省略作用域正是旧口径的病根。
+      ...slotClaims({ fromGeometry: null, modelSlots: expected, productSlots: claimed, source: 'dry-run-no-parts' }),
       text: `本轮没有读工程零件表，储位数不从几何派生（不拿参数回声冒充几何）；`
         + `按参数期望 ${options.params.layers} 层 = ${expected} 个储位，声明 ${claimed} 位，两者不等：`
         + `本脚本不把 ${options.params.layers} 层冒充 ${claimed} 位。`
+        + `口径分层：modelClaim（本机型）${expected} 位、aligned=null（无几何不冒充 true）；`
+        + `productClaim（塔产品）${claimed} 位、aligned=false（跨机型未验证，恒 false）、`
+        + `crossModelEquality=null（本轮没有几何，数值是否相等不确定）、`
+        + `coveredBy='${BASELINE.productCoveredBy}'、`
+        + `saveReloadCovered=false（塔不在本脚本「存库 → 盘上读回」路径上）。`
     };
   }
+  const modelClaim = slots.modelClaim ?? slotClaims({ fromGeometry: slots.fromGeometry }).modelClaim;
+  const productClaim = slots.productClaim ?? slotClaims({ fromGeometry: slots.fromGeometry }).productClaim;
   return {
     slotsFromGeometry: slots.fromGeometry,
     claimedSlots: claimed,
     aligned: slots.aligned,
     source: slots.source,
+    // 分层回执：两个作用域都在，各跟自己那条声明比（8 层 ≠ 16 位这个事实仍在 text/detail 里）
+    modelClaim,
+    productClaim,
     levelsFromGeometry: slots.levelsFromGeometry,
     slotsPerLevelFromGeometry: slots.slotsPerLevelFromGeometry,
     towersFromGeometry: slots.towersFromGeometry,
@@ -671,8 +763,15 @@ export function slotsNote(slots, options) {
     errors: slots.errors,
     text: `几何零件表派生（${slots.partsCount} 件）：托板 ${slots.trayCount} 层 + 进出料 ${slots.transferLevels} 层`
       + ` = ${slots.levelsFromGeometry} 层 × ${slots.slotsPerLevelFromGeometry} 位/层 × ${slots.towersFromGeometry} 塔`
-      + ` = ${slots.fromGeometry} 个储位；声明 ${claimed} 位，`
-      + (slots.aligned === true ? '一致。' : `不一致（本脚本不把 ${slots.levelsFromGeometry} 层冒充 ${claimed} 位）。`)
+      + ` = ${slots.fromGeometry} 个储位；塔产品声明 ${claimed} 位，`
+      // 数值恰好相等也只是一条信息：塔不在本脚本路径上，绝不写「一致 / 已覆盖 / 16 位完成」
+      + (slots.aligned === true
+        ? `本机几何数值恰好也是 ${claimed}，但这只是数值相等，不构成塔的对齐或覆盖证据（塔不走本脚本存库/读回）。`
+        : `不一致（本脚本不把 ${slots.levelsFromGeometry} 层冒充 ${claimed} 位）。`)
+      + `口径分层：modelClaim（本机型）${modelClaim.slots} 位、几何 ${slots.fromGeometry} 位 ⇒ aligned=${modelClaim.aligned}`
+      + `（source=${modelClaim.source}，这条才进门禁）；productClaim（塔产品）${productClaim.slots} 位 ⇒ aligned=false（跨机型未验证，恒 false，不翻转退出码）、`
+      + `crossModelEquality=${productClaim.crossModelEquality}（仅数值相等信息，不构成塔的对齐证据）、`
+      + `coveredBy='${productClaim.coveredBy}'、saveReloadCovered=${productClaim.saveReloadCovered}。`
       + '16 层塔身几何由 bufferTower 建造器生成（146 件静态件表），但不在本脚本路径上，故本报告无塔 B-Rep/STEP。'
   };
 }
@@ -861,7 +960,8 @@ export function verifyProjectDir(dir, options) {
    */
   const slots = slotsFromGeometryParts(project.partsList, {
     layers: options.params.layers,
-    claimed: BASELINE.claimedSlots
+    claimed: BASELINE.claimedSlots,
+    modelSlots: BASELINE.slotsFromLayers(options.params.layers)
   });
   checks.add('disk.slots.derived', slots.ok, {
     errors: slots.errors,
@@ -871,12 +971,62 @@ export function verifyProjectDir(dir, options) {
     slotsPerLevel: slots.slotsPerLevelFromGeometry,
     towers: slots.towersFromGeometry,
     claimed: slots.claimed,
-    aligned: slots.aligned
+    // 旧字段（跨口径原样比较）：保留只为兼容既有读法，**不证明塔覆盖**，门禁看 modelClaimAligned
+    aligned: slots.aligned,
+    legacyAlignedScope: 'geometry-vs-product（跨机型数值比较，仅 detail，不证明塔已对齐/已覆盖）',
+    modelClaim: slots.modelClaim,
+    productClaim: slots.productClaim
   });
   checks.eq('disk.slots.levelsFromGeometry', slots.levelsFromGeometry, options.params.layers);
   checks.add('disk.slots.fromGeometryPositive',
     Number.isSafeInteger(slots.fromGeometry) && slots.fromGeometry > 0,
     { fromGeometry: slots.fromGeometry });
+
+  /**
+   * 口径分层（A1）的三条检查。**只有第一条是本机型门禁**；后两条分别管「两个作用域都在且
+   * 分别是派生值」与「塔的缺口如实登记」。`productClaim.aligned` **恒为 false 且不参与任何一条
+   * 判据的绿/红** —— 它是跨机型未验证口径，不许翻转 regen 退出码。
+   */
+  checks.add('disk.slots.modelClaimAligned',
+    // slots.ok 是本条的前置：托板层数×每层件数×塔数是**乘积**，删第 3 层再补第 9 层时乘积仍是 8，
+    // 单看 aligned 会漏掉「整层错位」。几何自身有 error（缺层/越界/每层件数不符）就不许给绿。
+    slots.ok === true && slots.modelClaim?.aligned === true, {
+      slotsOk: slots.ok,
+      errors: slots.errors,
+      modelClaim: slots.modelClaim ?? null,
+      fromGeometry: slots.fromGeometry,
+      note: '本机型几何派生值必须等于本机型声明（8 层 ⇒ 8 位），且几何派生本身必须 ok（slots.ok）；'
+        + '乘积相同但整层错位的几何不得给绿。塔的 16 位不在这一条里判'
+    });
+  const productSlots = slots.productClaim?.slots ?? null;
+  const derivedCrossModelEquality = slots.fromGeometry === null ? null : slots.fromGeometry === productSlots;
+  checks.add('disk.slots.scopeSplit',
+    Boolean(slots.modelClaim) && Boolean(slots.productClaim)
+      && Number.isSafeInteger(slots.modelClaim.slots) && slots.modelClaim.slots > 0
+      && slots.modelClaim.source === 'project-parts'
+      && Number.isSafeInteger(productSlots) && productSlots > 0
+      // 跨机型口径：aligned 必须恒 false、basis 固定；相等信息只能落在 crossModelEquality 且必须是
+      // **派生值**（几何 vs 塔声明），写死成常量就红
+      && slots.productClaim.aligned === false
+      && slots.productClaim.basis === 'cross-model-unverified'
+      && slots.productClaim.crossModelEquality === derivedCrossModelEquality,
+    {
+      modelClaim: slots.modelClaim ?? null,
+      productClaim: slots.productClaim ?? null,
+      derivedCrossModelEquality,
+      modelVsProductEqual: slots.modelClaim?.slots === slots.productClaim?.slots
+    });
+  checks.add('disk.slots.productClaimRegistered',
+    slots.productClaim?.coveredBy === BASELINE.productCoveredBy
+      && slots.productClaim?.saveReloadCovered === false,
+    {
+      coveredBy: slots.productClaim?.coveredBy ?? null,
+      saveReloadCovered: slots.productClaim?.saveReloadCovered ?? null,
+      aligned: slots.productClaim?.aligned ?? null,
+      crossModelEquality: slots.productClaim?.crossModelEquality ?? null,
+      note: '塔 16 位只由 verify:step-tower --levels 16 覆盖，且不经过工程库落盘；'
+        + '谁把 saveReloadCovered 写成 true（声称塔已走 regen 存库/读回）这一条就红'
+    });
 
   return { checks, project, slots };
 }
