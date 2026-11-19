@@ -5,7 +5,7 @@
 - 当前版本：**v0.6.5** —— **智能体全链路 + 单一几何源**：智能体能自适应预算、写后自动验证、截图回灌（含区域截图）、跨会话记事、查审计自查；几何统一到 85 件参数化整机，设计评审一次跑完结构/三态干涉/电气/成本并给带数字证据的结论；机型库支持本地存取与远程下载；STEP 真实性门禁进 CI（真内核实出、数实体校包络）。逐版变更见 [CHANGELOG.md](./CHANGELOG.md)
 - 运行环境：Windows 11 x64；Electron 45 + TypeScript + Vite
 - 技术底座：渲染层直接复用仓库根目录的网页原型，桌面能力全部通过**注入扩展**叠加，原型文件（`index.html` / `app.js` / `styles.css` / `electrical.*`）**零改动**
-- 质量基线：**2990 个单元测试全绿**，另有覆盖 CAD / 运动学（含自动识别建议） / 机核 / 导出 / PLC / PLC 代码生成（含 UI 与 zip 导出）/ 联调 / 同步 / 电气库 / 电气校验 / 底板布置 / 参数化装配与 BOM / 成本（引擎 + 面板 + 报告 + Agent）/ 智能体上下文、指代、多轮续跑、本地知识检索、上下文预算与成本可见性、执行效率（去重/并行/缓存）/ 机型方案合成与落盘、并行/流水线节拍模型、工艺模板、11 种整机形态库（工艺 × 布局 × 机型，含预览夹紧与四档选型优先级）、追问策略、统一功率/成本模型（额定功率、系数折算、断路器初选、缺价计数）、BOM/PLC 联动、参数化整机几何（多头龙门 / 混合线 / 单元矩阵 / STL/glTF/sidecar）/ 主视口可旋转 3D（降级路径）/ 工厂的 headless smoke
+- 质量基线：**3798 个单元测试（3795 通过 / 3 跳过 / 0 失败）**，另有覆盖 CAD / 运动学（含自动识别建议） / 机核 / 导出 / PLC / PLC 代码生成（含 UI 与 zip 导出）/ 联调 / 同步 / 电气库 / 电气校验 / 底板布置 / 参数化装配与 BOM / 成本（引擎 + 面板 + 报告 + Agent）/ 智能体上下文、指代、多轮续跑、本地知识检索、上下文预算与成本可见性、执行效率（去重/并行/缓存）/ 机型方案合成与落盘、并行/流水线节拍模型、工艺模板、11 种整机形态库（工艺 × 布局 × 机型，含预览夹紧与四档选型优先级）、追问策略、统一功率/成本模型（额定功率、系数折算、断路器初选、缺价计数）、BOM/PLC 联动、参数化整机几何（多头龙门 / 混合线 / 单元矩阵 / STL/glTF/sidecar）/ 主视口可旋转 3D（降级路径）/ 工厂的 headless smoke
 
 ![AutomationCAD 主界面](docs/desktop/screenshots/01-home.png)
 
@@ -300,7 +300,7 @@ npm start
 │   │   ├── agent/                            # JSON-RPC、MCP、应用内对话
 │   │   ├── ui/                               # 注入方式与面板壳
 │   │   └── shared/                           # 共享类型
-│   ├── test/                                 # node:test 单测与集成测试（2990 个）
+│   ├── test/                                 # node:test 单测与集成测试（3798 个）
 │   ├── build/                                # 应用图标
 │   ├── scripts/                              # esbuild 打包 main / preload / MCP
 │   └── release/                              # 本地产物（不入库）
@@ -328,7 +328,7 @@ npm start
 
 ```bash
 cd desktop
-npm test          # 2990 个单测（node:test）
+npm test          # 3798 个单测（node:test；3795 通过 / 3 跳过 / 0 失败）
 npm run diagnose  # 输出环境/WebGL/userData/数据包（加载指标+统计摘要）/KB/审计/最近 20 条错误（不含密钥）
 npm run packs:validate # 校验全部内置包（manifest/parts/重复 id/依赖/partsSha256）
 npm run packs:stats    # 生成 docs/desktop/PACK-STATS.md 与 pack-stats.json
