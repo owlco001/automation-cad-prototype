@@ -8,12 +8,11 @@
    `git show e480f57:docs/desktop/PV-BUFFER-ITERATION-HANDOFF.md`（245 行）。数字/结论按 commit 与 CI run 复核，不以本文件的转述为准。
 
 - 仓库：`owlco001/automation-cad-prototype`；工作目录 `/tmp/automation-cad-prototype`
-- 代码状态：`HEAD = 94ec7e6` = `origin/main`，R10 的 **4 笔已推**（`137a68d` / `0379e15` / `ba8020d` / `94ec7e6`）；工作区只剩 CI 修复两文件待提交
-- 上轮远端 CI：run **`44493445997`**（head `e480f57`）**success，7/7 job**（`tsc + unit tests`、`FeatureTree real geometry (build123d)`、`Electron smoke (xvfb)`、`Qt client build`、`Qt 客户端（Windows 编译）`、`Qt + OCCT（Windows 编译）`、`Qt + OCCT 视口`）—— 只覆盖 `e480f57`
-- 本轮状态：**终验已完成（12 项全 `exit 0`，见 §2）**；**CI 首跑未绿但原因是环境前置**：run `44506016602`（head `94ec7e6`）的 `featuretree-geometry`（job `135497734775`）在严格档 `eval:tasks --require-full` 上因
-  `Cannot find package 'adm-zip'`（该 job 没跑 `npm ci`）失败，**一条断言都没跑到**。修复已写本机、**待重跑** —— 重跑绿之前不许写「CI 全绿」。**无安装包发版。**
+- 代码状态：`HEAD = e1d1138`（**本机，领先 `origin/main@9409f3e` 一笔**），R10 代码共 **6 笔**：**5 笔已推**（`137a68d` / `0379e15` / `ba8020d` / `94ec7e6` / `9409f3e`），第 6 笔 `e1d1138`（sidecar 诊断/竞态修复，4 文件 +604/−32）**已提交、未推送**；工作区只剩 **4 份交接文档**待提交
+- 上轮远端 CI：run **`44493445997`**（head `e480f57`）**success，7/7 job** —— 只覆盖 `e480f57`
+- 本轮状态：**终验已完成（见 §2）**；**CI 两次都未绿，原因不同**：首跑 `44506016602`（head `94ec7e6`）是 `featuretree-geometry` 没跑 `npm ci` → `Cannot find package 'adm-zip'`（**断言一条没跑到**，已由 `9409f3e` 修）；第二跑 `44508941094`（head `9409f3e`，job `135507781027`）依赖与装配都过，红在 `verify:step` —— sidecar 起来后**约 0.36 s 自行退出**（两个端口 7440/7435），旧实现误报成「健康检查在 3 秒内未通过」，**具体真因未证**（stderr 被丢）。修正已提交为 `e1d1138`（§1 包 D）、**待推送 / CI**；只有该 SHA 触发的**新 run** 才算数。**不许写「CI 全绿」。无安装包发版。**
 
-## 1. 本轮三包（改了什么）
+## 1. 本轮三包（改了什么）＋ 包 D（已提交 `e1d1138`，未推送）
 
 ### 包 A · 严格 CI 门禁 + 严格档负向自证
 
@@ -75,32 +74,63 @@
   刻意不用 `existsSync` 当守卫（它把「没权限」和「不存在」都判 false）。
 - `desktop/electron/ipc.ts` 的 PLC 历史读取改用它：首启不再记 `PLC_HISTORY_READ_FAILED`，真损坏/权限错误照旧留痕。
 
+### 包 D · sidecar 早退诊断 + 启动竞态（**已提交 `e1d1138`，待推送 / CI**）
+
+触发：第二跑 CI（run `44508941094`，head `9409f3e`）`npm ci`、装配、体积都过，红在 `verify:step`。只读侦察（`scratch/cad-r10-ci2-scout.md`）确认三件事：
+
+- **不是超时、不是 3 秒预算**：sidecar 子进程启动后 ~100 ms 自己退出两次（7440 → 7435），而 `waitHealthy` 一见 `child.exitCode !== null` 就返回 null，再套用写死的「健康检查在 3 秒内未通过」→ 实测 elapsed 0.36 s。预算实际是 90 s（默认）/120 s（verify 脚本），与失败无关。
+- **真因在日志里不存在**：`child.stdout?.resume(); child.stderr?.resume()` 把 Python traceback 直接丢弃 ⇒ 「为什么恰好这次死了」本次无法判定。**所以 CI 那次的具体真因仍未证**。
+- **重启与首启竞争**：退出触发 `handleExit` 再 `launch()`，而首次 `launch()` 还卡在 `waitHealthy`，后者的 `unavailable` 盖掉重启结论；上报的尝试次数（1 次）也是假的。
+
+修 4 个文件（`desktop/electron/parametric.ts`、`scripts/fake-parametric-sidecar.mjs`、`scripts/verify-step-export.mjs`、`test/parametric-sidecar.test.ts`，+604/−32）：
+
+1. **三态健康检查**：`ready | exited | timeout`；早退报 `子进程已退出（code=… signal=…，启动后 … ms）` + stderr 尾；超时用实值 `${Math.round(healthTimeoutMs/1000)} 秒（… ms）`，不再出现「3 秒」。
+2. **stderr 4 KB 尾缓存**：token 完整 / 跨 chunk 分片 / 裁剪残片（≥6 字符后缀）全部 `[REDACTED]`；`classifySidecarStderr()` → `argparse / missing-module / address-in-use / permission-denied / out-of-memory / traceback / empty / unknown`。
+3. **启动期不抢跑**：`handleExit` 在启动期只记证据；`launchActiveSeq` 按 launch 作用域，`finally` 只清自己一代（stop→start 重叠时旧 launch 不抹新标记）；ready 后崩溃仍自动重启一次。
+4. **verify 脚本带证据**：启动失败打印 `code/status/elapsed/exitCode/signal/stderrClass` + 脱敏尾（≤12 行）；`start()` 抛错不丢 code；**阈值与重试未改**。
+5. `ParametricStartInfo` 增 `elapsedMs/exitCode/signal/stderrClass/stderrTail`，`code` 扩为 `MODULE_DISABLED|COMMAND_NOT_FOUND|SPAWN_FAILED|PROCESS_EXITED|HEALTH_TIMEOUT|PORT_UNAVAILABLE`；`site` 标签从 `stop()` 的 `:485` 改到 `waitHealthy`。
+
+**确定性 token 前导 `-` bug（已实测，但不是这次 CI 红的已证根因）**：`--token` 与值分行传时，值以 `-` 开头会被 Python argparse 当选项名 ——
+真 `app.py` 实测：`--token -Synthetic…` → `error: argument --token: expected one argument`、**exit 2**；`--token=<值>` → 正常监听（exit 124 仅因测试 `timeout`）。
+`parse_args()` 在任何 import/绑端口之前，所以症状必然是「~100 ms 自己 exit 2」，**与 CI 两端口各死一次的签名一致**。
+但随机 token 43 字符 base64url 单个以 `-` 开头概率 1/64，同一 job 两次都踩到 ≈2.6e-4（偏低），且原 stderr 已丢无法回看 ⇒ **只能记为「机制成立 + 签名一致」，不得写成 CI 那次红的结论**；运行器侧瞬时故障并列可能。
+修法本身不依赖该假设：argv 改成 `--token=<值>`（真内核端到端验证 `{ok:true,status:'ready',tokenMatches:true}`）、随机源改为可注入 `tokenFactory`（熵不变）。
+
+证据：新增 6 例修复前 **0/6 全红**、修复后定向 **22/22 绿**（`ci-strict-gates` 23/23 不受影响）；「stop 后立刻重启」用例旧实现 spawns=3/`crashed` 必红、新实现 spawns=2/`unavailable` 绿；脱敏 fuzz 3000 轮 `leaks:0`；假 python exit 2 的 verify 路径仍 `EXIT=1` 且带证据。**P1 复审通过**（`scratch/cad-r10-sidecar-rereview.md`：作用域正确、测试既有断言零改动、probe 复跑一致）。
+
 ## 2. 本轮实测（只有这些是跑过的）
 
 **终验（同一棵树、串行、全部 `exit 0`；2026-11-19；日志 `/root/.hermes/cache/scratch/cad-r10-final/`）**
 
+| 项 | 结果（包 D 之后） | 日志 |
+|---|---|---|
+| `npx tsc --noEmit` | **exit 0**，0 诊断 | `tsc-final2.log` |
+| 全量 `npm test` | **3726 tests / 3723 pass / 3 skip / 0 fail / 120,598.912448 ms** | `full-final2.log` |
+| `npm run build:ext` | **exit 0**：extension **2,946,350 B** / gzip **921,963 B** / wasm 7,604,031 B / total 10,550,381 B | `build-final2.log` |
+| `verify:step`（真内核） | **7/7**，`state=ready port=7449 wait=3212ms start=559ms` | `step-final2.log` |
+| `verify:step-tower --levels 16 --require-full` | **23 / 23**（9 + 6 + 8），`identity=PASS(144/144)`、`exempt=2/14`、`declared=2 undeclared=0 stale=0` | `step16-final2.log` |
+| `eval:tasks --require-full` | **13 / 13 pass、skipped=0、env_skipped=0、undeclared_skips=0、degraded=false** | `eval-final2.log` |
+| `parametric-sidecar.test.ts` / `ci-strict-gates` | **22 / 22** / **23 / 23** | 定向实跑 |
+
+**包 D 之前同一棵树的实跑（本轮未重跑；再改源码/测试必须整轮重跑后才可引用）**
+
 | 项 | 结果 | 日志 |
 |---|---|---|
-| 全量 `npm test` | **3717 tests / 3714 pass / 3 skip / 0 fail / 119,708.889571 ms** | `full-final.log` |
 | focused | **415 / 415，13,094.827541 ms** | `focused-final.log` |
-| `npx tsc --noEmit` | **exit 0**，0 诊断 | `tsc.log` |
-| `npm run build:ext` | **exit 0**：extension **2,946,350 B** / gzip **921,963 B** / wasm 7,604,031 B / total 10,550,381 B | `build-ext.log` |
 | Electron smoke | **`SMOKE_OK`、exit 0、23.0 s、0 FAIL、4 个明确 SKIP** | `smoke.log` |
 | `verify:step-tower --levels 8 --require-full` | **16 / 16**（9 内核 + 6 身份 + 1 条边界显式 N/A） | `step-tower-8.log` |
-| `verify:step-tower --levels 16 --require-full` | **23 / 23**（9 + 6 + 8） | `step-tower-16.log` |
 | `verify:channel --levels 2` / `--levels 16` | **27/27 · 27/27**（正向 13 / 负向 14），`TOWER_CHANNEL_RESULT ok` | `channel-2.log` / `channel-16.log` |
-| `eval:tasks --require-full` | **13 / 13 pass、skipped=0、env_skipped=0、undeclared_skips=0、degraded=false** | `eval-tasks.log` |
 | `regen:pv-buffer` | **`ok=true checks=61 failed=0`**，仍 8 层 90 件、`aligned=false` | `regen-pv-buffer.log` |
-| `kb:build` | **13 docs / 454 chunks / 434,531 B**（三份交接文档不在 `KB_DOC_FILES`，统计不变） | `kb-final.log` |
+| `kb:build` | **13 docs / 454 chunks / 434,531 B**（四份交接文档不在 `KB_DOC_FILES`，统计不变） | `kb-final.log` |
 | 四文件定向 `node --test`（startup-metrics / optional-json / ci-strict-gates / verify-step-tower） | **105 / 105**（19 + 8 + 21 + **57**） | `node-test.log` |
 
 - **`verify-step-tower.test.mjs` 实跑 57 条**；静态 `grep -c` 只得 56 —— 文件里有动态生成子测试，**静态清单不能替代实跑**（「56 条、57 差 1 未复核」作废）。
 - **4 个 SKIP 各自带显式原因**（不是静默跳过）：`SMOKE_PLACEHOLDER_DIMS_SKIP reason=no-webgl`、`SMOKE_PARAMETRIC_SIDECAR_SKIP`、`SMOKE_PARAMETRIC_UI_SKIP`、`SMOKE_DRAWINGS_UI_SKIP`。
 - **rank 水位回归自证**：旧实现隔离副本 `18 pass / 1 fail`（失败正是「非法 load 没抛」），当前源码 `19 / 19 pass` —— 真红真绿，不是只跑绿的一侧。
 - **启动计时读数**：`STARTUP_METRICS totalMs=373.254`（ready 67.61 / window 131.226 / load 356.605 / readyToShow 372.3），零点 = **main 模块求值起点**，不含 Electron bootstrap 与 main 静态 import。**是口径读数，不是性能提升宣称**（无跨版本对照实验）。
-- **本轮没跑**：`verify:step`（不在本轮改动面内）、远端 CI 的绿（首跑 run `44506016602` 是 adm-zip 环境前置红，修复待重跑）。**无安装包发版。**
+- **本轮没拿到**：远端 CI 的绿（两次红，原因见文首）、安装包（**无发版**）。本机数字一律不是 CI 读数。
 
-**小修之前的旧数字（保留作演进记录，不再当结论）**：focused 415/415、全量 3716 tests / 3713 pass / 3 skip / 0 fail / 126,150 ms —— 都跑在 rank 一行小修与第 19 条测试之前，已被上表取代。
+**演进记录（保留，不再当结论）**：3719/3716/3/0/117,094 ms（补 `npm ci` 后）→ 3717/3714/3/0/119,708.889571 ms（包 D 前）→ **现行 3726/3723/3/0/120,598.912448 ms**；更早的 3716/3713/3/0/126,150 ms 只在 rank 一行小修之前成立。
 
 ## 3. 结论限制（先钉死，任何一轮都不许越过）
 
@@ -111,8 +141,8 @@
 | 结构/安全/电气/PLC 未做 | `structure.accepted:false`、板挠度/导向/防坠/安全回路全未校核；IO 地址 `null`、`executable=false`；无 PLC 程序与联调。 |
 | 占位顶点 ≠ 实体认证 | STEP 门禁只到「每件包络内 ≥1 个 B-Rep 顶点」+ 名字级声明；不是逐面/逐实体身份，不是制造验收。 |
 
-另：4 笔已推 `94ec7e6`，但 run `44506016602` 在该 SHA 上是**红的**（`featuretree-geometry` 没跑 `npm ci` → `Cannot find package 'adm-zip'`，断言未执行）。
-CI 结论只能挂在**补完依赖前置之后那一次** run 的 `headSha` 上；上轮 run `44493445997` 只覆盖 `e480f57`。
+另：R10 共 5 笔已推（head `9409f3e`），但该 SHA 的 run `44508941094` 是**红的**（`verify:step` sidecar 早退，真因未证）；上一个 head `94ec7e6` 的 run `44506016602` 红在缺 `npm ci`。
+CI 结论只能挂在**包 D 推送（`e1d1138`）之后那一次新 run** 的 `headSha` 上；上轮 run `44493445997` 只覆盖 `e480f57`。**不许写「CI 已绿」。**
 
 ## 4. 历史归档（T9 及更早，压缩；权威见 git）
 
@@ -171,7 +201,7 @@ kb **13 docs / 454 chunks / 434,531 B**、`verify:channel` 2 层 / 16 层各 **2
    复验到 0 之前 `sweep` fail 是事实。
 2. **结构/安全/电气/PLC**：结构只有屈曲手算量级；双通道急停、安全门、光幕、安全继电器未建；IO 地址 `null`。
 3. **STEP 逐实体身份**：占位顶点只到「≥1 顶点」，需要逐实体 bbox / 件族对应；豁免虽已改成声明表，仍非实体认证。
-4. **`featuretree-geometry` job 仍无 `actions/setup-node`**（存量）：node 取镜像默认值；若 <22.18，严格档与负向自证两臂都会非零 → 步骤红（fail-closed，不会假绿），正确修法是加 setup-node 并同步改预算。
+4. ~~`featuretree-geometry` job 仍无 `actions/setup-node`~~ —— **已由 `9409f3e` 关掉**（setup-node 24 + `npm ci` 放在严格评测之前，守卫 ⑦ 判「缺安装」与「安装排在评测之后」两种形态）。原风险描述保留作历史：node 取镜像默认值，若 <22.18 两臂都会非零（fail-closed，不会假绿）。
 5. 塔的 146 件没有 sceneIntegrity 断言；`sceneIntegrity` 只是计数等式门禁，不证明几何正确。
 6. 降级回执可能早于真实首帧（headless 兜底 4 s 到点后打 `degraded=missing:readyToShow`）：那是设计取舍，别把那条行当「首帧没发生」的结论。
 

@@ -1,25 +1,29 @@
 # PV 缓存机迭代交接（软件侧）
 
-## 当前状态速览（2026-11-19 · **R10 收口：4 笔已推 `94ec7e6`；CI 首跑未绿（adm-zip 环境前置遗漏），修复待重跑**）
+## 当前状态速览（2026-11-19 · **R10：5 笔已推 `9409f3e`；sidecar 修复已提交 `e1d1138` 未推送；CI 第二跑仍红（早退、真因未证）；4 份文档待提交**）
 
 > 本节只放**当前**状态。完整报告与此前各轮数字 → `docs/desktop/R10-ITERATION.md`；
 > 下面从「P2 整改（历史）」起的各节是**历史记录，原样保留、不逐段改写**（旧数字仍是那一轮的实测，只是不再是现状）。
 
-- **代码状态**：`HEAD = 94ec7e6`（`docs: record R10 acceptance and compact iteration handoff`）= `origin/main`，R10 的 **4 笔已推**
-  （`137a68d` / `0379e15` / `ba8020d` / `94ec7e6`）；工作区只剩 CI 修复两文件（`ci.yml`、`ci-strict-gates.test.mjs`）待提交。
+- **代码状态**：`HEAD = e1d1138`（`fix(parametric): diagnose sidecar exits and preserve launch state`，**本机**），**领先 `origin/main@9409f3e` 一笔（未推）**。R10 代码共 **6 笔**：**5 笔已推**
+  （`137a68d` / `0379e15` / `ba8020d` / `94ec7e6` / `9409f3e`），第 6 笔 `e1d1138` 含包 D 的 4 文件（`electron/parametric.ts`、`scripts/{fake-parametric-sidecar,verify-step-export}.mjs`、`test/parametric-sidecar.test.ts`，+604/−32）**已提交、待推送**；工作区只剩 **4 份交接文档**待提交。
   上轮远端 CI run **`44493445997`**（head `e480f57`）success 7/7 —— 只覆盖 `e480f57`。
-  **本轮 CI 首跑 run `44506016602`（head `94ec7e6`）未绿**：`featuretree-geometry`（job `135497734775`）在严格档 `eval:tasks --require-full` 上
-  `Cannot find package 'adm-zip'`（该 job 没跑 `npm ci`），**一条断言都没跑到，属于环境前置遗漏**；修复已写本机、**待重跑**，因此**不能写「CI 已绿」，也不能写「改动全未提交」**。
-- **本轮三包**（细节见 R10 报告 §1）：① **严格 CI + 负向自证** —— `featuretree-geometry` 的两条 `verify:step-tower` 与 `eval:tasks` 加 `--require-full`（SKIP 即 exit 1），新增「受控缺内核」负向自证步骤（松档 exit 0 / 严格档 exit 1），job 预算 75→90→**100 min**（首跑后补 `npm ci`），守卫 `test/meta/ci-strict-gates.test.mjs` 读真 `ci.yml`（+⑦ 依赖前置）；
-  ② **逐件豁免精确化** —— `verify-step-tower.mjs` 用 `OCCLUSION_DECLARED_HOSTS` 做精确件号 → 唯一合法宿主（不做族前缀/正则），双向闭合 + 声明件**必备**（`declaredPresence:'required'`，fail-closed），身份检查 5→6 项，**名字级、非实体认证**；
-  ③ **启动计时口径** —— 新增 `electron/startup-metrics.ts`（零点 = **main 模块求值**，`atMs/totalMs/sincePreviousMs` 同口径，raw 判回退、舍入只在写出，`readyToShow` 可晚到）+ `src/shared/optional-json.ts`（只静音 `ENOENT`，`ipc.ts` 的 PLC 历史读取改用它）。
-- **门禁状态（终验实测，2026-11-19，日志 `/root/.hermes/cache/scratch/cad-r10-final/`）**：全量 **3717 tests / 3714 pass / 3 skip / 0 fail（119,708.889571 ms）**、focused **415/415（13,094.83 ms）**、`tsc` exit 0、`build:ext` exit 0（extension 2,946,350 B / gzip 921,963 B）、Electron smoke **`SMOKE_OK`**（0 FAIL / 4 个明确 SKIP）、`verify:step-tower` **8 层 16/16、16 层 23/23**（9 内核 + 6 身份 + 1 条边界 N/A / + 8 条边界）、`verify:channel` 2/16 层各 **27/27**、`eval:tasks --require-full` **13/13（skipped=0）**、`regen` **61/61**、kb **13/454/434,531**。**均为本机实测**（不是 CI 读数）。**无安装包发版。**
-  **CI 侧**：首跑 `44506016602` 红在依赖前置（`adm-zip`），**不是门禁断言红**；补齐 `setup-node 24 + npm ci` 后待重跑，绿之前本文件不提供 CI 证据。
-  **启动计时**：`STARTUP_METRICS totalMs=373.254`，零点 = main 模块求值起点 —— 是**口径读数**，不是性能提升宣称。
-- **测试清单（`grep -cE "^[[:space:]]*test\("` 静态现测，条数不是通过数）**：`panel-channel` **50**、`buffer-tower-channel` **22**、`interference-panel-diagnostics` **10**、`geometry-export` **17**、`verify-step-tower` **56**（静态清单；**实跑 57/57**，文件含动态子测试）、`pv-buffer-regenerate` **26**、`eval-tasks` **7**、`startup-metrics` **19**（18→19）、`ci-strict-gates` **23**（21→23，首跑后加 ⑲/⑳）、`optional-json` **8**。
-  **旧的 33 / 21 / 54 / 46 全部作废**；也不许写「72 条定向全绿」（50+22 只是清单相加，从没有一条命令跑出过）。
-- **判据与 fail-closed（现行，未改动）**：`inCollisionSet` / `panelSourceOfGeometry` 认**完整工件身份**（同 id + `role=workpiece` + `size`/`center`/`rotationZDeg` 一致，转角周期等价；同 id 托板/夹具、转 90° 的件都不算；`rotationZDeg` 非有限不算）。坏坐标：承托**行**非有限 → 该行剔除、`diagnostic-only` + `invalid-support-rows`（N13）；承托**面几何**非有限 → 不判可行、`witness=null` + `invalid-shelf-geometry`（N14，带未污染正控），**不拿其余可读承托面顶替**；特征参数坏 → 并进同一码（`droppedPartIds`）。判据统一在 `feature-box.ts`：未知特征类型 → `unknown-feature-type`，`suppressed === true` 与内核同口径跳过，结构级坏件 → `malformed-part`/`malformed-feature` → `INVALID_PART_GEOMETRY` → `INVALID_ARGUMENT`（通道只剔该件）。
-- **边界不变**：塔仍**没有真实多层升降通道**（层托板整块、台面在托板投影内），**`sweep` 405 = 270 确认 + 135 待复核仍 fail，本轮未复跑、不得改判**；`structure.accepted:false`、挠度/导向/防坠/安全回路/PLC 全未校核；`mode=verified` 只等于「行表来自几何 + 碰撞集里有同一工件身份的板」，**不等于可行**；`verify:channel` 是诊断脚本（`feasible=false` 仍 exit 0），上 CI 也不改变这一点。**没有通道/结构结论。**
+- **本轮 CI 两次都未绿，原因不同**：首跑 run `44506016602`（head `94ec7e6`）是 `featuretree-geometry` job 没跑 `npm ci`，
+  `eval:tasks` import `adm-zip` 即 `ERR_MODULE_NOT_FOUND`，**一条断言都没跑到**（已由 `9409f3e` 修）；
+  第二跑 run `44508941094`（job `135507781027`，head `9409f3e`）依赖/装配/体积都过，红在 `verify:step` —— sidecar 起来后
+  **约 0.36 s 自行退出**（端口 7440/7435），旧实现误报成「健康检查在 3 秒内未通过」，**具体真因未证**（旧代码丢弃 stderr，无 traceback）。
+  因此**不能写「CI 已绿」，也不能写「改动全未提交」**（5 笔在远端 + `e1d1138` 已提交本机、仅 4 份文档未提交）；**无安装包发版**。
+- **本轮四包**（细节见 R10 报告 §1）：① **严格 CI + 负向自证**（`--require-full`、受控缺内核两臂、job 预算 100 min、守卫 ⑦ 依赖前置）；
+  ② **逐件豁免精确化**（`OCCLUSION_DECLARED_HOSTS` 精确件号→唯一宿主、双向闭合、声明件 `required`、身份检查 5→6 项，名字级非实体认证）；
+  ③ **启动计时口径**（`startup-metrics.ts` 零点 = main 模块求值 + `optional-json.ts` 只静音 `ENOENT`）；
+  ④ **包 D（已提交 `e1d1138`，未推送）** sidecar 错误诊断 —— `waitHealthy` 三态 `ready/exited/timeout`、早退报 `code/signal/实测 ms`、stderr 4 KB 尾缓存全 `[REDACTED]`、`classifySidecarStderr()` 八类、`verify:step` 失败带证据、**启动期不抢跑重启**（`launchActiveSeq` 作用域）；P1 复审通过。
+- **门禁状态（本机实测，包 D 之后，日志 `/root/.hermes/cache/scratch/cad-r10-final/*final2.log`）**：全量 **3726 tests / 3723 pass / 3 skip / 0 fail（120,598.912448 ms）**、`tsc` exit 0、`build:ext` exit 0（extension 2,946,350 B / gzip 921,963 B）、`verify:step` **7/7**（`start=559 ms`）、`verify:step-tower` **16 层 23/23**、`eval:tasks --require-full` **13/13（skipped=0）**、`parametric-sidecar` **22/22**、`ci-strict-gates` **23/23**。
+  **包 D 之前同树实跑、本轮未重跑**：focused **415/415**、smoke **`SMOKE_OK`**（0 FAIL / 4 个显式 SKIP）、`verify:step-tower` 8 层 **16/16**、`verify:channel` 2/16 层各 **27/27**、`regen` **61/61**、kb **13/454/434,531**。**均为本机读数，不是 CI 读数。**
+- **启动计时**：`STARTUP_METRICS totalMs=373.254`，零点 = main 模块求值起点 —— 是**口径读数**，不是性能提升宣称。
+- **测试清单（静态 `grep -cE "^[[:space:]]*test\("` 现测，条数不是通过数）**：`panel-channel` **50**、`buffer-tower-channel` **22**、`interference-panel-diagnostics` **10**、`geometry-export` **17**、`verify-step-tower` **56**（静态；**实跑 57/57**）、`pv-buffer-regenerate` **26**、`eval-tasks` **7**、`startup-metrics` **19**、`ci-strict-gates` **23**、`optional-json` **8**、`parametric-sidecar` **22**（包 D 后 15→22）。
+  **旧的 33 / 21 / 54 / 46 全部作废**；也不许写「72 条定向全绿」（50+22 只是清单相加）。
+- **判据与 fail-closed（现行，未改动）**：`inCollisionSet` / `panelSourceOfGeometry` 认**完整工件身份**（同 id + `role=workpiece` + `size`/`center`/`rotationZDeg` 一致，转角周期等价；同 id 托板/夹具、转 90° 的件都不算；`rotationZDeg` 非有限不算）。坏坐标：承托**行**非有限 → 该行剔除、`diagnostic-only` + `invalid-support-rows`（N13）；承托**面几何**非有限 → 不判可行、`witness=null` + `invalid-shelf-geometry`（N14，带未污染正控）；特征参数坏 → 并进同一码（`droppedPartIds`）。判据统一在 `feature-box.ts`。
+- **边界不变**：塔仍**没有真实多层升降通道**（层托板整块、台面在托板投影内），**`sweep` 405 = 270 确认 + 135 待复核仍 fail，本轮未复跑、不得改判**；`structure.accepted:false`、挠度/导向/防坠/安全回路/PLC 全未校核；`mode=verified` 只等于「行表来自几何 + 碰撞集里有同一工件身份的板」，**不等于可行**；`verify:channel` 是诊断脚本（`feasible=false` 仍 exit 0）。**没有通道/结构结论。**
 
 ## P2 整改（历史 · 2026-11-19 T3 复审后，落在 `920ea07`/`b85fab5`；源码现行，但整树证据已被本轮六笔叠加）
 
@@ -229,6 +233,7 @@ T3 第二轮复审判定 **P2-1 / P2-2 / P2-5 均通过，无新增 P0/P1**；�
 ## 下一步建议
 
 > **注意：本节是 T9 轮写的建议**（对应 `1c803f6` / run `44491644544`），保留原文不改数字。
+> 文中第 1 条的「门禁已跑完、六笔已推送 / CI 通过」只对 `1c803f6` 的 run `44491644544` 成立，不是现状 —— **R10 的两次 run（`44506016602`、`44508941094`）都红**，见文首。
 > R10 轮的当前状态与终验顺序见文首、`HANDOFF-NEXT-SESSION.md` 与 `docs/desktop/R10-ITERATION.md` §2。
 
 1. **门禁已跑完、六笔已推送、CI 已绿**（本轮 16:44–16:51 对应 `1c803f6`；远端 run `44491644544` 对 `1c803f6` 7/7 绿）：focused 405/405、全量 3659（3656 pass / 3 skip / 0 fail，116,728 ms）、tsc exit 0、kb 13/454/434,531、`verify:channel` 2/16 各 27/27、`verify:step-tower` 8 层 13/13 / 16 层 20/20、`verify:step` 7/7、regen 61/61、`build:ext` 2,946,350 B / gzip 921,963 B。**这些不需要重跑**（`1c803f6` 只动 `kb.json`；CI 已独立复核到同一棵树的门禁步骤）；**只有改了源码/测试才必须整轮重跑**，命令照抄、全部在**同一次会话、同一棵树**上跑完：
