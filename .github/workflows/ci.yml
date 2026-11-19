@@ -815,17 +815,32 @@ jobs:
   featuretree-geometry:
     name: FeatureTree real geometry (build123d)
     runs-on: ubuntu-latest
-    # 步骤预算（最坏情形）：安装 build123d ~10 + 装配 10 + 体积 10 + STEP 12 + 缓存塔 20
-    # + 任务级评测（严格档）10 + 严格档负向自证 5 + AABB 10 = 87 min，另加 checkout/setup-python 的 1~2 min；
-    # job 级 90 min 必须 ≥ 步骤合计，否则最后一步会在跑完断言前被掐断，表现成「红但原因误导」
-    # （60 < 62 就是旧口径的错；加了严格评测后旧的 75 min 也不够了；再加负向自证后 82 也不够了）。
+    # 步骤预算（最坏情形）：安装依赖(npm ci) 10 + 安装 build123d ~10 + 装配 10 + 体积 10 + STEP 12
+    # + 缓存塔 20 + 任务级评测（严格档）10 + 严格档负向自证 5 + AABB 10 = 97 min，另加 checkout/setup-node/setup-python 的 2~3 min；
+    # job 级 100 min 必须 ≥ 步骤合计，否则最后一步会在跑完断言前被掐断，表现成「红但原因误导」
+    # （60 < 62 就是旧口径的错；加了严格评测后旧的 75 min 也不够了；再加负向自证后 82 也不够了；
+    # 首跑又把「没装 node 依赖」暴露出来，加了 npm ci 这一步后 90 min 也不够了）。
     # 加 step 必须同时改这里 —— desktop/test/meta/ci-strict-gates.test.mjs ⑥ 会判红。
-    timeout-minutes: 90
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      # 本 job 之前只装了 build123d，**没装 node 依赖**，于是 eval:tasks / verify:step-tower
+      # 一 import desktop/src/shared/*.ts 就 `Cannot find package 'adm-zip'`（首跑实测，
+      # 是环境前置遗漏，不是断言失败）。命令与 unit job 逐字一致；npm ci 会执行依赖安装脚本，
+      # 这一步也为 Electron postinstall 预留安装时间，不假定它被禁用。
+      # 顺序是判据的一部分：守卫 ⑦ 从 job 的有效步骤里取执行顺序，装在评测之后同样判红。
+      - name: 安装依赖（desktop node_modules）
+        timeout-minutes: 10
+        working-directory: desktop
+        run: npm ci
       - name: 安装 build123d
         run: |
           python -m venv .venv-ft

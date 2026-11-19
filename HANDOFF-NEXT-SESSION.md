@@ -1,6 +1,6 @@
 # AutomationCAD 下一会话交接
 
-更新时间：2026-11-19（**R10 收口轮：终验已跑完，改动待提交/推送**）
+更新时间：2026-11-19（**R10 收口：4 笔已推 `94ec7e6`；CI 首跑暴露 adm-zip 环境前置遗漏，修复待重跑**）
 仓库 `owlco001/automation-cad-prototype`；工作目录 `/tmp/automation-cad-prototype`
 
 > 这是**短摘要**：只写「现在什么状态、下一步做什么」。
@@ -9,15 +9,20 @@
 
 ## 现状（三句）
 
-- **基线**：`HEAD = e480f57`（`docs: record optimization round gates and close stale claims`）= `origin/main`。
-- **上轮远端 CI**：run **`44493445997`**（head `e480f57`）**success，7/7 job**。它验的是 `e480f57` 那棵树，**不覆盖本轮改动**。
-- **本轮终验已全部跑完（12 项，全部 `exit 0`）；改动仍未提交，本轮还没有自己的 CI run** —— 推送后另起，只把「CI 已绿」写到那个新 run 的 `headSha` 上。**没有安装包发版。**
+- **代码状态**：`HEAD = 94ec7e6`（`docs: record R10 acceptance and compact iteration handoff`）= `origin/main`；R10 的 **4 笔已全部推送**
+  （`137a68d` CI 严格档 + 负向自证 → `0379e15` 豁免收窄到声明宿主 → `ba8020d` 启动计时 + 首跑历史 ENOENT 静音 → `94ec7e6` 文档收口）。
+- **上轮远端 CI**：run **`44493445997`**（head `e480f57`）success 7/7 —— 只覆盖 `e480f57`，**不覆盖这 4 笔**。
+- **本轮 CI 首跑未绿**：run **`44506016602`**（head `94ec7e6`）里 `featuretree-geometry` job（`135497734775`）**严格档失败**，但原因是**环境前置遗漏**：
+  该 job 只装了 build123d、没跑 `npm ci`，`eval:tasks` import `desktop/src/shared/zip.ts` 时直接
+  `ERR_MODULE_NOT_FOUND: Cannot find package 'adm-zip'` —— **一条断言都没跑到**（日志 `scratch/cad-r10-final/ci-ft-failure.log`）。
+  修复（setup-node 24 + `npm ci` 放在评测前、job 90→100 min、守卫 +2 条对抗用例）已在本机工作区，**待重跑 CI**。
+  **所以现在既不能说「CI 已绿」，也不能说「改动仍未提交」** —— 4 笔在远端，修复未提交。**没有安装包发版。**
 
 ## 本轮三包（一句话各自，细节见 R10 报告 §1）
 
 | 包 | 改了什么 | 证据（跑过的） |
 |---|---|---|
-| **A 严格 CI + 负向自证** | `featuretree-geometry` job 的两条 `verify:step-tower` 与 `eval:tasks` 加 `--require-full`（SKIP 即 exit 1）；新增「受控缺内核」负向自证步骤（松档 exit 0 / 严格档 exit 1，钉死 `python=$MISSING_PY`、无 `kernel port=`）；job 预算 75→90 min；守卫 `test/meta/ci-strict-gates.test.mjs` 读**真** `ci.yml` | 守卫 **21/21**（本轮实跑）；`eval:tasks --require-full` **13/13、skipped=0** |
+| **A 严格 CI + 负向自证** | `featuretree-geometry` job 的两条 `verify:step-tower` 与 `eval:tasks` 加 `--require-full`（SKIP 即 exit 1）；新增「受控缺内核」负向自证步骤（松档 exit 0 / 严格档 exit 1，钉死 `python=$MISSING_PY`、无 `kernel port=`）；job 预算 75→90→**100 min**（首跑后补 `npm ci` 这一步）；守卫 `test/meta/ci-strict-gates.test.mjs` 读**真** `ci.yml`，并新增 ⑦ 依赖前置（缺 `npm ci` / 装在评测之后都判红） | 守卫 **23/23**（首跑修复后实跑；首跑时是 21/21）；`eval:tasks --require-full` 本机 **13/13、skipped=0**（CI 上尚未跑通，见现状） |
 | **B 逐件豁免精确化** | `verify-step-tower.mjs`：`OCCLUSION_DECLARED_HOSTS` 精确件号 → 唯一合法宿主（`hasOwnProperty`，不做前缀）；双向闭合（未声明 / 宿主不符 / 死条目都红）；`declaredPresence` 默认 `required`（fail-closed）；身份检查 5→6 项 | `verify-step-tower.test.mjs` **实跑 57/57**（静态 grep 只数得到 56 —— 有动态子测试，清单不能替代实跑）；真内核 **8 层 16/16 · 16 层 23/23** |
 | **C 启动计时 + ENOENT 静音** | 新增 `electron/startup-metrics.ts`：零点 = **main 模块求值**，`atMs/totalMs/sincePreviousMs` 同口径，raw 判回退、舍入只在写出，`readyToShow` 可晚到；顺序水位 `Math.max`；`main.ts` 接线；新增 `src/shared/optional-json.ts` 只静音 `ENOENT`，`ipc.ts` 的 PLC 历史读取改用它 | `startup-metrics.test.mjs` **19/19**；rank 负例旧实现 **18 pass / 1 fail**、当前源码 **19/19**（真红真绿）；`optional-json` 8/8 |
 
@@ -25,9 +30,9 @@
 
 | 项 | 结果 | 日志 |
 |---|---|---|
-| 全量 `npm test` | **3717 tests / 3714 pass / 3 skip / 0 fail / 119,708.889571 ms** | `full-final.log` |
+| 全量 `npm test`（补齐 CI 前置后重跑） | **3719 tests / 3716 pass / 3 skip / 0 fail / 117,094.372255 ms** | `full-ci-fix.log` |
 | focused | **415 / 415，13,094.827541 ms** | `focused-final.log` |
-| `npx tsc --noEmit` | **exit 0**，0 诊断 | `tsc.log` |
+| `npx tsc --noEmit`（CI 修复后重跑） | **exit 0**，0 诊断 | `tsc-ci-fix.log` |
 | `npm run build:ext` | **exit 0**：extension 2,946,350 B / gzip 921,963 B / wasm 7,604,031 B / total 10,550,381 B | `build-ext.log` |
 | Electron smoke | **`SMOKE_OK`、exit 0、23.0 s、0 FAIL、4 个明确 SKIP** | `smoke.log` |
 | `verify:step-tower --levels 8 --require-full` | **16 / 16**（9 内核 + 6 身份 + 1 条边界显式 N/A） | `step-tower-8.log` |
@@ -51,7 +56,7 @@
 
 ## 下一会话顺序
 
-1. `git status --short` / `git log --oneline -3` → 确认仍是 `e480f57` + 未提交改动；**不要 `git checkout --`、不要重排已推送历史**。
+1. `git status --short` / `git log --oneline -5` → 确认 HEAD 仍是 `94ec7e6`、工作区只有 `ci.yml` + `ci-strict-gates.test.mjs` 两份修复改动（主会话统一提交）；**不要 `git checkout --`、不要重排已推送历史**。
 2. 终验已完成；**只有再动源码/测试才需要整轮重跑**（同一次会话、同一棵树、串行），命令与预期值：
    ```bash
    cd /tmp/automation-cad-prototype/desktop
@@ -68,7 +73,8 @@
    npm run regen:pv-buffer && npm run kb:build                                        # 61/61 / 13-454-434531
    git diff --check                                                                   # 无输出
    ```
-3. 提交 + push 后另查新 run 的 `headSha`：`gh run list --limit 3` → `gh run watch <id>`；把「CI 已绿」只写到**那个 SHA** 上（本轮尚无 CI）。
+3. 提交 + push 后另查新 run 的 `headSha`：`gh run list --limit 3` → `gh run watch <id>`；把「CI 已绿」只写到**那个 SHA** 上
+   （`94ec7e6` 的 run `44506016602` 首跑未绿：adm-zip 环境前置遗漏，**不是断言失败**，修复待重跑）。
 4. 之后才是老欠账：升降通道（`sweep` 405→0）、逐实体 STEP 身份、结构/安全/电气/PLC。
 
 落库时只 add 本轮白名单文件：`.github/workflows/ci.yml`、`desktop/electron/{ipc,main,startup-metrics}.ts`、

@@ -39,6 +39,10 @@
 //      且命令必须落在规范形状内；
 //   5. 严格档负向自证步骤存在且形状正确（受控缺内核 → SKIP + exit 1）；
 //   6. 预算注释覆盖新增步骤、步骤超时之和 ≤ 预算合计 ≤ job 超时。
+//   7. 跑门禁的 job 必须先装 node 依赖（`npm ci` / `npm install`），且从 job 的有效步骤里
+//      取**执行顺序**：没有安装步骤 → 红；装在评测之后 → 红。首跑事故：featuretree-geometry
+//      只装了 build123d，eval:tasks 一 import src/shared/zip.ts 就 `Cannot find package 'adm-zip'`，
+//      表现为「严格档红了」，实际是环境前置遗漏 —— 断言根本没跑到。
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
@@ -271,6 +275,9 @@ const PREAMBLE_SHAPES = [
 ];
 /** 命令替换 / 反引号：形状判据之外的显式一档（判红了才好解释）。 */
 const SUBSTITUTION_RE = /`|\$\(/;
+/** 装 node 依赖：只认命令开头（`# npm ci` 注释、`echo npm ci` 都不算）。 */
+const INSTALL_CMD_RE = /^npm\s+(?:ci|install)(?:\s|$)/;
+const isInstallCommand = (text) => INSTALL_CMD_RE.test(text);
 
 // ---------------------------------------------------------------------------
 // 负向自证步骤的形状（严格档必须「缺内核就红」，且不许真去卸载共享 venv）
@@ -530,6 +537,35 @@ function auditGates(text, { disable = [] } = {}) {
     }
   }
 
+  // ⑦ 依赖前置：跑 npm 门禁的 job 必须**先**装 node 依赖
+  //
+  // 首跑事故（featuretree-geometry）：只装了 build123d，没有 npm ci，eval:tasks 一 import
+  // desktop/src/shared/zip.ts 就 `ERR_MODULE_NOT_FOUND: Cannot find package 'adm-zip'` ——
+  // 严格档是「红了」，但一条断言都没跑到，红的理由只会把人往断言上带。
+  //
+  // 判据是**执行顺序**，不是「文本里出现过 npm ci」：`# npm ci` 注释、装在评测之后的步骤
+  // 都不算数。顺序从 parseWorkflow() 拆出来的步骤数组里取，和 shell 实际执行顺序一致
+  // （除了 `if:` 恒假，那由 ④ 单独判）。
+  const isInstallStep = (st) => st.commands.some((c) => INSTALL_CMD_RE.test(c.text));
+  for (const j of jobList) {
+    const gateIdx = j.steps.findIndex((st) => st.commands.some((c) => isToolCmd(c.text)));
+    if (gateIdx < 0) continue;
+    const installIdx = j.steps.findIndex(isInstallStep);
+    if (installIdx < 0) {
+      add(
+        'DEPS_INSTALL_MISSING',
+        `${j.name} 第 ${j.steps[gateIdx].line} 行起跑 npm 门禁，但该 job 里没有 npm ci / npm install 步骤 —— `
+        + 'runner 上 node_modules 不存在，首跑实测是 `Cannot find package \'adm-zip\'`（环境前置遗漏，不是断言失败）'
+      );
+    } else if (installIdx > gateIdx) {
+      add(
+        'DEPS_ORDER',
+        `${j.name} 的安装依赖落在第 ${j.steps[installIdx].line} 行，晚于第 ${j.steps[gateIdx].line} 行的第一条门禁命令 —— `
+        + '顺序反了等于没装（门禁跑的时候 node_modules 还不存在）'
+      );
+    }
+  }
+
   return { findings };
 }
 
@@ -683,9 +719,27 @@ const MUTATIONS = {
   budgetDrift: (t) => {
     const mutated = t
       .replace('+ 严格档负向自证 5 ', '')
-      .replace('= 87 min', '= 82 min');
-    assert.ok(mutated !== t, '夹具前提：预算注释里应有「+ 严格档负向自证 5」与「= 87 min」');
+      .replace('= 97 min', '= 92 min');
+    assert.ok(mutated !== t, '夹具前提：预算注释里应有「+ 严格档负向自证 5」与「= 97 min」');
     return mutated;
+  },
+  // 首跑事故（adm-zip）的两条变异：缺安装 / 安装顺序反了。
+  // 两者都只改「job 的有效步骤」，不改注释 —— 守卫读的是步骤顺序，不是文本。
+  deleteDepsInstall: (t) => {
+    const job = ftJob(t);
+    const st = job.steps.find((s) => s.commands.some((c) => isInstallCommand(c.text)));
+    assert.ok(st, '夹具前提：featuretree-geometry 里应有 npm ci 安装步骤');
+    return cutLines(t, st.line, st.endLine);
+  },
+  installAfterEval: (t) => {
+    const job = ftJob(t);
+    const st = job.steps.find((s) => s.commands.some((c) => isInstallCommand(c.text)));
+    assert.ok(st, '夹具前提：featuretree-geometry 里应有 npm ci 安装步骤');
+    const block = t.split('\n').slice(st.line - 1, st.endLine).join('\n');
+    const cut = cutLines(t, st.line, st.endLine);
+    // 行号在 cut 之后全变了：重新解析，把安装块插到严格评测步骤之后
+    const evalStep = strictEvalStep(cut).step;
+    return insertBefore(cut, evalStep.endLine + 1, block);
   },
   jobTimeoutLow: (t) => {
     const marker = `  ${FT_JOB}:`;
@@ -879,6 +933,45 @@ test('对抗⑰：预算注释退回旧口径（新 step 没进预算）→ 红'
 });
 
 // ---------------------------------------------------------------------------
+// 首跑事故（R10 之后第一次跑 CI）：严格档红了，但不是断言红
+//
+// featuretree-geometry 只装了 build123d，没有 npm ci，eval:tasks 一 import
+// desktop/src/shared/zip.ts 就 `Cannot find package 'adm-zip'`。两条对抗用例分别钉住
+// 「没装依赖」与「装得太晚」—— 判据取自 job 的有效步骤顺序，不是文本子串。
+// ---------------------------------------------------------------------------
+
+test('对抗⑲：门禁 job 没装 node 依赖（只装内核）→ 红，点名缺 npm ci', () => {
+  const mutated = MUTATIONS.deleteDepsInstall(CI_TEXT);
+  // 夹具自检：解析器真的看不见安装步骤了（注释里若还留着 npm ci 也不许顶替）
+  const job = ftJob(mutated);
+  assert.ok(
+    !job.steps.some((st) => st.commands.some((c) => isInstallCommand(c.text))),
+    '夹具没删掉安装步骤，下面的断言就没有意义'
+  );
+  const findings = messages(mutated);
+  assert.ok(
+    findings.some((f) => f.startsWith(FT_JOB) && /没有 npm ci \/ npm install/.test(f)),
+    `缺 npm ci 没被判红（或没点名 job）：\n- ${findings.join('\n- ')}`
+  );
+});
+
+test('对抗⑳：安装依赖排在严格评测之后 → 红（判执行顺序，不看子串）', () => {
+  const mutated = MUTATIONS.installAfterEval(CI_TEXT);
+  const { job, step: evalStep } = strictEvalStep(mutated);
+  const installIdx = job.steps.findIndex((st) => st.commands.some((c) => isInstallCommand(c.text)));
+  const evalIdx = job.steps.indexOf(evalStep);
+  // 夹具自检：「npm ci」这段文本还在、步骤也在，只有顺序变了 —— 正是子串判据抓不到的形态
+  assert.ok(installIdx >= 0, '夹具把安装步骤挪丢了');
+  assert.ok(evalIdx >= 0 && evalIdx < installIdx, `夹具没把安装挪到评测之后（eval=${evalIdx}, install=${installIdx}）`);
+  const found = codes(mutated);
+  assert.ok(
+    found.includes('DEPS_ORDER'),
+    `装在评测之后没被判红（说明判据是子串不是顺序）：${found.join(', ')}`
+  );
+  assert.ok(!found.includes('DEPS_INSTALL_MISSING'), '安装步骤还在，不该报「缺依赖」——这条用例要的是顺序判据');
+});
+
+// ---------------------------------------------------------------------------
 // 守卫自检：每条判据都是 load-bearing（删掉它，对应的变异就会变绿 → 这里红）
 //
 // 这是「删除守卫必红」的可执行证据：不是断言注释里写了什么，而是断言
@@ -907,8 +1000,11 @@ const LOAD_BEARING = [
   { mutation: 'deleteNegativeProof', codes: ['NEG_SELFPROOF_MISSING'] },
   { mutation: 'budgetDrift', codes: ['BUDGET_ITEM_MISSING'] },
   { mutation: 'jobTimeoutLow', codes: ['JOB_TIMEOUT_LOW'] },
+  { mutation: 'deleteDepsInstall', codes: ['DEPS_INSTALL_MISSING'] },
+  { mutation: 'installAfterEval', codes: ['DEPS_ORDER'] },
   { mutation: 'deleteKernelInstall', codes: ['KERNEL_PRECEDES'] },
-  { mutation: 'moveStrictToUnit', codes: ['UNIT_STRICT_FORBIDDEN', 'KERNEL_PRECEDES'] },
+  // 挪进 unit 时插在最前面（checkout 之前），于是顺带触发「安装依赖排在门禁之后」—— 第三码是真实发现，不是噪声
+  { mutation: 'moveStrictToUnit', codes: ['UNIT_STRICT_FORBIDDEN', 'KERNEL_PRECEDES', 'DEPS_ORDER'] },
   { mutation: 'deleteStrictEvalStep', codes: ['STRICT_EVAL_MISSING'] }
 ];
 

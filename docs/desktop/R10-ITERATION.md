@@ -8,9 +8,10 @@
    `git show e480f57:docs/desktop/PV-BUFFER-ITERATION-HANDOFF.md`（245 行）。数字/结论按 commit 与 CI run 复核，不以本文件的转述为准。
 
 - 仓库：`owlco001/automation-cad-prototype`；工作目录 `/tmp/automation-cad-prototype`
-- 基线：`HEAD = e480f57`（`docs: record optimization round gates and close stale claims`，= `origin/main`）
-- 上轮远端 CI：run **`44493445997`**（head `e480f57`）**success，7/7 job**（`tsc + unit tests`、`FeatureTree real geometry (build123d)`、`Electron smoke (xvfb)`、`Qt client build`、`Qt 客户端（Windows 编译）`、`Qt + OCCT（Windows 编译）`、`Qt + OCCT 视口`）
-- 本轮状态：**改动未提交**；**终验已完成（12 项全 `exit 0`，见 §2）**；**CI 未跑**（没有本轮自己的 run，不许把上轮 run 当本轮证据）。**无安装包发版。**
+- 代码状态：`HEAD = 94ec7e6` = `origin/main`，R10 的 **4 笔已推**（`137a68d` / `0379e15` / `ba8020d` / `94ec7e6`）；工作区只剩 CI 修复两文件待提交
+- 上轮远端 CI：run **`44493445997`**（head `e480f57`）**success，7/7 job**（`tsc + unit tests`、`FeatureTree real geometry (build123d)`、`Electron smoke (xvfb)`、`Qt client build`、`Qt 客户端（Windows 编译）`、`Qt + OCCT（Windows 编译）`、`Qt + OCCT 视口`）—— 只覆盖 `e480f57`
+- 本轮状态：**终验已完成（12 项全 `exit 0`，见 §2）**；**CI 首跑未绿但原因是环境前置**：run `44506016602`（head `94ec7e6`）的 `featuretree-geometry`（job `135497734775`）在严格档 `eval:tasks --require-full` 上因
+  `Cannot find package 'adm-zip'`（该 job 没跑 `npm ci`）失败，**一条断言都没跑到**。修复已写本机、**待重跑** —— 重跑绿之前不许写「CI 全绿」。**无安装包发版。**
 
 ## 1. 本轮三包（改了什么）
 
@@ -23,10 +24,21 @@
   日志再钉 `python=$MISSING_PY`（没回退 PATH/venv）、无 `kernel port=`（真没起内核）、`"skipped":true`、`"exitCode":1`，
   且不许出现 `STEP_TOWER FAIL`（证明红的是 SKIP 而不是别的错）。缺内核时松档若不为 0，这一步也红（挡住「崩了恰好 exit 1」的假绿）。
 - `unit` job **故意保持非严格**：那里没有 build123d，`t12-step-export` 恒 SKIP，加 `--require-full` 只会假红；注释已写明。
-- job 预算 `timeout-minutes: 75 → 90`（步骤 budget 由 72 → 87），加 step 必须同步改这里。
-- 守卫 `desktop/test/meta/ci-strict-gates.test.mjs`（**21 条**，T3 复审实测 21/21）：读**真** `ci.yml` / `package.json`，
+- job 预算 `timeout-minutes: 75 → 90 → 100`（步骤 budget 72 → 87 → 97，最后一段是首跑后补的 `npm ci`），加 step 必须同步改这里。
+- 守卫 `desktop/test/meta/ci-strict-gates.test.mjs`（**23 条**，本轮实跑 23/23；首跑前是 21 条）：读**真** `ci.yml` / `package.json`，
   不认注释；`--require-full` 用精确 token 正则（`--require-full=false` / `--no-require-full` 单独判红）、
   `continue-on-error` / `if: false` / `|| exit 0` / 预算算术都判。
+
+#### 包 A 追加（首跑后，2026-11-19 当天）：依赖前置
+
+- 首跑 run `44506016602` 的实际失败：`featuretree-geometry` 只装了 build123d，**没有 node_modules**，
+  `eval:tasks` import `desktop/src/shared/zip.ts` → `ERR_MODULE_NOT_FOUND: Cannot find package 'adm-zip'`。
+  这是**环境前置遗漏**，不是断言红（严格档的 flag 本身没问题，没被降级、没被去掉）。
+- 修复：该 job 加 `actions/setup-node@v4`（node 24，cache 指 `desktop/package-lock.json`）+ `npm ci`
+  （与 `unit` job 逐字一致，`working-directory: desktop`），**放在严格评测之前**；job 超时 90→100 min。
+- 守卫新增第 ⑦ 条判据 `DEPS_INSTALL_MISSING` / `DEPS_ORDER`：从 job 的**有效步骤顺序**判，缺安装步骤 → 红；
+  安装步骤排在任一 `npm run eval:tasks|verify:step-tower` 之后 → 红（不是「文本里出现过 npm ci」）。
+  对抗用例 ⑲/⑳ 分别钉住两种形态，两条都进了 load-bearing 自检。
 
 ### 包 B · 逐件豁免精确化：精确 id-host + 声明件必备（名字级）
 
@@ -86,7 +98,7 @@
 - **4 个 SKIP 各自带显式原因**（不是静默跳过）：`SMOKE_PLACEHOLDER_DIMS_SKIP reason=no-webgl`、`SMOKE_PARAMETRIC_SIDECAR_SKIP`、`SMOKE_PARAMETRIC_UI_SKIP`、`SMOKE_DRAWINGS_UI_SKIP`。
 - **rank 水位回归自证**：旧实现隔离副本 `18 pass / 1 fail`（失败正是「非法 load 没抛」），当前源码 `19 / 19 pass` —— 真红真绿，不是只跑绿的一侧。
 - **启动计时读数**：`STARTUP_METRICS totalMs=373.254`（ready 67.61 / window 131.226 / load 356.605 / readyToShow 372.3），零点 = **main 模块求值起点**，不含 Electron bootstrap 与 main 静态 import。**是口径读数，不是性能提升宣称**（无跨版本对照实验）。
-- **本轮没跑**：`verify:step`（不在本轮改动面内）、远端 CI（改动未提交）。**无安装包发版。**
+- **本轮没跑**：`verify:step`（不在本轮改动面内）、远端 CI 的绿（首跑 run `44506016602` 是 adm-zip 环境前置红，修复待重跑）。**无安装包发版。**
 
 **小修之前的旧数字（保留作演进记录，不再当结论）**：focused 415/415、全量 3716 tests / 3713 pass / 3 skip / 0 fail / 126,150 ms —— 都跑在 rank 一行小修与第 19 条测试之前，已被上表取代。
 
@@ -99,7 +111,8 @@
 | 结构/安全/电气/PLC 未做 | `structure.accepted:false`、板挠度/导向/防坠/安全回路全未校核；IO 地址 `null`、`executable=false`；无 PLC 程序与联调。 |
 | 占位顶点 ≠ 实体认证 | STEP 门禁只到「每件包络内 ≥1 个 B-Rep 顶点」+ 名字级声明；不是逐面/逐实体身份，不是制造验收。 |
 
-另：上轮 CI run `44493445997` 验的是 `e480f57`（docs 提交）那一棵树，**不覆盖本轮未提交改动**；本轮若 push，必须另查新 run 的 `headSha`。
+另：4 笔已推 `94ec7e6`，但 run `44506016602` 在该 SHA 上是**红的**（`featuretree-geometry` 没跑 `npm ci` → `Cannot find package 'adm-zip'`，断言未执行）。
+CI 结论只能挂在**补完依赖前置之后那一次** run 的 `headSha` 上；上轮 run `44493445997` 只覆盖 `e480f57`。
 
 ## 4. 历史归档（T9 及更早，压缩；权威见 git）
 
