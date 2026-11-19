@@ -1031,19 +1031,28 @@ export function towerLiftAxis(
 }
 
 /**
- * 塔的板件占位体：**只读诊断**，不进 `parts`（口径见 `geometry.ts` 的 workpiecePlaceholder）。
+ * 塔的板件：**真实几何刚体**（`role='workpiece'`、`moving:false`），尺寸/中心/底高一律从
+ * `params.panel` + `params.inbound.beltHeightMm` 派生 —— 与 `workpiecePlaceholder` 是同一份来源，
+ * 不许各写一套数。
  *
- * 为什么要它：承托断言（`panel-channel.ts` 的 `resolvePanelSupport`）必须从**几何**里读板，
- * 而不是从参数另算一份 —— 否则「几何里有板」和「这次查了板」又会是两件事。
- * 本轮只带静止位姿（底面 = 第 1 层承托面 = beltHeight），因为 M1 段只有 20 mm 取放；
- * 把它挂进升降轴（行程 2700）会立刻改变 lift/sweep 的全部命中数，那是下一轮的语义变更。
+ * 口径（与输送线移载工件的既有先例一致）：**`geometry.parts` = 碰撞刚体 = `ConveyorPart` 表 + 1 块板**
+ * （2/8/16 层 = 49/91/147）；板**不进** `ConveyorPart` 表 —— `assemblyPartCount` 仍是建造器件数，
+ * 只有 `partCount = assemblyPartCount + 1`，BOM（16 层 96 行 / qty 146）、成本、容量一件不动。
+ *
+ * **制造导出不是「一件不动」**：STL / glTF / sidecar → STEP 走 `geometry-export.ts` 的
+ * `machineExportParts(geometry)`，塔整机上按 id + `role=workpiece` 把这块板**排除** —— 导出件集 =
+ * `ConveyorPart` 表 = 48/90/146（16 层即 BOM qty 146），不会跟着碰撞集变成 49/91/147。别把
+ * `geometry.parts.length` 或 `partCount` 当 STEP/STL 件数读。
+ *
+ * 它**不挂**升降轴：`towerLiftAxis` 的 `partIds` 仍只含 `lift-platform`（行程 2700 是台面的，
+ * 不是板的）。把板挂进轴会让 sweep 命中从 405 变 1070，那是另一轮机构设计，不是本轮的语义接线。
  */
-export function towerWorkpiecePlaceholder(params: ResolvedBufferTowerParams): GeomWorkpiecePlaceholder {
+export function towerWorkpiecePart(params: ResolvedBufferTowerParams): GeomPart {
   const thickness = params.panel.thicknessMm;
   const bottomZ = params.inbound.beltHeightMm;
   return {
     id: WORKPIECE_PART_ID,
-    name: '工件（板件占位体 · 只读诊断）',
+    name: '工件（板件 · 真实碰撞件）',
     role: 'workpiece',
     shape: {
       type: 'box',
@@ -1056,10 +1065,30 @@ export function towerWorkpiecePlaceholder(params: ResolvedBufferTowerParams): Ge
     material: 'PV-GLASS',
     bomGroup: 'structure',
     estimated: true,
-    moving: false,
-    sizeMm: [round2(params.panel.lengthMm), round2(params.panel.widthMm), round2(thickness)],
-    bottomZmm: round2(bottomZ),
-    inCollisionSet: false
+    moving: false
+  };
+}
+
+/**
+ * 板件占位体：**由 `towerWorkpiecePart` 的同一件投影出来**（不是另建一份数据）。
+ *
+ * `inCollisionSet` 由调用方按「`parts` 里是否存在**同一件成员**」显式传入：同 id +
+ * `role='workpiece'` + box `size`/`center` 在 ±EPS 内一致 + `rotationZDeg` **有限**且周期等价，缺一不算；
+ * id 相同但 role/尺寸/中心/朝向不符的件不是同一件成员（同 id 的托板/夹具件、同尺寸同中心但转 90° 的件都不算）——
+ * 建造器这边给的是派生结果（塔几何确实 push 了这件板），不是手写常量；消费方（`panel-channel.ts`
+ * 的 `panelSourceOfGeometry`）也不会信这个字段，而是按同一身份判据自己再判一次。
+ */
+export function towerWorkpiecePlaceholder(part: GeomPart, inCollisionSet: boolean): GeomWorkpiecePlaceholder {
+  const size = part.shape.type === 'box'
+    ? part.shape.size
+    : [0, 0, 0] as Vec3;
+  const thickness = Number(size[2] ?? 0);
+  return {
+    ...part,
+    name: '工件（板件占位体 · 由碰撞件投影）',
+    sizeMm: [round2(Number(size[0])), round2(Number(size[1])), round2(thickness)],
+    bottomZmm: round2(Number(part.center[2]) - thickness / 2),
+    inCollisionSet
   };
 }
 
@@ -1074,19 +1103,32 @@ function towerGeometry(
   });
   const axis = towerLiftAxis(parts, params);
   const partsWithMoving = base.parts.map((part) => (axis.partIds.includes(part.id) ? { ...part, moving: true as const, actuatorId: axis.actuatorId } : part));
-  const panel = towerWorkpiecePlaceholder(params);
+  // 板：真实碰撞件（几何刚体层）。装配件数仍是建造器件数 —— 它不进 ConveyorPart 表。
+  const panelPart = towerWorkpiecePart(params);
+  const geometryParts = [...partsWithMoving, panelPart];
+  // 引用同一性：板就是刚 push 进去的这一件（同 id + 全字段天然成立），不是按 id 去 parts 里猜。
+  const panelInParts = geometryParts.some((part) => part === panelPart);
+  const panel = towerWorkpiecePlaceholder(panelPart, panelInParts);
   assertTowerAboveGround(parts, params);
   return {
     ...base,
-    parts: partsWithMoving,
+    parts: geometryParts,
     moving: [axis, ...base.moving],
     workpiecePlaceholder: panel,
     assumptions: [
-      `几何来源：buffer-tower-assembly 缓存塔塔身（${parts.length} 件，含底层输送线），与 BOM/STEP 同一份零件表`,
-      `板件占位体（只读）：${panel.sizeMm[0]}×${panel.sizeMm[1]}×${panel.sizeMm[2]} mm、role=workpiece、material=PV-GLASS，`
-        + `底面 ${panel.bottomZmm}（= 第 1 层承托面）。它只挂在 geometry.workpiecePlaceholder 上供承托断言读取，`
-        + `**不进 parts**：装配件数仍是 ${parts.length} 件、partCount=${parts.length}、rest/lift/sweep 的判定与命中数一个都不变。`
-        + '把板接进碰撞件表（partCount 146→147、满行程 sweep 405→446 命中）是下一轮语义变更，本轮不做',
+      `几何来源：buffer-tower-assembly 缓存塔塔身（${parts.length} 件，含底层输送线），BOM 与 STEP/STL 都按这份 ConveyorPart 表计件；`
+        + `碰撞几何另加 1 块板（geometry.parts = ${parts.length} + 1）`,
+      `板件（真实碰撞件）：${panel.sizeMm[0]}×${panel.sizeMm[1]}×${panel.sizeMm[2]} mm、role=workpiece、material=PV-GLASS，`
+        + `底面 ${panel.bottomZmm}（= 第 1 层承托面）。它作为普通 \`GeomPart\` 进 \`geometry.parts\`（参与 rest/lift/sweep 的 AABB 判定）：`
+        + `**碰撞刚体 = ConveyorPart 表 + 1 块板**（本层 ${geometryParts.length} = ${parts.length} + 1；16 层为 147 = 146 + 1）；`
+        + `但**不进 ConveyorPart 表**：装配件数 / BOM / 成本 / 容量一件不动（BOM 16 层 96 行 / qty 146，本层 qty ${parts.length}；partCount = ${geometryParts.length}）。`
+        + `**制造导出（STL/glTF/sidecar→STEP）= ConveyorPart 件集 = ${parts.length} 件**（2/8/16 层 48/90/146，16 层即 BOM qty 146）：`
+        + `板由 \`machineExportParts\` 按 id + role=workpiece 排除，别把 \`geometry.parts.length\` 当 STEP/STL 件数读。`
+        + `\`workpiecePlaceholder\` 是**同一件的投影**；它的 \`inCollisionSet\` 按「parts 里有无**同一件成员**」派生：`
+        + `同 id + role=workpiece + box size/center ±EPS + rotationZDeg 有限且周期等价，缺一不算 —— `
+        + `id 相同但 role/尺寸/中心/朝向不符的件不是同一件成员，不认手写值`,
+      `板不随升降轴移动：\`tower-lift\` 的 partIds 只有 ${axis.partIds.join('/')}（板不在其中）→ carried 位缺位移证据，`
+        + `\`workpiece.bottomZ.lift\` 为 null；板进碰撞集但静止，sweep 命中数与现役逐项相等（405 = 270 确认 + 135 待复核），板对 \`workpiecePairs\` 贡献 0`,
       `塔参数：${params.levels} 层 × ${params.slotsPerLevel} 位、层距 ${params.layerPitchMm} mm、柱高 ${params.columnHeightMm} mm、`
         + `立柱截面 ${params.columnSectionMm} mm（${params.columnSectionSource === 'derived' ? '按柱高反算' : '显式给出'}）、`
         + `升降行程 ${params.liftTravelMm} mm（导柱顶 ${params.postTopZMm} ≥ 顶层托板 ${params.topLayerZMm} + 240）`,

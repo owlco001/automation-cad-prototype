@@ -445,12 +445,12 @@ test('塔身不复制底层输送线：底层件数 29、layers 恒为 1', () =>
   assert.equal(parts.filter((part) => /^belt-top$/.test(part.id)).length, 1);
 });
 
-test('几何分派：config.bufferTower 走塔身建造器，movingAxes=1、台面随动', () => {
+test('几何分派：config.bufferTower 走塔身建造器，movingAxes=1、台面随动、板是几何刚体', () => {
   const resolved = resolveMachineGeometry(towerMachineConfig());
   assert.equal(resolved.source, 'buffer-tower-assembly');
   assert.equal(resolved.geometry.geometrySource, 'buffer-tower-assembly');
-  assert.equal(resolved.partCount, 146);
-  assert.equal(resolved.assemblyPartCount, 146);
+  assert.equal(resolved.partCount, 147, '几何刚体 = 146 装配件 + 板');
+  assert.equal(resolved.assemblyPartCount, 146, '装配件数/BOM/STEP 口径不含板');
   assert.match(resolved.reason, /缓存塔/);
   assert.equal(resolved.geometry.moving.length, 1);
   const axis = resolved.geometry.moving[0];
@@ -460,6 +460,11 @@ test('几何分派：config.bufferTower 走塔身建造器，movingAxes=1、台�
   const platform = resolved.geometry.parts.find((part) => part.id === 'lift-platform');
   assert.equal(platform.moving, true);
   assert.equal(platform.actuatorId, 'tower-lift');
+  // 板：真实碰撞件，但不在轴上（moving=false）
+  const plate = resolved.geometry.parts.find((part) => part.id === 'workpiece-plate');
+  assert.ok(plate, '板必须是几何刚体');
+  assert.equal(plate.moving, false);
+  assert.equal(resolved.geometry.workpiecePlaceholder?.inCollisionSet, true);
 });
 
 test('几何分派不误道：没有 bufferTower 时 layers=8 仍走 conveyor-assembly', () => {

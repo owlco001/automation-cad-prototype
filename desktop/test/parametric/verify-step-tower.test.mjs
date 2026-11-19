@@ -15,11 +15,18 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  TOWER_16,
+  buildTowerExportFacts,
   cylinderAllowanceMm,
+  evaluateExportBoundary,
   evaluateStepTower,
   readBinaryStlBBox,
   unionBoxes
 } from '../../scripts/verify-step-tower.mjs';
+import { buildBufferTowerParts, bufferTowerParamsFromConfig } from '../../src/machine/buffer-tower-assembly.ts';
+import { conveyorAssembly } from '../../src/machine/conveyor-assembly.ts';
+import { geometryToSidecarAssemblies, machineExportParts } from '../../src/machine/geometry-export.ts';
+import { WORKPIECE_PART_ID } from '../../src/machine/machine-geometry.ts';
 
 /** 造一份二进制 STL：每个三角形 3 个顶点，坐标由调用方给。 */
 function binaryStl(triangles) {
@@ -508,6 +515,115 @@ test('端点负测：极值件是箱体+输出轴（lift-motor 型）→ 平面�
 });
 
 /* ---------------------------------------------------------------------------
+ * 导出边界（review P2-5）：生产路径 146、变异不回流、门禁本身不是摆设
+ * ------------------------------------------------------------------------- */
+
+/** 与门禁同一份件表（buildBufferTowerParts → conveyorAssembly），STEP 内核输入就是它。 */
+function towerTable() {
+  const parts = buildBufferTowerParts(bufferTowerParamsFromConfig({ bufferTower: TOWER_16 }));
+  return { parts, expectedParts: 146, doc: conveyorAssembly(parts) };
+}
+
+/** 拿变异后的几何重算导出/sidecar，其余事实（件表、内核输入）保持不变。 */
+function reexport(facts, mutate) {
+  const geometry = mutate(facts.geometry);
+  return {
+    ...facts,
+    geometry,
+    exportParts: machineExportParts(geometry),
+    sidecar: geometryToSidecarAssemblies(geometry, { updatedAt: 'p2-5-mutation' })
+  };
+}
+
+test('导出边界门禁：生产塔几何（147 刚体）→ 制造导出/sidecar 都是 146，八条证据全绿', () => {
+  const facts = buildTowerExportFacts(towerTable());
+  assert.equal(facts.geometry.parts.length, 147, '塔几何 = 146 装配 + 1 块板');
+  assert.equal(facts.geometry.assemblyPartCount, 146);
+  assert.equal(facts.kernelInstances, 146, 'STEP 内核输入仍是 146 件');
+  assert.equal(facts.exportParts.length, 146, '制造导出 146（不是 147）');
+  assert.equal(facts.sidecar.instances, 146, 'sidecar ⇒ STEP 146 实例');
+  const result = evaluateExportBoundary(facts);
+  assert.equal(result.ok, true, JSON.stringify(result.checks.filter((check) => !check.ok)));
+  assert.equal(result.checks.length, 8, '八条证据一条都不能少（少一条就是静默略过）');
+});
+
+test('变异：改板件号 / 改来源标签都不能静默变成 147 实例（门禁必须仍判 146）', () => {
+  const base = buildTowerExportFacts(towerTable());
+  const plate = base.geometry.parts.find((part) => part.role === 'workpiece');
+  assert.equal(plate.id, WORKPIECE_PART_ID);
+
+  const variants = {
+    '只改件号（占位体保持原名）': (geometry) => ({
+      ...geometry,
+      parts: geometry.parts.map((part) => (part === plate ? { ...part, id: 'panel-x' } : part))
+    }),
+    '件号与占位体一起改': (geometry) => ({
+      ...geometry,
+      parts: geometry.parts.map((part) => (part === plate ? { ...part, id: 'panel-x' } : part)),
+      workpiecePlaceholder: { ...geometry.workpiecePlaceholder, id: 'panel-x' }
+    }),
+    '只改来源标签（station-generator）': (geometry) => ({ ...geometry, geometrySource: 'station-generator' }),
+    '件号 + 来源一起改': (geometry) => ({
+      ...geometry,
+      geometrySource: 'station-generator',
+      parts: geometry.parts.map((part) => (part === plate ? { ...part, id: 'panel-x' } : part))
+    }),
+    '件号 + role + 来源一起改': (geometry) => ({
+      ...geometry,
+      geometrySource: 'station-generator',
+      parts: geometry.parts.map((part) => (part === plate ? { ...part, id: 'panel-x', role: 'frame' } : part))
+    }),
+    '占位体被剥掉 + 件号 + 来源一起改': (geometry) => ({
+      ...geometry,
+      geometrySource: 'station-generator',
+      workpiecePlaceholder: undefined,
+      parts: geometry.parts.map((part) => (part === plate ? { ...part, id: 'panel-x' } : part))
+    })
+  };
+
+  for (const [label, mutate] of Object.entries(variants)) {
+    const facts = reexport(base, mutate);
+    assert.equal(facts.exportParts.length, 146, `${label}：导出必须 146（147 就是 P2-5 的原始症状）`);
+    assert.equal(facts.sidecar.instances, 146, `${label}：sidecar 实例数必须是 146，不是 147`);
+    const result = evaluateExportBoundary(facts);
+    assert.equal(result.ok, true, `${label}：${JSON.stringify(result.checks.filter((check) => !check.ok))}`);
+  }
+});
+
+test('门禁不是摆设：导出泄漏成 147 / 内核输入被动 / 件表多一件时，证据必须自己变红', () => {
+  const base = buildTowerExportFacts(towerTable());
+  // 模拟「过滤退化」：导出件集 = 全部碰撞刚体（147），sidecar 也照出 147
+  const leakedSidecar = {
+    instances: base.geometry.parts.length,
+    chunks: [{
+      instances: base.geometry.parts.map((part) => ({
+        id: part.id,
+        transform: { x: part.center[0], y: part.center[1], z: part.center[2], rz: part.rotationZDeg }
+      }))
+    }]
+  };
+  const leaked = evaluateExportBoundary({ ...base, exportParts: base.geometry.parts, sidecar: leakedSidecar });
+  assert.equal(leaked.ok, false);
+  const byLabel = new Map(leaked.checks.map((check) => [check.label, check]));
+  assert.equal(byLabel.get('导出边界：制造导出件数 == assemblyPartCount').ok, false);
+  assert.equal(byLabel.get('导出边界：制造导出件数 == assemblyPartCount').actual, '147');
+  assert.equal(byLabel.get('导出边界：制造导出不含工件板').ok, false);
+  assert.match(byLabel.get('导出边界：制造导出不含工件板').actual, /^1 件/);
+  assert.equal(byLabel.get('导出边界：sidecar 实例 == assemblyPartCount').ok, false);
+  assert.equal(byLabel.get('导出边界：sidecar 不含工件板（⇒ STEP 不会 147 件）').ok, false);
+
+  // 内核输入被导出过滤改动（146 → 147）同样必须红
+  const shifted = evaluateExportBoundary({ ...base, kernelInstances: 147 });
+  assert.equal(shifted.ok, false);
+  assert.equal(shifted.checks.find((check) => check.label === '导出边界：STEP 内核输入仍是 146 件').ok, false);
+
+  // 件表名不副实（多一件 / 重号）：件号逐件对照那一条必须红
+  const ghost = evaluateExportBoundary({ ...base, tablePartIds: [...base.tablePartIds, 'ghost-part'] });
+  assert.equal(ghost.ok, false);
+  assert.equal(ghost.checks.find((check) => check.label === '导出边界：导出件号 == STEP 件表').ok, false);
+});
+
+/* ---------------------------------------------------------------------------
  * CLI 级：退出码与参数/文件错误（门禁的价值一半在「红了真的会红」）
  * ------------------------------------------------------------------------- */
 
@@ -638,4 +754,30 @@ test('CLI：--merge-manifest 证据不合格（缺 fallback / 坏 JSON / 无 --f
   const runOrphan = runCli(['--levels', '16', '--merge-manifest', noFallback]);
   assert.equal(runOrphan.status, 2, 'build 模式不该接受 manifest（它自己会读内核 stats.merge）');
   assert.match(runOrphan.stderr, /只在 --file 模式有意义/);
+});
+
+/**
+ * 导出边界门禁必须真的接在 CLI 上（P2-5）：只测纯函数不够 —— 如果 `--file`/build 流程没把它
+ * 并进回执，退化时门禁照样全绿。这条用桩 STEP（不需要内核）证明：回执里有导出边界证据、且全过。
+ */
+test('CLI：--file 模式也跑导出边界门禁，八条证据进同一张回执', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'step-tower-cli-'));
+  const stepPath = join(dir, 'stub.step');
+  writeFileSync(stepPath, stubStepText());
+  const manifest = join(dir, 'stats.json');
+  writeFileSync(manifest, JSON.stringify({ merge: { mode: 'fuse', fallback: false } }));
+
+  const run = runCli(['--file', stepPath, '--merge-manifest', manifest, '--json']);
+  assert.equal(run.status, 1, '桩 STEP 本身仍整体红（导出边界过不等于整机合格）');
+  assert.match(run.stdout, /PASS 导出边界：制造导出件数 == assemblyPartCount/);
+  assert.match(run.stdout, /PASS 导出边界：STEP 内核输入仍是 146 件/);
+
+  const line = run.stdout.split('\n').find((row) => row.startsWith('STEP_TOWER_JSON '));
+  assert.ok(line, `必须输出 JSON 回执：\n${run.stdout}`);
+  const payload = JSON.parse(line.slice('STEP_TOWER_JSON '.length));
+  assert.equal(payload.exportBoundary?.ok, true, JSON.stringify(payload.exportBoundary?.checks));
+  assert.equal(payload.exportBoundary.checks.length, 8);
+  const boundaryChecks = payload.checks.filter((check) => check.label.startsWith('导出边界'));
+  assert.equal(boundaryChecks.length, 8, '导出边界证据必须并进同一张 checks 回执');
+  assert.ok(boundaryChecks.every((check) => check.ok), JSON.stringify(boundaryChecks.filter((check) => !check.ok)));
 });

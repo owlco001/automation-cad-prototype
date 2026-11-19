@@ -31,6 +31,16 @@
  *     （构建期 stats.merge 的独立证据：`{merge:{mode,fallback}}` 或 `{mode,fallback}`，
  *     `fallback` 必须是布尔值，不能省略）。**--file 默认不是验收门禁。**
  *
+ * 第 5 类证据（review P2-5）：**制造导出边界**。原来的输入是 `buildBufferTowerParts()` 的 146 件
+ * `ConveyorPart` 表 —— 它结构上**看不见**塔几何里那块工件板，件号/来源标签一漂移，App 的
+ * STL/glTF/sidecar(→STEP) 会静默变成 147 件，而这里照样全绿。所以另加一段（不依赖内核，build 与
+ * `--file` 都判、build 模式在起内核前先判）：
+ *   `resolveMachineGeometry({ bufferTower: TOWER_16 })` 派生的塔几何（147 刚体）→
+ *   `machineExportParts` / `geometryToSidecarAssemblies` 必须得 **146 实例**、
+ *   件号与 STEP 件表逐件一致、不含工件板（件号/role/占位体位姿任一命中都算漏出），
+ *   且**内核输入仍是 146 件**（导出过滤不许改制造件表）。8 层档是输送基线、没有塔板，
+ *   该条显式记为「不适用」，不静默略过。
+ *
  * 走的是**生产同一条路**（与 App 里同一个 `ParametricManager`）：
  *   buildBufferTowerParts(16 层) / buildConveyorParts(8 层基线)
  *     → conveyorAssembly(doc) → ParametricManager.build({perPart:true})
@@ -57,13 +67,15 @@ import { ParametricManager, resolvePython } from '../electron/parametric.ts';
 import { StepInspectError, describeInspection, inspectStep } from '../src/parametric/step-inspect.ts';
 import { buildConveyorParts, conveyorAssembly, conveyorEnvelope } from '../src/machine/conveyor-assembly.ts';
 import { buildBufferTowerParts, bufferTowerParamsFromConfig } from '../src/machine/buffer-tower-assembly.ts';
+import { WORKPIECE_PART_ID, resolveMachineGeometry } from '../src/machine/machine-geometry.ts';
+import { geometryToSidecarAssemblies, machineExportParts } from '../src/machine/geometry-export.ts';
 
 /** 8 层缓存基线：与 `scripts/pv-buffer-regenerate.mjs` 的 BASELINE 同一台机（90 件）。 */
 const BASELINE_8 = { lengthMm: 2400, widthMm: 1200, beltHeightMm: 900, layers: 8, layerPitchMm: 180 };
 const BASELINE_8_PARTS = 90;
 
 /** 16 层缓存塔：与 `buffer-tower-assembly` 探针/`apply_machine_design` 同一份参数（146 件）。 */
-const TOWER_16 = {
+export const TOWER_16 = {
   kind: 'tower',
   towers: 1,
   slotsPerTower: 16,
@@ -395,6 +407,165 @@ export function evaluateStepTower(facts) {
 }
 
 // ---------------------------------------------------------------------------
+// 制造导出边界（review P2-5）：件数门禁，不把「板被静默导出」只押在单测上
+// ---------------------------------------------------------------------------
+
+/**
+ * 塔几何 → 制造导出（STL / glTF / sidecar ⇒ STEP）的实测事实。
+ *
+ * **输入必须走生产入口**：`resolveMachineGeometry({ bufferTower })` 派生塔几何（147 刚体），
+ * 再走 `machineExportParts` / `geometryToSidecarAssemblies`（App 里导出用的同一对函数）。
+ * STEP 门禁自己的件表（`buildBufferTowerParts`，146 件）只用来对照件号 —— 它结构上**看不见**
+ * 塔几何里那块板，所以不能拿它当导出边界的证据。
+ */
+export function buildTowerExportFacts(table) {
+  const geometry = resolveMachineGeometry({
+    id: 'verify-step-tower-16',
+    name: '缓存塔 16 层（制造导出门禁）',
+    stations: ['进出料'],
+    actuators: [],
+    sensors: [],
+    bufferTower: TOWER_16
+  }).geometry;
+  return {
+    geometry,
+    exportParts: machineExportParts(geometry),
+    sidecar: geometryToSidecarAssemblies(geometry, { updatedAt: 'verify-step-tower' }),
+    kernelInstances: Array.isArray(table?.doc?.instances) ? table.doc.instances.length : null,
+    expectedAssemblyParts: Number(table?.expectedParts),
+    tablePartIds: Array.isArray(table?.parts) ? table.parts.map((part) => part.id) : []
+  };
+}
+
+const PLATE_IDENTITY_EPS = 1e-6;
+const PLATE_ANGLE_EPS_DEG = 1e-6;
+
+function angleDiffDeg(a, b) {
+  const raw = Math.abs((((a - b) % 360) + 360) % 360);
+  return Math.min(raw, 360 - raw);
+}
+
+/**
+ * 门禁**自己再判一次**工件身份（不调 `geometry-export` 里的私有判据）：共享件号、`role=workpiece`、
+ * 或与 `workpiecePlaceholder` 位姿同一（box size/center ±EPS、朝向周期等价）。这样导出函数本身
+ * 退化时这条门禁仍然会红 —— 与 `verify:channel` 不认手写 `inCollisionSet` 是同一条原则。
+ */
+function isWorkpieceIdentity(part, placeholder) {
+  if (!part) return false;
+  if (part.id === WORKPIECE_PART_ID || part.role === 'workpiece') return true;
+  if (!placeholder || part.shape?.type !== 'box' || placeholder.shape?.type !== 'box') return false;
+  for (let axis = 0; axis < 3; axis += 1) {
+    if (Math.abs(Number(part.shape.size[axis]) - Number(placeholder.shape.size[axis])) > PLATE_IDENTITY_EPS) return false;
+    if (Math.abs(Number(part.center[axis]) - Number(placeholder.center[axis])) > PLATE_IDENTITY_EPS) return false;
+  }
+  if (!Number.isFinite(part.rotationZDeg) || !Number.isFinite(placeholder.rotationZDeg)) return false;
+  return angleDiffDeg(part.rotationZDeg, placeholder.rotationZDeg) <= PLATE_ANGLE_EPS_DEG;
+}
+
+/** sidecar 实例没有 role/shape，只能用实例 transform 与占位体位姿对照（同一位姿就是同一件）。 */
+function instanceMatchesPlaceholder(instance, placeholder) {
+  const transform = instance?.transform;
+  if (!placeholder || !transform) return false;
+  const values = [transform.x, transform.y, transform.z];
+  if (values.some((value) => !Number.isFinite(value))) return false;
+  for (let axis = 0; axis < 3; axis += 1) {
+    if (Math.abs(values[axis] - Number(placeholder.center[axis])) > PLATE_IDENTITY_EPS) return false;
+  }
+  if (!Number.isFinite(transform.rz) || !Number.isFinite(placeholder.rotationZDeg)) return false;
+  return angleDiffDeg(transform.rz, placeholder.rotationZDeg) <= PLATE_ANGLE_EPS_DEG;
+}
+
+/**
+ * 导出边界判定（纯函数，可喂合成 facts）：
+ *   导出实例数 == `geometry.assemblyPartCount`（16 层 = 146）、导出件集 == STEP 件表、
+ *   碰撞几何仍是 147（板在、看得见）、且 STEP 内核输入仍是 146 件（导出过滤不许改它）。
+ */
+export function evaluateExportBoundary(facts) {
+  const checks = [];
+  const geometry = facts?.geometry ?? null;
+  const expected = Number(facts?.expectedAssemblyParts);
+  const expectedOk = Number.isFinite(expected) && expected > 0;
+  const exportParts = Array.isArray(facts?.exportParts) ? facts.exportParts : [];
+  const geometryParts = Array.isArray(geometry?.parts) ? geometry.parts : [];
+  const placeholder = geometry?.workpiecePlaceholder;
+  const assemblyCount = Number(geometry?.assemblyPartCount);
+  const sidecar = facts?.sidecar ?? null;
+  const sidecarInstances = Array.isArray(sidecar?.chunks)
+    ? sidecar.chunks.flatMap((chunk) => (Array.isArray(chunk?.instances) ? chunk.instances : []))
+    : [];
+
+  checks.push({
+    label: '导出边界：装配件数口径',
+    ok: expectedOk && assemblyCount === expected,
+    expected: `${expected}（BOM/STEP 口径）`,
+    actual: String(geometry?.assemblyPartCount ?? '(缺失)')
+  });
+
+  const plateInGeometry = geometryParts.filter((part) => isWorkpieceIdentity(part, placeholder));
+  checks.push({
+    label: '导出边界：碰撞几何 = 装配件数 + 1（板确实在）',
+    ok: expectedOk && geometryParts.length === expected + 1 && plateInGeometry.length === 1,
+    expected: `${expected + 1}（${expected} 装配 + 1 块板）`,
+    actual: `刚体 ${geometryParts.length} / 工件身份件 ${plateInGeometry.length}`
+  });
+
+  checks.push({
+    label: '导出边界：制造导出件数 == assemblyPartCount',
+    ok: expectedOk && exportParts.length === expected && exportParts.length === assemblyCount,
+    expected: `${expected}`,
+    actual: String(exportParts.length)
+  });
+
+  const leakedParts = exportParts.filter((part) => isWorkpieceIdentity(part, placeholder));
+  checks.push({
+    label: '导出边界：制造导出不含工件板',
+    ok: leakedParts.length === 0,
+    expected: '0 件（件号 / role / 占位体位姿任一命中都算漏出）',
+    actual: `${leakedParts.length} 件${leakedParts.length ? `（${leakedParts.slice(0, 3).map((part) => part.id).join(',')}…）` : ''}`
+  });
+
+  checks.push({
+    label: '导出边界：sidecar 实例 == assemblyPartCount',
+    ok: expectedOk && sidecar?.instances === expected && sidecarInstances.length === expected,
+    expected: `${expected}（分块合计同数）`,
+    actual: `instances=${sidecar?.instances ?? '(缺失)'} 分块合计=${sidecarInstances.length}`
+  });
+
+  const leakedInstances = sidecarInstances.filter((instance) => (
+    instance?.id === WORKPIECE_PART_ID || instanceMatchesPlaceholder(instance, placeholder)
+  ));
+  checks.push({
+    label: '导出边界：sidecar 不含工件板（⇒ STEP 不会 147 件）',
+    ok: leakedInstances.length === 0,
+    expected: '0 件（件号或占位体位姿命中都算漏出）',
+    actual: `${leakedInstances.length} 件${leakedInstances.length ? `（${leakedInstances.slice(0, 3).map((instance) => instance.id).join(',')}…）` : ''}`
+  });
+
+  const tablePartIds = Array.isArray(facts?.tablePartIds) ? facts.tablePartIds : [];
+  const exportIds = exportParts.map((part) => part.id);
+  const exportIdSet = new Set(exportIds);
+  const missing = tablePartIds.filter((id) => !exportIdSet.has(id));
+  checks.push({
+    label: '导出边界：导出件号 == STEP 件表',
+    ok: tablePartIds.length === expected
+      && exportIds.length === tablePartIds.length
+      && exportIdSet.size === exportIds.length
+      && missing.length === 0,
+    expected: `${tablePartIds.length} 个件号（与 buildBufferTowerParts 逐件一致，不许重号/缺号）`,
+    actual: `导出 ${exportIds.length} 件 / 唯一 ${exportIdSet.size} / 缺 ${missing.length}`
+  });
+
+  checks.push({
+    label: '导出边界：STEP 内核输入仍是 146 件',
+    ok: expectedOk && facts?.kernelInstances === expected,
+    expected: `${expected}（buildBufferTowerParts → conveyorAssembly，制造导出不许改它）`,
+    actual: String(facts?.kernelInstances ?? '(缺失)')
+  });
+
+  return { ok: checks.every((check) => check.ok), checks };
+}
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
@@ -443,6 +614,29 @@ function tableOf() {
     tableCache.value = { ...parts, doc: conveyorAssembly(parts.parts), partById: new Map(parts.parts.map((part) => [part.id, part])) };
   }
   return tableCache.value;
+}
+
+const exportFactsCache = { value: null };
+/**
+ * 制造导出边界门禁（review P2-5）。
+ *
+ * 16 层塔的几何含 1 块工件板（147 刚体），制造导出必须是 146 实例；8 层档是**输送基线**
+ * （`buildConveyorParts`，没有塔板），塔的导出边界不适用 —— 显式记一条「不适用」，不静默略过。
+ */
+function exportBoundaryOf(table) {
+  if (levels !== 16) {
+    return {
+      ok: true,
+      checks: [{
+        label: '导出边界（16 层塔专用）',
+        ok: true,
+        expected: '16 层塔几何（含 1 块工件板）',
+        actual: `levels=${levels} 是输送基线，几何里没有塔板；塔的制造导出边界由 16 层档判定`
+      }]
+    };
+  }
+  if (!exportFactsCache.value) exportFactsCache.value = buildTowerExportFacts(table);
+  return evaluateExportBoundary(exportFactsCache.value);
 }
 
 /**
@@ -536,17 +730,22 @@ function inspectOnly(stepPath, partsDir) {
     merge,
     toleranceMm: Number.isFinite(toleranceArg) ? toleranceArg : DEFAULT_TOLERANCE_MM
   });
-  printChecks(result.checks);
-  log(`${result.ok ? 'PASS' : 'FAIL'} file-check ${result.checks.filter((check) => check.ok).length}/${result.checks.length}`);
-  if (!result.ok) process.exitCode = 1;
+  // 导出边界（P2-5）不依赖内核：文件模式同样判，别让它成为「只有 build 模式才看」的缺口。
+  const boundary = exportBoundaryOf(table);
+  const checks = [...result.checks, ...boundary.checks];
+  const ok = result.ok && boundary.ok;
+  printChecks(checks);
+  log(`${ok ? 'PASS' : 'FAIL'} file-check ${checks.filter((check) => check.ok).length}/${checks.length}`);
+  if (!ok) process.exitCode = 1;
   if (jsonOutput) {
     console.log(`STEP_TOWER_JSON ${JSON.stringify({
       mode: 'file',
-      ok: result.ok,
+      ok,
       path: stepPath,
       merge,
       mergeVerified: Boolean(merge),
-      checks: result.checks
+      exportBoundary: { ok: boundary.ok, checks: boundary.checks },
+      checks
     })}`);
   }
 }
@@ -578,6 +777,25 @@ async function buildAndVerify() {
   const python = pythonArg ?? process.env.AUTOMATIONCAD_PYTHON ?? resolvePython(process.env);
   const table = tableOf();
   const doc = table.doc;
+  // P2-5：导出边界与内核无关，先判（不合格就别花几分钟起内核），同时保证「STEP 输入件数不变」。
+  const boundary = exportBoundaryOf(table);
+  if (!boundary.ok) {
+    printChecks(boundary.checks);
+    console.error(
+      'STEP_TOWER FAIL 制造导出边界不成立（P2-5）：塔几何 → 制造导出件数/件号不合格 —— '
+        + 'STEP 会跟着变成 147 件，先修 `machineExportParts` 的工件板判据'
+    );
+    process.exitCode = 1;
+    if (jsonOutput) {
+      console.log(`STEP_TOWER_JSON ${JSON.stringify({
+        mode: 'build',
+        ok: false,
+        levels,
+        exportBoundary: { ok: false, checks: boundary.checks }
+      })}`);
+    }
+    return;
+  }
   log(`case=${table.label} levels=${levels} parts=${doc.instances.length} envelope(估算)=${table.envelope.join('×')}`);
   log(`python=${python ?? '(未找到)'}`);
 
@@ -663,28 +881,32 @@ async function buildAndVerify() {
       minBytes: MIN_STEP_BYTES,
       merge
     });
-    printChecks(result.checks);
+    // 导出边界已在起内核前判过；这里只把它并入同一张回执，避免「内核绿、导出红」被分开读。
+    const checks = [...result.checks, ...boundary.checks];
+    const ok = result.ok && boundary.ok;
+    printChecks(checks);
     log(
       `perpart files=${parts.length} stepSolids=${step.solids} partSolids=${built.stats?.partSolids ?? '?'} ` +
         `stlUnion=${result.stlUnion ? result.stlUnion.min.map((v, a) => `${v.toFixed(1)}..${result.stlUnion.max[a].toFixed(1)}`).join(' ') : '(无)'}`
     );
-    log(`${result.ok ? 'PASS' : 'FAIL'} verify-step-tower ${result.checks.filter((check) => check.ok).length}/${result.checks.length}`);
-    if (!result.ok) process.exitCode = 1;
+    log(`${ok ? 'PASS' : 'FAIL'} verify-step-tower ${checks.filter((check) => check.ok).length}/${checks.length}`);
+    if (!ok) process.exitCode = 1;
     if (jsonOutput) {
       console.log(
         `STEP_TOWER_JSON ${JSON.stringify({
           mode: 'build',
-          ok: result.ok,
+          ok,
           levels,
           parts: parts.length,
           stepPath,
           stepBytes,
           step,
           merge,
+          exportBoundary: { ok: boundary.ok, checks: boundary.checks },
           allowances: result.allowances,
           minAllowance: result.minAllowance,
           maxAllowance: result.maxAllowance,
-          checks: result.checks
+          checks
         })}`
       );
     }

@@ -13,6 +13,7 @@ import {
   type FeatureNode,
   type PartInstance
 } from '../parametric/features.ts';
+import { WORKPIECE_PART_ID } from './machine-geometry.ts';
 import type { GeomPart, MachineGeometry, Vec3 } from './geometry.ts';
 
 export interface PartMesh {
@@ -110,13 +111,99 @@ export function partWorldTriangles(part: GeomPart, segments = DEFAULT_SEGMENTS):
 }
 
 export function geometryTriangleCount(geometry: MachineGeometry, segments = DEFAULT_SEGMENTS): number {
-  return geometry.parts.reduce((sum, part) => sum + partLocalMesh(part, segments).positions.length / 9, 0);
+  return machineExportParts(geometry).reduce((sum, part) => sum + partLocalMesh(part, segments).positions.length / 9, 0);
+}
+
+// ── 制造导出的工件板身份（review P2-5：边界不许押在单个字面量/来源标签上）──────
+
+const WORKPIECE_IDENTITY_EPS = 1e-6;
+/** 朝向按周期比较（`360° ≡ 0°`、`−90° ≡ 270°`），与 `panel-channel.ts` 同一口径。 */
+const WORKPIECE_ANGLE_EPS_DEG = 1e-6;
+
+function rotationDiffDeg(a: number, b: number): number {
+  const diff = Math.abs((((a - b) % 360) + 360) % 360);
+  return Math.min(diff, 360 - diff);
+}
+
+/**
+ * 同一工件身份（位姿部分）：box `size`/`center` 在 ±EPS 内一致，`rotationZDeg` 两侧都是有限数
+ * 且周期等价。与 `panel-channel.ts` 的工件身份判据（同 id + role + size/center + 朝向）同一套；
+ * 这里只用位姿，是因为 `workpiecePlaceholder` 由建造器从同一件投影出来 —— id/role 被改名后，
+ * 位姿仍然对得上，边界不会跟着名字一起漂。
+ */
+function sameWorkpiecePose(
+  a: Pick<GeomPart, 'shape' | 'center' | 'rotationZDeg'>,
+  b: Pick<GeomPart, 'shape' | 'center' | 'rotationZDeg'>
+): boolean {
+  if (a.shape.type !== 'box' || b.shape.type !== 'box') return false;
+  for (let axis = 0; axis < 3; axis += 1) {
+    if (Math.abs((a.shape.size[axis] as number) - (b.shape.size[axis] as number)) > WORKPIECE_IDENTITY_EPS) return false;
+    if (Math.abs((a.center[axis] as number) - (b.center[axis] as number)) > WORKPIECE_IDENTITY_EPS) return false;
+  }
+  if (!Number.isFinite(a.rotationZDeg) || !Number.isFinite(b.rotationZDeg)) return false;
+  return rotationDiffDeg(a.rotationZDeg, b.rotationZDeg) <= WORKPIECE_ANGLE_EPS_DEG;
+}
+
+/**
+ * 制造导出要剔除的「工件板」判据：三层独立证据，任一层成立即可，**不依赖单个字面量或来源标签**。
+ * 1. 共享件号 `WORKPIECE_PART_ID`（与 `towerWorkpiecePart` 同一常量，不再重复字面量）；
+ * 2. 结构角色 `role === 'workpiece'`；
+ * 3. 与 `geometry.workpiecePlaceholder` 位姿同一（占位体由同一件投影，id 改名也对得上）。
+ * 只有缓存塔几何带 `workpiecePlaceholder`；输送线移载工件没有这份投影，所以不会被这条误伤。
+ */
+function isWorkpiecePlatePart(geometry: MachineGeometry, part: GeomPart): boolean {
+  if (part.id === WORKPIECE_PART_ID || part.role === 'workpiece') return true;
+  const placeholder = geometry.workpiecePlaceholder;
+  return placeholder ? sameWorkpiecePose(placeholder, part) : false;
+}
+
+/** 件是否挂在任何运动轴上（塔的板**不挂**轴；输送线移载工件挂在两条移载轴上）。 */
+function isOnMovingAxis(geometry: MachineGeometry, part: GeomPart): boolean {
+  return (geometry.moving ?? []).some((axis) => axis.partIds.includes(part.id));
+}
+
+/**
+ * 制造导出（STL / glTF / sidecar → STEP）的件集。
+ *
+ * 缓存塔的板是**碰撞/工艺占位体**（`geometry.parts` 里的真刚体、参与 rest/lift/sweep），
+ * 但不是要制造的机加件 —— 它从来不在 `ConveyorPart` 表里（装配件数 = 2/8/16 层的 48/90/146），
+ * 所以制造导出必须剔除它，而碰撞几何（`geometry.parts` / `geometry.json` / `run_interference_check`）
+ * 仍保留装配件数 + 1 个刚体（49/91/147）。两套口径分开：**制造件数 = 装配件数，碰撞刚体数 = 装配件数 + 1**。
+ *
+ * 过滤作用域是「整机」（`assemblyPartCount` 存在且 `parts.length > assemblyPartCount`），
+ * 且至少有一条**整机级身份信号**：塔的来源标签，或只有塔才有的 `workpiecePlaceholder` 投影。
+ * 两个都缺时（老序列化几何被剥掉占位体、来源标签又被改写），只认「装配件表之外多出来的全是
+ * 静止、不挂轴的工件板」这一种结构形状 —— 拿不出这种形状就原样返回，绝不按位置整段裁件。
+ *
+ * 单件导出（wizard 逐件 STL 用 `{ ...geometry, parts: [part] }`）不满足整机口径，不能被
+ * 静默滤成空文件；输送线的工件板（`conveyor-assembly`，无占位体投影、`moving:true` 且挂移载轴）
+ * 也不过滤，行为逐字节不变。
+ */
+export function machineExportParts(geometry: MachineGeometry): GeomPart[] {
+  const parts = geometry.parts;
+  const assemblyCount = geometry.assemblyPartCount;
+  const hasAssemblyWindow = typeof assemblyCount === 'number'
+    && Number.isInteger(assemblyCount)
+    && assemblyCount >= 0
+    && parts.length > assemblyCount;
+  if (!hasAssemblyWindow) return parts;
+
+  const extras = parts.slice(assemblyCount);
+  const identityScoped = geometry.geometrySource === 'buffer-tower-assembly'
+    || geometry.workpiecePlaceholder !== undefined;
+  const extrasAreThePlate = extras.length > 0 && extras.every((part) => (
+    isWorkpiecePlatePart(geometry, part) && part.moving !== true && !isOnMovingAxis(geometry, part)
+  ));
+  if (!identityScoped && !extrasAreThePlate) return parts;
+
+  const exportParts = parts.filter((part) => !isWorkpiecePlatePart(geometry, part));
+  return exportParts.length === parts.length ? parts : exportParts;
 }
 
 /** 二进制 STL（mm，Z 向上）。法向由三角形绕向计算。 */
 export function geometryToStl(geometry: MachineGeometry, segments = DEFAULT_SEGMENTS): Uint8Array {
   const triangles: number[] = [];
-  for (const part of geometry.parts) triangles.push(...partWorldTriangles(part, segments));
+  for (const part of machineExportParts(geometry)) triangles.push(...partWorldTriangles(part, segments));
   const count = triangles.length / 9;
   const bytes = new Uint8Array(84 + count * 50);
   const view = new DataView(bytes.buffer);
@@ -191,7 +278,8 @@ export function geometryToGltf(geometry: MachineGeometry, segments = DEFAULT_SEG
     return view;
   };
 
-  for (const part of geometry.parts) {
+  const exportParts = machineExportParts(geometry);
+  for (const part of exportParts) {
     const shapeKey = JSON.stringify(part.shape);
     const colorKey = part.color;
     let mat = materialIndex.get(colorKey);
@@ -340,7 +428,7 @@ export function geometryToSidecarAssemblies(
   const updatedAt = options.updatedAt ?? new Date().toISOString();
   const instances: PartInstance[] = [];
   const approximated: string[] = [];
-  for (const part of geometry.parts) {
+  for (const part of machineExportParts(geometry)) {
     const { features, approximated: approx } = partSidecarFeatures(part);
     if (approx) approximated.push(part.id);
     instances.push({

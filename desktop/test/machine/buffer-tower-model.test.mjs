@@ -32,6 +32,7 @@ import {
 } from '../../src/machine/buffer-tower-assembly.ts';
 import { buildConveyorParts, conveyorAssembly, conveyorEnvelope } from '../../src/machine/conveyor-assembly.ts';
 import { resolveMachineGeometry, towerLiftAxis } from '../../src/machine/machine-geometry.ts';
+import { geometryToGltf, geometryToSidecarAssemblies, geometryToStl, geometryTriangleCount } from '../../src/machine/geometry-export.ts';
 import { saveProject, openProject } from '../../electron/projects.ts';
 
 const TOWER_ROOT = mkdtempSync(join(tmpdir(), 'buffer-tower-model-'));
@@ -124,8 +125,36 @@ test('两条链同一份零件表：resolveMachineGeometry 与整机建模件数
     bufferTower: resolved.config
   });
   assert.equal(geometry.source, 'buffer-tower-assembly');
-  assert.equal(geometry.partCount, parts.length);
-  assert.equal(geometry.geometry.parts.length, 146);
+  // 板是几何刚体（不进 ConveyorPart 表）：partCount = 建造器件数 + 1
+  assert.equal(geometry.partCount, parts.length + 1);
+  assert.equal(geometry.assemblyPartCount, parts.length);
+  assert.equal(geometry.geometry.parts.length, parts.length + 1);
+  assert.equal(geometry.geometry.parts.filter((part) => part.role === 'workpiece').length, 1);
+});
+
+test('同一份零件表的两套导出边界：碰撞 147、制造导出（STL/glTF/sidecar→STEP）146', () => {
+  const { resolved, parts } = parts16();
+  const geometry = resolveMachineGeometry({
+    id: 'buffer-tower-16l',
+    name: '缓存塔 16 层',
+    stations: ['进出料'],
+    actuators: [],
+    sensors: [],
+    bufferTower: resolved.config
+  }).geometry;
+  // 碰撞几何仍是「装配件 + 板」：导出过滤不许回头改 geometry.parts
+  assert.equal(geometry.parts.length, 147);
+  const bundle = geometryToSidecarAssemblies(geometry, { updatedAt: '2026-11-19T00:00:00+08:00' });
+  assert.equal(bundle.instances, 146);
+  const ids = bundle.chunks.flatMap((chunk) => chunk.instances.map((instance) => instance.id));
+  assert.equal(ids.length, 146);
+  assert.ok(!ids.includes('workpiece-plate'));
+  const stl = geometryToStl(geometry);
+  const stlCount = new DataView(stl.buffer, stl.byteOffset, stl.byteLength).getUint32(80, true);
+  assert.equal(stlCount, geometryTriangleCount(geometry));
+  assert.ok(!geometryToGltf(geometry).nodes.slice(0, -1).some((node) => node.name === 'workpiece-plate'));
+  // 原零件表（建造器件数）与制造导出口径一致；板只多一个碰撞刚体
+  assert.equal(parts.length, 146);
 });
 
 /* ---------------- 3. 参数严格校验：不夹紧 ---------------- */

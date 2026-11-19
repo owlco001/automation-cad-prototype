@@ -184,13 +184,26 @@ export interface MachineGeometry {
   /** 生成器显式产出的结构连接（不靠命名规则猜），干涉初筛只放行这些。 */
   joints: GeomJoint[];
   /**
-   * 板（工件）占位体的**只读诊断**描述：**不进 `parts`**、不参与任何 AABB 判据。
+   * 板（工件）占位体的**投影**：由 `parts` 里与占位体**同一工件身份**的那件派生 —— 同 id +
+   * `role='workpiece'` + box `size`/`center` 在 ±EPS 内一致 + `rotationZDeg` **有限**且与占位体
+   * **周期等价**（`360° ≡ 0°`、`−90° ≡ 270°` 同向；`NaN`/`Infinity`/字符串 `'90'` 都不是可核对的
+   * 朝向），四条缺一不算。**只同 id 不够**：同 id 的托板/夹具件、同尺寸同中心但转 90° 的件都是
+   * 另一个刚体位姿，不算同一块板。位姿供承托断言读。
    *
-   * 为什么单列而不是当普通件塞进 parts（本轮的边界）：缓存塔把板塞进碰撞件表会让
-   * `partCount` 由 146 变 147、并把 lift/sweep 的命中数一起改掉（板随 2700 行程穿过各层托板，
-   * 实测 sweep 由 405 增到 446）——那是另一轮「板进扫掠」的语义变更，不是本轮只读诊断。
-   * 所以这里只带「板在静止位姿的尺寸/位置」，让承托断言（`panel-channel.ts`）有真实输入，
-   * 而 rest/lift/sweep 的判据一个字不动。`inCollisionSet: false` 是判据字段，不是注释。
+   * 口径（T2 起）：缓存塔的板是 `parts` 里的**普通 `GeomPart`**（`role=workpiece`、`moving:false`），
+   * 所以 **`geometry.parts` / `partCount` = 碰撞刚体 = `ConveyorPart` 表 + 1 块板**（2/8/16 层 = 49/91/147）；
+   * **BOM（16 层 96 行 / qty 146）、成本、容量一件不动**（只从 `ConveyorPart` 表出）。
+   * 但 **STL / glTF / sidecar → STEP 不是「一件不动」** —— 制造导出是独立契约：
+   * `geometry-export.ts` 的 `machineExportParts(geometry)` 在塔整机上把这块板**排除**，
+   * 导出件集 = `ConveyorPart` 件集（2/8/16 层 = 48/90/146，16 层即 BOM qty 146），
+   * 而碰撞几何 `geometry.parts` 是 49/91/147；两套数不要互相校验。
+   * 板进碰撞集但**不挂升降轴**，因此静止位姿只与带上表面贴面（不计命中），`sweep` 命中数与板不在
+   * 碰撞集时逐项相等（405 = 270 确认 + 135 待复核）。
+   *
+   * `inCollisionSet` 是**判据字段**：消费方（`panel-channel.ts`）不认这里手写的值，而是自己按
+   * 「`parts` 里有没有**同一工件身份的件**（同 id + `role=workpiece` + `size`/`center` 在 ±EPS 内一致
+   * + `rotationZDeg` 有限且周期等价）」再判一次 —— id 相同但 role/尺寸/中心/朝向不符的件不是同一件
+   * 成员（同 id 的托板/夹具件、同尺寸同中心但转 90° 的件都不算）；板只在占位体里时该字段没有任何证据效力。
    */
   workpiecePlaceholder?: GeomWorkpiecePlaceholder;
   /** 结构件 BOM（机架、底板、门架、输送线等），与 bomDraft 的执行机构/传感器分开。 */
@@ -200,15 +213,21 @@ export interface MachineGeometry {
 }
 
 /**
- * 只读板件占位体（见 `MachineGeometry.workpiecePlaceholder`）。
- * 字段与转移工位的老工件件（`workpiece-plate`）同口径，将来真要接进 `parts` 时只需要换容器。
+ * 板件占位体（见 `MachineGeometry.workpiecePlaceholder`）：由 `parts` 里的**同一件板**投影出来，
+ * 不是另建的一份只读数据；字段与转移工位的老工件件（`workpiece-plate`）同口径。
  */
 export interface GeomWorkpiecePlaceholder extends GeomPart {
   /** 长×宽×厚（mm） */
   sizeMm: Vec3;
   /** 静止位姿的板底 z（mm） */
   bottomZmm: number;
-  /** 是否在碰撞件表里；本轮恒 false（口径见 MachineGeometry.workpiecePlaceholder） */
+  /**
+   * 是否在碰撞件表里。**只由 `parts` 里是否真有这块板本身派生** —— 同一工件身份：同 id +
+   * `role='workpiece'` + box `size`/`center` 在 ±EPS 内一致 + `rotationZDeg` **有限**且与占位体
+   * **周期等价**，四条缺一不算。**只同 id 不够**：同 id 的托板/夹具件、同尺寸同中心但转 90° 的件
+   * 都不是同一件成员，不计入碰撞集。`panel-channel.ts` 的 `panelSourceOfGeometry` 按同一判据自己
+   * 再判一次，不认手写值。false 时板只作承托诊断、不参与 AABB 判据。
+   */
   inCollisionSet: boolean;
 }
 
