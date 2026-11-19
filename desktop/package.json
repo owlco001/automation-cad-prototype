@@ -30,6 +30,7 @@
     "verify:step": "node scripts/verify-step-export.mjs",
     "verify:step-tower": "node scripts/verify-step-tower.mjs",
     "verify:channel": "node scripts/verify-channel.mjs",
+    "doctor:sidecar": "node scripts/sidecar-doctor.mjs",
     "smoke:design:webgl": "xvfb-run -a -s \"-screen 0 1920x1200x24\" node scripts/electron-run.mjs --headless-design-webgl-smoke",
     "smoke:win": "electron . --headless-smoke --disable-gpu --disable-gpu-compositing --disable-software-rasterizer",
     "update:installed": "node scripts/update-installed.mjs",
