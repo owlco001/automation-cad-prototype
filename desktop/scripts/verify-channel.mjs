@@ -22,17 +22,26 @@
  *   npm run verify:channel -- --levels N   # 2..64 层都跑同一组关系断言（件数/行程/净跨/走廊全派生）
  *   npm run verify:channel -- --json       # 末尾多一行 JSON 摘要
  *
+ * 末段还打一行 `SWEEP_EVIDENCE {…}`（文本模式；`--json` 时在 `summary.sweepEvidence` 里）：
+ * ① 去重对数 = 托板层数 × 每层几何命中族数（件表派生，2 层=4、16 层=60）；
+ * ② 全部通道相关 suspect 对都含台面，x/y 重叠由件表几何独立复算一致；
+ * ③ 台面外移后的变体：**通道对**归零、但 `feasible` 仍 false（**归零 ≠ 可行**）。
+ * 405 是**步累计**、42 是**单步 pairs**，两个数都不等于「问题对数」—— 见 docs/desktop/R11-CHANNEL-SWEEP.md。
+ *
  * **层数边界（实测，必须一起读）**：通道判据本身与层数无关（件表、行程、净跨、走廊全部派生），
- * 但基线建造器在 **17 层起**会让 `gearmotor` 与 `column-bl` 相交 1 对 —— 柱截面随塔高派生
- * （`columnSection = ceil5(h/48)`）导致柱位外移，`buffer-tower-assembly.ts` 里「塔架往里收一个柱位」
- * 的缓解只在 ≤16 层成立。这是**建造器几何问题，与板/通道无关**：脚本把它单列为 `baselineNotes`，
- * 不计入通道自证（也不假装 rest/lift 全 0）；除这一对之外的任何 rest/lift 命中仍然判失败。
+ * 2..64 层跑同一套断言。唯一与层数有关的现象是**建造器几何**：基线建造器在 **17 层起**会让
+ * `gearmotor` 与 `column-bl` 相交 1 对 —— 柱截面随塔高派生（`columnSection = ceil5(h/48)`）导致柱位外移，
+ * `buffer-tower-assembly.ts` 里「塔架往里收一个柱位」的缓解只在 ≤16 层成立。这是**建造器问题，与板/通道无关**：
+ * §5 把它单列为 `sweepEvidence.baselineGeometry`，**从通道证据里真的剔出去**（`splitChannelPairs`），
+ * 并把它的步数从闭合计里显式扣掉（`channelStepSums + baselineGeometry === confirmedHits/screenHits`）——
+ * 所以 17 层以上既不假装它不存在，也不会让通道自证变红。剔出去的对必须不含台面/托板家族，
+ * 剩下的对必须含台面：这两条把「静默丢对」挡在自证之外。
  *
  * 退出码：0 = 诊断成功（含 feasible:false）/ 1 = 负向自证或数值断言失败 / 2 = 用法错误。
  */
 import { buildBufferTowerParts, bufferTowerParamsFromConfig } from '../src/machine/buffer-tower-assembly.ts';
 import { resolveMachineGeometry } from '../src/machine/machine-geometry.ts';
-import { runInterferenceStates } from '../src/machine/interference-states.ts';
+import { runInterferenceStates, shiftParts } from '../src/machine/interference-states.ts';
 import {
   M1_PICK_PLACE,
   PANEL_PART_ID,
@@ -249,7 +258,7 @@ check('单条 1200 整带 → claim 降级 diagnostic-only（覆盖 100% 不等�
  * 2) 真实塔几何：件数语义 + 只读占位体 + 三态（件数从建造器派生）
  * ------------------------------------------------------------------ */
 say('\n[2] 真实塔几何 / 三态（判据未改）');
-const states = runInterferenceStates({ states: ['rest', 'lift', 'sweep'], config });
+const states = runInterferenceStates({ states: ['rest', 'lift', 'sweep'], config, collectChannelPairs: true });
 check('几何件数 = 建造器件数 + 1（板）、装配件数 = 建造器件数、板是真实碰撞件', () => {
   expect(resolved.assemblyPartCount === parts.length, `assemblyPartCount=${resolved.assemblyPartCount} vs 件表 ${parts.length}`);
   expect(resolved.partCount === parts.length + 1, `partCount=${resolved.partCount} vs 件表 ${parts.length}+1`);
@@ -718,6 +727,298 @@ check('N14 生产几何里承托件 center.x/z=NaN → load-passes-shelf 带 inv
 });
 
 /* ------------------------------------------------------------------ *
+ * 5) 通道证据（**正向**自证，不带 N 编号）：405 的单位、去重对数、「归零 ≠ 可行」
+ *
+ * 为什么单独一块：sweep 的 `items` 只留 10 条（`MAX_ITEMS`），于是「405 处」被反复读成
+ * 「405 个问题」。这里用 `collectChannelPairs: true` 拿到**不截断**的逐对证据，
+ * 把三个口径固定成可复算的关系：步累计 / 去重对数 / 外移后归零但不可行。
+ * 所有数字一律从件表与几何派生（层数 × 每层命中族数、重叠量 AABB 复算、外移量 = 最大重叠 + 一个扫描步），
+ * **不写死** 405 / 60 / 42 / 230 / 15。
+ * ------------------------------------------------------------------ */
+say('\n[5] 通道证据（正向自证：步累计 / 去重对数由件表派生 / 归零 ≠ 可行）');
+if (!states.ok) {
+  console.error(`verify:channel: 三态检查失败，通道证据无从谈起：${states.message}`);
+  process.exit(1);
+}
+const sweepState = states.states.sweep;
+/** 台面：升降轴上的运动件（从回执派生，不写死 'lift-platform'） */
+const movingPartIds = states.lift?.partIds ?? [];
+const rowOfPart = new Map(rows.map((row) => [row.id, row]));
+/** 区间重叠（mm）：负值 = 分开 */
+const overlapX = (left, right) => Math.min(left.maxX, right.maxX) - Math.max(left.minX, right.minX);
+const overlapY = (left, right) => Math.min(left.maxY, right.maxY) - Math.max(left.minY, right.minY);
+/** 证据①②填这里，最后进 summary.sweepEvidence */
+const sweepFacts = {
+  channelPairs: [],
+  derivedPairs: 0,
+  trayLayers: 0,
+  perLayer: [],
+  minXOverlapMm: 0,
+  maxXOverlapMm: 0,
+  trayBodyYOverlapMm: 0,
+  baselinePairs: [],
+  baselineConfirmed: 0,
+  baselineScreen: 0,
+  channelConfirmed: 0,
+  channelScreen: 0,
+  channelHitSteps: 0
+};
+let retractedVariant = null;
+
+/**
+ * 基线几何的已知重叠（`BASELINE_REST_LIFT_PAIR`，levels≥17 才出现）**真的**剔除，并把它的步数单列。
+ *
+ * 上一版的写法是「先 filter 掉基线对，紧接着断言 filter 没改变任何东西」—— 那条断言一几何里真有
+ * 基线对就**永假**：`--levels 17` 起整块 §5 变红，而通道判据本身与层数无关（CI 只跑 2/16，门禁看不见）。
+ * 现在改成三件**层数无关**的事：
+ *   ① 剔出去的对必须与板/通道**无关**（不含台面、也不含托板家族）—— 由件表/几何判定，不看名字像不像；
+ *   ② 剔出去的步数从闭合计里**显式扣掉**：channelConfirmed + baselineConfirmed === sweep.confirmedHits；
+ *   ③ 剩下的每一对必须含台面（否则「本该算通道问题的对」被静默当成基线丢掉）。
+ * ≤16 层基线族为空，② 退化成恒等式、①③ 照旧生效 —— 所以 2…64 层跑的是同一套判据。
+ */
+const SPLIT_BASELINE_GEOMETRY = true; // 变异自证锚点：flip 成 false 会让证据①③ 立刻红（buffer-tower-channel.test.mjs 守着）
+const splitChannelPairs = (pairs) => {
+  const all = Array.isArray(pairs) ? pairs : [];
+  const isBaseline = (pair) => SPLIT_BASELINE_GEOMETRY && BASELINE_REST_LIFT_PAIR.test(`${pair.a}|${pair.b}`);
+  const baseline = all.filter(isBaseline);
+  const channel = all.filter((pair) => !isBaseline(pair));
+  return {
+    all,
+    baseline,
+    channel,
+    baselineConfirmed: baseline.reduce((sum, pair) => sum + pair.confirmedSteps, 0),
+    baselineScreen: baseline.reduce((sum, pair) => sum + pair.screenSteps, 0)
+  };
+};
+/**
+ * 命中步里扣掉「只有基线对在命中」的那些步：残差 > 0 才算**通道**命中步（与层数无关）。
+ * 不扣的话 levels≥17 的 `hitSteps` 会等于总步数（基线对每步都在命中），读起来像「通道全线命中」。
+ */
+const channelHitStepsOf = (sweep, split) => {
+  const hitSteps = sweep.steps.filter((step) => step.confirmedHits + step.screenHits > 0);
+  if (split.baseline.length === 0) return hitSteps.length;
+  const baselineHitsAt = (zMm) =>
+    split.baseline.filter((pair) => pair.zStepsMm.some((z) => Math.abs(z - zMm) <= 1e-6)).length;
+  return hitSteps.filter((step) => step.confirmedHits + step.screenHits - baselineHitsAt(step.z) > 0).length;
+};
+
+check('通道证据①：去重对数 = 托板层数 × 每层几何命中族数（件表派生，步数之和 = 步累计计数）', () => {
+  const split = splitChannelPairs(sweepState.channelPairs);
+  expect(split.all.length > 0, 'sweep 没有 channelPairs（runInterferenceStates 的 collectChannelPairs 没打开？）');
+  const channelPairs = split.channel;
+  const movingSet = new Set(movingPartIds);
+  const inTrayFamily = (id) => /^tray-\d+$/.test(id) || /^tray-(rail|roller)-\d+-/.test(id);
+  // ① 剔出去的对必须与板/通道无关：不含台面、也不含托板家族（不是「名字像基线」就算）
+  for (const pair of split.baseline) {
+    expect(!movingSet.has(pair.a) && !movingSet.has(pair.b),
+      `基线对 ${pair.a}|${pair.b} 含台面 —— 这是通道问题，不许当基线剔掉`);
+    expect(!inTrayFamily(pair.a) && !inTrayFamily(pair.b),
+      `基线对 ${pair.a}|${pair.b} 含托板家族件 —— 这是通道问题，不许当基线剔掉`);
+  }
+  // ② 剩下的每一对都必须含台面：挡住「把通道对静默丢进基线」
+  for (const pair of channelPairs) {
+    expect(movingSet.has(pair.a) !== movingSet.has(pair.b),
+      `${pair.a}|${pair.b} 不含台面：不是通道对，不该留在通道证据里`);
+  }
+  const trayLayers = rows.filter((row) => /^tray-\d+$/.test(row.id));
+  expect(trayLayers.length > 0, '件表里没有 tray-<n> 托板，去重对数无从派生');
+  // 台面必须有**件表行**：几何里的台面与件表是同一份零件，重叠量只能从件表复算
+  const movingRows = rows.filter((row) => movingPartIds.includes(row.id));
+  expect(movingRows.length === 1, `升降轴上的运动件在件表里应有且只有 1 件，实测 ${movingRows.map((row) => row.id).join(',') || '无'}`);
+  const moving = movingRows[0];
+  // 每层托板家族（托板本体 + 两侧托条 + 两个辊）里，与台面投影双向相交的件 —— 这就是该层会被扫到的件数
+  let derived = 0;
+  const perLayer = [];
+  for (const tray of trayLayers) {
+    const layer = tray.id.slice('tray-'.length);
+    const family = rows.filter((row) => row.id === tray.id
+      || row.id.startsWith(`tray-rail-${layer}-`)
+      || row.id.startsWith(`tray-roller-${layer}-`));
+    const hits = family.filter((row) => overlapX(moving, row) > 0 && overlapY(moving, row) > 0);
+    derived += hits.length;
+    perLayer.push(`${tray.id}:${hits.length}`);
+  }
+  expect(channelPairs.length === derived,
+    `去重对数 ${channelPairs.length} ≠ 件表派生 ${derived}（${trayLayers.length} 层：${perLayer.join(' ')}）`);
+  // 405 的单位：逐对命中步数之和就是 sweep 的步累计计数（通道对 + 基线对两半各自闭合）
+  const sumConfirmed = channelPairs.reduce((sum, pair) => sum + pair.confirmedSteps, 0);
+  const sumScreen = channelPairs.reduce((sum, pair) => sum + pair.screenSteps, 0);
+  expect(sumConfirmed + split.baselineConfirmed === sweepState.confirmedHits,
+    `逐对确认步数之和 ${sumConfirmed} + 基线对 ${split.baselineConfirmed} ≠ sweep 确认 ${sweepState.confirmedHits}（步累计口径不闭合）`);
+  expect(sumScreen + split.baselineScreen === sweepState.screenHits,
+    `逐对待复核步数之和 ${sumScreen} + 基线对 ${split.baselineScreen} ≠ sweep 待复核 ${sweepState.screenHits}（步累计口径不闭合）`);
+  for (const pair of channelPairs) {
+    expect(pair.steps === pair.zStepsMm.length && pair.steps === pair.confirmedSteps + pair.screenSteps,
+      `${pair.a}|${pair.b} 步数不自洽：steps=${pair.steps} zSteps=${pair.zStepsMm.length} confirmed=${pair.confirmedSteps} screen=${pair.screenSteps}`);
+    expect(pair.zBandMm[0] === pair.zStepsMm[0] && pair.zBandMm[1] === pair.zStepsMm[pair.zStepsMm.length - 1],
+      `${pair.a}|${pair.b} z 带 ${pair.zBandMm.join('..')} 与命中高度不一致`);
+  }
+  const perLayerCounts = [...new Set(perLayer.map((entry) => Number(entry.split(':')[1])))];
+  sweepFacts.channelPairs = channelPairs;
+  sweepFacts.derivedPairs = derived;
+  sweepFacts.trayLayers = trayLayers.length;
+  sweepFacts.perLayer = perLayer;
+  sweepFacts.baselinePairs = split.baseline.map((pair) => `${pair.a}|${pair.b}`);
+  sweepFacts.baselineConfirmed = split.baselineConfirmed;
+  sweepFacts.baselineScreen = split.baselineScreen;
+  sweepFacts.channelConfirmed = sumConfirmed;
+  sweepFacts.channelScreen = sumScreen;
+  sweepFacts.channelHitSteps = channelHitStepsOf(sweepState, split);
+  const baselineNote = split.baseline.length === 0
+    ? ''
+    : `；基线几何对单列 ${split.baseline.length} 对（${split.baselineConfirmed}+${split.baselineScreen} 步，不计入通道证据）`;
+  return `${channelPairs.length} 对 = ${trayLayers.length} 层 × ${perLayerCounts.join('/')} 件（派生值 ${derived}）`
+    + `；逐对步数之和 ${sumConfirmed}+${sumScreen}`
+    + ` + 基线 ${split.baselineConfirmed}+${split.baselineScreen} = sweep 步累计 ${sweepState.confirmedHits}+${sweepState.screenHits}`
+    + `（同一步里重复命中的同一对不再算成多对）`
+    + baselineNote;
+});
+
+check('通道证据②：全部通道相关 suspect 对都含台面，x/y 重叠由件表几何复算一致（托板本体 y 向无走廊）', () => {
+  const channelPairs = sweepFacts.channelPairs;
+  expect(channelPairs.length > 0, '证据①未产出通道对，这条无从谈起');
+  const movingSet = new Set(movingPartIds);
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = 0;
+  for (const pair of channelPairs) {
+    const aMoving = movingSet.has(pair.a);
+    const bMoving = movingSet.has(pair.b);
+    expect(aMoving !== bMoving, `${pair.a}|${pair.b} 不是「台面 × 固定件」对（一侧是台面才说明这是升降通道问题）`);
+    const movingRow = rowOfPart.get(aMoving ? pair.a : pair.b);
+    const otherRow = rowOfPart.get(aMoving ? pair.b : pair.a);
+    expect(Boolean(movingRow) && Boolean(otherRow), `${pair.a}|${pair.b} 在件表里找不到，重叠量无法独立复算`);
+    if (!movingRow || !otherRow) throw new Error(`${pair.a}|${pair.b} 缺件表行`);
+    const x = overlapX(movingRow, otherRow);
+    const y = overlapY(movingRow, otherRow);
+    expect(near(pair.xOverlapMm, x, 0.05), `${pair.a}|${pair.b} 回执 x 重叠 ${pair.xOverlapMm} ≠ 件表复算 ${show(x)}`);
+    expect(near(pair.yOverlapMm, y, 0.05), `${pair.a}|${pair.b} 回执 y 重叠 ${pair.yOverlapMm} ≠ 件表复算 ${show(y)}`);
+    expect(x > 0 && y > 0, `${pair.a}|${pair.b} 复算无重叠（x=${show(x)} y=${show(y)}），不该出现在通道对里`);
+    minX = Math.min(minX, x);
+    maxX = Math.max(maxX, x);
+  }
+  // 「y 向没有走廊」只能在托板本体上说：它 y 宽与台面等宽 → 重叠 = 较窄件的全宽（不是一条窄带）
+  const trayBody = channelPairs.filter((pair) => /^tray-\d+$/.test(pair.a) || /^tray-\d+$/.test(pair.b));
+  expect(trayBody.length > 0, '没有「台面 × 托板本体」对，y 向有没有走廊无从判断');
+  const trayBodyY = trayBody.map((pair) => {
+    const rowsIn = [rowOfPart.get(pair.a), rowOfPart.get(pair.b)].filter(Boolean);
+    const narrower = Math.min(...rowsIn.map((row) => row.maxY - row.minY));
+    return { pair, narrower, y: overlapY(rowsIn[0], rowsIn[1]) };
+  });
+  for (const entry of trayBodyY) {
+    expect(near(entry.y, entry.narrower, 0.05),
+      `${entry.pair.a}|${entry.pair.b} y 重叠 ${show(entry.y)} ≠ 较窄件全宽 ${show(entry.narrower)}（y 向还有走廊可绕）`);
+  }
+  const yFull = Math.min(...trayBodyY.map((entry) => entry.narrower));
+  // 托条/辊的更窄（它们本身就是 40/610 宽的小件），所以「无走廊」这句只对托板本体成立 —— 逐族列出来
+  const byFamily = new Map();
+  for (const pair of channelPairs) {
+    const other = movingSet.has(pair.a) ? pair.b : pair.a;
+    const family = other.replace(/-\d+-(left|right|in|out)$/, '').replace(/^tray-\d+$/, 'tray');
+    const entry = byFamily.get(family) ?? { n: 0, x: new Set(), y: new Set() };
+    entry.n += 1;
+    entry.x.add(pair.xOverlapMm);
+    entry.y.add(pair.yOverlapMm);
+    byFamily.set(family, entry);
+  }
+  sweepFacts.minXOverlapMm = minX;
+  sweepFacts.maxXOverlapMm = maxX;
+  sweepFacts.trayBodyYOverlapMm = yFull;
+  return `全部含台面（${movingPartIds.join('/')}）；x 重叠 ${show(minX)}..${show(maxX)}、托板本体 y 重叠 ${show(yFull)} = 板全宽（y 向无走廊）`
+    + `；逐族 ${[...byFamily].map(([family, entry]) => `${family}×${entry.n}(x=${[...entry.x].join('/')},y=${[...entry.y].join('/')})`).join('、')}`;
+});
+
+check('通道证据③：台面外移（= 最大 x 重叠 + 一个扫掠步）→ sweep 归零，但 feasible 仍 false（归零 ≠ 可行）', () => {
+  const channelPairs = sweepFacts.channelPairs;
+  expect(channelPairs.length > 0, '证据①未产出通道对，外移量无从派生');
+  // 外移量派生：把最深的 x 重叠整个退出去，再加一个扫描步（正好卡在贴面上不算「让开」）
+  const retractMm = Math.max(...channelPairs.map((pair) => pair.xOverlapMm)) + sweepState.step;
+  // 台面在托板（x 中心 0）的负侧 → 往 −x 退，退出托板端部
+  const retracted = shiftParts(resolved.geometry, movingPartIds, [-1, 0, 0], retractMm);
+  const retractedPanel = panelSourceOfGeometry(retracted);
+  expect(retractedPanel?.inCollisionSet === true, '外移台面不许伤到板身份（板仍须在碰撞集里）');
+  // 收集逐对证据：归零要在**通道对**上判，不能在整态步累计上判 —— levels≥17 时基线几何对
+  // （gearmotor×column-*）与台面外移无关、照样每步命中，整态数字永远不会是 0。
+  const variant = runInterferenceStates({ states: ['sweep'], config, geometry: retracted, collectChannelPairs: true });
+  expect(variant.ok === true, variant.ok ? '' : `${variant.code} ${variant.message}`);
+  if (!variant.ok) throw new Error(`${variant.code} ${variant.message}`);
+  const variantSplit = splitChannelPairs(variant.states.sweep.channelPairs);
+  expect(variantSplit.channel.length === 0,
+    `外移后仍有 ${variantSplit.channel.length} 个通道对：${variantSplit.channel.map((pair) => `${pair.a}|${pair.b}`).join(',')}`);
+  const variantChannelConfirmed = variantSplit.channel.reduce((sum, pair) => sum + pair.confirmedSteps, 0);
+  const variantChannelScreen = variantSplit.channel.reduce((sum, pair) => sum + pair.screenSteps, 0);
+  expect(variantChannelConfirmed === 0 && variantChannelScreen === 0,
+    `外移后通道步累计未归零：${variantChannelConfirmed}+${variantChannelScreen}`);
+  const variantBaseline = variantSplit.baselineConfirmed + variantSplit.baselineScreen;
+  if (variantBaseline === 0) {
+    // 没有基线对（≤16 层）：整态也必须逐字段归零，结论才不只是「通道那部分」
+    expect(variant.states.sweep.confirmedHits === 0 && variant.states.sweep.screenHits === 0,
+      `外移后 sweep 未归零：${variant.states.sweep.confirmedHits}+${variant.states.sweep.screenHits}`);
+    expect(variant.states.sweep.reviewStatus !== 'fail', `外移后 sweep 仍 ${variant.states.sweep.reviewStatus}`);
+  } else {
+    // 有基线对：整态仍是 fail/warn 只能来自基线族本身，通道部分必须是 0（上面已断言）
+    expect(variantSplit.channel.length === 0, '基线对不为空时，通道对必须一个不剩');
+  }
+  const variantFeasibility = checkPanelChannel({ config, geometry: retracted });
+  expect(variantFeasibility.ok === true, variantFeasibility.ok ? '' : `${variantFeasibility.code} ${variantFeasibility.message}`);
+  if (!variantFeasibility.ok) throw new Error(`${variantFeasibility.code} ${variantFeasibility.message}`);
+  expect(variantFeasibility.feasibility.feasible === false,
+    'sweep 归零被读成 feasible=true —— 这正是本轮要防的假绿：通道通了不等于板托得住');
+  const variantBlockers = variantFeasibility.feasibility.blockers.map((blocker) => blocker.reason);
+  for (const reason of ['load-passes-shelf', 'stroke-shortfall']) {
+    expect(variantBlockers.includes(reason), `外移后缺 blocker ${reason}（实际 ${variantBlockers.join('/')}）`);
+  }
+  expect(variantFeasibility.panelSupport.rest.claim !== 'supported',
+    `外移后 rest claim=${variantFeasibility.panelSupport.rest.claim}（单条整带不许算托住）`);
+  retractedVariant = {
+    retractMm: show(retractMm),
+    confirmedHits: variantChannelConfirmed,
+    screenHits: variantChannelScreen,
+    sweepConfirmedHits: variant.states.sweep.confirmedHits,
+    sweepScreenHits: variant.states.sweep.screenHits,
+    baselineConfirmedHits: variantSplit.baselineConfirmed,
+    reviewStatus: variant.states.sweep.reviewStatus,
+    feasible: variantFeasibility.feasibility.feasible,
+    blockers: variantBlockers,
+    restClaim: variantFeasibility.panelSupport.rest.claim
+  };
+  return `外移 ${show(retractMm)} mm → 通道 ${variantChannelConfirmed}+${variantChannelScreen}（整态 ${variant.states.sweep.confirmedHits}+${variant.states.sweep.screenHits}，基线对 ${variantBaseline} 步不计）`
+    + `，但 feasible=${variantFeasibility.feasibility.feasible}（${variantBlockers.join('/')}）、rest=${variantFeasibility.panelSupport.rest.claim}`
+    + ' —— 归零只说明台面不再穿托板，承托/行程仍不成立';
+});
+
+/** 一行机器可读的证据回执（文本模式打在末段；`--json` 时在 summary.sweepEvidence 里） */
+const sweepEvidence = {
+  levels,
+  stepMm: sweepState.step,
+  sweepSteps: sweepState.steps.length,
+  hitSteps: sweepState.steps.filter((step) => step.confirmedHits + step.screenHits > 0).length,
+  /** 扣掉「只有基线几何对在命中」的步之后才是**通道**命中步（levels≥17 时两者不相等） */
+  channelHitSteps: sweepFacts.channelHitSteps,
+  confirmedHits: sweepState.confirmedHits,
+  screenHits: sweepState.screenHits,
+  /** 通道对逐对之和（= 整态步累计 − 基线几何对步数，由证据①实时派生） */
+  channelStepSums: { confirmedHits: sweepFacts.channelConfirmed, screenHits: sweepFacts.channelScreen },
+  /** 基线几何对（gearmotor×column-*，levels≥17 才出现）：单列、不计入通道判据 */
+  baselineGeometry: {
+    pairs: sweepFacts.baselinePairs,
+    confirmedHits: sweepFacts.baselineConfirmed,
+    screenHits: sweepFacts.baselineScreen
+  },
+  reviewStatus: sweepState.reviewStatus,
+  caliber: 'confirmedHits/screenHits 是**步累计**（同一对在多个高度重复计数）；dedupedPairs 才是问题对数',
+  dedupedPairs: sweepFacts.channelPairs.length,
+  derivedDedupedPairs: sweepFacts.derivedPairs,
+  trayLayers: sweepFacts.trayLayers,
+  perLayer: sweepFacts.perLayer,
+  platformPartIds: movingPartIds,
+  xOverlapMm: { min: show(sweepFacts.minXOverlapMm), max: show(sweepFacts.maxXOverlapMm) },
+  trayBodyYOverlapMm: show(sweepFacts.trayBodyYOverlapMm),
+  retractedVariant,
+  feasible: feasibility.feasible,
+  blockers: feasibility.blockers.map((blocker) => blocker.reason)
+};
+
+/* ------------------------------------------------------------------ *
  * 汇总
  * ------------------------------------------------------------------ */
 const failed = checks.filter((entry) => !entry.ok);
@@ -774,6 +1075,8 @@ const summary = {
     shift: { mm: m1Feasibility.m1.carriedShiftMm, source: m1Feasibility.m1.carriedShiftSource, boardLiftMm: m1Feasibility.m1.boardLiftMm },
     feasible: m1Feasibility.m1.feasible
   },
+  /** 通道证据（正向自证 ①去重对数 ②含台面/重叠复算 ③外移归零但不feasible）的机器可读回执 */
+  sweepEvidence,
   checks: checks.map(({ name, ok }) => ({ name, ok })),
   counts: {
     total: checks.length,
@@ -813,6 +1116,8 @@ if (jsonMode) {
       + ' —— 柱截面随塔高派生导致柱位外移（建造器问题，与板/通道无关）');
   }
   say('  遗留：板挠度/导向/防坠/安全/PLC 未验；STEP 未跑；真实塔 sweep 仍 fail；净跨/走廊需结构确认');
+  // 末段一行机器可读证据（`--json` 时同一份在 summary.sweepEvidence 里）
+  say(`SWEEP_EVIDENCE ${JSON.stringify(sweepEvidence)}`);
 }
 
 process.exit(failed.length === 0 ? 0 : 1);

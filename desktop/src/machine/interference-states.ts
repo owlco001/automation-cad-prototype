@@ -28,7 +28,7 @@ import {
   type MachineGeometrySource
 } from './machine-geometry.ts';
 import type { MachineGeometry } from './geometry.ts';
-import { screenInterference } from './interference.ts';
+import { screenInterference, type ScreenConfirmation } from './interference.ts';
 import {
   checkPanelChannel,
   panelSourceOfGeometry,
@@ -133,6 +133,53 @@ export interface CompactSweepStep {
 export interface SweepStateSummary extends InterferenceStateSummary {
   step: number;
   steps: CompactSweepStep[];
+  /**
+   * **opt-in** 的通道证据（`runInterferenceStates({ collectChannelPairs: true })`）：
+   * 扫掠里**全部** suspect 重叠对，按 (a,b) 去重、**不截断**。
+   *
+   * 为什么必须显式要：态级 `items` 只留 `MAX_ITEMS` 条（:48），去重后的对数与 z 带因此看不出来；
+   * 而这批数据在 15 层托板的塔上是六十对量级 ≈ 十几 KB —— 无条件回传会把 MCP/agent 的
+   * 工具结果顶过 10 KB 上限，四态 summary 被裁成 `{truncated, preview}`，数字全丢。
+   * 所以默认 `undefined`（不占位、不改任何既有字段），只有诊断脚本（`verify-channel.mjs`）显式要。
+   */
+  channelPairs?: ChannelSweepPair[];
+}
+
+/**
+ * 一条**通道证据**：一对零件在几个扫掠高度上重叠。
+ *
+ * 口径（和 `items` 不是一回事，必须一起读）：
+ * - 一条 = 一对零件（不是一步）；`steps` 是这对在多少个扫掠高度上重叠，同一对会在多处重复命中；
+ * - `confirmedSteps` / `screenSteps` 按步分（解析式精确 vs 只有 AABB 依据）；
+ * - `zStepsMm` / `zBandMm` 是命中的高度与最小/最大高度（去重升序）；
+ * - `xOverlapMm` / `yOverlapMm` 是 AABB 口径的轴向重叠上界（台面只沿 z 走，这两轴逐轴同值），
+ *   用来判「到底有没有一条能从托板旁边过去的通道」，不是干涉体积。
+ */
+export interface ChannelSweepPair {
+  a: string;
+  b: string;
+  aName: string;
+  bName: string;
+  /** 只收 suspect：declared=已声明连接、mate=同轴嵌套配合都不算通道冲突 */
+  kind: 'suspect';
+  /** exact = 至少一步解析式确认；aabb = 全程只有包围盒依据（待复核） */
+  confirmation: ScreenConfirmation;
+  confirmedSteps: number;
+  screenSteps: number;
+  /** 命中的扫掠步数 = confirmedSteps + screenSteps = zStepsMm.length */
+  steps: number;
+  /** 命中的扫掠高度 mm（去重升序） */
+  zStepsMm: number[];
+  /** 命中高度的最小/最大值 mm */
+  zBandMm: [number, number];
+  /** 各步里最大的 AABB 重叠上界 mm³（只作量级参考） */
+  maxOverlapMm3: number;
+  /** 各步里最大的解析式精确交集体积 mm³；全程只有 AABB 依据时 null */
+  maxExactOverlapMm3: number | null;
+  /** x 向 AABB 重叠 mm（台面只沿 z 走 → 逐轴同值） */
+  xOverlapMm: number;
+  /** y 向 AABB 重叠 mm（= 两件 y 宽的较小者即为「y 向没有走廊」） */
+  yOverlapMm: number;
 }
 
 export interface PushStepSummary extends InterferenceStateSummary {
@@ -560,6 +607,92 @@ function aggregateSteps<T extends InterferenceStateSummary>(
   };
 }
 
+/** 扫掠逐对的**不截断**证据收集器：按 (a,b) 归并（同一对会在多个高度各算一次）。 */
+interface ChannelPairAccumulator {
+  a: string;
+  b: string;
+  aName: string;
+  bName: string;
+  zSteps: number[];
+  confirmedSteps: number;
+  screenSteps: number;
+  maxOverlapMm3: number;
+  maxExactOverlapMm3: number | null;
+  xOverlapMm: number;
+  yOverlapMm: number;
+}
+
+/**
+ * 把一步的 screen 结果并进收集器（**只收 suspect**：declared/mate 不是通道冲突）。
+ * `treatAsScreen` 与 `summarize` 的降级口径一致：位姿被判定为反向平移时，动件相关的重叠只算待复核。
+ */
+function accumulateChannelPair(
+  acc: Map<string, ChannelPairAccumulator>,
+  screen: ReturnType<typeof screenInterference>,
+  options: { zMm: number; treatAsScreen: boolean }
+): void {
+  for (const pair of screen.pairs) {
+    if (pair.classification !== 'suspect') continue;
+    const a = String(pair.a);
+    const b = String(pair.b);
+    const key = `${a}|${b}`;
+    let entry = acc.get(key);
+    if (!entry) {
+      entry = {
+        a,
+        b,
+        aName: String(pair.aName ?? ''),
+        bName: String(pair.bName ?? ''),
+        zSteps: [],
+        confirmedSteps: 0,
+        screenSteps: 0,
+        maxOverlapMm3: 0,
+        maxExactOverlapMm3: null,
+        xOverlapMm: 0,
+        yOverlapMm: 0
+      };
+      acc.set(key, entry);
+    }
+    if (!entry.zSteps.includes(options.zMm)) entry.zSteps.push(options.zMm);
+    const exact = pair.exactOverlapMm3;
+    const confirmed = !options.treatAsScreen && pair.confirmation === 'exact' && (exact ?? 0) > CONFIRM_MIN_MM3;
+    if (confirmed) entry.confirmedSteps += 1;
+    else entry.screenSteps += 1;
+    entry.maxOverlapMm3 = Math.max(entry.maxOverlapMm3, Number(pair.overlapMm3) || 0);
+    if (exact !== null) entry.maxExactOverlapMm3 = Math.max(entry.maxExactOverlapMm3 ?? 0, Number(exact) || 0);
+    entry.xOverlapMm = Math.max(entry.xOverlapMm, Number(pair.overlapBox?.[0]) || 0);
+    entry.yOverlapMm = Math.max(entry.yOverlapMm, Number(pair.overlapBox?.[1]) || 0);
+  }
+}
+
+/** 收集器 → 稳定输出：按 (a,b) 排序（同一份几何两次跑必须逐字段相同），z 带由命中高度派生。 */
+function finalizeChannelPairs(acc: Map<string, ChannelPairAccumulator>): ChannelSweepPair[] {
+  return [...acc.values()]
+    .sort((left, right) => (left.a === right.a ? left.b.localeCompare(right.b) : left.a.localeCompare(right.a)))
+    .map((entry) => {
+      const zSteps = [...entry.zSteps].sort((left, right) => left - right);
+      const first = zSteps[0] ?? 0;
+      const last = zSteps[zSteps.length - 1] ?? first;
+      return {
+        a: entry.a,
+        b: entry.b,
+        aName: entry.aName,
+        bName: entry.bName,
+        kind: 'suspect' as const,
+        confirmation: entry.confirmedSteps > 0 ? 'exact' as const : 'aabb' as const,
+        confirmedSteps: entry.confirmedSteps,
+        screenSteps: entry.screenSteps,
+        steps: zSteps.length,
+        zStepsMm: zSteps,
+        zBandMm: [first, last] as [number, number],
+        maxOverlapMm3: round1(entry.maxOverlapMm3),
+        maxExactOverlapMm3: entry.maxExactOverlapMm3 === null ? null : round1(entry.maxExactOverlapMm3),
+        xOverlapMm: round1(entry.xOverlapMm),
+        yOverlapMm: round1(entry.yOverlapMm)
+      };
+    });
+}
+
 /** 把指定零件沿方向平移 distance mm；其余零件原样保留（不修改入参）。 */
 export function shiftParts(
   geometry: MachineGeometry,
@@ -687,6 +820,14 @@ export function runInterferenceStates(input: {
    * **绝不**返回一份「查不到 → 绿」的回执（N5）。
    */
   requirePanel?: boolean;
+  /**
+   * 要求 sweep 附带**不截断**的逐对通道证据（`states.sweep.channelPairs`）。
+   *
+   * 默认 false，与 `requirePanel` 同形：只有诊断脚本（`verify-channel.mjs`）会要。
+   * **不许默认打开** —— 六十对量级会把 MCP/agent 的工具结果顶过 10 KB 上限，
+   * 四态 summary 被裁成 `{truncated, preview}`，反而什么都读不到（见 `MAX_ITEMS` 的由来）。
+   */
+  collectChannelPairs?: boolean;
 }): InterferenceStatesOutcome {
   const normalized = normalizeStates(input.states);
   if (!normalized.ok) return normalized;
@@ -906,14 +1047,21 @@ export function runInterferenceStates(input: {
     }
     // sweep：按 10 mm 逐步顶升；行程不是 10 的整数倍时补最后一步（到位位姿也要查）
     const steps: SweepStepSummary[] = [];
+    // opt-in：逐对证据（不截断）。不收集时一份都不留，回执与旧版逐字节相同。
+    const channelAcc = input.collectChannelPairs === true ? new Map<string, ChannelPairAccumulator>() : null;
+    const takeStep = (posed: MachineGeometry, zMm: number, poseValidity: PoseValidity): SweepStepSummary => {
+      const screen = screenInterference(posed);
+      if (channelAcc) {
+        accumulateChannelPair(channelAcc, screen, { zMm, treatAsScreen: poseValidity === 'direction-overridden' });
+      }
+      return { z: round1(zMm), ...summarize(screen, { poseValidity, movingIds, workpieceId }) };
+    };
     for (let z = 0; z <= lift.strokeMm + 1e-9; z += SWEEP_STEP_MM) {
-      const posed = poseForState({ geometry, state: 'sweep', lift, push, liftMm: z });
-      steps.push({ z: round1(z), ...summarize(screenInterference(posed), { poseValidity: z === 0 ? 'valid' : liftPose, movingIds, workpieceId }) });
+      steps.push(takeStep(poseForState({ geometry, state: 'sweep', lift, push, liftMm: z }), z, z === 0 ? 'valid' : liftPose));
     }
     const lastZ = steps[steps.length - 1]?.z ?? 0;
     if (lastZ < lift.strokeMm - 1e-9) {
-      const posed = poseForState({ geometry, state: 'sweep', lift, push });
-      steps.push({ z: round1(lift.strokeMm), ...summarize(screenInterference(posed), { poseValidity: liftPose, movingIds, workpieceId }) });
+      steps.push(takeStep(poseForState({ geometry, state: 'sweep', lift, push }), lift.strokeMm, liftPose));
     }
     output.sweep = {
       ...aggregateSteps(steps, workpieceId !== undefined),
@@ -930,7 +1078,8 @@ export function runInterferenceStates(input: {
         poseValidity: step.poseValidity,
         ...(step.workpiecePairs === undefined ? {} : { workpiecePairs: step.workpiecePairs }),
         ...(step.workpieceTouching === undefined ? {} : { workpieceTouching: step.workpieceTouching })
-      }))
+      })),
+      ...(channelAcc ? { channelPairs: finalizeChannelPairs(channelAcc) } : {})
     };
   }
 

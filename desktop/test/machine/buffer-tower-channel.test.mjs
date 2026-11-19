@@ -606,14 +606,32 @@ test('verify:channel 收录 N12 伪板 + N13 非有限行 + N14 承托面几何�
   assert.equal(baseline.status, 0, `verify:channel 基线应退 0：${(baseline.stdout + baseline.stderr).slice(-1200)}`);
   const baseSummary = summaryOf(baseline);
   assert.equal(baseSummary.ok, true);
-  // 编号口径必须准确：N1..N14，13 正 + 14 负 = 27（多一条/少一条都要在这里现形）
-  assert.deepEqual(baseSummary.counts, { total: 27, positive: 13, negative: 14 });
+  // 编号口径必须准确：N1..N14（14 负）+ 3 条**正向**通道证据 = 30（16 正 + 14 负）；多一条/少一条都要在这里现形
+  assert.deepEqual(baseSummary.counts, { total: 30, positive: 16, negative: 14 });
   const negativeNames = (baseSummary.checks ?? [])
     .map((entry) => entry.name)
     .filter((name) => /^N\d/.test(name))
     .map((name) => name.match(/^N(\d+)/)[1]);
   assert.deepEqual(negativeNames, Array.from({ length: 14 }, (_, index) => String(index + 1)),
     '负向编号必须连续且正好 N1..N14');
+  // 通道证据必须是**正向**（不带 N 编号）：405 的单位与「归零 ≠ 可行」靠它们自证；
+  // 一旦给它们编 N 号，N1..N14 的连续性与 negative 计数会一起被改坏（这正是这条断言守的东西）。
+  const evidenceNames = (baseSummary.checks ?? [])
+    .map((entry) => entry.name)
+    .filter((name) => /^通道证据/.test(name));
+  assert.equal(evidenceNames.length, 3, `通道证据应 3 条（实际 ${evidenceNames.join(' / ')}）`);
+  assert.ok(evidenceNames.every((name) => !/^N\d/.test(name)),
+    '通道证据不许带 N 编号（那会被算进 negative，破坏 N1..N14 口径）');
+  // 证据回执必须是**实跑出来的**：去重对数 == 件表派生值（不是脚本里的常量），且判据没被读成绿灯
+  const sweepEvidence = baseSummary.sweepEvidence ?? {};
+  assert.equal(sweepEvidence.dedupedPairs, sweepEvidence.derivedDedupedPairs,
+    `去重对数 ${sweepEvidence.dedupedPairs} ≠ 件表派生 ${sweepEvidence.derivedDedupedPairs}`);
+  assert.ok(sweepEvidence.dedupedPairs > 0, '通道对不能是 0（否则「无干涉」是被 0 条证据撑起来的）');
+  assert.equal(sweepEvidence.reviewStatus, 'fail', 'sweep 仍须 fail：收口证据不是改判');
+  assert.equal(sweepEvidence.retractedVariant?.confirmedHits, 0, '外移变体的 sweep 必须归零（否则自证不成立）');
+  assert.equal(sweepEvidence.retractedVariant?.feasible, false,
+    '外移变体 feasible 必须仍 false —— 归零 ≠ 可行');
+  assert.equal(sweepEvidence.feasible, false, '真实塔 feasible 不许被证据块写成 true');
   // N14 的 fail-closed 回执必须进稳定输出（真实跑出来的，不是脚本里写死的）
   assert.match(baseSummary.shelfFailClosed?.partId ?? '', /^tray-\d+$/,
     `shelfFailClosed.partId=${baseSummary.shelfFailClosed?.partId}`);
@@ -667,6 +685,62 @@ test('verify:channel 收录 N12 伪板 + N13 非有限行 + N14 承托面几何�
       assert.ok(failed.some((name) => mutation.expect.test(name)),
         `${mutation.label}: 失败项必须包含对应编号（实际 ${failed.join(' / ')}）`);
     }
+  } finally {
+    rmSync(probePath, { force: true });
+  }
+});
+
+test('§5 通道证据在 baseline 几何对出现的层数（levels 17）不许自红：基线对真剔除、步数仍闭合', () => {
+  const scriptPath = fileURLToPath(new URL('../../scripts/verify-channel.mjs', import.meta.url));
+  const runAt = (path, levels) => spawnSync(process.execPath, [path, '--levels', String(levels), '--json'], {
+    encoding: 'utf8',
+    cwd: dirname(path),
+    timeout: 180_000
+  });
+  const summaryOfResult = (result) => JSON.parse(result.stdout.trim().split('\n').pop());
+
+  // 17 层起 `gearmotor × column-bl` 在基线几何里真的相交（建造器问题）。这一档必须**全绿**：
+  // 上一版「filter 完再断言 filter 没改变任何东西」在这里必红（§5 三条全红、exit 1）。
+  const at17 = runAt(scriptPath, 17);
+  assert.equal(at17.status, 0, `levels 17 必须退 0（§5 不许因基线对自红）：${(at17.stdout + at17.stderr).slice(-1600)}`);
+  const summary = summaryOfResult(at17);
+  assert.equal(summary.ok, true);
+  assert.deepEqual(summary.counts, { total: 30, positive: 16, negative: 14 });
+  const ev = summary.sweepEvidence;
+  // ① 基线对**单列**且真的不在通道对里
+  assert.deepEqual(ev.baselineGeometry.pairs, ['gearmotor|column-bl'],
+    `levels 17 的基线对：${JSON.stringify(ev.baselineGeometry)}`);
+  assert.ok(ev.baselineGeometry.confirmedHits > 0, '基线对步数必须 > 0（否则这条守着的窗口不存在）');
+  // ② 闭合：通道对之和 + 基线对 = 整态步累计 —— 这才是「剔出去并把步数扣掉」，不是假装没变化
+  assert.equal(ev.channelStepSums.confirmedHits + ev.baselineGeometry.confirmedHits, ev.confirmedHits,
+    `通道 ${ev.channelStepSums.confirmedHits} + 基线 ${ev.baselineGeometry.confirmedHits} ≠ ${ev.confirmedHits}`);
+  assert.equal(ev.channelStepSums.screenHits + ev.baselineGeometry.screenHits, ev.screenHits);
+  assert.equal(ev.dedupedPairs, ev.derivedDedupedPairs);
+  // ③ 通道命中步 ≠ 整态命中步（基线对每步都在命中）→ 两个数都必须在回执里
+  assert.ok(ev.channelHitSteps < ev.hitSteps,
+    `channelHitSteps=${ev.channelHitSteps} 必须小于 hitSteps=${ev.hitSteps}（否则读的人会把基线步当通道命中）`);
+  assert.equal(ev.channelHitSteps, ev.trayLayers * 9, '每层 9 个命中步（R11 口径，实跑派生）');
+  // ④ 口径锁：每命中步 **2 确认 + 1 待复核**（R11 文档的分解式，540 那种算法在这里过不去）
+  assert.equal(ev.channelStepSums.confirmedHits, ev.channelHitSteps * 2,
+    `确认步 ${ev.channelStepSums.confirmedHits} ≠ ${ev.channelHitSteps} × 2`);
+  assert.equal(ev.channelStepSums.screenHits, ev.channelHitSteps * 1,
+    `待复核步 ${ev.channelStepSums.screenHits} ≠ ${ev.channelHitSteps} × 1`);
+  // ⑤ 外移变体：通道归零，整态仍有基线对命中 → 回执必须分开写（否则「归零 ≠ 可行」被基线数污染）
+  assert.equal(ev.retractedVariant.confirmedHits, 0);
+  assert.equal(ev.retractedVariant.baselineConfirmedHits, ev.baselineGeometry.confirmedHits);
+
+  // 变异自证：关掉「基线对真的剔除」→ §5 必须红（否则这条剔除没在守任何东西）
+  const source = readFileSync(scriptPath, 'utf8');
+  const probePath = join(dirname(scriptPath), `.verify-channel-split-probe-${process.pid}-${Date.now()}.mjs`);
+  try {
+    const mutated = source.replace('const SPLIT_BASELINE_GEOMETRY = true;', 'const SPLIT_BASELINE_GEOMETRY = false;');
+    assert.notEqual(mutated, source, '变异必须命中锚点（锚点漂了就先改这个测试）');
+    writeFileSync(probePath, mutated);
+    const broken = runAt(probePath, 17);
+    assert.equal(broken.status, 1, '关掉基线对剔除后 levels 17 必须退 1');
+    const failed = summaryOfResult(broken).checks.filter((entry) => !entry.ok).map((entry) => entry.name);
+    assert.ok(failed.some((name) => /^通道证据①/.test(name)),
+      `失败项必须含通道证据①（实际 ${failed.join(' / ')}）`);
   } finally {
     rmSync(probePath, { force: true });
   }
