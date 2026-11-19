@@ -27,10 +27,12 @@ import {
   resolveChannelFeasibility,
   resolvePanelSupport,
   supportRowsFromConveyorParts,
+  supportRowsFromConveyorPartsDetailed,
   supportRowsFromGeometryParts
 } from '../../src/machine/panel-channel.ts';
-import { m1ChannelFixture, M1_PANEL } from '../../test-support/m1-channel-fixture.mjs';
+import { m1ChannelFixture, m1TowerConfig, M1_PANEL } from '../../test-support/m1-channel-fixture.mjs';
 import { resolveMachineGeometry } from '../../src/machine/machine-geometry.ts';
+import { buildBufferTowerParts, bufferTowerParamsFromConfig } from '../../src/machine/buffer-tower-assembly.ts';
 
 /** 板规格：中心**显式**给（0,0 也算显式；缺省会被拒，见「板位姿必须显式」用例） */
 const PANEL = {
@@ -338,8 +340,8 @@ test('通道判定：feasible=false 且两条可复算 blockers；首层 M1 段�
   assert.equal(shelf?.level, 2, '第一处挡路的是第 2 层承托面');
   assert.ok((shelf?.partIds.length ?? 0) > 0 && (shelf?.partIds.length ?? 0) <= 6);
   assert.match(shelf?.detail ?? '', /必穿过它/);
-  // 件数从件表派生，不许写死「2 层 26 处 / 16 层 446 处」这类快照
-  assert.doesNotMatch(shelf?.detail ?? '', /26 处|446 处/);
+  // 件数从件表派生，不许写死「2 层 26 处」这类快照
+  assert.doesNotMatch(shelf?.detail ?? '', /26 处/);
   assert.match(shelf?.detail ?? '', /本件表在板投影内、板顶以上的承托面共 \d+ 件/);
   // 首层 M1 段（夹具件表）是绿的，但它是**独立**结论，且带来源标注
   assert.equal(feasibility.m1.feasible, true);
@@ -513,23 +515,26 @@ test('checkPanelChannel：M1 几何 → verified，承托带来源 + 多层不�
   assert.equal(outcome.feasibility.feasible, false);
 });
 
-test('checkPanelChannel：生产塔 placeholder → diagnostic-only、不可声称 supported', () => {
+test('checkPanelChannel：生产塔（板已在 parts）→ verified，但 rest unsupported、carried 诊断', () => {
   const fixture = m1ChannelFixture();
   const resolved = resolveMachineGeometry(fixture.config);
   const outcome = checkPanelChannel({ config: fixture.config, geometry: resolved.geometry });
   assert.equal(outcome.ok, true);
   if (!outcome.ok) return;
-  // 生产塔：板只挂 workpiecePlaceholder、inCollisionSet=false，件表里没有 channel 承托路径
-  assert.equal(outcome.panelSource.inCollisionSet, false);
-  assert.equal(outcome.mode, 'diagnostic-only');
+  // 生产塔：板是 geometry.parts 里的真实碰撞件 → verified 只说明「几何行表 + 板在碰撞集」
+  assert.equal(outcome.panelSource.inCollisionSet, true);
+  assert.equal(outcome.mode, 'verified');
+  assert.equal(outcome.rowsSource, 'geometry');
   assert.match(outcome.pose.source, /workpiecePlaceholder/);
-  assert.equal(outcome.panelSupport.rest.claim, 'diagnostic-only');
-  assert.equal(outcome.panelSupport.carried.claim, 'diagnostic-only');
-  assert.equal(outcome.feasibility.diagnosticOnly, true);
-  assert.equal(outcome.feasibility.feasible, false, 'placeholder 路径不许出 feasible=true');
-  assert.equal(outcome.feasibility.m1.feasible, false, '没有承托路径也没有轴位移 → 首层也不成立');
+  assert.equal(outcome.panelSupport.rest.claim, 'unsupported', '覆盖 100% 但只有 1 条带 → 不许声称 supported');
+  assert.equal(outcome.panelSupport.carried.claim, 'diagnostic-only', '板不随塔轴移动 → 位移缺失，carried 只能是诊断');
+  assert.equal(outcome.feasibility.diagnosticOnly, false);
+  assert.equal(outcome.feasibility.feasible, false, 'verified 不等于可行：load-passes-shelf + stroke-shortfall 仍在');
+  assert.equal(outcome.feasibility.m1.feasible, false, '板没挂轴、也没有叉指 → 首层 M1 段不成立');
+  assert.equal(outcome.feasibility.m1.carriedShiftSource, 'missing', '不许把塔轴 2700 当成板的位移');
   assert.match(outcome.feasibility.m1.diagnosticError ?? '', /缺失/);
-  assert.match(outcome.note, /diagnosticOnly/);
+  assert.match(outcome.note, /verified/);
+  assert.match(outcome.note, /不是结构可行/);
   // 夹具的 M1 绿不许被读成生产塔可行：这条回执里没有任何 supported claim
   assert.equal(outcome.feasibility.panelSupport.rest.claim === 'supported', false);
   assert.equal(outcome.feasibility.panelSupport.carried.claim === 'supported', false);
@@ -550,7 +555,8 @@ test('checkPanelChannel：caller rows 一律 diagnostic-only，连 pose 也不�
   // P1-R2：行表来源不是几何 → held-out 承托面证明不了属于本机，哪怕给了 pose 也只能是诊断
   assert.equal(outcome.mode, 'diagnostic-only');
   assert.equal(outcome.rowsSource, 'caller');
-  assert.equal(outcome.panelSource.inCollisionSet, false);
+  // 板确实在碰撞集里（生产几何），但行表不是几何给的 → 仍 diagnostic-only：两条证据缺一不可
+  assert.equal(outcome.panelSource.inCollisionSet, true);
   assert.equal(outcome.panelSupport.rest.claim, 'diagnostic-only');
   assert.equal(outcome.panelSupport.carried.claim, 'diagnostic-only');
   assert.equal(outcome.feasibility.diagnosticOnly, true);
@@ -657,6 +663,220 @@ test('panelSourceOfGeometry：占位体中心缺失 → 不认这块板（不拿
   assert.match(source?.poseSource ?? '', /workpiecePlaceholder/);
 });
 
+test('panelSourceOfGeometry：inCollisionSet 只按 parts 里「同一块板」派生（手写 true 不算）', () => {
+  const base = {
+    id: PANEL_PART_ID,
+    name: '占位',
+    role: 'workpiece',
+    sizeMm: [2278, 1134, 35],
+    bottomZmm: 900,
+    center: [0, 0, 917.5],
+    inCollisionSet: true
+  };
+  // 只有占位体（哪怕自己写 true）→ parts 里没有同 id 件 → false
+  assert.equal(panelSourceOfGeometry({ parts: [], workpiecePlaceholder: base })?.inCollisionSet, false);
+  const plate = {
+    id: PANEL_PART_ID,
+    role: 'workpiece',
+    shape: { type: 'box', size: [2278, 1134, 35] },
+    center: [0, 0, 917.5],
+    rotationZDeg: 0
+  };
+  // parts 里有同一块板（同 id + role=workpiece + 尺寸/中心一致）→ true
+  const withPart = panelSourceOfGeometry({ parts: [plate], workpiecePlaceholder: base });
+  assert.equal(withPart?.inCollisionSet, true);
+  assert.equal(withPart?.id, PANEL_PART_ID);
+  // 别的工件（不同 id）不能把占位体「顶」成 true
+  assert.equal(
+    panelSourceOfGeometry({ parts: [{ ...plate, id: 'workpiece-other' }], workpiecePlaceholder: base })?.inCollisionSet,
+    false,
+    'inCollisionSet 只认同 id 成员，不许被别的 role=workpiece 件顶成 true'
+  );
+});
+
+test('P2-1 回归：同 id 但不是这块板（role/尺寸/中心不符）→ inCollisionSet=false', () => {
+  const placeholder = {
+    id: PANEL_PART_ID,
+    name: '占位',
+    role: 'workpiece',
+    sizeMm: [2278, 1134, 35],
+    bottomZmm: 900,
+    center: [0, 0, 917.5],
+    inCollisionSet: true
+  };
+  // 生产塔里的第 2 层托板：同 id 场景下它就是「同 id 非板件」
+  const tray = {
+    id: 'tray-2',
+    role: 'structure',
+    shape: { type: 'box', size: [1200, 900, 20] },
+    center: [0, 0, 1060],
+    rotationZDeg: 0
+  };
+  // ① 占位体 id 被写成 tray-2，parts 里真有同 id 托板 → false（旧实现只比 id，会回 true）
+  const forged = { ...placeholder, id: 'tray-2' };
+  const forgedSource = panelSourceOfGeometry({ parts: [tray], workpiecePlaceholder: forged });
+  assert.equal(forgedSource?.inCollisionSet, false, '同 id 托板不是这块板，flag 不许被顶成 true');
+  // 位姿仍来自板占位体（占位体没变）—— 所以 flag 一旦假 true，「位姿是板、碰撞集判定靠托板」
+  assert.equal(forgedSource?.bottomZmm, 900);
+  assert.equal(forgedSource?.panel.lengthMm, 2278);
+  // ② 同 id、同尺寸，但 role 不是 workpiece（结构件/夹具件）→ false
+  const correctSizeWrongRole = { ...tray, id: PANEL_PART_ID, shape: { type: 'box', size: [2278, 1134, 35] }, center: [0, 0, 917.5] };
+  assert.equal(
+    panelSourceOfGeometry({ parts: [correctSizeWrongRole], workpiecePlaceholder: placeholder })?.inCollisionSet,
+    false,
+    'role 不是 workpiece 的同 id 件不算板'
+  );
+  // ③ role/ id 都对但尺寸不符（这块托板 1200×900×20）→ false
+  const correctRoleWrongSize = { ...correctSizeWrongRole, role: 'workpiece', shape: { type: 'box', size: [1200, 900, 20] } };
+  assert.equal(
+    panelSourceOfGeometry({ parts: [correctRoleWrongSize], workpiecePlaceholder: placeholder })?.inCollisionSet,
+    false,
+    '尺寸与占位体不一致 → 不是这块板'
+  );
+  // ④ 尺寸对但中心偏 200 mm → false
+  const correctRoleWrongCenter = { ...correctSizeWrongRole, role: 'workpiece', center: [200, 0, 917.5] };
+  assert.equal(
+    panelSourceOfGeometry({ parts: [correctRoleWrongCenter], workpiecePlaceholder: placeholder })?.inCollisionSet,
+    false,
+    '中心与占位体不一致 → 不是这块板'
+  );
+  // ⑤ shape 不是 box（圆柱/无 shape）→ false
+  assert.equal(
+    panelSourceOfGeometry({
+      parts: [{ ...correctSizeWrongRole, role: 'workpiece', shape: { type: 'cylinder', radius: 500, length: 35, axis: 'z' } }],
+      workpiecePlaceholder: placeholder
+    })?.inCollisionSet,
+    false
+  );
+  // ⑥ 四条全对 → true（这条同时保证上面的 false 不是「一律 false」）
+  const exact = { ...correctSizeWrongRole, role: 'workpiece' };
+  assert.equal(panelSourceOfGeometry({ parts: [exact], workpiecePlaceholder: placeholder })?.inCollisionSet, true);
+});
+
+test('P2-1 回归（生产几何）：占位体 id 指向真实托板 → diagnostic-only，不升 verified', () => {
+  const config = m1TowerConfig(16);
+  const resolved = resolveMachineGeometry(config);
+  // 让占位体自称是 tray-2（parts 里确实有 tray-2），位姿仍是板占位体的
+  const forged = {
+    ...resolved.geometry,
+    workpiecePlaceholder: { ...resolved.geometry.workpiecePlaceholder, id: 'tray-2' }
+  };
+  const source = panelSourceOfGeometry(forged);
+  assert.equal(source?.id, 'tray-2');
+  assert.equal(source?.inCollisionSet, false, '同 id 的托板不是板：inCollisionSet 必须 false');
+  const outcome = checkPanelChannel({ config, geometry: forged });
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.mode, 'diagnostic-only');
+  assert.equal(outcome.panelSource.inCollisionSet, false);
+  assert.equal(outcome.feasibility.diagnosticOnly, true);
+  assert.equal(outcome.feasibility.feasible, false);
+  // 同一份几何、占位体 id 正确时仍是 verified —— 差别只在这块板是否真的在碰撞件表里
+  const genuine = checkPanelChannel({ config, geometry: resolved.geometry });
+  assert.equal(genuine.ok, true);
+  if (!genuine.ok) return;
+  assert.equal(genuine.mode, 'verified');
+  assert.equal(genuine.panelSource.inCollisionSet, true);
+});
+
+test('P3-1 回归：同 id/role/尺寸/中心都对但朝向不对（转 90°）→ inCollisionSet=false', () => {
+  // 占位体是**同一件板的投影**：它声明的 rotationZDeg 就是这块板应有的朝向（生产塔 0°）
+  const placeholder = {
+    id: PANEL_PART_ID,
+    name: '占位',
+    role: 'workpiece',
+    rotationZDeg: 0,
+    sizeMm: [2278, 1134, 35],
+    bottomZmm: 900,
+    center: [0, 0, 917.5],
+    inCollisionSet: true
+  };
+  const plate = {
+    id: PANEL_PART_ID,
+    role: 'workpiece',
+    shape: { type: 'box', size: [2278, 1134, 35] },
+    center: [0, 0, 917.5],
+    rotationZDeg: 0
+  };
+  const inSet = (parts, holder = placeholder) => panelSourceOfGeometry({ parts, workpiecePlaceholder: holder })?.inCollisionSet;
+
+  // ⓪ 精确副本（含 0°）→ true：保证下面那些 false 不是「一律 false」
+  assert.equal(inSet([plate]), true, '同 id + role + 尺寸/中心 + 0° 的精确副本才是这块板');
+
+  // ① 同中心、同尺寸、绕 Z 转 90°：局部 size 逐项相等（旧四条判据全过），但实际占位 x/y 互换
+  //    （2278×1134 → 1134×2278），是另一个刚体位姿 —— 不许冒充 collisionset 里的板
+  for (const rotationZDeg of [90, -90, 180, 45, 0.5]) {
+    assert.equal(
+      inSet([{ ...plate, rotationZDeg }]),
+      false,
+      `rotationZDeg=${rotationZDeg}° 的件不是这块板（同中心同尺寸也不行）`
+    );
+  }
+
+  // ② 转角必须是**有限数字**：缺字段 / NaN / Infinity / 字符串 / null 都不算（不拿 0 顶替，
+  //    否则 `Number(null) === 0` 会把「没声明朝向」读成 0° 并放行）
+  for (const rotationZDeg of [undefined, Number.NaN, Number.POSITIVE_INFINITY, '0', null]) {
+    assert.equal(
+      inSet([{ ...plate, rotationZDeg }]),
+      false,
+      `rotationZDeg=${String(rotationZDeg)} 不是有限数 → 无法核对朝向，不是这块板`
+    );
+  }
+
+  // ③ 周期量等价：绕 Z 的 360° ≡ 0°、−360° ≡ 0°，不许因为原始数值不同把真板判掉
+  assert.equal(inSet([{ ...plate, rotationZDeg: 360 }]), true, '360° 与 0° 同向');
+  assert.equal(inSet([{ ...plate, rotationZDeg: -360 }]), true, '-360° 与 0° 同向');
+
+  // ④ 比对对象是**占位体声明的朝向**，不是写死的 0：占位体声明 90° 时，90° 的件才是这块板
+  const turned = { ...placeholder, rotationZDeg: 90 };
+  assert.equal(inSet([{ ...plate, rotationZDeg: 90 }], turned), true, '占位体声明 90° + 件也 90° → true');
+  assert.equal(inSet([plate], turned), false, '占位体声明 90° + 件仍 0° → false');
+
+  // ⑤ 占位体自己的 rotationZDeg 不是有限数 → 没有可核对的板朝向，不认这块板（返回 null，不猜 0°）
+  for (const rotationZDeg of [Number.NaN, Number.POSITIVE_INFINITY, '0', null]) {
+    assert.equal(
+      panelSourceOfGeometry({ parts: [plate], workpiecePlaceholder: { ...placeholder, rotationZDeg } }),
+      null,
+      `占位体 rotationZDeg=${String(rotationZDeg)} 不是有限数 → 不认这块板`
+    );
+  }
+});
+
+test('P3-1 回归（生产几何）：同中心同尺寸但转 90° 的板件 → inCollisionSet=false、diagnostic-only', () => {
+  const config = m1TowerConfig(16);
+  const resolved = resolveMachineGeometry(config);
+  // 生产塔的板就是 0°（`towerWorkpiecePart`）：这条钉住「生产板要求 0°」，不是随便什么朝向
+  assert.equal(resolved.geometry.workpiecePlaceholder?.rotationZDeg, 0, '生产占位体显式投影 rotationZDeg=0');
+  const genuinePart = resolved.geometry.parts.find((part) => part.id === PANEL_PART_ID);
+  assert.equal(genuinePart?.rotationZDeg, 0, '生产板件本身也是 0°');
+
+  const rotated = {
+    ...resolved.geometry,
+    parts: resolved.geometry.parts.map((part) => (
+      part.id === PANEL_PART_ID ? { ...part, rotationZDeg: 90 } : part
+    ))
+  };
+  const source = panelSourceOfGeometry(rotated);
+  assert.equal(source?.inCollisionSet, false, '同中心同尺寸但绕 Z 转 90° 的件不是这块板');
+  // 位姿仍从占位体读（占位体没被改），所以这里正是「位姿是板、碰撞集判定被别的朝向顶掉」的形状
+  assert.equal(source?.bottomZmm, 900);
+  assert.equal(source?.panel.lengthMm, 2278);
+
+  const outcome = checkPanelChannel({ config, geometry: rotated });
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.mode, 'diagnostic-only');
+  assert.equal(outcome.feasibility.diagnosticOnly, true);
+  assert.equal(outcome.feasibility.feasible, false);
+
+  // 对照：同一份几何，板件朝向 0°（不改）→ 仍 verified
+  const genuine = checkPanelChannel({ config, geometry: resolved.geometry });
+  assert.equal(genuine.ok, true);
+  if (!genuine.ok) return;
+  assert.equal(genuine.mode, 'verified');
+  assert.equal(genuine.panelSource.inCollisionSet, true);
+});
+
 test('panelSourceOfGeometry：center/size 里的 null、空串、数字字符串一律不认（不拿 0 顶替）', () => {
   const base = {
     id: PANEL_PART_ID,
@@ -703,4 +923,398 @@ test('支撑面适配器：GeomPart 行表与 ConveyorPart 行表对同一件表
     }
   }
   assert.ok(Math.abs(panelArea - 2583252) < 1);
+});
+
+/* ------------------------------------------------------------------ *
+ * witness：口径来源（P2-2）、量到遮挡件 minZ（P2-4）、非有限坐标 fail-closed（P2-3）
+ * ------------------------------------------------------------------ */
+
+/** 16 层真实塔件表（witness 的 98.5 / 133.5 就出自它） */
+const towerParts16 = () => buildBufferTowerParts(bufferTowerParamsFromConfig(m1TowerConfig(16)));
+const TOWER_POSE = { bottomZmm: 900, centerXMm: 0, centerYMm: 0 };
+
+/** 从塔件表算 load-passes-shelf（可换行表来源 / 替换 parts） */
+const shelfBlockerOf = (extra = {}) => resolveChannelFeasibility({
+  config: m1TowerConfig(16),
+  parts: towerParts16(),
+  pose: TOWER_POSE,
+  supportSource: 'conveyor-parts',
+  ...extra
+}).blockers.find((blocker) => blocker.reason === 'load-passes-shelf');
+
+test('P2-2 回归：witness.caliber 跟行表来源走 —— caller-rows 不许标「几何口径」', () => {
+  const fromParts = shelfBlockerOf();
+  assert.equal(fromParts?.witness?.caliber, 'geometry', '行表由几何/件表派生 → geometry');
+  assert.match(fromParts?.detail ?? '', /几何解析口径/);
+
+  // 同一份数字、行表声明成调用方的：数值可以一样，标签必须换成 caller-rows
+  const callerRows = shelfBlockerOf({ supportSource: 'caller-rows' });
+  assert.equal(callerRows?.witness?.caliber, 'caller-rows', 'caller-rows 的行表不是本机几何，口径标签必须跟着来源');
+  assert.match(callerRows?.detail ?? '', /调用方行表口径/);
+  assert.doesNotMatch(callerRows?.detail ?? '', /几何解析口径/);
+  assert.equal(callerRows?.witness?.measuredFreeRiseFromPanelTopMm, 98.5, '口径标注不影响可复算的数字');
+  // 方向仍不假绿：caller-rows 一律 diagnostic-only / feasible=false
+  const callerFeasibility = resolveChannelFeasibility({
+    config: m1TowerConfig(16),
+    parts: towerParts16(),
+    pose: TOWER_POSE,
+    supportSource: 'caller-rows'
+  });
+  assert.equal(callerFeasibility.diagnosticOnly, true);
+  assert.equal(callerFeasibility.feasible, false);
+  assert.equal(callerFeasibility.m1.feasible, false);
+
+  // 生产入口的 caller rows 路径同样透出 caller-rows
+  const fixture = m1ChannelFixture();
+  const outcome = checkPanelChannel({
+    config: fixture.config,
+    geometry: fixture.geometry,
+    rows: supportRowsFromConveyorParts(fixture.parts),
+    pose: poseOf(fixture)
+  });
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  const witness = outcome.feasibility.blockers
+    .find((blocker) => blocker.reason === 'load-passes-shelf')?.witness;
+  assert.equal(witness?.caliber, 'caller-rows');
+});
+
+test('P2-4 回归：detail 明写 witness 量到遮挡件 minZ（底面），不让人按承托面顶面验算', () => {
+  const shelf = shelfBlockerOf();
+  const detail = shelf?.detail ?? '';
+  assert.match(detail, /距板顶 98\.5/);
+  assert.match(detail, /距板底 133\.5/);
+  // 量到哪儿必须点名：minZ / 底面；并且区分「承托面顶面 1080」
+  assert.match(detail, /minZ 底面/);
+  assert.match(detail, /不是量到第 2 层承托面顶面 1080/);
+  assert.match(detail, /板厚/);
+  assert.deepEqual(shelf?.witness?.firstObstructionZBand, [1033.5, 1083.5]);
+  // witness.note 同一个口径（不是写死一句「几何解析」）
+  assert.match(shelf?.witness?.note ?? '', /minZ（底面）/);
+  const feasibility = resolveChannelFeasibility({
+    config: m1TowerConfig(16),
+    parts: towerParts16(),
+    pose: TOWER_POSE,
+    supportSource: 'conveyor-parts'
+  });
+  assert.match(feasibility.note, /均量到遮挡件 minZ 底面/);
+});
+
+test('P2-3 回归：承托面候选 NaN 落在 x / y / z → witness=null + invalid-shelf-geometry（不许 fail-open）', () => {
+  const rows = supportRowsFromConveyorParts(towerParts16());
+  for (const axis of ['x', 'y', 'z']) {
+    // 第 2 层两根辊是最低遮挡（minZ 1033.5）：旧实现把 NaN 当「不重叠」丢掉 → witness 变成 105（偏大）
+    const poisoned = rows.map((entry) => (/^tray-roller-2-/.test(entry.id)
+      ? {
+        ...entry,
+        ...(axis === 'x' ? { minX: Number.NaN, maxX: Number.NaN } : {}),
+        ...(axis === 'y' ? { minY: Number.NaN, maxY: Number.NaN } : {}),
+        ...(axis === 'z' ? { minZ: Number.NaN } : {})
+      }
+      : entry));
+    const feasibility = resolveChannelFeasibility({
+      config: m1TowerConfig(16),
+      rows: poisoned,
+      pose: TOWER_POSE,
+      supportSource: 'geometry'
+    });
+    const shelf = feasibility.blockers.find((blocker) => blocker.reason === 'load-passes-shelf');
+    assert.ok(shelf, `NaN ${axis}：load-passes-shelf 必须仍在（不许静默消失）`);
+    assert.equal(shelf?.witness, null, `NaN ${axis}：读不出坐标的候选在场时 witness 必须 null，不许拿其余件的 105 顶替`);
+    assert.equal(shelf?.diagnosticCode, 'invalid-shelf-geometry', `NaN ${axis}：必须显式标记`);
+    assert.deepEqual(shelf?.invalidShelfPartIds, ['tray-roller-2-in', 'tray-roller-2-out']);
+    assert.match(shelf?.detail ?? '', /invalid-shelf-geometry/);
+    assert.match(shelf?.detail ?? '', /非有限值/);
+    assert.match(shelf?.detail ?? '', /不拿其余件的数字顶替/);
+    // 方向：不是假绿
+    assert.equal(feasibility.feasible, false);
+    assert.deepEqual(feasibility.blockers.map((blocker) => blocker.reason), ['load-passes-shelf', 'stroke-shortfall']);
+    assert.match(feasibility.note, /invalid-shelf-geometry/);
+  }
+});
+
+test('P2-3 回归：NaN 来自真实件表变换（x=NaN）同样 fail-closed', () => {
+  // 端到端：不是手写行表，而是件表 transform.x 坏掉 → supportRowsFromConveyorParts 出 NaN
+  const brokenParts = towerParts16().map((part) => (/^tray-roller-2-/.test(part.id)
+    ? { ...part, transform: { ...part.transform, x: Number.NaN } }
+    : part));
+  const feasibility = resolveChannelFeasibility({
+    config: m1TowerConfig(16),
+    parts: brokenParts,
+    pose: TOWER_POSE,
+    supportSource: 'conveyor-parts'
+  });
+  const shelf = feasibility.blockers.find((blocker) => blocker.reason === 'load-passes-shelf');
+  assert.equal(shelf?.witness, null);
+  assert.equal(shelf?.diagnosticCode, 'invalid-shelf-geometry');
+  assert.deepEqual(shelf?.invalidShelfPartIds, ['tray-roller-2-in', 'tray-roller-2-out']);
+  assert.equal(feasibility.feasible, false);
+});
+
+test('P2-3 回归：所有承托面候选都读不出坐标 → 不许退成 no-support，也不许报可行', () => {
+  const rows = supportRowsFromConveyorParts(towerParts16()).map((entry) => (
+    /^(tray-\d+|tray-rail-|stop-|tray-roller-|layer-sensor-)/.test(entry.id)
+      ? { ...entry, minZ: Number.NaN }
+      : entry
+  ));
+  const feasibility = resolveChannelFeasibility({
+    config: m1TowerConfig(16),
+    rows,
+    pose: TOWER_POSE,
+    supportSource: 'geometry'
+  });
+  const reasons = feasibility.blockers.map((blocker) => blocker.reason);
+  assert.ok(reasons.includes('load-passes-shelf'), '承托面候选读不出坐标时不许声明 no-support');
+  assert.equal(reasons.includes('no-support'), false);
+  const shelf = feasibility.blockers.find((blocker) => blocker.reason === 'load-passes-shelf');
+  assert.equal(shelf?.witness, null);
+  assert.equal(shelf?.diagnosticCode, 'invalid-shelf-geometry');
+  assert.ok((shelf?.partIds.length ?? 0) > 0, 'partIds 必须点名那些读不出坐标的候选');
+  assert.match(shelf?.detail ?? '', /不可排除挡路/);
+  assert.equal(feasibility.feasible, false);
+});
+
+test('P2-3 对照：件表干净时 witness 照旧 98.5 / 133.5（不用 NaN 兜底把正常读数压掉）', () => {
+  const shelf = shelfBlockerOf();
+  assert.equal(shelf?.diagnosticCode, undefined, '干净件表不许带 invalid-shelf-geometry');
+  assert.equal(shelf?.invalidShelfPartIds, undefined);
+  assert.equal(shelf?.witness?.measuredFreeRiseFromPanelTopMm, 98.5);
+  assert.equal(shelf?.witness?.measuredFreeRiseFromPanelBottomMm, 133.5);
+  assert.deepEqual(shelf?.witness?.firstObstructionPartIds, ['tray-roller-2-in', 'tray-roller-2-out']);
+});
+
+/* ------------------------------------------------------------------ *
+ * P2-2（最终复审）fail-closed：件的实体特征参数坏 → 行表不再静默丢件
+ *
+ * 旧实现 `supportRowsFromConveyorParts` 把「特征参数读不出」和「本来没有实体外形」都当成
+ * `solids === 0` 跳过 → 行表里没有这件，`invalid-shelf-geometry` 看不见它，witness 偏大且无诊断码。
+ * 现在适配器把前者记进 `droppedPartIds`，判据一侧并进同一份「无法判定是否挡路」清单。
+ * ------------------------------------------------------------------ */
+
+/** 16 层真实塔件表：把指定件的 cylinder 特征参数（直径/长度）改成 NaN（辊筒只有一条 cylinder 特征） */
+const poisonCylinderParams = (parts, pattern) => parts.map((part) => (pattern.test(part.id)
+  ? {
+    ...part,
+    features: part.features.map((node) => (node.type === 'cylinder'
+      ? { ...node, params: { ...node.params, diameter: Number.NaN, height: Number.NaN } }
+      : node))
+  }
+  : part));
+
+test('P2-2 回归：真实塔件表里 tray-roller-2-in/out 辊筒参数 NaN → droppedPartIds 记账 + witness=null + invalid-shelf-geometry', () => {
+  const poisoned = poisonCylinderParams(towerParts16(), /^tray-roller-2-(in|out)$/);
+
+  // ① 适配器必须把「量不出盒」的件交出来，不许当「件表里没有这件」
+  const detailed = supportRowsFromConveyorPartsDetailed(poisoned);
+  assert.deepEqual(detailed.droppedPartIds, ['tray-roller-2-in', 'tray-roller-2-out']);
+  assert.equal(
+    detailed.rows.some((entry) => /^tray-roller-2-/.test(entry.id)),
+    false,
+    '量不出包围盒的件本来就不许有行（不拿 0 或几何均值编一个盒）'
+  );
+
+  // ② 旧口径（只看行表）就是这个 P2 的样子：行没了、最低遮挡换人、自由上升变大、且没有诊断码
+  const rowsOnly = resolveChannelFeasibility({
+    config: m1TowerConfig(16),
+    rows: supportRowsFromConveyorParts(poisoned),
+    pose: TOWER_POSE,
+    supportSource: 'geometry'
+  });
+  const stale = rowsOnly.blockers.find((blocker) => blocker.reason === 'load-passes-shelf');
+  assert.equal(stale?.diagnosticCode, undefined, '对照：只看行表时诊断码是空的（复现 P2-2）');
+  assert.deepEqual(stale?.witness?.firstObstructionPartIds, ['tray-rail-2-left', 'tray-rail-2-right']);
+  assert.equal(stale?.witness?.measuredFreeRiseFromPanelTopMm, 105);
+  assert.ok(
+    (stale?.witness?.measuredFreeRiseFromPanelTopMm ?? 0) > 98.5,
+    '偏大 6.5 mm 正是 fail-open 读数（98.5 → 105）'
+  );
+
+  // ③ 判据路径（件表）必须 fail-closed：数字不顶替、件号点名、方向不假绿
+  const feasibility = resolveChannelFeasibility({
+    config: m1TowerConfig(16),
+    parts: poisoned,
+    pose: TOWER_POSE,
+    supportSource: 'conveyor-parts'
+  });
+  const shelf = feasibility.blockers.find((blocker) => blocker.reason === 'load-passes-shelf');
+  assert.ok(shelf, 'load-passes-shelf 不许因为两件量不出盒就消失');
+  assert.equal(shelf?.witness, null, '读不出包围盒的件在场时 witness 必须 null（不许拿其余的 105 / 98.5 顶替）');
+  assert.equal(shelf?.diagnosticCode, 'invalid-shelf-geometry');
+  assert.deepEqual(shelf?.invalidShelfPartIds, ['tray-roller-2-in', 'tray-roller-2-out']);
+  assert.match(shelf?.detail ?? '', /invalid-shelf-geometry/);
+  assert.match(shelf?.detail ?? '', /特征参数非有限值/, 'detail 必须说清是「参数坏」而不是「坐标坏」');
+  assert.match(shelf?.detail ?? '', /无法量到遮挡件 minZ 底面/);
+  assert.match(shelf?.detail ?? '', /不拿其余件的数字顶替/);
+  assert.match(feasibility.note, /invalid-shelf-geometry/);
+  assert.equal(feasibility.feasible, false);
+  assert.deepEqual(feasibility.blockers.map((blocker) => blocker.reason), ['load-passes-shelf', 'stroke-shortfall']);
+});
+
+test('P2-2 回归：只坏一根辊（tray-roller-2-in）也要点名 —— 旧实现首件会静默换成 -out', () => {
+  const poisoned = poisonCylinderParams(towerParts16(), /^tray-roller-2-in$/);
+  const detailed = supportRowsFromConveyorPartsDetailed(poisoned);
+  assert.deepEqual(detailed.droppedPartIds, ['tray-roller-2-in']);
+
+  // 对照：只看行表时数字仍是 98.5，但「首件」从 -in/out 两根变成只剩 -out —— 无告警的错答案
+  const rowsOnly = resolveChannelFeasibility({
+    config: m1TowerConfig(16),
+    rows: supportRowsFromConveyorParts(poisoned),
+    pose: TOWER_POSE,
+    supportSource: 'geometry'
+  });
+  const stale = rowsOnly.blockers.find((blocker) => blocker.reason === 'load-passes-shelf');
+  assert.equal(stale?.diagnosticCode, undefined);
+  assert.deepEqual(stale?.witness?.firstObstructionPartIds, ['tray-roller-2-out']);
+
+  const feasibility = resolveChannelFeasibility({
+    config: m1TowerConfig(16),
+    parts: poisoned,
+    pose: TOWER_POSE,
+    supportSource: 'conveyor-parts'
+  });
+  const shelf = feasibility.blockers.find((blocker) => blocker.reason === 'load-passes-shelf');
+  assert.equal(shelf?.witness, null);
+  assert.equal(shelf?.diagnosticCode, 'invalid-shelf-geometry');
+  assert.deepEqual(shelf?.invalidShelfPartIds, ['tray-roller-2-in']);
+  assert.equal(feasibility.feasible, false);
+});
+
+test('P2-2 对照：合法「无实体外形」的件照旧不成行 —— 不记 dropped、不加诊断码、witness 仍 98.5', () => {
+  // 只有减材料特征（holes）的件：本来就没有外形可量 → 政策是跳过，不是坏输入
+  const subtractOnly = {
+    id: 'tray-99',
+    name: '只钻孔的占位件',
+    transform: { x: 0, y: 0, z: 1200, rz: 0 },
+    features: [{ id: 'tray-99-hole', type: 'holes', name: '孔', params: { diameter: 10, depth: 5, positions: [[0, 0]] } }]
+  };
+  const baselineRows = supportRowsFromConveyorParts(towerParts16());
+  const parts = [...towerParts16(), subtractOnly];
+
+  const detailed = supportRowsFromConveyorPartsDetailed(parts);
+  assert.deepEqual(detailed.droppedPartIds, [], '无实体外形 ≠ 参数坏：不许进 droppedPartIds');
+  assert.deepEqual(detailed.rows, baselineRows, '行表必须与不含该件时逐项相等');
+
+  const feasibility = resolveChannelFeasibility({
+    config: m1TowerConfig(16),
+    parts,
+    pose: TOWER_POSE,
+    supportSource: 'conveyor-parts'
+  });
+  const shelf = feasibility.blockers.find((blocker) => blocker.reason === 'load-passes-shelf');
+  assert.equal(shelf?.diagnosticCode, undefined, '干净件表（含无外形件）不许带 invalid-shelf-geometry');
+  assert.equal(shelf?.invalidShelfPartIds, undefined);
+  assert.equal(shelf?.witness?.measuredFreeRiseFromPanelTopMm, 98.5);
+  assert.deepEqual(shelf?.witness?.firstObstructionPartIds, ['tray-roller-2-in', 'tray-roller-2-out']);
+});
+
+/* ------------------------------------------------------------------ *
+ * P2（最终复审）fail-closed：承托行含非有限 min/max x/y/z → 不得给 supported claim
+ * ------------------------------------------------------------------ */
+
+/** 两条真合格的叉指带（2000×100，y=±430 内侧，顶面 910）：单独算就是 supported（15.48% / 2 带） */
+const forkBands = () => [
+  row('lift-finger-left', { x: [-1000, 1000], y: [-480, -380], topZ: 910 }),
+  row('lift-finger-right', { x: [-1000, 1000], y: [380, 480], topZ: 910 })
+];
+
+/** 同类承托件的第三条：坐标读得出时它一定落在板投影正中、且顶面贴板底（必然是接触件） */
+const forkCenter = () => row('lift-finger-center', { x: [-1000, 1000], y: [-100, 0], topZ: 910 });
+
+/** 抬起位姿的入参（板底 910 = 叉指顶面） */
+const FORK_POSE = { panel: PANEL, bottomZmm: 910, pose: 'carried', poseShiftMm: 20 };
+
+test('P2 回归（对照）：两条真带 + 第三条真接触件 → supported，新判据不误伤干净输入', () => {
+  const report = resolvePanelSupport({ ...FORK_POSE, parts: [...forkBands(), forkCenter()] });
+  assert.equal(report.verdict, 'supported');
+  assert.equal(report.claim, 'supported', '干净行表不许被压成诊断');
+  assert.equal(report.diagnosticOnly, false);
+  assert.deepEqual(report.invalidPartIds, []);
+  assert.equal(report.diagnosticCode, undefined, '干净行表不许带 invalid-support-rows');
+  assert.equal(report.coveredPct, 23.23);
+  assert.equal(report.bandsY.length, 3);
+  assert.equal(report.supportPartCount, 3);
+});
+
+test('P2 回归：任一承托行 min/max x/y/z 非有限 → 该行剔除 + claim=diagnostic-only（即便几何 verdict=supported）', () => {
+  // 旧实现为什么会被这条顶高：NaN 参与的大小比较恒 false —— `|NaN − 910| > 1` 是 false，
+  // 于是「z 读不出来」被当成「顶面正好贴在板底」，而它的 x/y 重叠与面积都是有限正数。
+  assert.equal(Math.abs(Number.NaN - 910) > 1, false);
+
+  const baseline = resolvePanelSupport({ ...FORK_POSE, parts: forkBands() });
+  assert.equal(baseline.claim, 'supported', '前提：两条真带自身就是 supported');
+  assert.equal(baseline.coveredPct, 15.48);
+
+  const cases = [
+    ['x', { minX: Number.NaN, maxX: Number.NaN }],
+    ['y', { minY: Number.NaN, maxY: Number.NaN }],
+    ['minZ', { minZ: Number.NaN }],
+    ['maxZ', { maxZ: Number.NaN }] // 旧实现正是在这条上 fail-open（当成接触件计入）
+  ];
+  for (const [axis, patch] of cases) {
+    const report = resolvePanelSupport({
+      ...FORK_POSE,
+      parts: [...forkBands(), { ...forkCenter(), ...patch }]
+    });
+    assert.equal(report.verdict, 'supported', `${axis}：其余两行的几何判决仍是 supported —— 压住 claim 的不是「算不出来」`);
+    assert.equal(report.claim, 'diagnostic-only', `${axis}：不得给 supported claim`);
+    assert.equal(report.diagnosticOnly, true, `${axis}：必须显式标成诊断`);
+    assert.equal(report.diagnosticCode, 'invalid-support-rows', `${axis}：必须带稳定诊断码`);
+    assert.deepEqual(report.invalidPartIds, ['lift-finger-center'], `${axis}：坏行必须点名`);
+    // 数字与对照完全一致：坏行既不许顶高覆盖率/带数，也不许被静默当成「确认不接触」
+    assert.deepEqual(report.contacts.map((contact) => contact.partId), ['lift-finger-left', 'lift-finger-right']);
+    assert.equal(report.bandsY.length, 2);
+    assert.equal(report.coveredPct, baseline.coveredPct, `${axis}：覆盖率不许被坏行改变`);
+    assert.equal(report.supportPartCount, 2, `${axis}：坏行不算「参与判定」`);
+    // reason 必须点名根因，且不许被读成「托不住」
+    assert.match(report.reasons[0] ?? '', /invalid-support-rows/, `${axis}：根因放在第一条 reason`);
+    const joined = report.reasons.join(' ');
+    assert.match(joined, /lift-finger-center/);
+    assert.match(joined, /claim 只能是 diagnostic-only/);
+    assert.match(joined, /不得当「能托住板」的证据/);
+    assert.doesNotMatch(joined, /diagnosticOnly：板不在碰撞件集/, `${axis}：根因不是「板不在碰撞件集」，不许套错模板`);
+  }
+});
+
+test('P2 回归（端到端）：夹具件表里一条承托行 maxZ=NaN → rest claim 诊断、m1 不绿、feasible=false', () => {
+  const fixture = m1ChannelFixture();
+  const clean = channelOf(fixture);
+  assert.equal(clean.panelSupport.rest.claim, 'supported', '前提：干净夹具的 rest 是 supported');
+  assert.equal(clean.m1.restSupported, true);
+
+  const rows = supportRowsFromConveyorParts(fixture.parts).map((entry) => (
+    entry.id === 'lift-finger-left' ? { ...entry, maxZ: Number.NaN } : entry
+  ));
+  const poisoned = channelOf(fixture, { rows });
+  assert.equal(poisoned.panelSupport.rest.claim, 'diagnostic-only');
+  assert.equal(poisoned.panelSupport.rest.verdict, 'supported', '几何判决本身仍算得出来 —— 被压住的是可引用性');
+  assert.deepEqual(poisoned.panelSupport.rest.invalidPartIds, ['lift-finger-left']);
+  assert.equal(poisoned.m1.restSupported, false, '诊断结论不许进 m1 首层绿');
+  assert.equal(poisoned.m1.feasible, false);
+  assert.equal(poisoned.feasible, false, 'claim 与可行判定同源：诊断态不许 feasible=true');
+  assert.match(poisoned.note, /invalid-support-rows/);
+  assert.equal(poisoned.panelSupport.carried.claim, 'diagnostic-only', '同一行随轴走，仍读不出顶面');
+});
+
+test('P2 回归（生产入口）：几何件表里承托件中心坏掉 → mode 仍 verified，但 rest claim 降为 diagnostic-only', () => {
+  const fixture = m1ChannelFixture();
+  const geometry = {
+    ...fixture.geometry,
+    // 行表（supportRowsFromGeometryParts）读的是 world center：这里就是「几何件表投影出 NaN 行」的入口
+    parts: fixture.geometry.parts.map((part) => (
+      part.id === 'lift-finger-left'
+        ? { ...part, center: [Number.NaN, part.center[1], part.center[2]] }
+        : part
+    ))
+  };
+  const outcome = checkPanelChannel({ config: fixture.config, geometry });
+  assert.equal(outcome.ok, true);
+  if (!outcome.ok) return;
+  assert.equal(outcome.rowsSource, 'geometry', '行表仍来自几何，不是拿 caller rows 兜');
+  // mode 的口径不变（只覆盖「行表来自几何 + 板在碰撞件集」），可引用性由 claim 管
+  assert.equal(outcome.mode, 'verified');
+  assert.equal(outcome.panelSupport.rest.claim, 'diagnostic-only', '有非有限坐标行 → 不得给 supported claim');
+  assert.ok(outcome.panelSupport.rest.invalidPartIds.includes('lift-finger-left'));
+  assert.equal(outcome.feasibility.feasible, false);
+  assert.match(outcome.note, /invalid-support-rows/);
+  assert.match(outcome.note, /读不全/, 'note 必须说清「读不全 ≠ 托不住」');
 });

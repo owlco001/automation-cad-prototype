@@ -147,8 +147,12 @@ const INTERFERENCE_CHECK_SCHEMA = {
       description:
         '要求校验板承托 / 升降通道（只对 states 有意义）：true 时启用严格输入校验（缺 states、无板、非缓存塔均 INVALID_ARGUMENT）；缓存塔本来就会回 panelSupport / panelFeasibility / panelChannelNote（只读诊断字段），不是此标志打开的字段开关；'
         + '几何里没有板占位体、或机型不是缓存塔 → INVALID_ARGUMENT（不做「查不到 → 绿」）。'
-        + '口径边界：生产塔当前只有 diagnostic-only（板是只读占位体、没有承托路径，claim=diagnostic-only、feasible=false），'
-        + 'verified 只属于 M1 夹具件表（test-support/m1-channel-fixture.mjs，152 件）。'
+        + '口径边界（生产缓存塔）：几何**包含真实板**（workpiece-plate 进 geometry.parts、参与 rest/lift/sweep 的 AABB），'
+        + '因此 panelSupport/panelFeasibility 的 mode 可以是 verified —— verified 只说明「行表来自几何 + 碰撞集里有同一工件身份的这块板（含朝向）」，'
+        + '不是可行性结论、也不是承载认证：该塔 rest 承托 unsupported（单条整带）、carried diagnostic-only（板不随塔轴移动、位移缺失）、'
+        + 'feasible=false，blockers 为 load-passes-shelf + stroke-shortfall。'
+        + '碰撞集判定认的是**同一件成员**：同 id + role=workpiece + box 尺寸/中心在 ±EPS 内一致 + rotationZDeg 有限且与占位体周期等价，缺一即不算 —— '
+        + 'id 相同但 role/尺寸/中心/朝向不符的件不是同一件成员，不计入碰撞集（只同 id 不够）。行表来自调用方时也仍是 diagnostic-only。'
         + '该字段只给几何诊断读数，不是结构验收：不要据此对外称可落地，也不要当结构结论引用。'
     }
   },
@@ -732,7 +736,7 @@ function buildBufferTowerGeometryReceipt(
       massNote: '本工具不跑建模内核：质量必须由真 B-Rep（regen/STEP）回传体积后按密度算，这里不给估算值'
     },
     /**
-     * BOM / 成本覆盖度（P2-6）：回执里 146 件几何、8 行 BOM 是两台机器的清单。
+     * BOM / 成本覆盖度（P2-6）：回执里 146 件装配 + 1 块板（碰撞几何 147 刚体）、8 行 BOM 是两台机器的清单。
      * 本轮**不**把塔身塞进 `design.bomDraft`（那会改成本口径与价格簿匹配），而是显式标注
      * 「机器 BOM 只覆盖底架、塔身见 geometry.structureBom」，让 cost.total 不被当整机成本。
      */
@@ -1509,7 +1513,7 @@ export class AgentTools {
               );
             }
             // BOM/成本口径：`design.bomDraft` 是机型方案的执行机构/传感器清单（底架输送线口径），
-            // 不含塔身 117 件。不显式说，回执里「146 件几何 + 8 行 BOM + cost.total」会被读成整机成本。
+            // 不含塔身 117 件。不显式说，回执里「147 个碰撞刚体（146 装配 + 板）+ 8 行 BOM + cost.total」会被读成整机成本。
             const basePartCount = buildConveyorParts(bufferTowerInboundParams(towerParams)).length;
             const bomRows = Array.isArray(design.bomDraft?.items) ? design.bomDraft.items.length : 0;
             design.warnings.push(
@@ -1598,7 +1602,7 @@ export class AgentTools {
     this.add({
       name: 'apply_machine_design',
       description:
-        '把机型方案写入 userData/machine/<id>.json 并把当前工程指向它；brief 与完整 design 二选一。需要用户确认，可用 undo_last 撤销。默认把 bomDraft 追加到 BOM 草稿（withBom=true），可选生成 PLC 点位映射 io-map.csv（withPlc=true）；默认生成参数化整机几何（geometry.json / model.stl / model.gltf / sidecar-assembly.json，withGeometry=true），withSolids=true 时在 build123d 内核可用时实体化为 STEP；成功后 3D 联调视图切到新配置的真实几何。',
+        '把机型方案写入 userData/machine/<id>.json 并把当前工程指向它；brief 与完整 design 二选一。需要用户确认，可用 undo_last 撤销。默认把 bomDraft 追加到 BOM 草稿（withBom=true），可选生成 PLC 点位映射 io-map.csv（withPlc=true）；默认生成参数化整机几何（geometry.json / model.stl / model.gltf / sidecar-assembly.json，withGeometry=true），withSolids=true 时在 build123d 内核可用时实体化为 STEP；成功后 3D 联调视图切到新配置的真实几何。口径：geometry.json 是碰撞几何（缓存塔含板时比装配件多 1，16 层 147 个刚体）；STL/glTF/sidecar（→STEP）是制造导出（缓存塔剔除板件，只出装配件，16 层 146）。',
       inputSchema: APPLY_MACHINE_DESIGN_SCHEMA,
       handler: async (args) => {
         const brief = getString(args.brief);
@@ -1760,7 +1764,7 @@ export class AgentTools {
         '按机型参数生成整机 3D 模型并装配进当前视口：机型经注册表分发（conveyor / buffer-tower），走参数化内核（逐件实体 → 每件独立 STL），返回零件数、实体数、包络、总质量、BOM、STEP/STL 字节数。' +
         '可以直接给 brief（需求原文），工具会从里面取线体长/宽、「N 层」缓存层数，不必逐项填 params；params 显式给了就以 params 为准。' +
         'layers≥2 出立体缓存（底层输送 + 多层托架 + 升降机构），layers=1 是普通输送线。' +
-        '缓存塔：给 process=\'buffer-tower\' 或直接给 design/config（design.config.bufferTower 是权威来源），出 146 件塔身（16 层）；' +
+        '缓存塔：给 process=\'buffer-tower\' 或直接给 design/config（design.config.bufferTower 是权威来源），出 146 件塔身（16 层；STL/STEP 件数同此，碰撞几何另加 1 块板 = 147 刚体）；' +
         '塔参数越界拒绝（不夹紧），process 与塔 design 冲突时显式拒绝而不是静默改建成 29 件底层输送线。' +
         'design/config 只对塔有意义：非塔机型请把尺寸放进 params（config.conveyor 不会被读取，会显式拒）；' +
         '塔也不要同时给 params（塔几何只认 config.bufferTower）。会落盘成工程。',
@@ -1886,14 +1890,18 @@ export class AgentTools {
         '返回 {ok,reviewStatus,states:{rest|lift|sweep|push:{pairs,hits,screenHits,confirmedHits,mates,mm3,mm3Confirmed,mm3Screen,poseValidity,items}},lift:{...},push:{...}|null,workpiece:{...}|null,precision}。' +
         '工件（板）在移载机型上是一个**普通零件**（partId=workpiece-plate，尺寸由 conveyor.transferPartLengthMm/WidthMm/ThicknessMm 给，缺省 1200×800×35）：' +
         '它参与全部碰撞对，所以「板能不能从出料口推出去」是本工具能回答的问题；每态的 workpiecePairs/workpieceTouching 是「板真的在场」的证据。' +
-        '口径：partCount（几何刚体数）含工件 +1，assemblyPartCount/BOM/成本**不含**工件。' +
+        '口径：partCount（几何刚体数）含工件 +1，assemblyPartCount/BOM/成本**不含**工件；STL/STEP 制造导出按 machineExportParts（缓存塔剔除板件，件数 = assemblyPartCount，不是 partCount）。' +
         '口径必须按字段读：confirmedHits=解析式精确求交确认的实体重叠（唯一能否决出图的数字）；screenHits=只有包围盒依据或位姿不可达，只能当待复核；' +
         'mates=同轴嵌套配合（缸体×活塞杆这类，实体布尔必然重叠但不是干涉，不是缺陷）；mm3 含 declared/mate，只作量级参考。' +
         '顶升行程优先读 active 机型 config 的执行机构 travelMm（turner-lift）；config 里没有顶升机构时认几何标注了 strokeSource=geometry 的轴' +
         '（缓存塔 tower-lift，行程 = (层数−1)×层距），此时回执 lift.strokeSource=geometry，精度低于 config 行程；两种都没有才返回 STATE_UNAVAILABLE，绝不拿静态位姿冒充 lift；' +
         'directionOverridden=true 表示 config 方向与几何建模的伸出方向相反，该态是反向平移、位姿不可达。' +
         '要板承托/通道诊断时可加 requirePanel=true（须同时给 states）：该标志要求严格校验诊断适用条件（缺 states、无板、非缓存塔均为 INVALID_ARGUMENT）；缓存塔在缺省路径也会回这些只读诊断字段，requirePanel 不是字段开关。' +
-        '几何无板或非缓存塔直接 INVALID_ARGUMENT。生产塔当前只有 diagnostic-only，M1 夹具件表才是 verified —— 这些字段只是几何诊断，不构成结构结论。',
+        '几何无板或非缓存塔直接 INVALID_ARGUMENT。生产塔几何现在包含真实板（workpiece-plate 进 geometry.parts），所以 mode 可以是 verified；'
+        + '但 verified 只说明「行表来自几何 + 碰撞集里有同一工件身份的这块板（含朝向）」，不是结构可行：rest unsupported（单条整带）、'
+        + 'carried diagnostic-only（板不随塔轴移动、位移缺失）、feasible=false（load-passes-shelf + stroke-shortfall）；'
+        + '判定认同一件成员（同 id + role=workpiece + box 尺寸/中心 ±EPS + rotationZDeg 有限且周期等价，缺一即不算；id 相同但 role/尺寸/中心/朝向不符 → 不是同一件成员，不计入碰撞集）。'
+        + '板只在占位体里（parts 里没有同一工件身份的件）或行表来自调用方时仍 diagnostic-only。这些字段只是几何诊断，不构成结构结论。',
       inputSchema: INTERFERENCE_CHECK_SCHEMA,
       handler: async (args) => {
         if (args.states !== undefined && args.states !== null && !Array.isArray(args.states)) {

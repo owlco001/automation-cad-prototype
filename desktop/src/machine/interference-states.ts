@@ -655,6 +655,25 @@ function normalizeStates(states: unknown): { ok: true; states: InterferenceState
 }
 
 /**
+ * 承托断言在回执里**可引用**的那一半：只印 `claim`，残缺时点名诊断码与坏行。
+ *
+ * 为什么不能直接把 `verdict` 印成结论：`verdict` 是纯几何读数，`claim='diagnostic-only'`
+ * 时它**仍可能算出 `supported`**（N13：承托行坐标非有限值 → 该行已剔除，其余行凑出
+ * `supported`）。把 `verdict` 印成 `rest supported` 会把「测量残缺」读成「承托成立」——
+ * 正是 fail-closed 分支要防的假绿。干净输入（claim 就是 verdict）输出与旧文案一致。
+ */
+function panelSupportClaimText(report: PanelSupportReport): string {
+  if (report.claim !== 'diagnostic-only') return report.claim;
+  const invalid = report.invalidPartIds;
+  const listed = invalid.slice(0, 6).join('/') + (invalid.length > 6 ? '…' : '');
+  const cause = report.diagnosticCode === 'invalid-support-rows'
+    ? `diagnosticCode=${report.diagnosticCode}，invalidPartIds=${listed}；`
+      + `这 ${invalid.length} 件的坐标不是有限值、已从接触判定中剔除，本次测量残缺`
+    : '行表/位移来源不构成本机证据，见 feasibility.note';
+  return `diagnostic-only（不可当承托证据：${cause}；不得当「能托住」读）`;
+}
+
+/**
  * 计算请求的状态。config 来自 active 机型（`active.json`），geometry 缺省由它生成，
  * 保证 rest/lift/sweep 三份数字比较的是同一套零件（不会一份来自场景、一份来自配置文件）。
  */
@@ -743,13 +762,20 @@ export function runInterferenceStates(input: {
       panelFeasibility = check.feasibility;
       const rest = check.panelSupport.rest;
       const carried = check.panelSupport.carried;
-      panelChannelNote = `承托断言（只读，阈值 ≥${rest.thresholds.minCoveredPct}% / ≥${rest.thresholds.minBands} 带 / `
+      panelChannelNote = `承托断言（只读，${check.mode}；阈值 ≥${rest.thresholds.minCoveredPct}% / ≥${rest.thresholds.minBands} 带 / `
         + `带 x≥${rest.thresholds.minBandOverlapXmm} / 接触 x≥${rest.thresholds.minContactOverlapXmm}）：`
-        + `rest ${rest.verdict}（覆盖 ${rest.coveredPct}%、${rest.bandsY.length} 带）、`
-        + `carried ${carried.verdict}（覆盖 ${carried.coveredPct}%、${carried.bandsY.length} 带，随动 +${carried.poseShiftMm} mm）；`
+        + `rest ${panelSupportClaimText(rest)}（覆盖 ${rest.coveredPct}%、${rest.bandsY.length} 带）、`
+        + `carried ${panelSupportClaimText(carried)}（覆盖 ${carried.coveredPct}%、${carried.bandsY.length} 带，随动 +${carried.poseShiftMm} mm）；`
         + `多层通道 feasible=${check.feasibility.feasible}，blockers=`
         + `${check.feasibility.blockers.map((blocker) => blocker.reason).join('/')}。`
-        + '首层能托住 ≠ 多层可行；blockers 里的 load-passes-shelf 是结构事实（纯 Z 升降必穿过板投影内的承托面）';
+        + '首层能托住 ≠ 多层可行；blockers 里的 load-passes-shelf 是结构事实（纯 Z 升降必穿过板投影内的承托面）；'
+        + (check.mode === 'verified'
+          ? 'verified 只说明「行表来自几何 + 碰撞集里有这块板」，不是结构可行/承载认证'
+          : 'diagnostic-only：板不在碰撞件集或行表来自调用方，数字只能当诊断')
+        + (rest.diagnosticCode || carried.diagnosticCode
+          ? `；承托测量残缺（${rest.diagnosticCode ?? carried.diagnosticCode}）：rest/carried 的几何 verdict 只作诊断，`
+            + '回执结论只按 claim 读，不得当成「板被托住」'
+          : '');
     } else {
       panelChannelNote = `承托/通道未算出：${check.message}`;
     }
@@ -791,8 +817,11 @@ export function runInterferenceStates(input: {
     ? Number(workpiecePart.shape.size[2]) / 2
     : 0;
   // 工件在顶升轴上的实际位移 = 轴行程 − 拾取空行程（带空行程的件按表算）。
-  const workpieceLiftMm = lift
-    ? (workpieceId !== undefined ? liftTravelOf(lift, workpieceId, lift.strokeMm) : lift.strokeMm)
+  // **工件必须在这条轴的 partIds 里**：塔的 `tower-lift` 只带台面（partIds=['lift-platform']），
+  // 板不随它走。以前这里无条件按轴行程给位，于是板底凭空变成 3600（而 workpiecePairs=0、
+  // 板一动不动）—— 三个数互相矛盾。不在轴上时 `lift` 位是 null（= 没有位移证据，不是 0）。
+  const workpieceLiftMm = lift && workpieceId !== undefined && lift.partIds.includes(workpieceId)
+    ? liftTravelOf(lift, workpieceId, lift.strokeMm)
     : null;
   const workpiece: InterferenceWorkpieceInfo | null = workpiecePart
     ? {

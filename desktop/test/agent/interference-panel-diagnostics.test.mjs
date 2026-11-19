@@ -8,8 +8,9 @@
  *    这两种机型会照旧返回 ok:true —— 见 §「缺省不变」用例的对照断言）。
  * 2. 塔 config 走 **active 设计**（readActiveMachineDesign → resolveMachineGeometry 的塔分派），
  *    回执同时带 panelSupport / panelFeasibility / panelChannelNote，且 `feasible=false` 有 blockers。
- * 3. 口径不许写歪：生产塔的板只是只读占位体（`workpiecePlaceholder`、`inCollisionSet:false`），
- *    承托结论恒 `claim='diagnostic-only'`；「verified」只属于 M1 夹具件表。本文件不出现
+ * 3. 口径不许写歪：生产塔的几何**包含真实板**（`geometry.parts` 里的 workpiece-plate），所以
+ *    `mode` 可以是 `verified`；但 verified 只说明「行表来自几何 + 板在碰撞集」，不是结构可行——
+ *    rest 仍 `unsupported`（单条整带）、carried 仍 `diagnostic-only`（板不随塔轴移动）、`feasible=false`。本文件不出现
  *    「结构可行」这种结论 —— 诊断读数不是结构验收。
  * 4. requirePanel 缺省（或 false）时回执与旧行为逐字节一致（老调用方不受影响）。
  * 4b. requirePanel 只认布尔：`'true'`/`1`/`{}` 在**命令层与工具层**都 INVALID_ARGUMENT
@@ -17,6 +18,9 @@
  *    同理不许退化成绿。
  * 5. 结果大小截断规则仍适用：该回执本身 >10 KB，走 `serializeToolResult` 会被截成
  *    preview + resultId（外置全文仍含三个 panel 字段，`get_tool_result` 可取回）。
+ * 6. 回执文案与结构化结论同源：`panelChannelNote` 只印 `claim`。承托行坐标非有限值时
+ *    `verdict` 仍可能算出 supported，但 `claim` 已降级成 diagnostic-only —— 文案里
+ *    绝不许出现 `rest supported` 这种读法（N13 在 `runInterferenceStates` 这一层的回归）。
  */
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -27,8 +31,9 @@ import { after, test } from 'node:test';
 import { AgentTools } from '../../src/agent/tools.ts';
 import { createAgentCommandBus } from '../../src/agent/commands.ts';
 import { TOOL_RESULT_BYTE_LIMIT, serializeToolResult, trimToolResult } from '../../src/agent/trim.ts';
+import { runInterferenceStates } from '../../src/machine/interference-states.ts';
 import { validateMachineDesign, writeStoredMachineDesign } from '../../src/machine/store.ts';
-import { m1TowerConfig } from '../../test-support/m1-channel-fixture.mjs';
+import { m1ChannelFixture, m1TowerConfig } from '../../test-support/m1-channel-fixture.mjs';
 
 const roots = [];
 const registry = { listParts: () => [] };
@@ -101,20 +106,23 @@ test('塔 config 经 active 设计 + requirePanel：回执含 panelSupport/panel
   const data = result.data;
   assert.equal(data.ok, true, JSON.stringify(data).slice(0, 300));
   assert.equal(data.geometrySource, 'buffer-tower-assembly');
-  assert.equal(data.partCount, 146, '板不进 parts：塔仍是 146 件');
+  assert.equal(data.partCount, 147, '几何刚体 = 146 装配件 + 板');
+  assert.equal(data.assemblyPartCount, 146, '装配件数/BOM/STEP 口径不含板');
 
   assert.ok(data.panelSupport, 'requirePanel=true 必须交出承托断言');
   assert.ok(data.panelFeasibility, 'requirePanel=true 必须交出通道可行性');
   assert.equal(typeof data.panelChannelNote, 'string');
   assert.match(data.panelChannelNote, /多层通道 feasible=false/);
 
-  // 生产塔：板只是只读占位体 → 承托只能诊断，不许被读成「托住了」
-  assert.equal(data.panelSupport.rest.claim, 'diagnostic-only');
+  // 生产塔：板在碰撞集里 → rest 判决是 verified 口径的 unsupported（单条 1200 整带）；
+  // carried 缺板的位移证据（板不随塔轴移动）→ diagnostic-only
+  assert.equal(data.panelSupport.rest.claim, 'unsupported');
   assert.equal(data.panelSupport.carried.claim, 'diagnostic-only');
   assert.equal(data.panelSupport.rest.verdict, 'unsupported');
+  assert.equal(data.panelFeasibility.m1.carriedShiftSource, 'missing');
 
   assert.equal(data.panelFeasibility.feasible, false, '多层通道不可行是结论，不是失败');
-  assert.equal(data.panelFeasibility.diagnosticOnly, true);
+  assert.equal(data.panelFeasibility.diagnosticOnly, false, 'verified ≠ 可行；它只说明行表来自几何 + 板在碰撞集');
   const reasons = data.panelFeasibility.blockers.map((blocker) => blocker.reason);
   assert.ok(reasons.length >= 1, `blockers 不能为空：${JSON.stringify(reasons)}`);
   for (const reason of ['load-passes-shelf', 'stroke-shortfall']) {
@@ -125,8 +133,68 @@ test('塔 config 经 active 设计 + requirePanel：回执含 panelSupport/panel
     data.panelFeasibility.designNotes.map((note) => note.reason),
     ['clear-span-conservative', 'corridor-conservative']
   );
-  assert.match(data.panelFeasibility.note, /diagnosticOnly/);
+  assert.match(data.panelFeasibility.note, /实测自由上升/, 'note 必须带从件表算出的自由上升');
+  assert.match(data.panelFeasibility.note, /不得读成「多层可行」/);
+  assert.match(data.panelChannelNote, /verified/, '回执必须自报 mode');
+  assert.match(data.panelChannelNote, /不是结构可行/, 'verified 不许写成结构结论');
   assert.match(data.panelFeasibility.note, /不得读成「多层可行」|不得据此断言整板无法通过/);
+});
+
+test('承托行坐标非有限值：panelChannelNote 只印 claim=diagnostic-only，不许把 verdict 印成承托结论', () => {
+  const fixture = m1ChannelFixture();
+  // 正控：同一份 M1 夹具在干净输入下 rest/carried 都是 claim=supported —— 否则下面
+  // 「文案里不许出现 supported」可能只是碰巧本来就 unsupported，测不出这次降级。
+  const clean = runInterferenceStates({
+    states: ['rest', 'lift'],
+    config: fixture.config,
+    geometry: fixture.geometry,
+    requirePanel: true
+  });
+  assert.equal(clean.ok, true, JSON.stringify(clean).slice(0, 300));
+  assert.equal(clean.panelSupport.rest.claim, 'supported');
+  assert.equal(clean.panelSupport.carried.claim, 'supported');
+  assert.match(clean.panelChannelNote, /rest supported/);
+  assert.match(clean.panelChannelNote, /carried supported/);
+
+  // 把一条**真实接触行**的 x 中心改成 NaN：该行被剔除后其余行仍能凑出 verdict=supported，
+  // 但 claim 必须降级成 diagnostic-only（N13 的 fail-closed 语义）。
+  const geometry = structuredClone(fixture.geometry);
+  const poisoned = 'rail-left';
+  const row = geometry.parts.find((part) => part.id === poisoned);
+  assert.ok(row, `M1 夹具里必须有承托行 ${poisoned}`);
+  row.center = [NaN, row.center[1], row.center[2]];
+
+  const dirty = runInterferenceStates({
+    states: ['rest', 'lift'],
+    config: fixture.config,
+    geometry,
+    requirePanel: true
+  });
+  assert.equal(dirty.ok, true, JSON.stringify(dirty).slice(0, 300));
+  assert.equal(dirty.partCount, geometry.parts.length, '坏一行不改几何刚体数');
+
+  // 结构化结论是文案的对照基准：claim 已降级、diagnosticCode/invalidPartIds 点名坏行，
+  // 而 verdict 照实算成 supported —— 这正是文案不能直接印 verdict 的原因。
+  for (const pose of ['rest', 'carried']) {
+    const report = dirty.panelSupport[pose];
+    assert.equal(report.claim, 'diagnostic-only', `${pose} claim 必须降级`);
+    assert.equal(report.diagnosticCode, 'invalid-support-rows', `${pose} 必须带诊断码`);
+    assert.deepEqual(report.invalidPartIds, [poisoned], `${pose} 必须点名坏行`);
+    assert.equal(report.verdict, 'supported', `${pose} verdict 是几何读数（照实算，但不可引用）`);
+  }
+  assert.equal(dirty.panelFeasibility.feasible, false);
+  assert.equal(dirty.panelFeasibility.m1.feasible, false);
+  assert.equal(dirty.panelFeasibility.m1.restSupported, false);
+  assert.equal(dirty.panelFeasibility.m1.carriedSupported, false);
+
+  const note = dirty.panelChannelNote;
+  assert.equal(typeof note, 'string');
+  assert.match(note, /diagnostic-only/, '回执必须自报 claim');
+  assert.match(note, /invalid-support-rows/, '回执必须点名诊断码');
+  assert.match(note, new RegExp(poisoned), '回执必须点名坏行');
+  assert.doesNotMatch(note, /supported/,
+    `claim=diagnostic-only 时整段文案都不许出现 supported（会被读成承托成立）：${note}`);
+  assert.doesNotMatch(note, /rest supported|carried supported/);
 });
 
 test('工具层透传：schema 有 requirePanel，handler 回执与命令层逐字段一致（三键原样）', async () => {
@@ -136,7 +204,8 @@ test('工具层透传：schema 有 requirePanel，handler 回执与命令层逐�
   const description = String(schema.properties.requirePanel?.description ?? '');
   assert.match(description, /承托|通道/);
   assert.match(description, /diagnostic-only/);
-  assert.match(description, /M1 夹具/, '必须点明 verified 只属于 M1 夹具件表');
+  assert.match(description, /verified/, '必须点明 verified 的口径');
+  assert.match(description, /不是可行性|不是结构结论/, 'verified 不许写成结构结论');
   assert.doesNotMatch(description, /结构可行/, 'schema 文案不许把诊断写成结构结论');
 
   const viaTool = await tools.call('run_interference_check', { states: ['rest'], requirePanel: true });

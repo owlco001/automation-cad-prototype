@@ -30,9 +30,18 @@
  *
  * **来源标注**：`supported` 一律带 `supportSource`（`fixture` / `geometry` / `conveyor-parts` /
  * `caller-rows`）与 `poseSource`。`caller-rows` 恒 `diagnostic-only`（调用方自带的行表证明不了
- * 属于本机）。生产塔当前只有 `workpiecePlaceholder`（`inCollisionSet:false`），
- * 既没有承托路径也没有把板挂进升降轴 —— 那条路径的回执被标成 `diagnosticOnly`、`claim:'diagnostic-only'`、
- * `feasible:false`，**不许**把夹具的 M1 绿写成生产塔可行。
+ * 属于本机）。生产塔的几何**现在包含板**（`geometry.parts` 里的 `workpiece-plate`，真实碰撞件），
+ * 所以 `mode` 可以是 `verified` —— 但 `verified` 只说明「行表来自几何 + 碰撞集里有这块板」：
+ * 该塔 rest 承托仍是 `unsupported`（单条 1200 整带）、carried 是 `diagnostic-only`（板**不随**
+ * 塔轴移动，位移来源 missing）、多层 `feasible:false`。板只在 `workpiecePlaceholder` 里
+ * （`parts` 里没有这块板本身：同 id + `role=workpiece` + 尺寸/中心一致 + 朝向一致，缺一即不算）时仍然只能是
+ * `diagnostic-only` —— 那个 `inCollisionSet` 字段一律不信。
+ *
+ * **非有限坐标一律 fail-closed**：行表里任一行的 `min/max x/y/z` 不是有限值时，该行从接触判定中
+ * **剔除**（既不当接触件，也不当「确认不接触」），记进 `invalidPartIds` + `diagnosticCode:
+ * 'invalid-support-rows'`，并把 `diagnosticOnly` / `claim='diagnostic-only'` / `feasible=false` 钉死 ——
+ * 即便其余行的几何 `verdict` 算出了 `supported`。理由：`NaN` 参与的 `>`/`<=` 比较恒 false，
+ * 旧实现会把「z 读不出来」当成「顶面正好贴板底」，覆盖率与接触带被真实地顶高（P2）。
  *
  * 精度边界（写进回执，不许当验收）：
  * - 纯 AABB 承包（与 `interference.ts` 同口径），不是 B-Rep / 不是接触力学；
@@ -104,6 +113,12 @@ const LIFT_FOLLOW_PATTERN = /^lift-(platform|carriage|fork-|finger-)/;
 /** 承托面/挡停件族：判「板投影内有没有承托面挡在路上」用（load-passes-shelf）。 */
 const SHELF_PATTERN = /^(tray-\d+|tray-rail-|stop-|tray-roller-|layer-sensor-)/;
 const EPS = 1e-6;
+/**
+ * 朝向等价判据（度）。绕 Z 的转角是**周期量**：360 ≡ 0、−90 ≡ 270，所以比较的是规范化后的
+ * 最小夹角，不是原始数值差。板件在几何里只有整数值（生产塔 0°、夹具 0°），1e-6° 的余量只用于
+ * 吸收 `round2` 之类的进位，**不**给「转了几度也算同一块」留口子。
+ */
+const ANGLE_EPS_DEG = 1e-6;
 
 export type PanelChannelErrorCode = 'INVALID_ARGUMENT' | 'NOT_A_TOWER';
 
@@ -151,6 +166,53 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  */
 function isStrictFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
+}
+
+/**
+ * 两个绕 Z 转角的最小夹角（度，取值 −180..180）。用于「朝向是否等价」的判定：
+ * 360 ≡ 0、−90 ≡ 270 都必须在同一边，否则一个 `rotationZDeg: 360` 的件会被误判成另一个朝向。
+ */
+function rotationDiffDeg(a: number, b: number): number {
+  const diff = (((a - b) % 360) + 360) % 360;
+  return diff > 180 ? diff - 360 : diff;
+}
+
+/**
+ * 判定 `geometry.parts` 里的某件**就是占位体声明的那块板**。
+ *
+ * 四条必须同时成立：件号完全相同、`role === 'workpiece'`、box 的 `size` 与 `center` 与占位体在
+ * ±EPS 内一致、绕 Z 转角与占位体声明的板朝向等价。只比 id 是不够的（P2-1）：把占位体 id 写成
+ * `tray-2` 时，`parts` 里真有同 id 的托板，于是 `inCollisionSet` 被顶成 true，而位姿仍来自板占位体
+ * —— 同 id 的托条/夹具件不是这块板。
+ *
+ * 为什么要比朝向：`size` 是**局部**尺寸，中心也是同一个点，所以「同中心、同尺寸、绕 Z 转 90°」的件
+ * 在四条旧判据下逐项相等，但它的实际占位是 1134×2278（x/y 互换），与板不是同一个刚体位姿 ——
+ * 拿它冒充就等于「碰撞集里有块板」而真正被 sweep 的是另一块。转角还必须是**有限数**：
+ * `undefined`/`NaN`/`'90'` 都不是可核对的朝向，一律不算（不拿 0 顶替）。
+ */
+function isSamePlateMember(
+  candidate: unknown,
+  id: string,
+  size: Vec3,
+  center: Vec3,
+  rotationZDeg: number
+): boolean {
+  if (!isRecord(candidate) || candidate.id !== id) return false;
+  if (candidate.role !== 'workpiece') return false;
+  const shape = candidate.shape;
+  if (!isRecord(shape) || shape.type !== 'box') return false;
+  const rawSize = shape.size;
+  const rawCenter = candidate.center;
+  if (!(Array.isArray(rawSize) && rawSize.length === 3 && rawSize.every(isStrictFiniteNumber))) return false;
+  if (!(Array.isArray(rawCenter) && rawCenter.length === 3 && rawCenter.every(isStrictFiniteNumber))) return false;
+  for (let axis = 0; axis < 3; axis += 1) {
+    if (Math.abs((rawSize[axis] as number) - (size[axis] as number)) > EPS) return false;
+    if (Math.abs((rawCenter[axis] as number) - (center[axis] as number)) > EPS) return false;
+  }
+  // 朝向：必须是有限数字（`Number(null) === 0` 之类的强转会把「没声明」变成 0，这里不转），
+  // 且与占位体声明的板朝向在 ANGLE_EPS_DEG 内等价（周期量比较，360 与 0 同向）。
+  if (!isStrictFiniteNumber(candidate.rotationZDeg)) return false;
+  return Math.abs(rotationDiffDeg(candidate.rotationZDeg, rotationZDeg)) <= ANGLE_EPS_DEG;
 }
 
 /* ------------------------------------------------------------------ *
@@ -240,23 +302,34 @@ export interface PanelSupportReport {
    */
   verdict: 'supported' | 'unsupported';
   /**
-   * 可引用性：`supported` / `unsupported` 是几何结论；`diagnostic-only` 表示
-   * 「行表里没有生产承托路径（板只是占位体）」，`verdict` 只能当诊断，不得当证据。
+   * 可引用性：`supported` / `unsupported` 是几何结论；`diagnostic-only` 表示本次测量残缺，
+   * `verdict` 只能当诊断、不得当证据。两类起因：
+   * ① 行表来自调用方 / 板只是占位体（`diagnosticOnly=true` 入参）；
+   * ② 行表里有**坐标非有限值**的承托行（`invalidPartIds` 点名）：这些行已从计算中剔除，
+   *    剩余行的数字可能凑出 `verdict='supported'`，但缺的那几行谁也不知道托没托住。
    */
   claim: 'supported' | 'unsupported' | 'diagnostic-only';
   /** 行表来源（调用方声明的标签；`fixture` = 测试夹具件表，不是生产塔） */
   supportSource: PanelSupportSource;
   /** 板位姿从哪读来的（原样透出，便于复核） */
   poseSource: string;
-  /** true = 本次不是承托证据（生产塔只有 placeholder 时） */
+  /** true = 本次不是承托证据（板不在碰撞件集，或行表来自调用方） */
   diagnosticOnly: boolean;
   /** 每条判据的实测/阈值（含未满足的那几条），给回执与复核用 */
   reasons: string[];
   /** 阈值原样回显：调用方不许猜用的是什么口径 */
   thresholds: typeof PANEL_SUPPORT_THRESHOLDS;
   toleranceMm: number;
-  /** 参与判定的件数（已按 filter/pose 处理） */
+  /** 参与判定的件数（已按 filter/pose 处理，且**已剔除坐标非有限值的行**） */
   supportPartCount: number;
+  /**
+   * 坐标读不出来的行（`min/max x/y/z` 任一不是有限值）。这些行**不参与**接触判定，
+   * 但它们在场就说明本次测量残缺：`claim` 必为 `diagnostic-only`，`diagnosticCode`
+   * 见 reasons 里的 `invalid-support-rows`。
+   */
+  invalidPartIds: string[];
+  /** 有非有限坐标行时的稳定诊断码（干净输入不出现） */
+  diagnosticCode?: 'invalid-support-rows';
 }
 
 function panelFootprint(panel: PanelSpec): { minX: number; maxX: number; minY: number; maxY: number } {
@@ -271,6 +344,16 @@ function panelFootprint(panel: PanelSpec): { minX: number; maxX: number; minY: n
 
 function overlap1d(aMin: number, aMax: number, bMin: number, bMax: number): number {
   return Math.max(0, Math.min(aMax, bMax) - Math.max(aMin, bMin));
+}
+
+/**
+ * 一行的六个坐标是否全部为有限值。
+ *
+ * 单独判这一条的原因：`NaN` 进 `overlap1d`/比较会得到 `false`，于是「读不出坐标」和
+ * 「确实不重叠」在布尔上无法区分 —— 承托面候选必须先按这条截住，再谈重叠（P2-3）。
+ */
+function hasFiniteBox(row: PanelSupportPart): boolean {
+  return [row.minX, row.maxX, row.minY, row.maxY, row.minZ, row.maxZ].every(isStrictFiniteNumber);
 }
 
 /** 一维区间并集长度。 */
@@ -328,7 +411,7 @@ export function resolvePanelSupport(input: {
   const panel = input.panel;
   const footprint = panelFootprint(panel);
   const bottomZ = requireFinite(input.bottomZmm, 'bottomZmm');
-  const diagnosticOnly = input.diagnosticOnly === true;
+  const requestedDiagnosticOnly = input.diagnosticOnly === true;
   const supportSource = input.supportSource ?? 'caller-rows';
   const poseSource = input.poseSource ?? 'input.bottomZmm';
   const tolerance = input.toleranceMm === undefined
@@ -338,9 +421,22 @@ export function resolvePanelSupport(input: {
   if (!Array.isArray(input.parts)) fail('INVALID_ARGUMENT', 'parts 必须是数组（空数组可以，但不是缺省）');
 
   const contacts: PanelSupportContact[] = [];
+  /** 坐标读不出来的行（已从接触判定剔除）：它们在场就把 claim 压成 diagnostic-only */
+  const invalidParts: string[] = [];
+  let consideredParts = 0;
   for (const part of input.parts) {
     if (!part || typeof part.id !== 'string') fail('INVALID_ARGUMENT', 'parts 里每一行都必须有 string 类型的 id');
     if (input.filter && !input.filter(part.id)) continue;
+    // 非有限坐标的行**必须在接触判定之前截住**（P2 fail-open）：
+    // `Math.abs(NaN - bottomZ) > tolerance` 求值为 false（NaN 比较恒 false），旧实现于是把
+    // 「z 读不出来」当成「顶面正好贴在板底」，而它的 x/y 重叠与面积都是有限正数 —— 覆盖率与
+    // 接触带被真实地顶高，可能把 unsupported 顶成 supported，回执里看不出异常。
+    // 这里一律：该行不进 contacts（既不算接触件，也不算「确认不接触」），另记 invalidParts。
+    if (!hasFiniteBox(part)) {
+      invalidParts.push(part.id);
+      continue;
+    }
+    consideredParts += 1;
     // 只有顶面贴板底才算接触：低于板底（gap 大）与高于板底（穿透）都不算
     if (Math.abs(part.maxZ - bottomZ) > tolerance) continue;
     const overlapX = overlap1d(part.minX, part.maxX, footprint.minX, footprint.maxX);
@@ -423,6 +519,10 @@ export function resolvePanelSupport(input: {
   const bandOverlapOk = bands.length > 0 && minBandOverlap >= thresholds.minBandOverlapXmm;
   const contactOverlapOk = contacts.length > 0 && minContactOverlap >= thresholds.minContactOverlapXmm;
   const verdict = coveredOk && bandsOk && bandOverlapOk && contactOverlapOk ? 'supported' : 'unsupported';
+  // 测量残缺（有非有限坐标行）时 verdict 照实算 —— 但**不可引用**，即便它算出了 supported。
+  // 注意这里是「或」，不是「覆盖入参」：调用方说 diagnosticOnly=false 也压不回 supported。
+  const invalidRows = invalidParts.length > 0;
+  const diagnosticOnly = requestedDiagnosticOnly || invalidRows;
   const claim: PanelSupportReport['claim'] = diagnosticOnly ? 'diagnostic-only' : verdict;
 
   const reasons: string[] = [
@@ -438,14 +538,28 @@ export function resolvePanelSupport(input: {
   if (contacts.length === 0) {
     reasons.unshift(
       `没有任何件的顶面贴在板底 ${round2(bottomZ)} ±${tolerance} mm 内`
-        + `（参与判定 ${input.parts.filter((part) => !input.filter || input.filter(part.id)).length} 件）：板未被承托`
+        + `（参与判定 ${consideredParts} 件）：板未被承托`
     );
   } else if (verdict === 'unsupported') {
     reasons.push('承托条件缺一即判 unsupported：覆盖率/接触带数量/x 重叠是三条独立条件，不许相互替代');
   }
+  if (invalidRows) {
+    const listed = invalidParts.slice(0, 6).join('/') + (invalidParts.length > 6 ? '…' : '');
+    // 单独一条、单独一句：这是本次不可引用的**根因**，不许混在「覆盖率不满足」里被误读成测量结论
+    reasons.unshift(
+      `invalid-support-rows：行表里有 ${invalidParts.length} 件（${listed}）的 min/max x/y/z 不是有限值，`
+        + '已从接触判定中剔除（既不算接触件，也不算「确认不接触」——读不出坐标的件可能正贴在板底，也可能挡住板）；'
+        + `本次判决只覆盖其余 ${consideredParts} 件：几何 verdict=${verdict}，但缺少那 ${invalidParts.length} 件的读数，`
+        + 'claim 只能是 diagnostic-only，不得当「能托住板」的证据'
+    );
+  }
   if (diagnosticOnly) {
-    reasons.push('diagnosticOnly：行表里没有生产承托路径（板只挂在 workpiecePlaceholder、inCollisionSet=false），'
-      + '本报告只能当诊断，claim=diagnostic-only —— 不得当成「生产塔能托住板」的证据');
+    reasons.push(invalidRows
+      ? 'diagnostic-only（invalid-support-rows）：起因是行表里有坐标非有限值的行，不是「板不在碰撞件集」'
+        + '也不是「行表来自调用方」—— 数字残缺 ≠ 承托结论；补齐这些件的坐标后重算才能给 claim'
+      : 'diagnosticOnly：板不在碰撞件集（parts 里没有这块板本身：同 id + role=workpiece + 尺寸/中心/朝向一致）'
+        + '或行表来自调用方，'
+        + '本报告只能当诊断，claim=diagnostic-only —— 不得当成「生产塔能托住板」的证据');
   }
 
   return {
@@ -469,7 +583,9 @@ export function resolvePanelSupport(input: {
     reasons,
     thresholds,
     toleranceMm: tolerance,
-    supportPartCount: input.parts.filter((part) => !input.filter || input.filter(part.id)).length
+    supportPartCount: consideredParts,
+    invalidPartIds: invalidParts,
+    ...(invalidRows ? { diagnosticCode: 'invalid-support-rows' as const } : {})
   };
 }
 
@@ -483,57 +599,111 @@ function rotate2(x: number, y: number, rzDeg: number): [number, number] {
   return [x * Math.cos(rad) - y * Math.sin(rad), x * Math.sin(rad) + y * Math.cos(rad)];
 }
 
-function featureLocalBox(node: ConveyorPart['features'][number]): { min: Vec3; max: Vec3 } | null {
+/**
+ * 单条特征 → 局部 AABB，三态（**不许把两种 null 混成一个**）：
+ * - `box`：参数有限、量得出盒；
+ * - `none`：**本来就没有实体外形**（减材料特征 holes/counterbore/slot/fillet，或未知类型）——
+ *   这类特征不参与外形，跳过是政策，不是坏输入；
+ * - `invalid`：这条特征**声明了实体外形但参数读不出**（非有限 / 退化）——
+ *   不能量盒，也不能拿同件其余特征拼一个偏小的盒（那会让自由上升偏大）。
+ *
+ * 旧实现把后两种都返回 `null`，于是「参数坏」的件在适配器里被当成「无实体特征」静默删行：
+ * 最低遮挡换人、witness 偏大（105 而不是 98.5），且没有任何诊断码（最终复审 P2-2）。
+ */
+type FeatureLocalBox =
+  | { kind: 'box'; min: Vec3; max: Vec3 }
+  | { kind: 'none' }
+  | { kind: 'invalid' };
+
+function featureLocalBox(node: ConveyorPart['features'][number]): FeatureLocalBox {
   const params = node.params as Record<string, unknown>;
   if (node.type === 'box') {
     const length = Number(params.length);
     const width = Number(params.width);
     const height = Number(params.height);
-    if (![length, width, height].every((value) => Number.isFinite(value))) return null;
-    return { min: [-length / 2, -width / 2, -height / 2], max: [length / 2, width / 2, height / 2] };
+    if (![length, width, height].every((value) => Number.isFinite(value))) return { kind: 'invalid' };
+    return { kind: 'box', min: [-length / 2, -width / 2, -height / 2], max: [length / 2, width / 2, height / 2] };
   }
   if (node.type === 'cylinder') {
     const radius = Number(params.diameter) / 2;
     const length = Number(params.height);
-    const axis = params.axis === 'x' || params.axis === 'y' ? params.axis : 'z';
-    const at = Array.isArray(params.at) ? (params.at as unknown[]).map((value) => Number(value) || 0) : [0, 0, 0];
-    if (!Number.isFinite(radius) || !Number.isFinite(length) || radius <= 0 || length <= 0) return null;
+    const rawAxis = params.axis;
+    // 轴向只认三个枚举值；缺省按 z（既有口径），声明了别的值就是参数坏了 —— 不拿 'z' 顶替
+    const axis = rawAxis === undefined ? 'z' : rawAxis;
+    // 半径/长度必须有限且为正，否则量不出实体盒（旧实现静默返回 null = 丢件）
+    if (!Number.isFinite(radius) || !Number.isFinite(length) || radius <= 0 || length <= 0) return { kind: 'invalid' };
+    if (axis !== 'x' && axis !== 'y' && axis !== 'z') return { kind: 'invalid' };
+    let center: Vec3 = [0, 0, 0];
+    if (params.at !== undefined) {
+      // 旧实现用 `Number(value) || 0` 把 NaN 悄悄变 0：那是编坐标，必须改成「读不出」
+      if (!Array.isArray(params.at) || params.at.length < 3) return { kind: 'invalid' };
+      const at = params.at.map((value) => Number(value));
+      if (!at.every((value) => Number.isFinite(value))) return { kind: 'invalid' };
+      center = [at[0] ?? 0, at[1] ?? 0, at[2] ?? 0];
+    }
     const half: Vec3 = axis === 'x' ? [length / 2, radius, radius] : axis === 'y' ? [radius, length / 2, radius] : [radius, radius, length / 2];
-    const center: Vec3 = [at[0] ?? 0, at[1] ?? 0, at[2] ?? 0];
     return {
+      kind: 'box',
       min: [center[0] - half[0], center[1] - half[1], center[2] - half[2]],
       max: [center[0] + half[0], center[1] + half[1], center[2] + half[2]]
     };
   }
-  return null; // 减材料特征不参与外形
+  return { kind: 'none' }; // 减材料特征不参与外形
+}
+
+/** `supportRowsFromConveyorPartsDetailed` 的结果：行表 + **因参数坏而量不出盒**的件号 */
+export interface SupportRowsFromConveyorPartsResult {
+  rows: PanelSupportPart[];
+  /**
+   * 有实体外形特征、但特征参数读不出（非有限 / 退化）→ 量不出包围盒、**已剔除**的件号。
+   * 与「只有减材料特征、本来就不成行」的件不同：后者不进这里（`rows` 里也不会出现，政策未变）。
+   * 调用方（`resolveChannelFeasibility`）必须把它当 `invalid-shelf-geometry` 处理，不许当「这件不存在」。
+   */
+  droppedPartIds: string[];
 }
 
 /**
  * `ConveyorPart → 承托面盒`。算法与 `machine-geometry.partWorldBounds` **同口径**
  * （实体特征并集包围盒 + 绕 Z 旋转后的 AABB）；两者对同一件表必须逐件相等，
  * 由 `buffer-tower-channel.test.mjs` 的「逐件盒一致」用例锁住，避免两套包络漂移。
+ *
+ * 返回 `{ rows, droppedPartIds }`：`droppedPartIds` 是「参数坏、量不出盒」被剔除的件，
+ * 调用方拿它置 `invalid-shelf-geometry`。只想要行表的老调用方用下面的
+ * `supportRowsFromConveyorParts`（等价于 `.rows`）。
  */
-export function supportRowsFromConveyorParts(
+export function supportRowsFromConveyorPartsDetailed(
   parts: readonly ConveyorPart[],
   options: { shiftMm?: number; excludeIds?: readonly string[] } = {}
-): PanelSupportPart[] {
+): SupportRowsFromConveyorPartsResult {
   const shift = options.shiftMm ?? 0;
   const exclude = new Set(options.excludeIds ?? []);
   const rows: PanelSupportPart[] = [];
+  const droppedPartIds: string[] = [];
   for (const part of parts) {
     if (exclude.has(part.id)) continue;
     let min: Vec3 = [Infinity, Infinity, Infinity];
     let max: Vec3 = [-Infinity, -Infinity, -Infinity];
     let solids = 0;
+    let invalid = false;
     for (const node of part.features) {
       const box = featureLocalBox(node);
-      if (!box) continue;
+      if (box.kind === 'invalid') {
+        // 一件里有一条实体特征量不出盒 → 整件都量不出（不许拿其余特征拼一个偏小的盒）
+        invalid = true;
+        break;
+      }
+      if (box.kind === 'none') continue;
       solids += 1;
       for (let axis = 0; axis < 3; axis += 1) {
         min[axis] = Math.min(min[axis] ?? Infinity, box.min[axis] ?? 0);
         max[axis] = Math.max(max[axis] ?? -Infinity, box.max[axis] ?? 0);
       }
     }
+    if (invalid) {
+      droppedPartIds.push(part.id);
+      continue;
+    }
+    // 只有减材料特征/无特征：本来就不成行（政策未变，不记入 dropped）
     if (solids === 0) continue;
     const rz = part.transform.rz ?? 0;
     const localCenter: Vec3 = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
@@ -558,7 +728,19 @@ export function supportRowsFromConveyorParts(
       maxZ: round2(cz + half[2] + dz)
     });
   }
-  return rows;
+  return { rows, droppedPartIds };
+}
+
+/**
+ * 只要行表的老入口（`verify-channel` / 逐件盒一致性用例用）。
+ * **诊断不能走这条**：它把「参数坏、量不出盒」的件和「本来没有实体外形」的件一样藏起来，
+ * 判据一侧要用 `supportRowsFromConveyorPartsDetailed` 拿 `droppedPartIds`。
+ */
+export function supportRowsFromConveyorParts(
+  parts: readonly ConveyorPart[],
+  options: { shiftMm?: number; excludeIds?: readonly string[] } = {}
+): PanelSupportPart[] {
+  return supportRowsFromConveyorPartsDetailed(parts, options).rows;
 }
 
 function shapeHalf(shape: GeomShape): Vec3 {
@@ -620,6 +802,46 @@ export type ChannelBlockerReason = 'load-passes-shelf' | 'no-support' | 'stroke-
 
 export type ChannelDesignNoteReason = 'clear-span-conservative' | 'corridor-conservative';
 
+/**
+ * `load-passes-shelf` 的**实测自由上升 witness**（可选字段，不是新 reason）。
+ *
+ * 全部由实际板位姿 + 承托件表 + 每层几何坐标算出，**不许写死 98.5 / 133.5 / 89**：
+ * - `measuredFreeRiseFromPanelTopMm`：板**顶面**到最低遮挡件 `minZ` 的自由上升（16 层实测 98.5）；
+ * - `measuredFreeRiseFromPanelBottomMm`：板**底面**到同一处的自由上升（16 层实测 133.5 = 98.5 + 板厚）；
+ * - `firstObstructionPartIds`：`minZ` 与最低值相等的那些件（16 层是 `tray-roller-2-in/out`）；
+ * - `firstObstructionZBand`：这些件的 z 区间。
+ *
+ * 件表一变（删/移动第 2 层第一处遮挡）这些值必须跟着变；算不出有限值时为 `null`，
+ * 由调用方当诊断处理，**不许**回一个假绿的数字。
+ *
+ * **量到哪儿**：两个数都是量到遮挡件的 `minZ`（**底面 / 下表面**），不是量到承托面顶面。
+ * 所以「距板顶 98.5」与「第 2 层承托面顶面 1080」不是同一个点，不能互相验算。
+ *
+ * `caliber` 明写行表口径：`geometry` = 行表由几何/件表派生（解析 AABB 读数），
+ * `caller-rows` = 行表由调用方直接给出（证明不了属于本机）。它不是 10 mm 步长 sweep 的
+ * 采样结果，两个口径不能混着报。
+ */
+export interface ChannelBlockerWitness {
+  caliber: 'geometry' | 'caller-rows';
+  measuredFreeRiseFromPanelTopMm: number;
+  measuredFreeRiseFromPanelBottomMm: number;
+  firstObstructionPartIds: string[];
+  firstObstructionZBand: [number, number];
+  note: string;
+}
+
+/**
+ * `load-passes-shelf` 上的**诊断标记**（可选字段，不是新 reason、不改 feasibility 判据）。
+ *
+ * `invalid-shelf-geometry`：件表里有承托面候选无法判定是否挡路，两条来源都要标记：
+ * ① 行在、但 min/max x/y/z 非有限值（NaN/Infinity）；
+ * ② 行根本不在 —— 件的实体特征参数非有限/退化，量不出包围盒，适配器把它从行表剔除
+ *    （`supportRowsFromConveyorPartsDetailed().droppedPartIds`；只影响件表路径，几何行表不受此途）。
+ * 两者一律按「不可排除挡路」处理：witness 置 `null`、在 detail 里点名。绝不因为 NaN 在 x/y
+ * 重叠里被算成「不重叠」、或因为行被删掉，就把它静默丢掉（那会让自由上升数字偏大 = fail-open）。
+ */
+export type ChannelBlockerDiagnosticCode = 'invalid-shelf-geometry';
+
 export interface ChannelBlocker {
   /** 撞到第几层的承托面（与层无关时为 null） */
   level: number | null;
@@ -628,6 +850,15 @@ export interface ChannelBlocker {
   reason: ChannelBlockerReason;
   /** 带数字的说明（例：板 2278 需穿过 tray-2-m） */
   detail: string;
+  /** 仅 `load-passes-shelf`：实测自由上升 witness（算不出时为 null，不当绿用） */
+  witness?: ChannelBlockerWitness | null;
+  /** 仅 `load-passes-shelf`：件表里有无法判读的承托面候选时置 `invalid-shelf-geometry` */
+  diagnosticCode?: ChannelBlockerDiagnosticCode;
+  /**
+   * 触发 `invalid-shelf-geometry` 的件号：坐标非有限值（行还在），或特征参数非有限/退化成
+   * 无法量出包围盒、行被适配器剔除（件表路径）。两种都无法判定是否挡路。
+   */
+  invalidShelfPartIds?: string[];
 }
 
 /** 保守设计余量：**不是**已证明的阻塞，回执与文档都不得写成「过不去」。 */
@@ -654,7 +885,7 @@ export interface ChannelColumnSweep {
 
 export interface ChannelFeasibility {
   ok: true;
-  /** true = 本回执不作为「通道可行/承托可用」的证据（生产塔 placeholder 路径） */
+  /** true = 本回执不作为「通道可行/承托可用」的证据（板不在碰撞件集 / caller rows） */
   diagnosticOnly: boolean;
   panel: { lengthMm: number; widthMm: number; thicknessMm: number; massKg: number };
   /** 板位姿（显式输入，原样回显）与来源 */
@@ -769,7 +1000,7 @@ export function resolveChannelFeasibility(input: {
   axis?: { strokeMm?: number; pickupGapMm?: number };
   /** 行表来源声明（缺省 `conveyor-parts`） */
   supportSource?: PanelSupportSource;
-  /** true = 本次不作为可行性/承托证据（生产塔 placeholder 路径），强制 `feasible=false` */
+  /** true = 本次不作为可行性/承托证据（板不在碰撞件集 / caller rows），强制 `feasible=false` */
   diagnosticOnly?: boolean;
 }): ChannelFeasibility {
   const params = towerParamsOf(input.config);
@@ -804,9 +1035,18 @@ export function resolveChannelFeasibility(input: {
   }
   const panel: PanelSpec = { ...declaredPanel, centerXMm: centerX, centerYMm: centerY };
 
-  const rows = input.rows ?? supportRowsFromConveyorParts(
-    input.parts ?? buildBufferTowerParts(params)
-  );
+  // 行表来源：调用方行表原样用；件表路径要同时拿「因特征参数坏而量不出盒、被剔除」的件号
+  // —— 那些件在 rows 里不存在，只看 rows 会把它们当「件表里没这件」（最终复审 P2-2）。
+  let rows: readonly PanelSupportPart[];
+  let droppedUnboundedIds: string[];
+  if (input.rows) {
+    rows = input.rows;
+    droppedUnboundedIds = [];
+  } else {
+    const derived = supportRowsFromConveyorPartsDetailed(input.parts ?? buildBufferTowerParts(params));
+    rows = derived.rows;
+    droppedUnboundedIds = derived.droppedPartIds;
+  }
 
   // ---- 轴位移与拾取空行程（carried 结论必须与轴行程同源）----
   const axisStroke = input.axis?.strokeMm !== undefined && Number.isFinite(input.axis.strokeMm)
@@ -948,33 +1188,101 @@ export function resolveChannelFeasibility(input: {
 
   // 板投影内的承托面（承托件 + 挡停 + 层辊 + 层光电）：纯 Z 升降必然穿过
   const footprint = panelFootprint(panel);
-  const shelves = rows.filter((row) => {
-    if (!SHELF_PATTERN.test(row.id)) return false;
+  const topShelfTargetZ = round2(params.topLayerZMm + TOWER_CHANNEL_STROKE.trayTopOffsetMm);
+  // 承托面候选先按件族取，**再把坐标非有限值的候选单独截住**（P2-3）。
+  // 顺序有意义：NaN 一旦落进 `overlap1d` 就得到 NaN，`NaN > EPS` 是 false，这件会被当成
+  // 「与板投影不重叠」静默丢出 shelves —— 最低遮挡换人，自由上升反而变大（105 而不是 98.5），
+  // 是 fail-open。所以先认「读不出坐标」的候选，再谈 x/y 重叠。
+  const shelfCandidates = rows.filter((candidate) => SHELF_PATTERN.test(candidate.id));
+  const invalidShelfRows = shelfCandidates.filter((candidate) => !hasFiniteBox(candidate));
+  const shelves = shelfCandidates.filter((row) => {
+    if (!hasFiniteBox(row)) return false;
     if (row.maxZ <= panelTopZ + EPS) return false; // 在板顶以下的不挡上行
     if (row.maxZ > params.topLayerZMm + TOWER_CHANNEL_STROKE.trayTopOffsetMm + EPS) return false; // 顶层以上不挡
     return overlap1d(row.minX, row.maxX, footprint.minX, footprint.maxX) > EPS
       && overlap1d(row.minY, row.maxY, footprint.minY, footprint.maxY) > EPS;
   });
+  // 两条漏口都要并进同一份「无法判定是否挡路」清单（P2-3 + 最终复审 P2-2）：
+  // ① 行在、但 x/y/z 非有限值（几何行表路径）；
+  // ② 行根本不在，因为件的实体特征参数非有限/退化，适配器量不出包围盒（件表路径）——
+  //    只看 `rows` 会把这件读成「件表里没有这件」，最低遮挡换人、witness 偏大且无诊断码。
+  // 件表路径下「有实体特征但参数坏」的件一律进清单：哪怕它不是承托件族的候选，
+  // 它同样可能才是最底层的那件，宁可 fail-closed 也不拿其余件的数字顶替。
+  const invalidShelfIds = [...new Set([
+    ...invalidShelfRows.map((row) => row.id),
+    ...droppedUnboundedIds
+  ])];
+  const invalidShelfGeometry = invalidShelfIds.length > 0;
   const shelfIds = shelves.map((row) => row.id).slice(0, 6);
   const shelfLevels = [...new Set(shelves
     .map((row) => levelOfPart(row.id))
     .filter((level): level is number => level !== null))].sort((a, b) => a - b);
-  const shelfLevel = shelfLevels[0] ?? null;
+  const invalidShelfLevels = [...new Set(invalidShelfIds
+    .map((id) => levelOfPart(id))
+    .filter((level): level is number => level !== null))].sort((a, b) => a - b);
+  const shelfLevel = shelfLevels[0] ?? invalidShelfLevels[0] ?? null;
   const shelfZBand: [number, number] = shelves.length > 0
     ? [round2(Math.min(...shelves.map((row) => row.maxZ))), round2(Math.max(...shelves.map((row) => row.minZ)))]
     : [0, 0];
+  // 口径必须跟着行表来源走：caller-rows 的行表不是这台机器的几何，标签不许写「几何口径」（P2-2）。
+  const witnessCaliber: ChannelBlockerWitness['caliber'] = supportSource === 'caller-rows' ? 'caller-rows' : 'geometry';
+  const witnessCaliberText = witnessCaliber === 'caller-rows' ? '调用方行表口径' : '几何解析口径';
+  // 实测自由上升 witness：从**这件表**的最低遮挡件 minZ 反算，不用任何写死的 98.5/133.5/89。
+  // 板顶→遮挡 = minZ - (bottomZ + 板厚)，板底→遮挡 = minZ - bottomZ；两者差一个板厚，是两个口径。
+  const shelfWitness: ChannelBlockerWitness | null = (() => {
+    if (shelves.length === 0) return null;
+    // 有读不出坐标的承托面候选时一律 null：那件可能才是最低遮挡，拿其余件的最小值冒充就是 fail-open
+    if (invalidShelfGeometry) return null;
+    const lowerZ = shelves.map((row) => row.minZ);
+    if (lowerZ.length === 0 || !lowerZ.every((value) => Number.isFinite(value))) return null;
+    const firstZ = Math.min(...lowerZ);
+    if (!Number.isFinite(firstZ)) return null;
+    const firstRows = shelves.filter((row) => Math.abs(row.minZ - firstZ) <= EPS);
+    const firstMaxZ = Math.max(...firstRows.map((row) => row.maxZ));
+    if (!Number.isFinite(firstMaxZ)) return null;
+    return {
+      caliber: witnessCaliber,
+      // 已与板顶/板底相交时自由上升就是 0（不是负值）；这是「件表自相矛盾」的下限，不静默给绿
+      measuredFreeRiseFromPanelTopMm: round2(Math.max(0, firstZ - panelTopZ)),
+      measuredFreeRiseFromPanelBottomMm: round2(Math.max(0, firstZ - bottomZ)),
+      firstObstructionPartIds: firstRows.map((row) => row.id).sort(),
+      firstObstructionZBand: [round2(firstZ), round2(firstMaxZ)],
+      note: `${witnessCaliberText}：AABB 最低遮挡件 **minZ（底面）**，不是 10 mm 步长 sweep 采样；`
+        + `板顶/板底两个口径都量到同一个 minZ，相差 ${panel.thicknessMm} mm 板厚（不是量到承托面顶面）`
+    };
+  })();
 
   const blockers: ChannelBlocker[] = [];
-  if (shelves.length > 0) {
-    // 数字全部从件表派生：不写死「2 层 26 处 / 16 层 446 处」这类实测快照（件表一变就不符）
+  if (shelves.length > 0 || invalidShelfGeometry) {
+    // 数字全部从件表派生：不写死「2 层 26 处」这类实测快照（件表一变就不符）
+    const detailHead = shelves.length > 0
+      ? `板 ${panel.lengthMm}×${panel.widthMm} 只做纯 Z 升降：第 ${shelfLevel ?? 2} 层承托面（顶面 ${shelfZBand[0]}）`
+        + `在板投影内，板从 ${round2(bottomZ)} 抬到第 ${params.levels} 层 ${topShelfTargetZ} 必穿过它；`
+        + `本件表在板投影内、板顶以上的承托面共 ${shelves.length} 件（涉及 ${shelfLevels.length} 层，件号前 ${shelfIds.length} 见 partIds）；`
+      : `件表里有 ${invalidShelfIds.length} 件承托面候选（${invalidShelfIds.join('/')}）的坐标或特征参数不是有限值`
+        + '（件表路径下量不出包围盒的件已从行表剔除，不当作「件表里没有这件」），'
+        + '无法判定它们是否在板投影内、板顶以上：按「不可排除挡路」处理（既不声明可行，也不声明 no-support）；';
+    const detailWitness = shelfWitness
+      ? `实测自由上升（${witnessCaliberText}）：距板顶 ${shelfWitness.measuredFreeRiseFromPanelTopMm} mm、`
+        + `距板底 ${shelfWitness.measuredFreeRiseFromPanelBottomMm} mm（两个数都量到遮挡件 **minZ 底面**`
+        + ` = ${shelfWitness.firstObstructionZBand[0]}，不是量到第 ${shelfLevel ?? 2} 层承托面顶面 ${shelfZBand[0]}；`
+        + `两者差 ${panel.thicknessMm} mm 板厚），首件 ${shelfWitness.firstObstructionPartIds.join('/')}`
+      : invalidShelfGeometry
+        ? `实测自由上升按 null 处理（invalid-shelf-geometry）：${invalidShelfIds.join('/')} 的 x/y/z 有非有限值`
+          + '或特征参数非有限值（量不出包围盒），'
+          + '无法量到遮挡件 minZ 底面；不拿其余件的数字顶替，也不当作可行依据'
+        : '实测自由上升量无法从件表无歧义确定（坐标不是有限值）：此项只作诊断，不当作可行依据';
     blockers.push({
       level: shelfLevel,
-      partIds: shelfIds,
-      zBand: shelfZBand,
+      partIds: shelves.length > 0 ? shelfIds : invalidShelfIds.slice(0, 6),
+      // 有可读承托面时给它的 z 区间；只有读不出坐标的候选时给「板要走的行程带」，不编一个承托面 z
+      zBand: shelves.length > 0 ? shelfZBand : [round2(bottomZ), topShelfTargetZ],
       reason: 'load-passes-shelf',
-      detail: `板 ${panel.lengthMm}×${panel.widthMm} 只做纯 Z 升降：第 ${shelfLevel ?? 2} 层承托面（顶面 ${shelfZBand[0]}）`
-        + `在板投影内，板从 ${round2(bottomZ)} 抬到第 ${params.levels} 层 ${round2(params.topLayerZMm + TOWER_CHANNEL_STROKE.trayTopOffsetMm)} 必穿过它；`
-        + `本件表在板投影内、板顶以上的承托面共 ${shelves.length} 件（涉及 ${shelfLevels.length} 层，件号前 ${shelfIds.length} 见 partIds）`
+      detail: detailHead + detailWitness,
+      witness: shelfWitness,
+      ...(invalidShelfGeometry
+        ? { diagnosticCode: 'invalid-shelf-geometry' as const, invalidShelfPartIds: invalidShelfIds }
+        : {})
     });
   } else if (params.levels > 1) {
     // 逻辑上不该走到这里（levels≥2 必有托板），但宁可报 no-support 也不静默放行
@@ -1029,6 +1337,14 @@ export function resolveChannelFeasibility(input: {
     && supportCarried.claim === 'supported'
     && shiftDiagnostic === null
     && !diagnosticOnly;
+  // 「读不出坐标的承托行」让承托测量残缺：这时 feasible 也不许绿，否则会出现
+  // 「rest claim=diagnostic-only 但 feasible=true」这种自相矛盾的回执（claim 与可行判定同源）。
+  const invalidSupportRows = supportRest.invalidPartIds.length > 0
+    || supportCarried.invalidPartIds.length > 0;
+  const invalidSupportIds = [...new Set([
+    ...supportRest.invalidPartIds,
+    ...supportCarried.invalidPartIds
+  ])];
 
   return {
     ok: true,
@@ -1090,7 +1406,7 @@ export function resolveChannelFeasibility(input: {
         + `carried 底面 ${carriedBottomZ} = 静止 ${round2(bottomZ)} + max(0, 位移 ${round2(shift)} − 空行程 ${round2(pickupGap)})，`
         + '与 interference-states 的 workpiece.bottomZ.lift 同一公式'
     },
-    feasible: blockers.length === 0 && !diagnosticOnly,
+    feasible: blockers.length === 0 && !diagnosticOnly && !invalidSupportRows,
     blockers,
     designNotes,
     note: (diagnosticOnly
@@ -1098,12 +1414,25 @@ export function resolveChannelFeasibility(input: {
         ? 'diagnosticOnly（caller-rows）：行表是调用方给的，不是这台机器的几何 —— 无法证明这些承托面属于本机，'
           + '承托数字只能当诊断，claim=diagnostic-only，feasible / m1.feasible 恒 false。'
           + '要可引用只能走「几何行表」这条路（`resolveChannelFeasibility` 不接调用方自带的行表当证据）。'
-        : 'diagnosticOnly：本次走的是「生产塔 placeholder」诊断路径 —— 板只挂在 workpiecePlaceholder、'
-          + 'inCollisionSet=false，件表里没有生产 channel 承托路径（无叉指/无分段带），板也没挂进升降轴。'
+        : 'diagnosticOnly：板不在碰撞件集（`geometry.parts` 里没有同 id 件，或只有占位体）——'
+          + '判据是「同 id + role=workpiece + size/center 与占位体一致 + rotationZDeg 与占位体声明的板朝向一致」，'
+          + '同 id 的托板/夹具件、同中心同尺寸但绕 Z 转 90° 的件都不算；'
+          + '占位体自带的 inCollisionSet 也不参与判定；件表里也没有把板挂进升降轴。'
           + '本回执的承托数字只能当诊断，feasible 恒 false。'
       : '')
+      + (invalidSupportRows
+        ? `invalid-support-rows：行表里有 ${invalidSupportIds.length} 件（${invalidSupportIds.slice(0, 6).join('/')}）`
+          + '的 min/max x/y/z 不是有限值，已从接触判定中剔除；承托测量残缺 → rest/carried claim 只能是 '
+          + 'diagnostic-only、feasible / m1.feasible 恒 false（不是「托不住」，也不是「能托住」）。'
+        : '')
       + `不可行判定依据两条可复算的事实（不是缺参数）：`
-      + `① 承托面必然被板穿过（板投影内的第 ${shelfLevel ?? 2} 层承托面，纯 Z 上升必穿过）；`
+      + `① 承托面必然被板穿过（板投影内的第 ${shelfLevel ?? 2} 层承托面，纯 Z 上升必穿过`
+      + `${shelfWitness
+        ? `；实测自由上升 距板顶 ${shelfWitness.measuredFreeRiseFromPanelTopMm} mm / 距板底 ${shelfWitness.measuredFreeRiseFromPanelBottomMm} mm`
+          + `（均量到遮挡件 minZ 底面），首件 ${shelfWitness.firstObstructionPartIds.join('/')}`
+        : invalidShelfGeometry
+          ? `；自由上升量无法无歧义确定：件表里有 ${invalidShelfIds.length} 件承托面候选坐标/特征参数非有限值（invalid-shelf-geometry）`
+          : '；自由上升量无法无歧义确定'}）；`
       + `② 行程不变量：声明 ${declared} 少于 M1 叉指口径所需 ${required}（缺 ${strokeShortfall}）。`
       + `净跨 ${xClear} < 板长 ${panel.lengthMm}、走廊 ${corridor} < 板半宽 ${halfWidth} 只作保守设计 notes：`
       + `实测柱与板体 AABB 在行程内不相交（y 向重叠 ${columnSweep.yOverlapMm} mm），`
@@ -1129,14 +1458,20 @@ export interface PanelSource {
   /** 板中心 x / y（mm，同样来自几何，不再另推 0） */
   centerXMm: number;
   centerYMm: number;
-  /** 板是否在碰撞件表（parts）里：false 表示只做承托诊断，不参与 AABB 判据 */
+  /**
+   * 板是否在碰撞件表（parts）里：**只由 parts 里真正的同一块板决定** —— 件号完全相同、
+   * `role==='workpiece'`、box `size`/`center` 与占位体在 ±EPS 内一致、`rotationZDeg` 有限且与
+   * 占位体声明的板朝向等价（±1e-6°，周期量比较），**四条缺一即 false**。朝向这一条挡的是
+   * 「同中心、同尺寸、绕 Z 转 90°」的件：局部 size 一样，实际占位却是 x/y 互换的另一块。
+   * `workpiecePlaceholder` 自带的同名字段不参与判定；false = 只做承托诊断，不参与 AABB 判据。
+   */
   inCollisionSet: boolean;
   /** 位姿从几何的哪一处读来的（回执原样透出） */
   poseSource: string;
 }
 
 /**
- * 从几何里认「板」：先认显式的只读占位体（`geometry.workpiecePlaceholder`），
+ * 从几何里认「板」：先认显式占位体（`geometry.workpiecePlaceholder`，由真实件投影），
  * 再认碰撞件表里 role/id 命中者（转移工位的老口径）。
  *
  * 位姿（`bottomZmm` + `centerXMm/centerYMm`）一律从几何读：占位体缺 `center` 就**不认**这块板
@@ -1173,8 +1508,24 @@ export function panelSourceOfGeometry(geometry: unknown): PanelSource | null {
       ? center[2] - thickness / 2
       : explicitBottomZ as number;
     if (!Number.isFinite(bottomZ)) return null;
+    // `inCollisionSet` 只由**真实 parts 里这块板本身**决定：占位体自己写的 flag 一律不信，
+    // 而且不是「同 id 就算」—— 还要 role==='workpiece' 且 box 尺寸/中心与占位体一致（±EPS）。
+    // 同 id 的托板/夹具件（`tray-2` 之类）不许把 flag 顶成 true（P2-1）。
+    const placeholderId = String(placeholder.id ?? PANEL_PART_ID);
+    const placeholderSize: Vec3 = [lengthMm, widthMm, thickness];
+    const placeholderCenter: Vec3 = [centerX, centerY, center[2] as number];
+    // 板朝向：占位体是同**一件板**的投影，它声明的 `rotationZDeg` 就是这块板应有的朝向
+    // （生产塔 `towerWorkpiecePart` 显式给 0°；夹具/转移工位的板件同样 0°）。
+    // 字段缺失（老几何/手写占位体）按平放 0° 期望，仍要求候选件是真的 0°，而不是「随便转多少都行」；
+    // 给了但不是有限数（NaN / Infinity / '90'）= 无法核对朝向，直接不认这块板（不拿 0 顶替）。
+    const placeholderRotationRaw = placeholder.rotationZDeg;
+    if (placeholderRotationRaw !== undefined && !isStrictFiniteNumber(placeholderRotationRaw)) return null;
+    const placeholderRotationDeg = placeholderRotationRaw === undefined ? 0 : placeholderRotationRaw;
+    const inCollisionSet = (geometry.parts as unknown[]).some((candidate) => (
+      isSamePlateMember(candidate, placeholderId, placeholderSize, placeholderCenter, placeholderRotationDeg)
+    ));
     return {
-      id: String(placeholder.id ?? PANEL_PART_ID),
+      id: placeholderId,
       name: String(placeholder.name ?? '工件（板件占位体）'),
       panel: {
         lengthMm,
@@ -1186,8 +1537,9 @@ export function panelSourceOfGeometry(geometry: unknown): PanelSource | null {
       bottomZmm: round2(bottomZ),
       centerXMm: round2(centerX),
       centerYMm: round2(centerY),
-      inCollisionSet: false,
-      poseSource: 'geometry.workpiecePlaceholder（center[0..1] + bottomZmm）'
+      inCollisionSet,
+      poseSource: 'geometry.workpiecePlaceholder（center[0..1] + bottomZmm；inCollisionSet 按 parts 里'
+        + '同 id + role=workpiece + size/center 与占位体一致、且 rotationZDeg 与占位体声明的板朝向等价的件派生）'
     };
   }
   const part = (geometry.parts as unknown[]).find((candidate): candidate is GeomPart => (
@@ -1225,7 +1577,14 @@ export function panelSourceOfGeometry(geometry: unknown): PanelSource | null {
   };
 }
 
-/** 从几何里读升降轴的位移/拾取空行程（`checkPanelChannel` 唯一允许的轴来源）。 */
+/**
+ * 从几何里读升降轴的位移/拾取空行程（`checkPanelChannel` 唯一允许的轴来源）。
+ *
+ * **板必须在这条轴的 `partIds` 里**才返回位移：塔轴（`tower-lift`，partIds 只有
+ * `lift-platform`）只带台面，把它的 2700 当成板的位移会得出一个不存在的 carried 位姿
+ * （板底凭空 +2690）。板没挂轴时返回 `null` → 调用方按「位移缺失」处理（carried 只能诊断），
+ * 不夹紧、不借用别条轴的行程。
+ */
 export function liftAxisOfGeometry(
   geometry: unknown,
   panelPartId: string
@@ -1237,6 +1596,8 @@ export function liftAxisOfGeometry(
     const actuatorId = entry.actuatorId === undefined ? undefined : String(entry.actuatorId);
     const isLift = actuatorId === 'tower-lift' || partIds.some((id) => LIFT_FOLLOW_PATTERN.test(id));
     if (!isLift) continue;
+    // 轴找到了，但板不随它走：没有「板被抬起」的位移证据（不许把轴的行程当成板的位移）
+    if (!partIds.includes(panelPartId)) continue;
     const strokeMm = Number(entry.strokeMm);
     const gapTable = isRecord(entry.partPickupGapMm) ? entry.partPickupGapMm : null;
     const gapRaw = gapTable && gapTable[panelPartId] !== undefined ? Number(gapTable[panelPartId]) : undefined;
@@ -1253,9 +1614,13 @@ export interface PanelChannelCheck {
   ok: true;
   /**
    * `diagnostic-only` = 本次不作可行性/承托证据。两种入口：
-   * - 板只挂在 `workpiecePlaceholder`（`inCollisionSet:false`），件表里没有生产 channel 承托路径；
+   * - 板**不在** `geometry.parts`（只有 `workpiecePlaceholder`，或占位体自报 `inCollisionSet:true`
+   *   但 parts 里没有这块板本身）—— 判据是「同 id + `role=workpiece` + box `size`/`center` 与
+   *   占位体一致（±EPS）+ `rotationZDeg` 与占位体声明的板朝向等价」，字段按 parts 里真正的板派生，
+   *   不信手写 flag、也不认同 id 的非板件、也不认同中心同尺寸但转 90° 的件；
    * - `rowsSource='caller'`：行表是调用方给的，证明不了「这些承托面属于这台机器」。
    * 要转成 `verified` 只有一条路：不传 `rows`，让本函数从 `geometry.parts` 读行表，且板在碰撞件表里。
+   * `verified` 只覆盖这两条，**不是**结构可行/承载认证。
    */
   mode: 'diagnostic-only' | 'verified';
   /** 板从哪来：只读占位体 / 碰撞件表 */
@@ -1286,12 +1651,13 @@ export type PanelChannelOutcome = PanelChannelCheck | PanelChannelCheckFailure;
  * - 几何里必须有板的**位姿**（`workpiecePlaceholder.center` 或 role/id 命中的件）—— N5；
  * - config 必须是缓存塔（`config.bufferTower.kind === 'tower'`）。
  *
- * **默认口径是「诊断」，不是「验收」**：生产塔的板只挂在 `workpiecePlaceholder`
- * （`inCollisionSet:false`），件表里没有生产 channel 承托路径（无叉指、无分段带），板也没挂进升降轴。
- * 因此当板不在碰撞件表里、**或**行表来自调用方时，本函数返回
- * `mode:'diagnostic-only'`、`panelSupport.*.claim:'diagnostic-only'`、`feasibility.feasible:false`。
- * `verified` 只认「几何行表 + 板在碰撞件表」（行表来源是唯一允许的证据来源：调用方自带的
- * `rows` 无法证明属于本机，M1 夹具那条绿也只在夹具测试里成立）。
+ * **默认口径是「诊断」，不是「验收」**：只有「行表来自几何 + 板在碰撞件表里」才返回 `verified`。
+ * 生产塔现在两条都成立（板是 `geometry.parts` 里的真实 `GeomPart`），所以 `mode='verified'` ——
+ * 但它的承托结论仍是 `rest:unsupported`（单条 1200 整带）、`carried:diagnostic-only`
+ * （板不随塔轴移动，位移来源 missing）、`feasibility.feasible:false`
+ * （`load-passes-shelf` + `stroke-shortfall`）。**`verified` 不是结构可行/承载认证。**
+ * 板只在占位体里（parts 里没有这块板本身，哪怕占位体写 `inCollisionSet:true`）或行表来自调用方时，
+ * 一律返回 `mode:'diagnostic-only'`、`claim:'diagnostic-only'`、`feasible:false`。
  *
  * 不启动内核、不读文件、不改任何既有判据：本函数只做纯几何读数。
  */
@@ -1335,7 +1701,7 @@ export function checkPanelChannel(input: {
   // verified 只认「行表来自几何 且 板在碰撞件表里」这两条同源证据：
   // - `rowsSource='caller'` 一律 diagnostic-only：调用方自带的行表证明不了「这些承托面属于这台机器」，
   //   哪怕同一次调用还给了 pose（P1-R2：夹具行表 + 生产几何曾报 verified/supported）；
-  // - 生产塔 placeholder（inCollisionSet=false）即便配了 caller rows/pose 也不升级。
+  // - 板不在 parts（只有占位体、哪怕自报 inCollisionSet:true）即便配了 caller rows/pose 也不升级。
   const diagnosticOnly = rowsSource !== 'geometry' || !source.inCollisionSet;
   const axis = diagnosticOnly ? null : liftAxisOfGeometry(input.geometry, source.id);
 
@@ -1394,12 +1760,24 @@ export function checkPanelChannel(input: {
         ? 'diagnosticOnly（caller-rows）：调用方给了 rows —— 行表来源不是几何，无法证明这些承托面属于这台机器。'
           + '承托数字只作诊断，claim=diagnostic-only、feasible/m1.feasible 恒 false；'
           + '要可引用只能让本函数从 geometry.parts 读行表（不传 rows），且板必须在碰撞件表里'
-        : 'diagnosticOnly（生产塔 placeholder）：板只挂在 workpiecePlaceholder、inCollisionSet=false，'
-          + '件表里没有 channel 承托路径（无叉指/无分段带），板也没挂进升降轴。'
+        : 'diagnosticOnly（板不在碰撞件集）：geometry.parts 里没有同 id 的板件 —— 只看占位体/占位体自报的 '
+          + 'inCollisionSet 不算证据（判据是同 id + role=workpiece + size/center 与占位体一致 + rotationZDeg 朝向一致；'
+          + '该字段按 parts 里真正的板派生，不认手写值，同 id 的托板/夹具件与转 90° 的同尺寸件也不算）。'
           + '承托数字只作诊断，claim=diagnostic-only，feasible 恒 false；'
-          + '调用方自带 rows/pose 也升不成证据（verified 只认几何行表）'
-      : '只读检查：承托断言与通道可行性都不改动 rest/lift/sweep 的任何判据；'
+          + '调用方自带 rows/pose 也升不成证据（verified 只认几何行表 + 碰撞集里的板）'
+      : '只读检查（verified）：只说明「行表来自几何 + 碰撞集里有这块板」，不是结构可行/承载认证；'
         + `行表来源 ${rowsSource}、位姿来源 ${feasibility.pose.source}；`
-        + '`feasibility.feasible=false` 是「多层通道不成立」，与首层 M1 段的绿是两个结论'
+        + `rest=${feasibility.panelSupport.rest.claim}（${feasibility.panelSupport.rest.coveredPct}%、`
+        + `${feasibility.panelSupport.rest.bandsY.length} 带）、carried=${feasibility.panelSupport.carried.claim}`
+        + `（位移来源 ${feasibility.m1.carriedShiftSource}：板不随塔轴移动时 carried 只能是诊断）；`
+        + '`feasibility.feasible=false` 是「多层通道不成立」'
+        + (feasibility.panelSupport.rest.invalidPartIds.length > 0
+          || feasibility.panelSupport.carried.invalidPartIds.length > 0
+          ? `；**注意**：行表里有 ${new Set([
+            ...feasibility.panelSupport.rest.invalidPartIds,
+            ...feasibility.panelSupport.carried.invalidPartIds
+          ]).size} 件坐标非有限值（invalid-support-rows），承托 claim 已降为 diagnostic-only —— 那不是「托不住」，`
+            + '是「读不全」'
+          : '')
   };
 }
