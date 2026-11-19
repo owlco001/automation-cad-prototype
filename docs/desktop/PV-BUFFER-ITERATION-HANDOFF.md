@@ -1,22 +1,22 @@
 # PV 缓存机迭代交接（软件侧）
 
-## 当前状态速览（2026-11-19 · **R10：5 笔已推 `9409f3e`；sidecar 修复已提交 `e1d1138` 未推送；CI 第二跑仍红（早退、真因未证）；4 份文档待提交**）
+## 当前状态速览（2026-11-19 · **R10：代码 6 笔已全部推送（末笔 `e1d1138`）；CI 前两跑红（早退、真因未证）；新 run `44516236961` 结论未出**）
 
 > 本节只放**当前**状态。完整报告与此前各轮数字 → `docs/desktop/R10-ITERATION.md`；
 > 下面从「P2 整改（历史）」起的各节是**历史记录，原样保留、不逐段改写**（旧数字仍是那一轮的实测，只是不再是现状）。
 
-- **代码状态**：`HEAD = e1d1138`（`fix(parametric): diagnose sidecar exits and preserve launch state`，**本机**），**领先 `origin/main@9409f3e` 一笔（未推）**。R10 代码共 **6 笔**：**5 笔已推**
-  （`137a68d` / `0379e15` / `ba8020d` / `94ec7e6` / `9409f3e`），第 6 笔 `e1d1138` 含包 D 的 4 文件（`electron/parametric.ts`、`scripts/{fake-parametric-sidecar,verify-step-export}.mjs`、`test/parametric-sidecar.test.ts`，+604/−32）**已提交、待推送**；工作区只剩 **4 份交接文档**待提交。
+- **代码状态**：`HEAD = origin/main`（最新一笔为文档同步提交），**工作区干净**。R10 代码共 **6 笔，全部已推**
+  （`137a68d` / `0379e15` / `ba8020d` / `94ec7e6` / `9409f3e` / `e1d1138`）；包 D 的 4 文件（`electron/parametric.ts`、`scripts/{fake-parametric-sidecar,verify-step-export}.mjs`、`test/parametric-sidecar.test.ts`，+604/−32）在 `e1d1138`。含该笔的新 run `44516236961` **结论未出**。
   上轮远端 CI run **`44493445997`**（head `e480f57`）success 7/7 —— 只覆盖 `e480f57`。
 - **本轮 CI 两次都未绿，原因不同**：首跑 run `44506016602`（head `94ec7e6`）是 `featuretree-geometry` job 没跑 `npm ci`，
   `eval:tasks` import `adm-zip` 即 `ERR_MODULE_NOT_FOUND`，**一条断言都没跑到**（已由 `9409f3e` 修）；
   第二跑 run `44508941094`（job `135507781027`，head `9409f3e`）依赖/装配/体积都过，红在 `verify:step` —— sidecar 起来后
   **约 0.36 s 自行退出**（端口 7440/7435），旧实现误报成「健康检查在 3 秒内未通过」，**具体真因未证**（旧代码丢弃 stderr，无 traceback）。
-  因此**不能写「CI 已绿」，也不能写「改动全未提交」**（5 笔在远端 + `e1d1138` 已提交本机、仅 4 份文档未提交）；**无安装包发版**。
+  因此**不能写「CI 已绿」**：前两跑都没过，含包 D 的新 run `44516236961` 结论未出（更新本文时 queued）；**无安装包发版**。
 - **本轮四包**（细节见 R10 报告 §1）：① **严格 CI + 负向自证**（`--require-full`、受控缺内核两臂、job 预算 100 min、守卫 ⑦ 依赖前置）；
   ② **逐件豁免精确化**（`OCCLUSION_DECLARED_HOSTS` 精确件号→唯一宿主、双向闭合、声明件 `required`、身份检查 5→6 项，名字级非实体认证）；
   ③ **启动计时口径**（`startup-metrics.ts` 零点 = main 模块求值 + `optional-json.ts` 只静音 `ENOENT`）；
-  ④ **包 D（已提交 `e1d1138`，未推送）** sidecar 错误诊断 —— `waitHealthy` 三态 `ready/exited/timeout`、早退报 `code/signal/实测 ms`、stderr 4 KB 尾缓存全 `[REDACTED]`、`classifySidecarStderr()` 八类、`verify:step` 失败带证据、**启动期不抢跑重启**（`launchActiveSeq` 作用域）；P1 复审通过。
+  ④ **包 D（`e1d1138`，已推送）** sidecar 错误诊断 —— `waitHealthy` 三态 `ready/exited/timeout`、早退报 `code/signal/实测 ms`、stderr 4 KB 尾缓存全 `[REDACTED]`、`classifySidecarStderr()` 八类、`verify:step` 失败带证据、**启动期不抢跑重启**（`launchActiveSeq` 作用域）；P1 复审通过。
 - **门禁状态（本机实测，包 D 之后，日志 `/root/.hermes/cache/scratch/cad-r10-final/*final2.log`）**：全量 **3726 tests / 3723 pass / 3 skip / 0 fail（120,598.912448 ms）**、`tsc` exit 0、`build:ext` exit 0（extension 2,946,350 B / gzip 921,963 B）、`verify:step` **7/7**（`start=559 ms`）、`verify:step-tower` **16 层 23/23**、`eval:tasks --require-full` **13/13（skipped=0）**、`parametric-sidecar` **22/22**、`ci-strict-gates` **23/23**。
   **包 D 之前同树实跑、本轮未重跑**：focused **415/415**、smoke **`SMOKE_OK`**（0 FAIL / 4 个显式 SKIP）、`verify:step-tower` 8 层 **16/16**、`verify:channel` 2/16 层各 **27/27**、`regen` **61/61**、kb **13/454/434,531**。**均为本机读数，不是 CI 读数。**
 - **启动计时**：`STARTUP_METRICS totalMs=373.254`，零点 = main 模块求值起点 —— 是**口径读数**，不是性能提升宣称。

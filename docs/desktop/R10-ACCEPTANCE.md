@@ -10,14 +10,14 @@
 - **CI 两次都未绿，原因不同**：
   ① run `44506016602`（head `94ec7e6`）：`featuretree-geometry` job 没跑 `npm ci`，`eval:tasks` import `desktop/src/shared/zip.ts` 即 `Cannot find package 'adm-zip'`，**一条断言都没跑到**（环境前置遗漏，已由 `9409f3e` 修）。
   ② run `44508941094`（head `9409f3e`，job `135507781027`）：依赖安装、装配、体积步骤**都过**，红在 `verify:step` —— sidecar 启动后**约 0.36 s 自行退出**（探测端口 7440/7435），旧实现误报成「健康检查在 3 秒内未通过」。**具体真因未证**（旧代码丢弃 stderr，没有 traceback）；**不是内核慢，也不是预算不足**（本机 `start=559 ms`，预算 90/120 s）。
-  包 D（错误诊断 + 启动竞态）**已提交为本机 `e1d1138`（4 文件，+604/−32），尚未推送**、**待推送 / CI**；在那个 SHA 触发的**新 run** 出绿前，**不得声称本轮 CI 已绿**。上轮 run `44493445997` 只覆盖 `e480f57`。
+  包 D（错误诊断 + 启动竞态）**已作为 `e1d1138` 推送**（随文档提交 `e2c3213` 进 `origin/main`）；其触发的**新 run `44516236961` 结论未出**（更新本文时状态 queued）。**该 run 出绿前，不得声称本轮 CI 已绿。** 上轮 run `44493445997` 只覆盖 `e480f57`。
 - **无安装包发版**。本记录不构成制造验收或结构安全结论。
 
 ## 2. 受验对象
 
 | 项 | 值 |
 |---|---|
-| 仓库 / 树 | `owlco001/automation-cad-prototype` @ `/tmp/automation-cad-prototype`，`HEAD = e1d1138`（**本机，领先 `origin/main@9409f3e` 一笔**；R10 代码共 6 笔，其中 5 笔已推）；包 D 的 4 文件已随 `e1d1138` 入库（`electron/parametric.ts`、`scripts/fake-parametric-sidecar.mjs`、`scripts/verify-step-export.mjs`、`test/parametric-sidecar.test.ts`，+604/−32）；**工作区脏**仅剩 4 份交接文档 |
+| 仓库 / 树 | `owlco001/automation-cad-prototype` @ `/tmp/automation-cad-prototype`，`HEAD = origin/main`（最新一笔为文档同步提交），**工作区干净**；R10 代码 6 笔全部已推，包 D 的 4 文件在 `e1d1138`（`electron/parametric.ts`、`scripts/fake-parametric-sidecar.mjs`、`scripts/verify-step-export.mjs`、`test/parametric-sidecar.test.ts`，+604/−32） |
 | 工具链 | node v26.7.0 / npm 11.19.0 / tsc 5.9.3 / vite 7.3.7，cwd = `desktop/` |
 | 环境 | 容器内 root，Electron 需 `--no-sandbox`；图形相关门禁在 xvfb 下跑 |
 | 证据目录 | `/root/.hermes/cache/scratch/cad-r10-final/`（`results.json` / `results.ndjson` + 各门禁 `.log`）；**scratch 永不提交** |
@@ -67,10 +67,10 @@
 2. `sweep` 405 命中（270 确认 + 135 待复核）**仍 fail，本轮未复跑**，不得改判为通过。
 3. 结构/安全/电气/PLC 全未做：`structure.accepted:false`、挠度/导向/防坠/安全回路未校核、IO 地址 `null`、`executable=false`。
 4. STEP 门禁只到「每件包络内 ≥1 个 B-Rep 顶点」+ **名字级**精确件号/宿主/声明件存在；**不是逐面或逐实体身份，不是制造验收**。占位顶点 ≠ 实体认证。
-5. 全量 3 个 skip 是仓库既有跳过，不代表被覆盖；**CI 两次红都不是门禁断言红，也都不是绿** —— 首跑缺 `npm ci`（adm-zip），第二跑 sidecar 早退（真因未证）。包 D **推送后那次新 run** 之前，本记录不提供 CI 证据。
+5. 全量 3 个 skip 是仓库既有跳过，不代表被覆盖；**CI 两次红都不是门禁断言红，也都不是绿** —— 首跑缺 `npm ci`（adm-zip），第二跑 sidecar 早退（真因未证）。**新 run `44516236961` 出结论前，本记录不提供 CI 证据。**
 
 ## 6. 移交动作
 
-1. **代码已提交**：包 D 的 4 文件（`parametric.ts`、`fake-parametric-sidecar.mjs`、`verify-step-export.mjs`、`parametric-sidecar.test.ts`）已在本机 `e1d1138`，**尚未推送**；A/B/C + CI 修复共 5 笔已在远端 `9409f3e`。现在只需提交 4 份交接文档并 `git push origin main`（一次 push 同时带走 `e1d1138` 与文档）→ 记 `git rev-parse HEAD`。
-2. `gh run list --limit 3` 确认新 run 的 `headSha` 等于该 SHA → `gh run watch <id>`；**CI 结论只挂这个 SHA**（`44506016602` 缺依赖、`44508941094` sidecar 早退，只作已知问题证据）。若再红，先看 `verify:step` 打出的 `code/stderrClass/stderr 尾`——本轮修复就是为这条。
+1. **已推送**：包 D 的 4 文件在 `e1d1138`，随文档提交 `e2c3213` 进入 `origin/main`（`git log --oneline -6` 复核）。不再有未提交内容；后续若改文档，只 add 白名单 4 份。
+2. `gh run list --limit 3` 取 `headSha = $(git rev-parse HEAD)` 的 run（首个 `44516236961`）→ `gh run watch <id>`；**CI 结论只挂这个 SHA 的 run**（`44506016602` 缺依赖、`44508941094` sidecar 早退，只作已知问题证据）。**结论未出前写「未出」，不要写绿。** 若再红，先看 `verify:step` 打出的 `code/stderrClass/stderr 尾`——本轮修复就是为这条。
 3. 未完成项按危害排序：升降通道（`sweep` 405→0）→ 结构/安全/电气/PLC → STEP 逐实体身份。

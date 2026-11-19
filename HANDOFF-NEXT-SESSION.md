@@ -1,6 +1,6 @@
 # AutomationCAD 下一会话交接
 
-更新时间：2026-11-19（**R10：5 笔已推 `9409f3e`；sidecar 修复已提交 `e1d1138` 但尚未推送；CI 第二跑仍红 = 启动早退、真因未证；工作区只剩 4 份文档待提交**）
+更新时间：2026-11-19（**R10：代码 6 笔已全部推送（末笔 `e1d1138`）；CI 前两跑红 = 启动早退、真因未证；新 run `44516236961` 结论未出**）
 仓库 `owlco001/automation-cad-prototype`；工作目录 `/tmp/automation-cad-prototype`
 
 > 这是**短摘要**：只写「现在什么状态、下一步做什么」。
@@ -9,13 +9,13 @@
 
 ## 现状（三句）
 
-- **代码状态**：`HEAD = e1d1138`（本机，领先 `origin/main@9409f3e` 一笔）。R10 代码共 **6 笔**：其中 **5 笔已推**（`137a68d` 严格档 + 负向自证 → `0379e15` 豁免精确化 → `ba8020d` 启动计时 + ENOENT 静音 → `94ec7e6` 文档收口 → `9409f3e` CI 依赖前置），第 6 笔 `e1d1138`（sidecar 早退诊断 + 启动竞态，4 文件 +604/−32）**已提交、尚未推送**。
+- **代码状态**：`HEAD = origin/main`（最新一笔是文档同步提交，`git log --oneline -3` 复核），工作区干净。R10 代码共 **6 笔，全部已推**：`137a68d` 严格档 + 负向自证 → `0379e15` 豁免精确化 → `ba8020d` 启动计时 + ENOENT 静音 → `94ec7e6` 文档收口 → `9409f3e` CI 依赖前置 → **`e1d1138` sidecar 早退诊断 + 启动竞态（4 文件 +604/−32）**。
 - **CI 两次都未绿，原因不同**：
   ① 首跑 run `44506016602`（head `94ec7e6`）：`featuretree-geometry` job 没跑 `npm ci`，`eval:tasks` import `adm-zip` 即 `ERR_MODULE_NOT_FOUND`，**一条断言都没跑到**；已由 `9409f3e` 修（setup-node 24 + `npm ci` 放在评测前、job 100 min、守卫 ⑦ 判依赖前置/顺序）。
   ② 第二跑 run `44508941094`（job `135507781027`，head `9409f3e`）：`npm ci`、装配与体积步骤**都过了**，红在 `verify:step` —— sidecar 起来后**约 0.36 s 自行退出**（探测两个端口 7440/7435），旧实现把这次死亡上报成「健康检查在 3 秒内未通过」。**具体真因（Python 为何退出）仍未证**：旧代码 `child.stderr?.resume()` 吞掉全部 stderr，日志里没有任何 traceback；**不许把 0.36 s 读成内核慢**（本机 `start=559 ms`，预算 90/120 s）。
-- **所以既不能写「CI 已绿」，也不能写「改动全未提交」**：5 笔在远端，sidecar 修复**已提交为 `e1d1138`**（`parametric.ts`、`fake-parametric-sidecar.mjs`、`verify-step-export.mjs`、`test/parametric-sidecar.test.ts`，+604/−32）但**尚未推送**；工作区现在只剩 **4 份交接文档**的改动。**没有安装包发版。**
+- **所以既不能写「CI 已绿」，也不能写「改动全未提交」**：R10 代码 6 笔全在远端（最后一笔 `e1d1138` 随 `e2c3213` 推送），工作区干净；但 **`e1d1138` 触发的 run `44516236961` 尚未出结论**，CI 仍是前两次红的历史。**没有安装包发版。**
 
-## 包 D 修复（代码已提交 `e1d1138`；待推送 / CI）
+## 包 D 修复（已推送 `e1d1138`；CI 结论待 run `44516236961`）
 
 | 项 | 改了什么 | 证据 |
 |---|---|---|
@@ -49,9 +49,9 @@
 
 ## 下一会话顺序
 
-1. `git status --short` / `git log --oneline -5` → 确认 `HEAD = e1d1138`（领先 `origin/main@9409f3e` 一笔）、工作区只有 **4 份文档**；**不要 `git checkout --`、不要 amend `e1d1138`、不要重排已推送历史**。
-2. 只 add 这 4 份文档并提交（例如 `docs: record sidecar fix commit and pending push`）→ `git push origin main`：这一次 push 同时带走代码 `e1d1138` 与文档 → `git rev-parse HEAD` 记 SHA。
-3. `gh run list --limit 3` → 确认**新 run**（push 后产生的那一个）的 `headSha` 等于该 SHA → `gh run watch <id>`；**CI 结论只挂这个新 run**（`44506016602` 缺 `npm ci`、`44508941094` sidecar 早退，都只作已知问题证据）。此刻**仍不得写「CI 已绿」**。
+1. `git status --short` / `git log --oneline -6` → 确认工作区干净、`origin/main` 已含 `e1d1138`；**不要 `git checkout --`、不要 amend、不要重排已推历史**。
+2. `gh run list --limit 3` → 取 `headSha = $(git rev-parse HEAD)` 的那个 run（首个是 `44516236961`，其后若再有文档提交则以最新为准）→ `gh run watch <id>`。
+3. 只有该 run **completed/success** 才能把「CI 已绿」写进这 4 份文档（同时记 run id 与 headSha）；**在它出结论前一律写「结论未出」**。若再红，先看 `verify:step` 的 `code/elapsed/exitCode/stderrClass/stderr 尾`（包 D 就是为这条），不要先改测试。
 4. 任何再次改源码/测试后按此顺序整轮重跑（同会话、同树、串行）：
    ```bash
    cd /tmp/automation-cad-prototype/desktop
@@ -66,7 +66,7 @@
    ```
 5. 之后才是老欠账：升降通道（`sweep` 405→0）、逐实体 STEP 身份、结构/安全/电气/PLC。
 
-落库只 add 白名单文件：**现在只剩 4 份文档** —— `HANDOFF-NEXT-SESSION.md`、`docs/desktop/{R10-ITERATION,R10-ACCEPTANCE,PV-BUFFER-ITERATION-HANDOFF}.md`；代码 4 文件（`desktop/electron/parametric.ts`、`desktop/scripts/{fake-parametric-sidecar,verify-step-export}.mjs`、`desktop/test/parametric-sidecar.test.ts`）已随 `e1d1138` 入库，**不要再加、不要重复提交**。**`scratch/` 永不提交，`git add -A` 禁用。**
+落库只 add 白名单文件：**当前工作区应为干净**；若还要改文档，只允许这 4 份 —— `HANDOFF-NEXT-SESSION.md`、`docs/desktop/{R10-ITERATION,R10-ACCEPTANCE,PV-BUFFER-ITERATION-HANDOFF}.md`。代码 4 文件已在 `e1d1138`（随 `e2c3213` 推送），**不要再提交代码、不要 amend**。**`scratch/` 永不提交，`git add -A` 禁用。**
 
 ## 文档与 KB / 安全
 
