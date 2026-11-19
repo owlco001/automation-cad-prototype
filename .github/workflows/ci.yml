@@ -816,12 +816,14 @@ jobs:
     name: FeatureTree real geometry (build123d)
     runs-on: ubuntu-latest
     # 步骤预算（最坏情形）：安装依赖(npm ci) 10 + 安装 build123d ~10 + 装配 10 + 体积 10 + STEP 12
-    # + 缓存塔 20 + 任务级评测（严格档）10 + 严格档负向自证 5 + AABB 10 = 97 min，另加 checkout/setup-node/setup-python 的 2~3 min；
-    # job 级 100 min 必须 ≥ 步骤合计，否则最后一步会在跑完断言前被掐断，表现成「红但原因误导」
+    # + 缓存塔 20 + 任务级评测（严格档）10 + 严格档负向自证 5 + AABB 10 + 内核 identity-export 5
+    # = 102 min，另加 checkout/setup-node/setup-python 的 2~3 min；
+    # job 级 105 min 必须 ≥ 步骤合计，否则最后一步会在跑完断言前被掐断，表现成「红但原因误导」
     # （60 < 62 就是旧口径的错；加了严格评测后旧的 75 min 也不够了；再加负向自证后 82 也不够了；
-    # 首跑又把「没装 node 依赖」暴露出来，加了 npm ci 这一步后 90 min 也不够了）。
+    # 首跑又把「没装 node 依赖」暴露出来，加了 npm ci 这一步后 90 min 也不够了；
+    # R13 把 6 条真内核 identity-export 用例挪进本 job（+5），100 min 也不够了）。
     # 加 step 必须同时改这里 —— desktop/test/meta/ci-strict-gates.test.mjs ⑥ 会判红。
-    timeout-minutes: 100
+    timeout-minutes: 105
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -847,6 +849,31 @@ jobs:
           . .venv-ft/bin/activate
           pip install --quiet --upgrade pip
           pip install --quiet build123d==0.13.0
+      # 真内核用例（R13 / C2 + P1-3）：test/parametric/identity-export.test.mjs 里那组要真起
+      # build123d 的用例，在 unit job 里恒 SKIP（CI 实测 `# 内核不可用：…身份导出未验证`）。
+      # 不给 unit 装 build123d（那等于把 PyPI 可达性压到主门禁上），改在本 job 真跑：
+      # 复用上面已装好的 .venv-ft，0 新增安装。本步必须在 npm ci 与 build123d 之后（守卫⑦/⑧）。
+      #
+      # 回执口径（P1-3 整改，上一版是假的）：
+      #   node 用 TAP reporter 把结果写进**独立文件**，再由 scripts/verify-identity-export-tap.mjs
+      #   解析。校验器只认结构化记录：计划 `1..N` == 记录数 == `# tests`，pass/fail/skip/todo
+      #   逐项与记录对账，无 fail/cancel/skip/todo；且原 R12 那 6 条「内核：…」具名用例必须有
+      #   真实 passed 记录（只钉这 6 个名字，不钉总条数 —— 用例会继续加）。
+      #   为什么不能用 `grep -q 'ℹ skipped 0'`：echo 一行同文案就能满足它；`--test-name-pattern`
+      #   把全部用例过滤掉后 node 仍打印 `ℹ tests 1 / ℹ pass 1 / ℹ skipped 0` 并 exit 0。
+      #   两条都在 R13 审查里实测复现过，所以这步不带任何用例过滤参数，也不拿 grep/echo 当证据。
+      - name: 内核 identity-export 用例（真跑 + TAP 回执结构校验）
+        timeout-minutes: 5
+        run: |
+          cd desktop
+          set -euo pipefail
+          FT_PY="$PWD/../.venv-ft/bin/python"
+          # 先证明这个解释器真有内核：用例文件自带 AUTOMATIONCAD_PYTHON → /root/.venvs → python3
+          # 三级回退，指错了会静默落到本机恰好存在的那一个，红因就变成「skipped N」而不是
+          # 「venv 指错」。这一行让「venv 是不是对的」先独立成立，不靠回退链兜着。
+          "$FT_PY" -c 'import build123d; print("IDENTITY_KERNEL_OK", build123d.__version__)'
+          AUTOMATIONCAD_PYTHON="$FT_PY" node --test --test-reporter=tap --test-reporter-destination=/tmp/identity-export.tap test/parametric/identity-export.test.mjs
+          node scripts/verify-identity-export-tap.mjs /tmp/identity-export.tap
       # 真实 OCCT 重建：种子树体积必须等于手算（94166.8 mm³），改板厚后按手算变化
       - name: 装配验收（并集 / 包围盒 / STL / 错误路径）
         timeout-minutes: 10

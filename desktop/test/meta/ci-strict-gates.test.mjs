@@ -43,8 +43,22 @@
 //      取**执行顺序**：没有安装步骤 → 红；装在评测之后 → 红。首跑事故：featuretree-geometry
 //      只装了 build123d，eval:tasks 一 import src/shared/zip.ts 就 `Cannot find package 'adm-zip'`，
 //      表现为「严格档红了」，实际是环境前置遗漏 —— 断言根本没跑到。
+//   8. 真内核用例 `test/parametric/identity-export.test.mjs` 必须在**有内核**的 job
+//      （featuretree-geometry）里作为独立步骤真跑，且**回执是结构化 TAP**：node 写独立文件
+//      （`--test-reporter=tap --test-reporter-destination=/tmp/…`），再由
+//      `scripts/verify-identity-export-tap.mjs` 解析同一个文件。该步还要：先自证 venv 里
+//      真有 build123d、`set -euo pipefail`、不带任何用例过滤参数、不拿 echo/grep/`ℹ …`
+//      文案当证据。只断言 `skipped 0` 的旧版已被两条实测假绿击穿（echo 伪造、过滤到零条）。
+//   9. unit（无内核）里不许出现该文件名：把整文件挪进 unit 等于给主门禁压 PyPI 依赖
+//      （C1 拒绝的理由），且 6 条在那边恒 SKIP，看起来「跑了」其实没跑。
+//  10. 这条新步骤与旧门禁**同级**：step / job 级 `if` 恒假、`continue-on-error`、
+//      `|| true` / `; true` 吞码一律判红（⑩ 复用 JOB_/STEP_IF_FALSE、
+//      JOB_/STEP_CONTINUE_ON_ERROR、MASKED_EXIT 四个既有码）；并且它的每个命令行必须
+//      整行落在契约形状内、按 preflight < TAP 生产者 < 消费者 执行 ——
+//      `true # <真命令>` / `: # …` / `if false; then …; fi` 这类「文本里有、实际不执行」
+//      的写法一律判红（fail-closed；不写 shell 解释器，只锁这一步的形状与顺序）。
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
 const CI_PATH = new URL('../../../.github/workflows/ci.yml', import.meta.url);
@@ -214,7 +228,7 @@ const MASK_PATTERNS = [
   { re: /\|\|\s*:\s*(?:$|[;&#])/, label: '|| :' },
   { re: /\|\|\s*exit\s+0\b/, label: '|| exit 0' },
   { re: /\|\|\s*(?:echo|printf|cat)\b/, label: '|| echo/printf/cat（失败被替换成 0）' },
-  { re: /(?:^|[;&])\s*(?:true|:)\s*(?:$|[;&#])/, label: '; true' },
+  { re: /(?:^|[;&])\s*(?:true|:)\s*(?:$|[;&#])/, label: '; true / 裸 true、: 顶掉命令' },
   { re: /(?:^|[;&])\s*exit\s+0\b/, label: '; exit 0' },
   { re: /^\s*set\s+\+e\b/, label: 'set +e' }
 ];
@@ -278,6 +292,108 @@ const SUBSTITUTION_RE = /`|\$\(/;
 /** 装 node 依赖：只认命令开头（`# npm ci` 注释、`echo npm ci` 都不算）。 */
 const INSTALL_CMD_RE = /^npm\s+(?:ci|install)(?:\s|$)/;
 const isInstallCommand = (text) => INSTALL_CMD_RE.test(text);
+
+// ---------------------------------------------------------------------------
+// 真内核 identity-export 用例（R13 / C2）
+//
+// 事故形态：这 6 条在 unit job 里恒 SKIP（runner 没 build123d），而唯一装了内核的
+// featuretree-geometry job **没有任何 node --test 步骤** → 这 6 条在 CI 一处都没跑。
+// 判据同样只认命令：注释里写「这里跑了 identity-export」不顶用。
+// ---------------------------------------------------------------------------
+const IDENTITY_EXPORT_FILE = 'test/parametric/identity-export.test.mjs';
+/** 真跑该文件的命令：`node --test … identity-export.test.mjs`。 */
+const isIdentityExportRun = (text) => /\bnode\s+--test\b/.test(text) && text.includes(IDENTITY_EXPORT_FILE);
+/** TAP 回执校验器（本包新增，独占文件）。 */
+const IDENTITY_VERIFIER = 'scripts/verify-identity-export-tap.mjs';
+const IDENTITY_VERIFIER_RE = /\bnode\s+scripts\/verify-identity-export-tap\.mjs\s+(\S+)\s*$/;
+/** 结构化回执：node 自己把结果写成 TAP（不再是给人看的 spec 日志）。 */
+const TAP_REPORTER_RE = /(?:^|\s)--test-reporter=tap(?:\s|$)/;
+const TAP_DEST_RE = /(?:^|\s)--test-reporter-destination=(\S+)/;
+/** 用例过滤：任何一种都能把整文件过滤成「零条执行仍 exit 0」。 */
+const FILTER_FLAGS = [
+  { re: /--test-name-pattern\b/, label: '--test-name-pattern' },
+  { re: /--test-only\b/, label: '--test-only' },
+  { re: /--test-skip-pattern\b/, label: '--test-skip-pattern' }
+];
+/**
+ * 「拿文本当证据」的写法：R13 审查实测两条都能假绿 ——
+ *   ① `echo 'ℹ skipped 0'`：不读日志、不证明任何东西；
+ *   ② `grep -q 'ℹ skipped 0' <log>`：`--test-name-pattern` 过滤掉全部用例后 node 仍打印
+ *      `ℹ tests 1 / ℹ pass 1 / ℹ skipped 0` 并 exit 0，grep 照样命中。
+ * 所以回执只能来自 TAP 解析器，这一步里出现 echo/printf/cat/grep 或 `ℹ …` 摘要文案一律判红。
+ */
+const FAKE_PROOF_RES = [
+  { re: /^(?:echo|printf|cat|grep)\b/, label: 'echo/printf/cat/grep（拿文本冒充执行结果）' },
+  { re: /ℹ (?:tests|pass|fail|skipped|suites|cancelled|todo|duration_ms)\b/, label: '`ℹ …` 摘要文案（spec reporter 的日志行）' }
+];
+
+// ---------------------------------------------------------------------------
+// 这一步的**契约形状**（R13 复审 §4.2 整改）
+//
+// 复审实测的四个绿：step 级 `continue-on-error: true`、step 级 `if: false`（新步骤
+// 不在 ④ 的判据作用域内，那两个码只绑 `isToolCmd`），以及
+//   `"$FT_PY" -c '…'` / 生产者行 被 `true # <真命令>` / `: # …` / `if false; then …; fi`
+// 顶掉（判据是全文子串正则，行尾注释和恒假分支都能满足它）。
+//
+// 这里不写 shell 解释器，只锁**这一条步骤的契约**：每个命令行必须整行落进下面六种
+// 形状之一（行首锚定 + 全行匹配），并且必须 preflight < 生产者 < 消费者。条件/循环
+// 控制语句、`true`/`:` 这类 noop 天然落不进这六种形状 —— fail-closed，不需要额外
+// 枚举每一个 shell 关键字（这一步本来就只有顺序执行，用不到任何控制流）。
+// ---------------------------------------------------------------------------
+
+/**
+ * 去掉行尾 shell 注释（引号内的 `#` 原样保留）。
+ *
+ * 只做「引号状态机 + 第一个引号外的 `#`」，不是词法分析器：它的唯一职责是让
+ * `true # <真命令>` 不再靠注释里的文本满足任何判据。引号内的 Python 代码
+ * （含 `;`）因此一字不动 —— 本文件从不在引号内切分命令。
+ */
+function stripShellComment(text) {
+  let quote = null;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '#' && (i === 0 || /\s/.test(text[i - 1]))) return text.slice(0, i).trimEnd();
+  }
+  return text;
+}
+
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** 预检：必须是**这一行**在直接调用刚取到的解释器（行首锚定，行尾锚定）。 */
+const ID_PREFLIGHT_CMD = /^"\$FT_PY"\s+-c\s+'(?=[^']*\bimport\s+build123d\b)[^']*'$/;
+/** 生产者：必须由 `AUTOMATIONCAD_PYTHON="$FT_PY"` 起头，把 TAP 写进**绝对路径**文件。 */
+const ID_PRODUCER_CMD = new RegExp(
+  '^AUTOMATIONCAD_PYTHON="\\$FT_PY"\\s+node\\s+--test\\s+--test-reporter=tap'
+  + '\\s+--test-reporter-destination=(\\/\\S+)\\s+'
+  + `${escapeRe(IDENTITY_EXPORT_FILE)}$`
+);
+/** 消费者：必须是 `node <校验器> <绝对路径>`，不多不少。 */
+const ID_CONSUMER_CMD = new RegExp(`^node\\s+${escapeRe(IDENTITY_VERIFIER)}\\s+(\\/\\S+)$`);
+
+/** 这一步允许的六种行；`role` 参与顺序判据（preflight < producer < consumer）。 */
+const ID_STEP_SHAPES = [
+  { re: /^cd desktop$/, label: 'cd desktop' },
+  { re: /^set -euo pipefail$/, label: 'set -euo pipefail' },
+  { re: /^FT_PY="\$PWD\/\.\.\/\.venv-ft\/bin\/python"$/, label: 'FT_PY="$PWD/../.venv-ft/bin/python"' },
+  { re: ID_PREFLIGHT_CMD, label: '预检「"$FT_PY" -c \'… import build123d …\'」', role: 'preflight' },
+  {
+    re: ID_PRODUCER_CMD,
+    label: '生产者「AUTOMATIONCAD_PYTHON="$FT_PY" node --test --test-reporter=tap '
+      + `--test-reporter-destination=/tmp/… ${IDENTITY_EXPORT_FILE}」`,
+    role: 'producer'
+  },
+  { re: ID_CONSUMER_CMD, label: `消费者「node ${IDENTITY_VERIFIER} /tmp/…」`, role: 'consumer' }
+];
+const ID_STEP_SHAPE_HINT = ID_STEP_SHAPES.map((s) => `「${s.label}」`).join(' / ');
+const ID_ROLE_LABEL = { preflight: 'venv 预检（preflight）', producer: 'TAP 生产者（producer）', consumer: 'TAP 消费者（consumer）' };
 
 // ---------------------------------------------------------------------------
 // 负向自证步骤的形状（严格档必须「缺内核就红」，且不许真去卸载共享 venv）
@@ -566,6 +682,243 @@ function auditGates(text, { disable = [] } = {}) {
     }
   }
 
+  // ⑧ 真内核 identity-export 用例：有内核的 job 必须真跑，且回执必须是**结构化 TAP**
+  //
+  // C2 之前这份文件的真内核用例在 CI **一处都没跑**：unit 里恒 SKIP（runner 没 build123d），
+  // 而唯一装了内核的 featuretree-geometry 里没有任何 node --test 步骤。
+  // P1-3 之前那条「真跑」步骤只断言 `grep -q 'ℹ skipped 0'`，被两条实测假绿击穿：
+  //   · `echo 'ℹ skipped 0'` 能满足它（不读日志、不证明任何事）；
+  //   · `--test-name-pattern=ZZ` 过滤掉全部用例后 node 仍打印 `ℹ tests 1 / ℹ pass 1 /
+  //     ℹ skipped 0` 并 exit 0 —— 「线接上了、一条都没跑」。
+  // 现在的判据是一条链，缺一环就红：
+  //   producer：`node --test --test-reporter=tap --test-reporter-destination=<独立文件>`
+  //   consumer：`node scripts/verify-identity-export-tap.mjs <同一个文件>`
+  //   · 必须先证明 venv 里真有内核（`"$FT_PY" -c 'import build123d…'`）——用例文件自带
+  //     AUTOMATIONCAD_PYTHON → /root/.venvs → python3 三级回退，指错了也会静默落到别处；
+  //   · `set -euo pipefail`（没有它，前面命令失败还能走到最后一行）；
+  //   · 不许任何 `--test-name-pattern/--test-only/--test-skip-pattern`；
+  //   · 不许拿 echo/grep/`ℹ …` 文案当证据（那正是被击穿的两条）。
+  // 用例条数一个字都不钉（B 还在加），「必须真跑过」由校验器按具名契约判。
+  if (ft) {
+    const identitySteps = ft.steps.filter((st) => st.commands.some((c) => isIdentityExportRun(c.text)));
+    const structural = (() => {
+      if (identitySteps.length === 0) {
+        return `没有任何步骤跑 ${IDENTITY_EXPORT_FILE} —— 那几条真内核用例在 CI 一处都不跑（unit 里恒 SKIP，本 job 又不跑）`;
+      }
+      if (identitySteps.length > 1) {
+        return `有 ${identitySteps.length} 条步骤在跑 ${IDENTITY_EXPORT_FILE}（第 ${identitySteps.map((s) => s.line).join(', ')} 行），判据不知道看哪一条`;
+      }
+      const st = identitySteps[0];
+      const runCmds = st.commands.filter((c) => isIdentityExportRun(c.text));
+      const run = runCmds[0];
+      if (!TAP_REPORTER_RE.test(run.text)) {
+        return `第 ${run.line} 行没有 --test-reporter=tap —— 不给结构化回执，就只能拿文本（echo/grep）当证据，那两条已被实测击穿`;
+      }
+      const dest = TAP_DEST_RE.exec(run.text)?.[1];
+      if (!dest) {
+        return `第 ${run.line} 行没有 --test-reporter-destination=<独立文件> —— 结果没有落到可校验的独立文件里`;
+      }
+      if (!dest.startsWith('/')) {
+        return `TAP 输出文件是相对路径「${dest}」—— 必须是仓库外的独立绝对路径（/tmp/…），否则会被当成仓库产物提交`;
+      }
+      if (!st.commands.some((c) => IDENTITY_VERIFIER_RE.test(c.text))) {
+        return `没有跑 ${IDENTITY_VERIFIER} —— node 写了 TAP 却没人校验，等于回执没人看`;
+      }
+      if (!st.commands.some((c) => /^set -euo pipefail$/.test(c.text))) {
+        return '缺 `set -euo pipefail` —— node 那条命令失败时后面还会继续跑，最后以校验器/最后一行为准就假绿了';
+      }
+      const venvLine = st.commands.find((c) => /^FT_PY="/.test(c.text));
+      if (!venvLine || !/\.venv-ft\/bin\/python/.test(venvLine.text)) {
+        return '没有 `FT_PY=…/.venv-ft/bin/python` —— 不许赌 runner 上恰好有 build123d';
+      }
+      if (!st.commands.some((c) => /"\$FT_PY"\s+-c\s+['"][^'"]*import build123d/.test(c.text))) {
+        return '没有先 `"$FT_PY" -c "import build123d…"` —— 用例文件有三级回退，venv 指错时它会静默落到别处，'
+          + '红因就变成「skipped N」而不是「venv 指错」';
+      }
+      if (!/AUTOMATIONCAD_PYTHON="\$FT_PY"/.test(run.text)) {
+        return `第 ${run.line} 行的 AUTOMATIONCAD_PYTHON 不是刚验证过的 "$FT_PY" —— 证明的和用的可能不是同一个解释器`;
+      }
+      if (typeof st.timeoutMinutes !== 'number') {
+        return '这一步没有 timeout-minutes：预算注释里的 5 min 只是散文，算不进步骤合计（⑥）';
+      }
+      // 前置顺序：npm ci 与 build123d 都必须在**这一步之前**（判执行顺序，不看文本里有没有）
+      const stIdx = ft.steps.indexOf(st);
+      const npmIdx = ft.steps.findIndex((s) => s.commands.some((c) => INSTALL_CMD_RE.test(c.text)));
+      const kernelIdx = ft.steps.findIndex((s) => s.commands.some((c) => /pip\s+install/.test(c.text) && /build123d/.test(c.text)));
+      if (npmIdx < 0 || npmIdx > stIdx) {
+        return 'npm ci 不在这条步骤之前 —— node_modules 不存在时 node --test 连文件都加载不起来，红因与断言无关';
+      }
+      if (kernelIdx < 0 || kernelIdx > stIdx) {
+        return '「安装 build123d」不在这条步骤之前 —— 跑的时候 .venv-ft 还不存在，前置证明会直接红';
+      }
+      return null;
+    })();
+    if (structural) add('FT_IDENTITY_EXPORT_MISSING', `${FT_JOB} 的真内核 identity-export 用例不成立：${structural}`);
+
+    const st = identitySteps.length === 1 ? identitySteps[0] : null;
+    if (st) {
+      for (const c of st.commands) {
+        const flag = FILTER_FLAGS.find((f) => f.re.test(c.text));
+        if (flag) {
+          add(
+            'IDENTITY_TAP_FILTER_FORBIDDEN',
+            `${FT_JOB}:${c.line} 的 \`${c.text}\` 带 ${flag.label} —— 过滤到零条时 node 仍 exit 0，`
+            + '「零条执行仍全绿」正是这条门禁要堵的形态（实测：18 条全被过滤后 tests 1 / pass 1 / skipped 0）'
+          );
+        }
+        const fake = FAKE_PROOF_RES.find((f) => f.re.test(c.text));
+        if (fake) {
+          add(
+            'IDENTITY_TAP_FAKE_PROOF',
+            `${FT_JOB}:${c.line} 的 \`${c.text}\` 是${fake.label} —— 回执只能来自 TAP 解析器，`
+            + '`echo "ℹ skipped 0"` 与 `grep -q "ℹ skipped 0"` 都已被实测证明可以为零执行背书'
+          );
+        }
+      }
+      // producer / consumer 必须指向**同一个**文件：两处各写各的路径时，校验器读的是上一次的旧回执
+      const dest = st.commands.map((c) => TAP_DEST_RE.exec(c.text)?.[1]).find(Boolean);
+      const consumed = st.commands.map((c) => IDENTITY_VERIFIER_RE.exec(c.text)?.[1]).find(Boolean);
+      if (dest && consumed && dest !== consumed) {
+        add(
+          'IDENTITY_TAP_UNBOUND',
+          `${FT_JOB}: 写回执的是「${dest}」，校验器读的是「${consumed}」—— 生产者与消费者没绑在同一个文件上，`
+          + '校验器可能在校验上一次（或别人的）回执'
+        );
+      }
+    }
+  }
+
+  // ⑨ unit（无内核）：不许出现该文件名 —— 挪错方向 = 给主门禁压 PyPI 依赖，且那 6 条在
+  // 那边恒 SKIP（看起来跑了、其实一条都没跑）。和 ③ 是同一条思路的反面基准。
+  if (unit) {
+    for (const c of cmds(unit)) {
+      if (!c.text.includes(IDENTITY_EXPORT_FILE)) continue;
+      add(
+        'UNIT_IDENTITY_EXPORT_FORBIDDEN',
+        `${NO_KERNEL_JOB}:${c.line} \`${c.text}\` 在无内核 job 里跑 ${IDENTITY_EXPORT_FILE} —— `
+        + `那 6 条在这里恒 SKIP（看着跑了、其实没跑），要真跑请放 ${FT_JOB}（那里有 .venv-ft）`
+      );
+    }
+  }
+
+  // ⑩ 内核 identity-export / TAP 步骤：禁用、吞码、noop 与执行顺序（R13 复审 §4.2）
+  //
+  // 复审实测的四个绿全部落在这一条步骤上：
+  //   · step 级 `continue-on-error: true` → 步骤失败不阻塞 job，内核零证据而流水线绿；
+  //   · step 级 `if: false` → 这一步永不执行，等于没接；
+  //   · `"$FT_PY" -c '…'` / 生产者行 被 `true # <真命令>`、`: # …`、`if false; then …; fi` 满足；
+  //   · 校验器排在生产者之前、生产者/消费者挂 `|| true` / `; true`（吞码）。
+  // 根因：④ 的判据对象只取 `isToolCmd`（verify:step-tower / eval:tasks），新加的内核
+  // 步骤不在作用域内；而 ⑧ 的命令判据是「文本里出现过」，行尾注释与恒假分支都能满足。
+  // 这里的三类判据都**复用既有码**（JOB_/STEP_IF_FALSE、JOB_/STEP_CONTINUE_ON_ERROR、
+  // MASKED_EXIT），只新增两个位置明确的码：IDENTITY_STEP_NOOP（不是实际执行命令）与
+  // IDENTITY_STEP_ORDER（preflight < 生产者 < 消费者 不成立）。
+  const identityGovSteps = [];
+  for (const j of jobList) {
+    for (const st of j.steps) {
+      if (st.commands.some((c) => isIdentityExportRun(c.text) || IDENTITY_VERIFIER_RE.test(c.text))) {
+        identityGovSteps.push({ job: j, step: st });
+      }
+    }
+  }
+  for (const { job: j, step: st } of identityGovSteps) {
+    // job 级条件对**每一个**步骤生效：这一条步骤所在的 job 被禁用/不阻塞，同样等于没接。
+    // （④ 只在「有 npm 门禁步骤」的 job 里查这两种键，新步骤可能落在别的 job 里。）
+    for (const row of j.lines) {
+      const key = /^ {4}(continue-on-error|if):\s*(.+?)\s*$/.exec(row.text);
+      if (!key) continue;
+      if (key[1] === 'continue-on-error' && !isFalseish(key[2])) {
+        add(
+          'JOB_CONTINUE_ON_ERROR',
+          `${j.name} 第 ${row.line} 行是 job 级 continue-on-error: ${key[2]} —— 内核 identity-export 步骤（第 ${st.line} 行起）`
+          + '同样被摘掉阻塞，job 绿而内核零证据'
+        );
+      }
+      if (key[1] === 'if' && isConstantFalse(key[2])) {
+        add('JOB_IF_FALSE', `${j.name} 第 ${row.line} 行是 job 级 if: ${key[2]} —— 整个 job 永不执行，内核 identity-export 步骤也一并消失`);
+      }
+    }
+    // step 级 if / continue-on-error（任意缩进；值不是显式 false 就判红）
+    // 也查**首行**写法 `- if: false`（那一行不在 st.raw 里，是 step.head）
+    for (const row of [{ line: st.line, text: st.head }, ...st.raw]) {
+      const m = /^\s*if:\s*(.+?)\s*$/.exec(row.text);
+      if (m && isConstantFalse(m[1])) {
+        add('STEP_IF_FALSE', `${j.name}:${row.line} 内核 identity-export 步骤的 if: ${m[1]} 恒假 —— 这一步永不执行，TAP 生产者与校验器一起消失`);
+      }
+      const ce = /^\s*continue-on-error:\s*(.+?)\s*$/.exec(row.text);
+      if (ce && !isFalseish(ce[1])) {
+        add(
+          'STEP_CONTINUE_ON_ERROR',
+          `${j.name}:${row.line} 内核 identity-export 步骤标了 continue-on-error: ${ce[1]}`
+          + '（失败不阻塞 = 这一步没有门禁作用，且 100% 零内核证据仍绿）'
+        );
+      }
+    }
+    // 吞退出码 + 契约形状（注释先剥掉：`true # <真命令>` 不许靠注释满足任何判据）
+    const roleAt = { preflight: [], producer: [], consumer: [] };
+    for (let ci = 0; ci < st.commands.length; ci += 1) {
+      const c = st.commands[ci];
+      const bare = stripShellComment(c.text);
+      // 只判「剥掉注释后的命令」：注释里提一句 `|| true` 不是吞码（整行注释本来就不进 commands）
+      const mask = maskOf(bare);
+      if (mask) {
+        add('MASKED_EXIT', `${j.name}:${c.line} 内核 identity-export 步骤的命令带「${mask.label}」（失败被吞，等于没门禁）`);
+      }
+      const shape = ID_STEP_SHAPES.find((s) => s.re.test(bare));
+      if (!shape) {
+        add(
+          'IDENTITY_STEP_NOOP',
+          `${j.name}:${c.line} \`${c.text}\` 不是这一步契约内的实际执行命令 —— 该步只允许 ${ID_STEP_SHAPE_HINT}；`
+          + '`true` / `:` / 行尾注释冒充 / `if …; then …; fi` 这类条件或循环控制语句一律判红（fail-closed，不做 shell 解释）'
+        );
+        continue;
+      }
+      if (shape.role) roleAt[shape.role].push({ idx: ci, line: c.line });
+    }
+    // 顺序：preflight < 生产者 < 消费者，且三者各一条。
+    // 消费者在前 = 校验的是上一次（或别人的）回执；生产者在前 = 内核没证明就开跑。
+    for (const role of ['preflight', 'producer', 'consumer']) {
+      const hits = roleAt[role];
+      if (hits.length === 0) {
+        add(
+          'IDENTITY_STEP_ORDER',
+          `${j.name}:${st.line} 起的这一步缺 ${ID_ROLE_LABEL[role]} —— 形态上「有」，但没有一行是它的实际执行命令`
+        );
+      } else if (hits.length > 1) {
+        add(
+          'IDENTITY_STEP_ORDER',
+          `${j.name}:${st.line} 起的这一步有 ${hits.length} 条 ${ID_ROLE_LABEL[role]}（第 ${hits.map((h) => h.line).join(', ')} 行），判据不知道看哪一条`
+        );
+      }
+    }
+    const one = (role) => (roleAt[role].length === 1 ? roleAt[role][0] : null);
+    const pre = one('preflight');
+    const prod = one('producer');
+    const cons = one('consumer');
+    if (pre && prod && prod.idx < pre.idx) {
+      add(
+        'IDENTITY_STEP_ORDER',
+        `${j.name}:${prod.line} 的 TAP 生产者排在 ${pre.line} 的 venv 预检之前 —— 生产者会先用一个没证明过的解释器跑出回执，预检就不再是前置条件`
+      );
+    }
+    if (prod && cons && cons.idx < prod.idx) {
+      add(
+        'IDENTITY_STEP_ORDER',
+        `${j.name}:${cons.line} 的 TAP 校验器排在 ${prod.line} 的生产者之前 —— 校验器读不到本步的回执（同机残留时会校验上一次的）`
+      );
+    }
+    // 生产者写、消费者读必须是同一个绝对路径（⑧ 的 IDENTITY_TAP_UNBOUND 是同一件事的另一半）。
+    const destOf = (roleHit, re) => (roleHit ? re.exec(stripShellComment(st.commands[roleHit.idx].text))?.[1] : undefined);
+    const destProduced = destOf(prod, ID_PRODUCER_CMD);
+    const destConsumed = destOf(cons, ID_CONSUMER_CMD);
+    if (destProduced && destConsumed && destProduced !== destConsumed) {
+      add(
+        'IDENTITY_TAP_UNBOUND',
+        `${j.name}: 生产者写「${destProduced}」，校验器读「${destConsumed}」—— 回执与校验没绑在同一个文件上`
+      );
+    }
+  }
+
   return { findings };
 }
 
@@ -635,6 +988,25 @@ function replaceTowerLine(text, from, to) {
   assert.ok(mutated !== text, `夹具没改动：找不到「${from}」`);
   return mutated;
 }
+
+/** 跑 identity-export.test.mjs 的那一条步骤（夹具定位用）。 */
+function identityStep(text) {
+  const job = ftJob(text);
+  const st = job.steps.find((s) => s.commands.some((c) => isIdentityExportRun(c.text)));
+  assert.ok(st, '夹具前提：featuretree-geometry 里应有跑 identity-export.test.mjs 的步骤');
+  return st;
+}
+
+/** 整行替换（命中不了就直接失败，避免夹具静默失效让用例变绿）。 */
+function replaceLine(text, from, to) {
+  assert.ok(text.includes(from), `夹具没改动：找不到「${from.trim().slice(0, 60)}」`);
+  return text.replace(from, to);
+}
+
+// ci.yml 里这条步骤的三个关键命令行（逐字复制，改动会被夹具断言挡住）
+const ID_PRE_LINE = '          "$FT_PY" -c \'import build123d; print("IDENTITY_KERNEL_OK", build123d.__version__)\'';
+const ID_PROD_LINE = '          AUTOMATIONCAD_PYTHON="$FT_PY" node --test --test-reporter=tap --test-reporter-destination=/tmp/identity-export.tap test/parametric/identity-export.test.mjs';
+const ID_CONS_LINE = '          node scripts/verify-identity-export-tap.mjs /tmp/identity-export.tap';
 
 // 变异体登记表：key 给单条用例用，也供「删掉 check → 用例变绿」的自检用。
 const MUTATIONS = {
@@ -763,7 +1135,132 @@ const MUTATIONS = {
   deleteStrictEvalStep: (t) => {
     const { step } = strictEvalStep(t);
     return cutLines(t, step.line, step.endLine);
-  }
+  },
+  // R13 / C2 + P1-3：真内核 identity-export 用例的回退与假绿形态
+  //   ① 整步删掉（回到「CI 一处都不跑」）；
+  //   ② venv 指向改掉（赌 runner 上有 build123d）；
+  //   ③ 删掉校验器（node 写了 TAP 没人读）；
+  //   ④ 校验器换成 `echo 'IDENTITY_TAP_OK'`（不读回执的假证据）；
+  //   ⑤ 校验器换成上一版的 `grep -q 'ℹ skipped 0'`（被零执行击穿的那条）；
+  //   ⑥ 生产者与消费者指向不同文件（校验器读上一次的回执）；
+  //   ⑦ 加 `--test-name-pattern`（过滤到零条仍 exit 0）；
+  //   ⑧ 删掉「venv 里真有内核」的前置证明（指错了会静默落到三级回退的别的 python）；
+  //   ⑨ 把 `set -euo pipefail` 降级成 `set -o pipefail`；
+  //   ⑩ 挪进无内核的 unit（方向错：把 PyPI 依赖压回主门禁）。
+  deleteIdentityExportStep: (t) => {
+    const job = ftJob(t);
+    const st = job.steps.find((s) => s.commands.some((c) => isIdentityExportRun(c.text)));
+    assert.ok(st, '夹具前提：featuretree-geometry 里应有跑 identity-export.test.mjs 的步骤');
+    return cutLines(t, st.line, st.endLine);
+  },
+  identityExportNoKernel: (t) => {
+    const from = '          FT_PY="$PWD/../.venv-ft/bin/python"\n';
+    const mutated = t.replace(from, '          FT_PY="/usr/bin/python3"\n');
+    assert.ok(mutated !== t, '夹具没改动：找不到 FT_PY 指向 .venv-ft 的那一行');
+    return mutated;
+  },
+  identityTapNoVerifier: (t) => {
+    const from = '          node scripts/verify-identity-export-tap.mjs /tmp/identity-export.tap\n';
+    const mutated = t.replace(from, '');
+    assert.ok(mutated !== t, '夹具没改动：找不到校验器那一行');
+    return mutated;
+  },
+  identityTapEchoVerifier: (t) => {
+    const from = '          node scripts/verify-identity-export-tap.mjs /tmp/identity-export.tap\n';
+    const mutated = t.replace(from, "          echo 'IDENTITY_TAP_OK'\n");
+    assert.ok(mutated !== t, '夹具没改动：找不到校验器那一行');
+    return mutated;
+  },
+  identityTapGrepOldAssertion: (t) => {
+    const from = '          node scripts/verify-identity-export-tap.mjs /tmp/identity-export.tap\n';
+    const mutated = t.replace(from, "          grep -q 'ℹ skipped 0' /tmp/identity-export.log\n");
+    assert.ok(mutated !== t, '夹具没改动：找不到校验器那一行');
+    return mutated;
+  },
+  identityTapSplitFile: (t) => {
+    const from = '          node scripts/verify-identity-export-tap.mjs /tmp/identity-export.tap\n';
+    const mutated = t.replace(from, '          node scripts/verify-identity-export-tap.mjs /tmp/identity-export-old.tap\n');
+    assert.ok(mutated !== t, '夹具没改动：找不到校验器那一行');
+    return mutated;
+  },
+  identityTapFiltered: (t) => {
+    const from = '          AUTOMATIONCAD_PYTHON="$FT_PY" node --test --test-reporter=tap';
+    const mutated = t.replace(from, '          AUTOMATIONCAD_PYTHON="$FT_PY" node --test --test-name-pattern=ZZ_NOTHING_MATCHES --test-reporter=tap');
+    assert.ok(mutated !== t, '夹具没改动：找不到身份用例的 node --test 行');
+    return mutated;
+  },
+  identityTapNoKernelProof: (t) => {
+    const ls = t.split('\n');
+    const idx = ls.findIndex((l) => /\$FT_PY"\s+-c\s+'import build123d/.test(l));
+    assert.ok(idx >= 0, '夹具没改动：找不到「venv 里真有内核」的前置证明那一行');
+    ls.splice(idx, 1);
+    return ls.join('\n');
+  },
+  identityTapBeforeInstall: (t) => {
+    const job = ftJob(t);
+    const st = job.steps.find((s) => s.commands.some((c) => isIdentityExportRun(c.text)));
+    assert.ok(st, '夹具前提：featuretree-geometry 里应有跑 identity-export.test.mjs 的步骤');
+    const npmStep = job.steps.find((s) => s.commands.some((c) => isInstallCommand(c.text)));
+    assert.ok(npmStep && npmStep.line < st.line, '夹具前提：npm ci 原本在身份用例之前');
+    const block = t.split('\n').slice(st.line - 1, st.endLine).join('\n');
+    const cut = cutLines(t, st.line, st.endLine);
+    return insertBefore(cut, npmStep.line, block);
+  },
+  identityTapWeakPipefail: (t) => {
+    const from = '          set -euo pipefail\n';
+    const mutated = t.replace(from, '          set -o pipefail\n');
+    assert.ok(mutated !== t, '夹具没改动：找不到 set -euo pipefail');
+    return mutated;
+  },
+  moveIdentityExportToUnit: (t) => {
+    const job = ftJob(t);
+    const st = job.steps.find((s) => s.commands.some((c) => isIdentityExportRun(c.text)));
+    assert.ok(st, '夹具前提：featuretree-geometry 里应有跑 identity-export.test.mjs 的步骤');
+    const block = t.split('\n').slice(st.line - 1, st.endLine).join('\n');
+    const cut = cutLines(t, st.line, st.endLine);
+    // 行号在 cut 之后全变了：重解析，插到 unit 的 npm ci **之后**（只留身份判据，
+    // 不顺带触发 DEPS_ORDER —— 那条已由对抗⑳ 单独钉住）
+    const unitJob = parseWorkflow(cut).jobs.get(NO_KERNEL_JOB);
+    assert.ok(unitJob, '夹具前提：ci.yml 里有 unit job');
+    const installStep = unitJob.steps.find((s) => s.commands.some((c) => isInstallCommand(c.text)));
+    assert.ok(installStep, '夹具前提：unit 里应有 npm ci 步骤');
+    return insertBefore(cut, installStep.endLine + 1, block);
+  },
+  // -------------------------------------------------------------------------
+  // R13 复审 §4.2：新内核步骤的「禁用 / 吞码 / noop / 顺序」
+  //
+  // 这 12 条全部是**真实 ci.yml 文本**上的最小变异，跑的是同一份 auditGates；
+  // 复审实测前 6 条里除 job 级那两条外全绿（new step 不在 ④ 的作用域内，
+  // 且 preflight/生产者的判据是全文子串，行尾注释与恒假分支都能满足）。
+  // -------------------------------------------------------------------------
+  // ① 一 disable：step 级 continue-on-error
+  identityStepContinueOnError: (t) => insertBefore(t, identityStep(t).line + 1, '        continue-on-error: true'),
+  // ② 一 disable：step 级 if: false（含表达式写法、含 `- if: false` 首行写法）
+  identityStepIfFalse: (t) => insertBefore(t, identityStep(t).line + 1, '        if: false'),
+  identityStepIfFalseExpr: (t) => insertBefore(t, identityStep(t).line + 1, '        if: ${{ false }}'),
+  identityStepIfFalseHead: (t) => replaceLine(
+    t,
+    '      - name: 内核 identity-export 用例（真跑 + TAP 回执结构校验）',
+    '      - if: false\n        name: 内核 identity-export 用例（真跑 + TAP 回执结构校验）'
+  ),
+  // ③ 一 disable：job 级条件（对每个步骤都生效，包括这条内核步骤）
+  identityJobIfFalse: (t) => insertBefore(t, ftJob(t).line + 1, '    if: ${{ false }}'),
+  identityJobContinueOnError: (t) => insertBefore(t, ftJob(t).line + 1, '    continue-on-error: true'),
+  // ④ preflight 被 noop 顶掉：`true # <真命令>` / `: # <真命令>`
+  identityPreflightNoopTrue: (t) => replaceLine(t, ID_PRE_LINE, `          true # ${ID_PRE_LINE.trim()}`),
+  identityPreflightNoopColon: (t) => replaceLine(t, ID_PRE_LINE, `          : # ${ID_PRE_LINE.trim()}`),
+  // ⑤ preflight 被恒假分支包起来（单行 / 换行两种，都不许靠行内锚定假装执行）
+  identityPreflightFalseInline: (t) => replaceLine(t, ID_PRE_LINE, `          if false; then ${ID_PRE_LINE.trim()}; fi`),
+  identityPreflightFalseBlock: (t) => replaceLine(t, ID_PRE_LINE, `          if false; then\n${ID_PRE_LINE}\n          fi`),
+  // ⑥ 生产者被 noop 顶掉（`true # <真命令>`：字符串里还写着 node --test …）
+  identityProducerNoop: (t) => replaceLine(t, ID_PROD_LINE, `          true # ${ID_PROD_LINE.trim()}`),
+  // ⑦ 生产者/消费者吞退出码
+  identityProducerOrTrue: (t) => replaceLine(t, ID_PROD_LINE, `${ID_PROD_LINE} || true`),
+  identityProducerSemicolonTrue: (t) => replaceLine(t, ID_PROD_LINE, `${ID_PROD_LINE}; true`),
+  identityConsumerOrTrue: (t) => replaceLine(t, ID_CONS_LINE, `${ID_CONS_LINE} || true`),
+  // ⑧ 顺序：校验器先于生产者 / preflight 后于生产者
+  identityConsumerBeforeProducer: (t) => replaceLine(t, `${ID_PROD_LINE}\n${ID_CONS_LINE}`, `${ID_CONS_LINE}\n${ID_PROD_LINE}`),
+  identityPreflightAfterProducer: (t) => replaceLine(t, `${ID_PRE_LINE}\n${ID_PROD_LINE}`, `${ID_PROD_LINE}\n${ID_PRE_LINE}`)
 };
 
 const codes = (text, opts) => auditGates(text, opts).findings.map((f) => f.code);
@@ -972,6 +1469,193 @@ test('对抗⑳：安装依赖排在严格评测之后 → 红（判执行顺序
 });
 
 // ---------------------------------------------------------------------------
+// R13 / C2：真内核 identity-export 用例（unit 里恒 SKIP，别再让它「一处都不跑」）
+//
+// 事故形态（CI run 44558824879 实测）：unit job 日志里 `# 内核不可用：…身份导出未验证`、
+// `ℹ skipped 9`；而唯一装了 build123d 的 featuretree-geometry 里**没有任何 node --test 步骤**
+// → test/parametric/identity-export.test.mjs 的真内核用例在 CI 一处都没跑。
+// 两条守卫：⑧ FT 必须真跑，回执走独立 TAP 文件并由 scripts/verify-identity-export-tap.mjs
+// 解析（P1-3：旧的 `skipped 0` 断言被 echo 伪造与「过滤到零条」两条实测击穿）；⑨ unit 里不许出现该文件名。
+// 两条都**不**断言用例条数 —— 用例会继续加（R13 包 B 就在加），数目是那把尺子自己的事。
+// ---------------------------------------------------------------------------
+
+test('守卫⑧：FT job 必须真跑 identity-export.test.mjs，回执走独立 TAP 并由校验器解析', () => {
+  // 正控：真 ci.yml 里这一条必须成立
+  const { jobs } = parseWorkflow(CI_TEXT);
+  const steps = jobs.get(FT_JOB).steps.filter((st) => st.commands.some((c) => isIdentityExportRun(c.text)));
+  assert.equal(steps.length, 1, `真 ci.yml 里 ${FT_JOB} 应正好有 1 条跑 ${IDENTITY_EXPORT_FILE} 的步骤（实际 ${steps.length} 条）`);
+  const st = steps[0];
+  const run = st.commands.find((c) => isIdentityExportRun(c.text));
+  // producer：结构化回执写进独立文件
+  assert.match(run.text, TAP_REPORTER_RE, '这一步没开 --test-reporter=tap：回执只能是结构化 TAP，不能是给人看的日志');
+  const dest = TAP_DEST_RE.exec(run.text)?.[1];
+  assert.ok(dest, `这一步没有 --test-reporter-destination=<独立文件>：${run.text}`);
+  assert.ok(dest.startsWith('/'), `TAP 输出路径应是绝对路径（实际「${dest}」）`);
+  // consumer：校验器读的是**同一个**文件
+  const verifier = st.commands.find((c) => IDENTITY_VERIFIER_RE.test(c.text));
+  assert.ok(verifier, `这一步没有跑 ${IDENTITY_VERIFIER}：写了 TAP 却没人校验`);
+  assert.equal(IDENTITY_VERIFIER_RE.exec(verifier.text)[1], dest, '生产者与消费者指向的不是同一个文件');
+  // venv 自证 + 严失败
+  assert.ok(st.commands.some((c) => /^set -euo pipefail$/.test(c.text)), '缺 set -euo pipefail');
+  assert.ok(
+    st.commands.some((c) => /"\$FT_PY"\s+-c\s+['"][^'"]*import build123d/.test(c.text)),
+    '缺「venv 里真有 build123d」的前置证明：用例文件有三级回退，指错了会静默落到别处'
+  );
+  assert.equal(st.timeoutMinutes, 5, '这一步的 timeout-minutes 应为 5（预算注释里的条目靠它对账）');
+  // 过滤参数与「拿文本当证据」都不许出现在这一步
+  for (const c of st.commands) {
+    for (const flag of FILTER_FLAGS) {
+      assert.ok(!flag.re.test(c.text), `这一步带了 ${flag.label}：过滤到零条时 node 仍 exit 0`);
+    }
+    for (const fake of FAKE_PROOF_RES) {
+      assert.ok(!fake.re.test(c.text), `这一步出现${fake.label}：回执只能来自 TAP 解析器`);
+    }
+  }
+  // 校验器本身必须真实存在（不是 ci.yml 里写了个不存在的脚本）
+  assert.ok(
+    existsSync(new URL('../../scripts/verify-identity-export-tap.mjs', import.meta.url)),
+    'scripts/verify-identity-export-tap.mjs 不存在'
+  );
+
+  // 对抗：每一种回退 / 假绿都必须判红，且红因点名对应的判据
+  for (const [name, mutate, code] of [
+    ['整步删掉', MUTATIONS.deleteIdentityExportStep, 'FT_IDENTITY_EXPORT_MISSING'],
+    ['venv 指向改成 runner 的 python3', MUTATIONS.identityExportNoKernel, 'FT_IDENTITY_EXPORT_MISSING'],
+    ['删掉 TAP 校验器', MUTATIONS.identityTapNoVerifier, 'FT_IDENTITY_EXPORT_MISSING'],
+    ['校验器换成 echo', MUTATIONS.identityTapEchoVerifier, 'IDENTITY_TAP_FAKE_PROOF'],
+    ['校验器退回 grep skipped 0', MUTATIONS.identityTapGrepOldAssertion, 'IDENTITY_TAP_FAKE_PROOF'],
+    ['生产者/消费者指向不同文件', MUTATIONS.identityTapSplitFile, 'IDENTITY_TAP_UNBOUND'],
+    ['加 --test-name-pattern', MUTATIONS.identityTapFiltered, 'IDENTITY_TAP_FILTER_FORBIDDEN'],
+    ['删掉 venv 内核前置证明', MUTATIONS.identityTapNoKernelProof, 'FT_IDENTITY_EXPORT_MISSING'],
+    ['set -euo pipefail 降级', MUTATIONS.identityTapWeakPipefail, 'FT_IDENTITY_EXPORT_MISSING'],
+    ['挪到 npm ci 之前', MUTATIONS.identityTapBeforeInstall, 'FT_IDENTITY_EXPORT_MISSING']
+  ]) {
+    const mutated = mutate(CI_TEXT);
+    const found = codes(mutated);
+    assert.ok(found.includes(code), `${name} 没被判红 ${code}（实际 ${found.join(', ')}）`);
+  }
+});
+
+test('守卫⑨：unit（无内核）里不许出现 identity-export.test.mjs 文件名', () => {
+  const m = codes(MUTATIONS.moveIdentityExportToUnit(CI_TEXT));
+  assert.ok(m.includes('UNIT_IDENTITY_EXPORT_FORBIDDEN'), `挪进 unit 没被判红：${m.join(', ')}`);
+  assert.ok(m.includes('FT_IDENTITY_EXPORT_MISSING'), `挪走之后 FT 那边也没被判红：${m.join(', ')}`);
+  // 反向对照组：真 ci.yml 的 unit 里既没有这个文件名，也没有因为这个报红
+  const unitCmds = parseWorkflow(CI_TEXT).jobs.get(NO_KERNEL_JOB).steps.flatMap((s) => s.commands);
+  assert.equal(unitCmds.filter((c) => c.text.includes(IDENTITY_EXPORT_FILE)).length, 0, 'unit 里出现了 identity-export.test.mjs');
+  assert.ok(!codes(CI_TEXT).includes('UNIT_IDENTITY_EXPORT_FORBIDDEN'), '真 ci.yml 的 unit 被判红了');
+});
+
+// ---------------------------------------------------------------------------
+// R13 复审 §4.2：新内核步骤的「禁用 / 吞码 / noop / 顺序」
+//
+// 复审用未改动的 auditGates 对真 ci.yml 做变异，实测四个绿：
+//   · step 级 `continue-on-error: true`（失败不阻塞 → job 绿、内核零证据）
+//   · step 级 `if: false`（这一步永不执行）
+//   · preflight 被 `true # <真命令>` / `: # …` / `if false; then …; fi` 满足
+//   · 生产者被 `true # <真命令>` 顶掉（注释里还写着 node --test …）
+// 根因是 ④ 的判据只绑 `isToolCmd`，新步骤不在作用域内；且命令判据是全文子串。
+// ⑩ 用「契约形状 + 严格顺序」补上，并把 `continue-on-error`/`if`/`MASKED_EXIT`
+// 的扫描对象扩到这条步骤（含 job 级继承）。下面每条都是一次真实文本变异。
+// 用例条数不钉（B 还在加用例），只钉「这一步必须真跑且不被一键禁用」。
+// ---------------------------------------------------------------------------
+
+/** 这 16 条反例：每条都必须判红，且红因点名 job。 */
+const IDENTITY_STEP_COUNTEREXAMPLES = [
+  'identityStepContinueOnError',
+  'identityStepIfFalse',
+  'identityStepIfFalseExpr',
+  'identityStepIfFalseHead',
+  'identityJobIfFalse',
+  'identityJobContinueOnError',
+  'identityPreflightNoopTrue',
+  'identityPreflightNoopColon',
+  'identityPreflightFalseInline',
+  'identityPreflightFalseBlock',
+  'identityProducerNoop',
+  'identityProducerOrTrue',
+  'identityProducerSemicolonTrue',
+  'identityConsumerOrTrue',
+  'identityConsumerBeforeProducer',
+  'identityPreflightAfterProducer'
+];
+
+test('守卫⑩：内核 identity 步骤不可被一键禁用 / 不可被 noop 冒充 / 顺序不可反 → 16 条反例全红', () => {
+  // 正控一：真 ci.yml 上一条 finding 都没有（⑩ 不是把正常写法判红）
+  assert.deepEqual(codes(CI_TEXT), [], '真 ci.yml 被判红了');
+  const st = identityStep(CI_TEXT);
+  for (const c of st.commands) {
+    const bare = stripShellComment(c.text);
+    assert.ok(
+      ID_STEP_SHAPES.some((s) => s.re.test(bare)),
+      `真 ci.yml 的 \`${c.text}\` 不在这一步的契约形状内（形状写得过窄会把正确写法判红）`
+    );
+  }
+
+  // 正控二：引号内的 Python 分号与 `#` 不许被误杀（`;` 是 shell 分隔符，但引号内不是）
+  const pyLine = `"$FT_PY" -c 'import build123d; print("a # b; c")'`;
+  assert.equal(stripShellComment(pyLine), pyLine, 'stripShellComment 切掉了引号内的 `#`');
+  assert.ok(ID_PREFLIGHT_CMD.test(pyLine), '预检形状把带 Python 分号的合法行判红了');
+  assert.equal(stripShellComment('true # node --test x'), 'true', '行尾注释没被剥掉');
+  assert.ok(!ID_PRODUCER_CMD.test(stripShellComment(`true # ${ID_PROD_LINE.trim()}`)), '带注释的 noop 仍满足了生产者形状');
+
+  // 反例：逐个变异必须判红，红因点名 job，且判据集合与 LOAD_BEARING 登记一致
+  for (const name of IDENTITY_STEP_COUNTEREXAMPLES) {
+    const entry = LOAD_BEARING.find((e) => e.mutation === name);
+    assert.ok(entry, `${name} 没登记进 LOAD_BEARING`);
+    const mutated = MUTATIONS[name](CI_TEXT);
+    const found = codes(mutated);
+    const msgs = messages(mutated);
+    assert.ok(found.length > 0, `${name}：守卫仍然绿 —— 这正是复审实测的假绿形态`);
+    for (const code of entry.codes) {
+      assert.ok(found.includes(code), `${name}：没判红 ${code}（实际判据 [${[...new Set(found)].join(', ')}]）`);
+    }
+    assert.ok(
+      msgs.some((m) => m.includes(FT_JOB)),
+      `${name}：红因没有点名 ${FT_JOB}：\n- ${msgs.join('\n- ')}`
+    );
+  }
+});
+
+test('守卫⑩（job 级继承）：内核步骤落在没有 npm 门禁的 job 里，job 级 if/continue-on-error 同样判红', () => {
+  // ④ 只在「有 npm 门禁步骤」的 job 里查 job 级 if / continue-on-error；⑩ 的对象是
+  // 「跑内核用例的步骤」，所以即使那个 job 里一条 verify:step-tower 都没有，也必须判红。
+  const stub = (extraJobKey, extraStepKey) => `jobs:
+  ${FT_JOB}:
+    runs-on: ubuntu-latest
+${extraJobKey}
+    steps:
+      - name: 内核 identity-export 用例（真跑 + TAP 回执结构校验）
+${extraStepKey}
+        timeout-minutes: 5
+        run: |
+          cd desktop
+          set -euo pipefail
+          FT_PY="$PWD/../.venv-ft/bin/python"
+          "$FT_PY" -c 'import build123d'
+          AUTOMATIONCAD_PYTHON="$FT_PY" node --test --test-reporter=tap --test-reporter-destination=/tmp/identity-export.tap test/parametric/identity-export.test.mjs
+          node scripts/verify-identity-export-tap.mjs /tmp/identity-export.tap
+`;
+
+  // 正控：这条 job 里没有任何 npm 门禁步骤，⑩ 也该认这条步骤且不误报
+  const clean = codes(stub('', ''));
+  for (const c of ['JOB_IF_FALSE', 'JOB_CONTINUE_ON_ERROR', 'STEP_IF_FALSE', 'STEP_CONTINUE_ON_ERROR', 'IDENTITY_STEP_NOOP', 'IDENTITY_STEP_ORDER', 'MASKED_EXIT']) {
+    assert.ok(!clean.includes(c), `干净夹具被判红 ${c}：${clean.join(', ')}`);
+  }
+
+  for (const [name, extraJob, extraStep, want] of [
+    ['job if: false', '    if: false', '', 'JOB_IF_FALSE'],
+    ['job if: ${{ false }}', '    if: ${{ false }}', '', 'JOB_IF_FALSE'],
+    ['job continue-on-error: true', '    continue-on-error: true', '', 'JOB_CONTINUE_ON_ERROR'],
+    ['step if: false', '', '        if: false', 'STEP_IF_FALSE'],
+    ['step continue-on-error: true', '', '        continue-on-error: true', 'STEP_CONTINUE_ON_ERROR']
+  ]) {
+    const found = codes(stub(extraJob, extraStep));
+    assert.ok(found.includes(want), `${name}（该 job 无 npm 门禁步骤）没判红 ${want}：${found.join(', ')}`);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // 守卫自检：每条判据都是 load-bearing（删掉它，对应的变异就会变绿 → 这里红）
 //
 // 这是「删除守卫必红」的可执行证据：不是断言注释里写了什么，而是断言
@@ -1000,12 +1684,60 @@ const LOAD_BEARING = [
   { mutation: 'deleteNegativeProof', codes: ['NEG_SELFPROOF_MISSING'] },
   { mutation: 'budgetDrift', codes: ['BUDGET_ITEM_MISSING'] },
   { mutation: 'jobTimeoutLow', codes: ['JOB_TIMEOUT_LOW'] },
-  { mutation: 'deleteDepsInstall', codes: ['DEPS_INSTALL_MISSING'] },
-  { mutation: 'installAfterEval', codes: ['DEPS_ORDER'] },
-  { mutation: 'deleteKernelInstall', codes: ['KERNEL_PRECEDES'] },
+  // 这三条现在还会连带触发 ⑧ 的前置顺序判据（身份用例排在 npm ci / 装内核之后）：
+  // 删掉安装步骤、或把安装挪到评测之后，身份用例同样会变成「跑的时候还没有 node_modules/内核」。
+  { mutation: 'deleteDepsInstall', codes: ['DEPS_INSTALL_MISSING', 'FT_IDENTITY_EXPORT_MISSING'] },
+  { mutation: 'installAfterEval', codes: ['DEPS_ORDER', 'FT_IDENTITY_EXPORT_MISSING'] },
+  { mutation: 'deleteKernelInstall', codes: ['KERNEL_PRECEDES', 'FT_IDENTITY_EXPORT_MISSING'] },
   // 挪进 unit 时插在最前面（checkout 之前），于是顺带触发「安装依赖排在门禁之后」—— 第三码是真实发现，不是噪声
   { mutation: 'moveStrictToUnit', codes: ['UNIT_STRICT_FORBIDDEN', 'KERNEL_PRECEDES', 'DEPS_ORDER'] },
-  { mutation: 'deleteStrictEvalStep', codes: ['STRICT_EVAL_MISSING'] }
+  { mutation: 'deleteStrictEvalStep', codes: ['STRICT_EVAL_MISSING'] },
+  // R13 / C2 + P1-3：真内核用例的守卫⑧⑨（删掉对应判据，这些变异必须完全变绿）
+  { mutation: 'deleteIdentityExportStep', codes: ['FT_IDENTITY_EXPORT_MISSING'] },
+  // 下面几条除 ⑧ 的形态判据外，还会被 ⑩ 的契约形状/顺序判据抓到（这正是加固点：
+  // 「改掉这一行」「删掉这一行」「拿 noop 顶掉这一行」都判红，且两条判据各自独立成立）
+  { mutation: 'identityExportNoKernel', codes: ['FT_IDENTITY_EXPORT_MISSING', 'IDENTITY_STEP_NOOP'] },
+  { mutation: 'identityTapNoVerifier', codes: ['FT_IDENTITY_EXPORT_MISSING', 'IDENTITY_STEP_ORDER'] },
+  { mutation: 'identityTapNoKernelProof', codes: ['FT_IDENTITY_EXPORT_MISSING', 'IDENTITY_STEP_ORDER'] },
+  { mutation: 'identityTapWeakPipefail', codes: ['FT_IDENTITY_EXPORT_MISSING', 'IDENTITY_STEP_NOOP'] },
+  { mutation: 'identityTapBeforeInstall', codes: ['FT_IDENTITY_EXPORT_MISSING'] },
+  {
+    mutation: 'identityTapEchoVerifier',
+    codes: ['FT_IDENTITY_EXPORT_MISSING', 'IDENTITY_STEP_NOOP', 'IDENTITY_STEP_ORDER', 'IDENTITY_TAP_FAKE_PROOF']
+  },
+  {
+    mutation: 'identityTapGrepOldAssertion',
+    codes: ['FT_IDENTITY_EXPORT_MISSING', 'IDENTITY_STEP_NOOP', 'IDENTITY_STEP_ORDER', 'IDENTITY_TAP_FAKE_PROOF']
+  },
+  { mutation: 'identityTapSplitFile', codes: ['IDENTITY_TAP_UNBOUND'] },
+  {
+    mutation: 'identityTapFiltered',
+    codes: ['IDENTITY_STEP_NOOP', 'IDENTITY_STEP_ORDER', 'IDENTITY_TAP_FILTER_FORBIDDEN']
+  },
+  { mutation: 'moveIdentityExportToUnit', codes: ['FT_IDENTITY_EXPORT_MISSING', 'UNIT_IDENTITY_EXPORT_FORBIDDEN'] },
+  // R13 复审 §4.2 的四个实测绿 + 同族形态：⑩ 的「禁用 / 吞码 / noop / 顺序」判据逐个撑住
+  // 一条变异（关掉该集合 → 完全变绿，见自检）。
+  { mutation: 'identityStepContinueOnError', codes: ['STEP_CONTINUE_ON_ERROR'] },
+  { mutation: 'identityStepIfFalse', codes: ['STEP_IF_FALSE'] },
+  { mutation: 'identityStepIfFalseExpr', codes: ['STEP_IF_FALSE'] },
+  { mutation: 'identityStepIfFalseHead', codes: ['STEP_IF_FALSE'] },
+  { mutation: 'identityJobIfFalse', codes: ['JOB_IF_FALSE'] },
+  { mutation: 'identityJobContinueOnError', codes: ['JOB_CONTINUE_ON_ERROR'] },
+  // `true # <真命令>` / `: # <真命令>`：注释里还写着真命令，实际什么都不跑
+  { mutation: 'identityPreflightNoopTrue', codes: ['IDENTITY_STEP_NOOP', 'IDENTITY_STEP_ORDER', 'MASKED_EXIT'] },
+  { mutation: 'identityPreflightNoopColon', codes: ['IDENTITY_STEP_NOOP', 'IDENTITY_STEP_ORDER', 'MASKED_EXIT'] },
+  // 恒假分支：单行时预检形状也一起消失；换行块时真命令行还在，靠「控制语句不在契约形状内」判红
+  { mutation: 'identityPreflightFalseInline', codes: ['IDENTITY_STEP_NOOP', 'IDENTITY_STEP_ORDER'] },
+  { mutation: 'identityPreflightFalseBlock', codes: ['IDENTITY_STEP_NOOP'] },
+  { mutation: 'identityProducerNoop', codes: ['IDENTITY_STEP_NOOP', 'IDENTITY_STEP_ORDER', 'MASKED_EXIT'] },
+  { mutation: 'identityProducerOrTrue', codes: ['IDENTITY_STEP_NOOP', 'IDENTITY_STEP_ORDER', 'MASKED_EXIT'] },
+  { mutation: 'identityProducerSemicolonTrue', codes: ['IDENTITY_STEP_NOOP', 'IDENTITY_STEP_ORDER', 'MASKED_EXIT'] },
+  {
+    mutation: 'identityConsumerOrTrue',
+    codes: ['FT_IDENTITY_EXPORT_MISSING', 'IDENTITY_STEP_NOOP', 'IDENTITY_STEP_ORDER', 'MASKED_EXIT']
+  },
+  { mutation: 'identityConsumerBeforeProducer', codes: ['IDENTITY_STEP_ORDER'] },
+  { mutation: 'identityPreflightAfterProducer', codes: ['IDENTITY_STEP_ORDER'] }
 ];
 
 test('守卫自检：每条判据都 load-bearing（删掉它 → 配对的变异完全变绿 → 这条自检红）', () => {
