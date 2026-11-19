@@ -1,18 +1,19 @@
 # AutomationCAD 下一会话交接
 
-更新时间：2026-11-19（**T7 提交收口轮（本轮）**：只改本文件与 `docs/desktop/PV-BUFFER-ITERATION-HANDOFF.md`。P2-1/P2-2/P2-5 整改后的 **final6 全套门禁（10:04–10:10，同一棵树）对应的源码/测试已落成本地三笔提交**：`920ea07` → `b85fab5` → `8037e11`；**当前 HEAD `8037e11`，工作区干净（`git status --short` 无输出）**，仓库内 `scratch/` 临时回执目录已删。**三笔只在本地，尚未 push，CI 未触发**；final6 数字保留为实测证据，「21 M + 1 ?? / 未提交」改作提交前历史。上一轮 T4 的 N14 自证 27/27 记录保留，标为「N14 轮」）
+更新时间：2026-11-19 10:35（**T8 CI 回填轮（本轮）**：只改本文件与 `docs/desktop/PV-BUFFER-ITERATION-HANDOFF.md`，不动源码/测试、不跑构建。**当前 HEAD `dec1373` = `origin/main`（已推送，工作区干净，ahead/behind 0/0）**；四笔 `920ea07` → `b85fab5` → `8037e11` → `dec1373` 全在远端。**远端 CI 有实测结论：run `44444540414`（head `dec1373a6aa1fc3380636c9e8e4c5ab72be56212`）7/7 job success，2026-11-19 10:28–10:33 CST**：`FeatureTree real geometry (build123d)` job 真实跑了 16 层 `verify:step-tower` **17/17**（9 内核 + 8 导出边界）、8 层 **10/10**（9 内核 + 1 条导出边界 N/A），并过了 STEP 真实性门禁与 AABB↔布尔误差；`tsc + unit tests` job 跑出 **3614 tests / 3611 pass / 3 skipped / 0 fail**。链接 https://github.com/owlco001/automation-cad-prototype/actions/runs/44444540414 。**口径边界**：这个 run 验的是 `dec1373` 这棵树（docs-only，只改两份交接文档，源码/测试与 `920ea07`+`b85fab5` 一致）；**本轮之后再提交的 docs-only commit 在 push 之前没有自己的 run**。final6 本机数字保留为实测证据；「21 M + 1 ?? / 未提交 / CI 未运行」一律改作历史。上一轮 T4 的 N14 自证 27/27 记录保留，标为「N14 轮」）
 项目：`owlco001/automation-cad-prototype`
 工作目录：`/tmp/automation-cad-prototype`
 
-## 当前状态（2026-11-19 · HEAD `8037e11`，工作区干净；final6 门禁 10:04–10:10 对应源码提交 `920ea07`+`b85fab5`，文档/知识库随 `8037e11` 定稿）
+## 当前状态（2026-11-19 · HEAD `dec1373` = `origin/main`，工作区干净；final6 本机门禁 10:04–10:10 对应源码提交 `920ea07`+`b85fab5`，文档随 `8037e11`/`dec1373` 定稿；远端 CI run `44444540414` 对 `dec1373` 7/7 全绿）
 
-- **当前 HEAD：`8037e11`**（`docs: record PV board export and diagnostic verification`）。本地 `main` 领先 `origin/main`（仍是 `114e024`）**三笔**，**尚未 push**。`git status --short` **无输出**，仓库内 `scratch/` 已删。三笔链（按提交顺序）：
+- **当前 HEAD：`dec1373`**（`docs: align handoff with committed PV board changes`）= `origin/main`，**已推送、本地与远端同点（ahead/behind 0/0）**。`git status --short` **无输出**，仓库内 `scratch/` 已删。四笔链（按提交顺序，全部已在远端）：
   - `920ea07` `feat(machine): add workpiece collision and manufacturing export boundary` —— 板进 `geometry.parts`、制造导出三层身份 + 装配件窗口、`verify-step-tower` 8 条导出边界门禁、件数注释（8 文件）；
   - `b85fab5` `fix(machine): fail closed on invalid support evidence` —— 承托/件表 fail-closed（N12/N13/N14）、`panelChannelNote` 按 claim 出文案（P2-1）、行表 dropped（P2-2）、7 文件；
-  - `8037e11` `docs: record PV board export and diagnostic verification` —— 两份交接文档、`NL-AGENT.md`、`MODULE.md`、README kb 统计与 `kb/kb.json`（`KB_BUILD_OK` 13/454/434531，6 文件）。
-- **历史（提交前快照）**：收口前是 `114e024` + **21 M + 1 ??**（`??` = 临时回执目录 `scratch/`）。那 21 个 M 已全部进上面三笔（分组见文末「文件落库情况」），`scratch/` 未入库并已删除；**不要再按「工作区 21 M 未提交」描述现状**。
+  - `8037e11` `docs: record PV board export and diagnostic verification` —— 两份交接文档、`NL-AGENT.md`、`MODULE.md`、README kb 统计与 `kb/kb.json`（`KB_BUILD_OK` 13/454/434531，6 文件）；
+  - `dec1373` `docs: align handoff with committed PV board changes` —— **只改两份交接文档**（`HANDOFF-NEXT-SESSION.md` + `docs/desktop/PV-BUFFER-ITERATION-HANDOFF.md`，2 文件 +54/−63），不动源码/测试/kb；**远端 CI run `44444540414` 验的就是这一笔**。
+- **历史（提交前快照）**：收口前是 `114e024` + **21 M + 1 ??**（`??` = 临时回执目录 `scratch/`）。那 21 个 M 已全部进上面的 `920ea07`/`b85fab5`/`8037e11` 三笔（分组见文末「文件落库情况」），`scratch/` 未入库并已删除；**不要再按「工作区 21 M 未提交」描述现状**。
 - **时效已对上（保留原证据）**：源码/测试最后改动 09:42:40–09:48:06，final6 日志 10:04–10:10，晚于全部改动：`interference-states.ts` 09:42:51、`panel-channel.ts` 09:44:53、`geometry-export.ts` 09:44:21、`verify-step-tower.mjs` 09:45:36，对应测试 09:42:40–09:48:06（`panel-channel.test.mjs` 09:44:10、`verify-step-tower.test.mjs` 09:46:48、`geometry-export.test.mjs` 09:48:06）；`kb:build` 于 10:05:04 重写 `desktop/src/agent/kb/kb.json`（final6 内），该文件的最终统计随 `8037e11` 入库。**final6 就是 `920ea07`+`b85fab5` 这两笔源码的证据**；`8037e11` 只动文档与 kb，不改源码/测试，所以那些数字仍对应当前源码。final5（09:22–09:28）只作历史，不再引用。
-- **门禁状态（final6 全套，10:04–10:10；对应源码提交 `920ea07`+`b85fab5`）**：targeted **205/205**、focused **370/370**、全量 **3614 tests / 3611 pass / 3 skipped / 0 fail（205,933 ms）**、`tsc --noEmit` exit 0、kb **13 docs / 454 chunks / 434,531 B**、`verify:channel` **2/8/16 各 27/27**、`verify:step-tower` 8 层 **10/10**、16 层 **17/17**、`verify:step` **7/7**（85 件，1,930,477 B）、regen **58/58**、`build:ext` **2,941,695 B / gzip 920,422 B / total 10,545,726 B**。**CI 尚未运行（三笔未 push，没有任何 run）**：`verify:channel` 不在 `ci.yml`；`verify:step-tower` 的 16/8 层步骤在 `ci.yml:856-857`，要等 push 后确认在 CI 上真实执行。
+- **门禁状态（final6 全套，10:04–10:10；对应源码提交 `920ea07`+`b85fab5`）**：targeted **205/205**、focused **370/370**、全量 **3614 tests / 3611 pass / 3 skipped / 0 fail（205,933 ms）**、`tsc --noEmit` exit 0、kb **13 docs / 454 chunks / 434,531 B**、`verify:channel` **2/8/16 各 27/27**、`verify:step-tower` 8 层 **10/10**、16 层 **17/17**、`verify:step` **7/7**（85 件，1,930,477 B）、regen **58/58**、`build:ext` **2,941,695 B / gzip 920,422 B / total 10,545,726 B**。**CI 已在远端跑通（run `44444540414`，head `dec1373a6aa`，7/7 job success，2026-11-19 10:28–10:33 CST，https://github.com/owlco001/automation-cad-prototype/actions/runs/44444540414）**：`FeatureTree real geometry (build123d)` job 里 `ci.yml:856-857` 的 16 层 / 8 层 `verify:step-tower` **确已在 CI 上真实执行并通过**（16 层 **17/17** = 9 内核 + 8 导出边界；8 层 **10/10** = 9 内核 + 1 条导出边界 N/A），该 job 还过了 STEP 真实性门禁与 AABB↔布尔误差；`tsc + unit tests` job 跑出 **3614 tests / 3611 pass / 3 skipped / 0 fail**（136.8 s，与 final6 本机 3614/3611/3/0 一致）。**`verify:channel` 仍不在 `ci.yml`**，27/27 只有本机证据。**范围**：该 run 验的是 `dec1373` 这棵树；`dec1373` 只动两份文档 → 等价于验 `920ea07`+`b85fab5` 的源码；**本轮之后再提交的 docs-only commit 在 push 前没有自己的 run**。告警只有两类、全部非致命：① 多个 job 的 `##[warning]Node.js 20 is deprecated`（`actions/checkout@v4`/`setup-python@v5`/`setup-node@v4`/`upload-artifact@v4`/`msvc-dev-cmd@v1`/`setup-micromamba@v1` 仍是 Node20 action，被强制跑在 Node24）；② Windows Qt job 里一处 `powershell is not supported`。**没有任何 `##[error]`**，job 结论不受影响；要清掉得升 action 主版本，属后续维护项，不是本次阻塞。
 - **测试清单**（`grep -cE "^[[:space:]]*test\("` 静态现测，是条数不是通过数）：`panel-channel.test.mjs` **50**、`buffer-tower-channel.test.mjs` **22**、`interference-panel-diagnostics.test.mjs` **10**、`geometry-export.test.mjs` **14**、`verify-step-tower.test.mjs` **31**。本轮重跑 grep 复核：`interference-panel-diagnostics` **是 10，不是 14**（P2-1 只加了 1 条：9→10；14 是 `geometry-export` 的条数，别串）。**旧的「33 条 / 21 条 / 54/54」全部作废**：33 是更早的 panel-channel 基数，21 是更早的 buffer-tower-channel 基数，54 = 33+21 是两次错记叠出来的。
 - **不许写「72 条定向全绿」**：50+22=72 只是**清单相加**。可引用的实跑是 final6 的定向集 **205/205**（这一条命令确实同时含 `panel-channel` 的 50 与 `buffer-tower-channel` 的 22，另外还有 `interference-panel-diagnostics` 10、`geometry-export` 14、`verify-step-tower` 31、`buffer-tower-model` 20、`buffer-tower-assembly` 34、`kb` 19、`kb-freshness` 2、`tool-count-doc` 3 —— 合计 205）。**报结论只报 targeted final6 = 205**，不要拿 72 说事；分文件历史实跑（50/50、22/22、10/10、105/105）只作历史。
 - **P2 整改摘要（源码已改；T3 第二轮复审判定 P2-1/P2-2/P2-5 均通过，无 P0/P1）**：
@@ -20,7 +21,7 @@
   - **P2-2 行表静默丢件**：`featureLocalBox` 从「减材料」与「参数读不出」都返回 `null` 改成三态 `box|none|invalid`；新增导出 `supportRowsFromConveyorPartsDetailed()` 交 `{rows, droppedPartIds}`；件表路径下 `invalidShelfIds = 行内非有限坐标 ∪ dropped` → `invalid-shelf-geometry` + `witness=null` + `feasible=false`，不再出现「witness 偏大 6.5 mm、首件静默换人、无诊断码」。`at` 不再 `Number(v)||0` 编坐标、未知 `axis` 不再默认 `z`。测试 `panel-channel` 47→**50** 条。
   - **P2-5 导出边界**：`machineExportParts` 从「`id==='workpiece-plate' && role==='workpiece'` + 来源标签」改成**三层身份**（共享件号 `WORKPIECE_PART_ID` / `role='workpiece'` / 与占位体 box 位姿同一）+ **装配件窗口**；`verify-step-tower.mjs` 新增脚本级**导出边界门禁 8 条**（走 `resolveMachineGeometry` → `machineExportParts` → `geometryToSidecarAssemblies`：导出 146 实例 == `assemblyPartCount`、不含板、件号与 `buildBufferTowerParts` 146 件逐件一致、STEP 内核输入仍 146 件），build 模式在**起内核之前**先判，`--file` 模式也判。测试 `geometry-export` 12→**14** 条、`verify-step-tower` 27→**31** 条。
   - **残留（P3，不改判；T3 第二轮复审判定 P2-1/P2-2/P2-5 通过、无新增 P0/P1，只留这三条 P3）**：① P2-2 的未知特征类型仍按「无实体」静默跳过（`featureLocalBox` 末尾 `return {kind:'none'}`，将来往联合类型加加材料特征而不改适配器就会重演旧症状）；② P2-2 的 `suppressed` 特征未跟随内核（`compileFeatureOps` 跳过、适配器不跳过 → 被抑制的坏特征判 invalid、被抑制的好特征撑大盒，方向偏保守，件表里目前没有这种件）；③ P2-5 的身份剔除本身不看 `moving`/挂轴（仅「整机信号全缺」的结构兜底会看：窗口外的件必须 `moving !== true` 且不挂任何运动轴），靠装配件窗口 + 门禁计数兜底，合成越界要同时让 `assemblyPartCount` 窗口与「`geometrySource` / `workpiecePlaceholder`」两道放行信号都失效）；另 `machine-geometry.ts:1043`/`:1126` 注疏仍写旧判据（行为已对）。
-- **门禁（现行 = final6，10:04–10:10，源码提交 `920ea07`+`b85fab5`）**：targeted **205/205**；focused **370/370**；全量 **3614 tests / 3611 pass / 3 skipped / 0 fail（205,933 ms）**；`verify:channel` **2/8/16 各 27/27**（正向 13 / 负向 14，N1..N14）、exit 0、`TOWER_CHANNEL_RESULT ok`；`verify:step-tower` 8 层 **10/10**（9 内核 + 导出边界 1 条显式 N/A）、16 层 **17/17**（9 内核 + 8 导出边界）；`verify:step` **7/7**（85 件 / 1,930,477 B）；regen **58/58**；`build:ext` **2,941,695 B / gzip 920,422 B / total 10,545,726 B**；kb **13 docs / 454 chunks / 434,531 B**；`tsc --noEmit` exit 0。**CI 未运行（三笔尚未 push）。** final5（09:22–09:28）那套数（362 / 168 / 3604 / 9-9 / 2,940,961 B…）只作历史。
+- **门禁（现行 = final6，10:04–10:10，源码提交 `920ea07`+`b85fab5`）**：targeted **205/205**；focused **370/370**；全量 **3614 tests / 3611 pass / 3 skipped / 0 fail（205,933 ms）**；`verify:channel` **2/8/16 各 27/27**（正向 13 / 负向 14，N1..N14）、exit 0、`TOWER_CHANNEL_RESULT ok`；`verify:step-tower` 8 层 **10/10**（9 内核 + 导出边界 1 条显式 N/A）、16 层 **17/17**（9 内核 + 8 导出边界）；`verify:step` **7/7**（85 件 / 1,930,477 B）；regen **58/58**；`build:ext` **2,941,695 B / gzip 920,422 B / total 10,545,726 B**；kb **13 docs / 454 chunks / 434,531 B**；`tsc --noEmit` exit 0。**远端 CI：run `44444540414`（head `dec1373`）7/7 全绿**，CI 侧复核到全量单测 3614/3611/3/0、16 层 `verify:step-tower` 17/17、8 层 10/10；`verify:channel` 不在 CI，27/27 仍是本机证据（见上一条）。final5（09:22–09:28）那套数（362 / 168 / 3604 / 9-9 / 2,940,961 B…）只作历史。
 - **四条结论限制（先钉死，别把门禁当验收）**：
   1. **`verify:channel` 是诊断脚本，不是结构/安全校验**：`feasible=false` 是真实结论（所以 exit 0）；`structure.accepted:false`、板挠度/导向/防坠/安全回路/PLC 全部**未校核**；`verified` 只说明「行表来自几何 + 碰撞集里有这块板」，**不等于 supported，也不等于通道可行**。
   2. **`sweep` 仍 fail，不得改判**：16 层 42 对 / **270 确认 + 135 待复核 = 405** 命中；塔没有升降通道（层托板整块、台面在托板投影内）。生产塔也**没有真正的多层通道**：无叉指、无分段带、板不挂轴 → rest `unsupported`（单条 1200 整带）、carried `diagnostic-only`、`feasible=false`（`load-passes-shelf` + `stroke-shortfall`）。M1 的绿只是「首层 20 mm 取放」，不是多层可行。
@@ -45,6 +46,8 @@
 
 三种口径，别混：「N14 轮」= 09:06 之后的 N14 补丁实际复跑（`cad-board-final4-*.log`，09:13–09:15）；「final5 轮」= 09:22–09:28 日志（`cad-board-*-final5.log`），**跑在 P2-1/P2-2/P2-5 整改（09:42–09:48）之前，只作历史**；「**final6 轮（现行）**」= 10:04–10:10 同一工作区日志（`cad-board-*-final6.log`），**晚于 09:48 最后一次源码/测试改动，是本文件所有现行数字的唯一来源**。
 
+**另有远端复核（2026-11-19）**：run `44444540414`（head `dec1373`，10:28–10:33 CST）在 CI 上跑了 `npm test`（**3614/3611/3/0**）与 16/8 层 `verify:step-tower`（**17/17**、**10/10**），与上表 final6 本机数字一致；它验的是 `dec1373` 这棵树，本轮 docs-only 提交 push 前没有 run。
+
 | 目标 | 命令 | 结果 | 日志 / 时效 |
 |---|---|---|---|
 | 通道自证 | `node scripts/verify-channel.mjs --levels 2 / 8 / 16` | 三次均 **27/27**（正向 13 / 负向 14，N1..N14）、`ok:true`、exit 0、`TOWER_CHANNEL_RESULT ok`；`production={mode:verified, rowsSource:geometry, restClaim:unsupported, carriedClaim:diagnostic-only, feasible:false, blockers:[load-passes-shelf,stroke-shortfall], m1Feasible:false}`；`shelfFailClosed={partId:tray-2, axis:x/z, diagnosticCode:invalid-shelf-geometry, witness:null, feasible:false}` | **final6 10:05:05 / 10:05:07 / 10:05:11**（`cad-board-verify-{2,8,16}-final6.log`），**同一棵树、P2 整改之后** |
@@ -59,10 +62,10 @@
 | 构建 + 体积门禁 | `npm run build:ext` | extension **2,941,695 B** / gzip **920,422 B** / wasm 7,604,031 B / total **10,545,726 B** | **final6 10:06:51**（`cad-board-build-final6.log`） |
 | 类型检查 | `npx tsc --noEmit` | exit 0，0 诊断 | **final6 10:04:40**（`cad-board-tsc-final6.log`，空文件 = 无输出）；仍不覆盖 `.mjs`（`verify-step-tower.mjs` / `verify-channel.mjs`） |
 | 知识库 | `npm run kb:build` | `KB_BUILD_OK docs=13 chunks=454 bytes=434531 truncated=0` | **final6 10:05:04**（`cad-board-kb-final6.log`）；这次重建确实重写了 `kb.json`；两份交接文档不在 `KB_DOC_FILES` 里 |
-| CI | — | **未运行**。三笔提交（`920ea07`/`b85fab5`/`8037e11`）都只在本地、**未 push**，所以没有任何 CI run；`verify:channel` **不在 `ci.yml`**；`verify:step-tower` 的 16/8 层步骤**在** `ci.yml` 的 `featuretree-geometry` job 里（第 856–857 行），要等 push 后确认它在 CI 上真实执行。提交前那 21 M + 1 ?? 已全部进这三笔 | — |
+| CI（远端） | `gh run view 44444540414` | **success，7/7 job 全绿**：`FeatureTree real geometry (build123d)`、`tsc + unit tests`、`Electron smoke (xvfb)`、`Qt client build`、`Qt 客户端（Windows 编译）`、`Qt + OCCT（Windows 编译）`、`Qt + OCCT 视口`；head `dec1373a6aa` | **run 44444540414**，2026-11-19 10:28–10:33 CST，https://github.com/owlco001/automation-cad-prototype/actions/runs/44444540414 ；`verify:channel` **仍不在 `ci.yml`**；告警 = 多个 job 的 Node20 action 被强制跑在 Node24 + 一处 `powershell is not supported`（均非致命，无 `##[error]`） |
 
-**仍未跑 / 不能当通过（final6 之后）**：
-- **CI 未运行（三笔未 push）**；Electron 冒烟未跑；结构/安全/电气/PLC 未校核。**下一步：push `920ea07`..`8037e11` 并查 CI**（见「下一会话建议顺序」第 2 条）。
+**仍未跑 / 不能当通过（final6 之后、CI 之后）**：
+- **CI 已跑（run `44444540414`，`dec1373`，7/7 绿），但只覆盖到 `dec1373`**：本轮修改这两份文档后新提交的 commit，push 之前没有自己的 run，push 后要另查一次（见「下一会话建议顺序」第 2 条）。**本机** Electron 冒烟仍未跑（CI 的 `Electron smoke (xvfb)` job 绿，那是 CI 的 xvfb 降级渲染路径，不等于本机 GUI 冒烟）；结构/安全/电气/PLC 仍未校核。
 - **导出边界已实跑（16 层 8 条全绿），但仍只是脚本级 sidecar 断言**：不经内核输出、不核对内核 STEP；内核 9 项结构上看不见板 → 「板被剔除」仍没有板专属的端到端内核证明。
 - **无结构/通道结论**：`verify:channel` 是诊断脚本（`feasible=false` 而 exit 0），**不是结构/安全校验**；`sweep` 405 仍 fail（16 层 270 确认 + 135 待复核），final6 日志里每一步都还写着「真实塔 sweep 仍 fail」。
 
@@ -74,7 +77,7 @@
 >
 > 当前 HEAD：`5885e51`（与 `origin/main` 同点）；当前工作区有本轮未提交的 Agent 工具接线、测试与文档改动（以 `git status --short` 为准）。此前 M1 几何/诊断实现已在 `5885e51` 提交且 CI 7/7 全绿。
 >
-> > **当前轮实测**：Agent 专项 26/26、focused 341/341、全量 3580 项（3577 pass / 3 skip / 0 fail）、`npx tsc --noEmit` 通过。因本轮更新 `NL-AGENT.md` 与 README 索引统计，`kb:build` 已重建；提交前需再次跑与最终文档一致的 `kb:build`、focused、tsc、diff-check。当前改动尚未提交、未 push、当前 CI 尚未运行。
+> > **当前轮实测**：Agent 专项 26/26、focused 341/341、全量 3580 项（3577 pass / 3 skip / 0 fail）、`npx tsc --noEmit` 通过。因本轮更新 `NL-AGENT.md` 与 README 索引统计，`kb:build` 已重建；提交前需再次跑与最终文档一致的 `kb:build`、focused、tsc、diff-check。当前改动尚未提交、未 push、当前 CI 尚未运行。（**历史 · 2026-11-18 那轮的状态**：此后已 push 并跑过 CI，现行结论是四笔全在远端、run `44444540414` 对 `dec1373` 7/7 绿。）
 
 ## M1「首层承托取放」纯数据概念验证（历史 · 2026-11-18 那一轮，几何实现已提交于 `5885e51`）
 
@@ -126,28 +129,33 @@
 ```bash
 cd /tmp/automation-cad-prototype
 git status --short      # 应为空（2026-11-19 收口后工作区干净；`scratch/` 已删）
-git log -5 --oneline    # 顶端是 8037e11（本地 main，领先 origin/main@114e024 三笔：920ea07 / b85fab5 / 8037e11）
-git log --oneline origin/main..HEAD   # 应正好列出这三笔，确认本地领先范围
+git log -5 --oneline    # 顶端是 dec1373（docs-only）；其下 8037e11 / b85fab5 / 920ea07，全部已在 origin/main
+git log --oneline origin/main..HEAD   # 应为空（已同步）；只有本轮 docs 提交前会列出 1 笔
+git rev-parse HEAD origin/main        # 两个 SHA 应相同：dec1373a6aa1fc3380636c9e8e4c5ab72be56212
 ```
 
 `git status --short` **应为空**。若非空，先看清单再动手：可能是你自己刚跑出的临时产物；不要覆盖、不要回滚、不要 `git checkout --`。`scratch/` 这类临时回执目录可以随手删，**永远不要提交**。
 
-> 历史：本文件早前版本这里写的是「10 M + 5 ??」「顶端 7b089a1」（2026-11-18 塔 B-Rep 轮），以及「`114e024` + 21 M + 1 ??（顶端 114e024）」（2026-11-19 提交前）。前者已被 `1df0d05`/`114e024` 超过；后者这 21 个 M 现已落成 `920ea07`/`b85fab5`/`8037e11` 三笔，`?? scratch/` 已删。都不要当现状引用。
+> 历史：本文件早前版本这里写的是「10 M + 5 ??」「顶端 7b089a1」（2026-11-18 塔 B-Rep 轮），以及「`114e024` + 21 M + 1 ??（顶端 114e024）」（2026-11-19 提交前）。前者已被 `1df0d05`/`114e024` 超过；后者这 21 个 M 现已落成 `920ea07`/`b85fab5`/`8037e11` 三笔，`?? scratch/` 已删。都不要当现状引用。（2026-11-19 10:35 补：此后又落了 `dec1373`，四笔已全部 push，`origin/main` = `dec1373`；「未 push / CI 未运行」对现状不成立。）
 
 ## 当前远端状态
 
-**2026-11-19 收口后：本地 `main` 顶端 = `8037e11`，`origin/main` 仍停在 `114e024`** —— 本地领先三笔（`920ea07` 板进碰撞几何 + 制造导出边界、`b85fab5` 承托/行表 fail-closed、`8037e11` 文档 + kb），**尚未 push，CI 未触发**。下一步是 `git push` 后查 CI（见「下一会话建议顺序」第 2 条）。`114e024` 及更早的 CI 结论按「未知」记（本轮没查），不要写成绿。
+**2026-11-19 10:35 现状：本地 `main` = `origin/main` = `dec1373`**（`dec1373a6aa1fc3380636c9e8e4c5ab72be56212`，ahead/behind 0/0，**已推送**）：`920ea07`（板进碰撞几何 + 制造导出边界）→ `b85fab5`（承托/行表 fail-closed）→ `8037e11`（文档 + kb）→ `dec1373`（docs-only，只改两份交接文档）。**远端 CI run `44444540414`（head `dec1373a6aa`）7/7 全绿，2026-11-19 10:28–10:33**：https://github.com/owlco001/automation-cad-prototype/actions/runs/44444540414 。`114e024` 及更早的 CI 结论仍按「未知」记（未逐个查），不要写成绿。
 
-**提交前快照（历史）**：收口时是 `114e024` + 21 M + 1 ??，那时这 21 个 M 不在任何 CI run 里；现已在本地三笔里，但**未 push 依然不在任何 CI run 里**。下面这串是更早的推送历史（写到 `411f21d` 为止），保留原样；它之后又推了 `1df0d05`（`run_interference_check` 接 panel channel 诊断）与 `114e024`。
+**提交前快照（历史）**：收口时是 `114e024` + 21 M + 1 ??，那时这 21 个 M 不在任何 CI run 里。**现状**：它们已随 `920ea07`/`b85fab5`/`8037e11`/`dec1373` 推到远端，并已由 run `44444540414` 覆盖。下面这串是更早的推送历史（写到 `411f21d` 为止），保留原样；它之后又推了 `1df0d05`（`run_interference_check` 接 panel channel 诊断）、`114e024`、`920ea07`、`b85fab5`、`8037e11`、`dec1373`。
 
 最后已推送提交（远端 `main` 就是这里）：
+
+- **最近四笔（现行）**：`dec1373`（docs-only，CI `44444540414` 7/7 绿）← `8037e11`（文档 + kb）← `b85fab5`（承托/行表 fail-closed）← `920ea07`（板进碰撞几何 + 制造导出边界）
+
+以下四行是更早的推送历史：
 
 - `411f21d`：锁存故障期来料拒绝（`ITEM_REJECTED_FAULT`）+ 静态守卫扫三种同步子进程 API
 - `65229c5`：缓存塔塔身几何 builder（fail-loud 配置、真派生储位、塔升降轴）
 - `e6c1ef3`：per-station PLC 转换（并行工位联动时间线通过审计）
 - `b3b13f3`：CI 沙箱守卫
 
-远端 CI 最近一次**有记录**的全绿是 run `44276548527`，验的是 `411f21d`（2026-11-18 的旧记录；`1df0d05`/`114e024` 及本地三笔的 CI 均未查，不要据此说「已上 CI 且绿」）。提交前的 21 M + 1 ?? 已并入 `920ea07`/`b85fab5`/`8037e11`，**未 push，因此不在任何 CI run 里**。`featuretree-geometry` 里的 16 层 + 8 层 STEP 完整性步骤，要等这三笔 push 后才能在 CI 上确认执行。
+**现行（2026-11-19 10:35）**：远端 `main` = `dec1373`，CI run `44444540414`（head `dec1373a6aa`）**7/7 全绿**（10:28–10:33），`featuretree-geometry` 里的 16 层 + 8 层 STEP 完整性步骤**已确认在 CI 上真实执行并通过**（16 层 17/17、8 层 10/10）；告警是多个 job 的 Node20 action 被强制跑在 Node24（`##[warning]Node.js 20 is deprecated`）加一处 `powershell is not supported`，均非致命、无 `##[error]`。**历史**：2026-11-18 那次有记录的全绿是 run `44276548527`（验 `411f21d`）；`1df0d05`/`114e024` 两笔的 CI 未单独查过，按「未知」记。
 
 ## 门禁：塔 B-Rep/STEP 轮本地实测（历史 · 2026-11-18，工作区已变，不是现状）
 
@@ -236,13 +244,14 @@ git log --oneline origin/main..HEAD   # 应正好列出这三笔，确认本地�
 - 旧 `/tmp/automationcad-pv-buffer-iter` 里的历史产物是 250 mm 层的旧结果，不能改参数后声称几何已更新
 - 该 8 层产物当时的 STEP 是 **781,970 B / 47 实体（历史丢件产物）**；修复后的当前值是 1,622,322 B / 55 实体
 
-## 文件落库情况（2026-11-19 收口后：21 个 M 全部已提交，工作区干净）
+## 文件落库情况（2026-11-19 收口后：21 个 M 全部已提交并推送，工作区干净）
 
-### 三笔提交（本地 `main` = `8037e11`，**未 push**）
+### 四笔提交（`main` = `origin/main` = `dec1373`，**全部已 push**）
 
 - `920ea07` `feat(machine): add workpiece collision and manufacturing export boundary`（8 文件）：`desktop/src/machine/{machine-geometry,geometry,geometry-export}.ts`、`desktop/test/machine/{geometry-export,buffer-tower-assembly,buffer-tower-model}.test.mjs`、`desktop/scripts/verify-step-tower.mjs`、`desktop/test/parametric/verify-step-tower.test.mjs`。
 - `b85fab5` `fix(machine): fail closed on invalid support evidence`（7 文件）：`desktop/src/machine/{panel-channel,interference-states}.ts`、`desktop/src/agent/tools.ts`、`desktop/scripts/verify-channel.mjs`、`desktop/test/machine/{panel-channel,buffer-tower-channel}.test.mjs`、`desktop/test/agent/interference-panel-diagnostics.test.mjs`。
 - `8037e11` `docs: record PV board export and diagnostic verification`（6 文件）：`HANDOFF-NEXT-SESSION.md`、`docs/desktop/PV-BUFFER-ITERATION-HANDOFF.md`、`docs/desktop/NL-AGENT.md`、`desktop/src/agent/MODULE.md`、`README.md`（kb 统计 `chunks=454`）、`desktop/src/agent/kb/kb.json`（该 commit 内重建 `KB_BUILD_OK docs=13 chunks=454 bytes=434531`）。
+- `dec1373` `docs: align handoff with committed PV board changes`（2 文件，+54/−63）：`HANDOFF-NEXT-SESSION.md`、`docs/desktop/PV-BUFFER-ITERATION-HANDOFF.md` —— **docs-only，不改源码/测试/kb**；远端 CI run `44444540414` 验的就是这一笔（7/7 绿）。
 
 `git status --short` **无输出**；`scratch/`（临时回执目录，含 `cad-channel-*.md`、`cad-board-*.md` 等各岗报告）**未入库并已删除**。日后若再产生这类目录，照旧不要提交。
 
@@ -295,8 +304,8 @@ git log --oneline origin/main..HEAD   # 应正好列出这三笔，确认本地�
 
 ## 下一会话建议顺序
 
-1. 读本文件 + `docs/desktop/PV-BUFFER-ITERATION-HANDOFF.md`，跑 `git status` / `git log --oneline origin/main..HEAD`。**HEAD 是 `8037e11`，工作区干净，本地领先 `origin/main@114e024` 三笔（`920ea07` → `b85fab5` → `8037e11`），三笔都未 push**。这是已落库状态，不要再当成「待提交工作区」；不要改写/重排这三笔历史，也不要 `git checkout --`。
-2. **门禁已跑完且已提交（final6，10:04–10:10，对应源码提交 `920ea07`+`b85fab5`）**：targeted 205/205、focused 370/370、全量 3614（3611 pass / 3 skip / 0 fail，205,933 ms）、tsc exit 0、kb 13/454/434,531、`verify:channel` 2/8/16 各 27/27、`verify:step-tower` 8 层 10/10 / 16 层 17/17、`verify:step` 7/7、regen 58/58、`build:ext` 2,941,695 B / gzip 920,422 B。**不要重跑 final6**：`8037e11` 只动文档与 `kb.json`，不改源码/测试，这些数字仍对应当前源码。只有你改了源码/测试才必须整轮重跑（顺序照抄下面），并在跑完后把文首「当前状态」与本表换成**新**日志：
+1. 读本文件 + `docs/desktop/PV-BUFFER-ITERATION-HANDOFF.md`，跑 `git status` / `git log --oneline origin/main..HEAD` / `git rev-parse HEAD origin/main`。**HEAD 是 `dec1373`（docs-only），已与 `origin/main` 同步（ahead/behind 0/0），工作区干净**。四笔（`920ea07` → `b85fab5` → `8037e11` → `dec1373`）都已 push，**远端 CI run `44444540414` 对 `dec1373` 7/7 绿**（`FeatureTree` 的 16 层 17/17、8 层 10/10，`tsc + unit tests` 的 3614/3611/3/0）。不要再当成「待提交 / 未推送工作区」；不要改写或重排这四笔历史（已推送，重排要 force push），也不要 `git checkout --`。
+2. **门禁已跑完且已提交（final6，10:04–10:10，对应源码提交 `920ea07`+`b85fab5`）**：targeted 205/205、focused 370/370、全量 3614（3611 pass / 3 skip / 0 fail，205,933 ms）、tsc exit 0、kb 13/454/434,531、`verify:channel` 2/8/16 各 27/27、`verify:step-tower` 8 层 10/10 / 16 层 17/17、`verify:step` 7/7、regen 58/58、`build:ext` 2,941,695 B / gzip 920,422 B。**不要重跑 final6**：`8037e11` 与 `dec1373` 只动文档与 `kb.json`，不改源码/测试，这些数字仍对应当前源码；远端 run `44444540414` 已用另一台机器交叉复核到全量 3614/3611/3/0、16 层 17/17、8 层 10/10。只有你改了源码/测试才必须整轮重跑（顺序照抄下面），并在跑完后把文首「当前状态」与本表换成**新**日志：
    ```bash
    cd /tmp/automation-cad-prototype/desktop
    node --test test/machine/buffer-tower-channel.test.mjs         # 清单 22
@@ -315,17 +324,18 @@ git log --oneline origin/main..HEAD   # 应正好列出这三笔，确认本地�
    npm run kb:build                                                # 两份交接文档不在 KB_DOC_FILES，统计预期不变
    git diff --check                                                # 必须无输出
    ```
-   **三笔已经提交好了（`920ea07` / `b85fab5` / `8037e11`），不要重做提交**；落库分组见文末「文件落库情况」。下一步是 **push + 查 CI**：
+   **四笔已经提交并推送（`920ea07` / `b85fab5` / `8037e11` / `dec1373`），不要重做提交、不要重排已推送历史**；落库分组见文末「文件落库情况」。**本文件这一轮只改两份文档 → 改完提交并 push，再对新 SHA 查一次 CI**（新提交在 push 前没有 run）：
    ```bash
    cd /tmp/automation-cad-prototype
-   git log --oneline origin/main..HEAD   # 应正好三笔：8037e11 / b85fab5 / 920ea07
-   git status --short                    # 应为空
+   git status --short                     # 应只有这两份文档是 M
+   git add HANDOFF-NEXT-SESSION.md docs/desktop/PV-BUFFER-ITERATION-HANDOFF.md
+   git commit -m "docs: backfill remote CI result for dec1373"
    git push origin main
-   git status -sb                        # main...origin/main 不应再带 ahead 标记
-   gh run list --limit 5                 # 找到这次 push 的 run
-   gh run watch <run-id>                 # 盯到结束；失败就按日志修，不要猜
+   git rev-parse HEAD                     # 记下新 SHA
+   gh run list --limit 3                  # 新 run 的 headSha 必须等于这个 SHA
+   gh run watch <run-id>                  # 盯到结束；失败就按日志修，不要猜
    ```
-   CI 要确认三件事：① `npm test` 全绿；② `featuretree-geometry` 的 16 层 / 8 层 STEP 步骤（`ci.yml` 第 856–857 行）真实执行并通过；③ `verify:channel` **不在 CI**，它只有本机 27/27 这一份证据，别指望 CI 覆盖。若 CI 红了，先看是哪一步、修完再 push，别把红说成绿。
+   **已验基线（`dec1373`，run `44444540414`，7/7 绿）三件事都成立**：① `npm test` 全绿（3614/3611/3/0）；② `featuretree-geometry` 的 16 层 / 8 层 STEP 步骤（`ci.yml` 第 856–857 行）真实执行并通过（16 层 17/17、8 层 10/10）；③ `verify:channel` **不在 CI**，它只有本机 27/27 这一份证据。新提交若只动文档，预期与 `44444540414` 相同；若 CI 红了，先看是哪一步、修完再 push，别把红说成绿。
 3. **补覆盖盲区（N12/N13/N14 已补齐；导出边界 P2-5 已在 final6 实跑）**：`machine-geometry.ts`（`towerWorkpiecePart` 注释、几何 assumptions）与 `geometry.ts`（`workpiecePlaceholder`）已改成「碰撞刚体 = 装配件+1；BOM 96/qty146、制造导出 STL/glTF/sidecar→STEP = `ConveyorPart` 48/90/146，板由 `machineExportParts` 排除；成本/容量不变」（`machine-geometry.ts:1043`/`:1126` 两处提示串仍是旧措辞，P3）。`verify-channel` 的 N12 覆盖同 id 托板 + role/size/center/`rotationZDeg=90°`（**五维都有门禁**），N13/N14 覆盖坏坐标。**导出边界现在是实跑证据**（16 层 17/17 含 8 条、8 层 10/10 含 1 条 N/A），但它是 sidecar 级断言、**不核对内核 STEP**；仍缺「逐实体 bbox 覆盖 + 实际组件对应」这类能堵内部件漏件的 STEP 断言。
 4. **设计可承载的升降通道**：让 `sweep` 的 confirmed 命中归零，再谈机构可行性；同时做**逐实体 bbox 覆盖 + 实际组件对应**的 STEP 门禁，堵内部件漏件盲区。
 5. 之后才是结构/安全/电气/PLC：结构 `accepted:false`、IO 地址 `null`、`executable=false`，都未验收。
