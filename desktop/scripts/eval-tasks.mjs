@@ -27,17 +27,27 @@
  * 不计 pass），绝不拿内核桩产物冒充通过。
  *
  * 用法：cd desktop && npm run eval:tasks
+ *       node scripts/eval-tasks.mjs --require-full   # 环境门控的跳过也算不通过（有内核的 CI job 用）
  * 输出：每例一行 `TASK_EVAL <id> PASS|FAIL|SKIP <关键数字>`，
- *      末尾 `TASK_EVAL_SUMMARY pass=N/13 failed=M skipped=S turns_total=T`；
+ *      末尾 `TASK_EVAL_SUMMARY pass=N/13 failed=M skipped=S env_skipped=E undeclared_skips=U degraded=B turns_total=T`；
  *      任一 FAIL 追加末态差异（期望 vs 实际），退出码 1。
+ *
+ * 跳过策略（fail-closed，别只看「绿」）：
+ *   - 用例只能通过 `gate` 字段声明自己的跳过理由，且理由必须在 `ENV_SKIP_GATES` 白名单里
+ *     （目前只有 `kernel-missing`：本机/runner 没有 build123d）。这是**环境门控**：不算 pass
+ *     （没验证过就不能记通过），默认也不改退出码，但必须打印 `TASK_EVAL_SKIP_LIST` 与
+ *     `TASK_EVAL_DEGRADED`，摘要里 `degraded=true`——跳过不许静默变绿。
+ *   - 没有 `gate`、或 `gate` 不在白名单里的跳过 = **未声明的跳过**（拿 `return {skipped:true}`
+ *     悄悄关掉一例）：一律 `exit 1`，并单独打印 `TASK_EVAL_SKIP_UNDECLARED`。
+ *   - `--require-full`：连环境门控跳过也算不通过（给装了 build123d 的 job 用）。
  */
 
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { AgentSession } from '../src/agent/session.ts';
 import { AgentTools } from '../src/agent/tools.ts';
 import { createAgentCommandBus } from '../src/agent/commands.ts';
@@ -1256,7 +1266,14 @@ async function caseStepExport() {
     return { ok: false, checks: check.checks, turns: 1 };
   }
   if (report.skipped) {
-    return { skipped: true, reason: `本机没有 build123d 内核：${report.reason ?? '未知'}`, checks: [], turns: 1 };
+    return {
+      skipped: true,
+      // 只有「本机没有 build123d」算环境门控：白名单外的跳过按未声明处理（fail-closed）
+      gate: 'kernel-missing',
+      reason: `本机没有 build123d 内核：${report.reason ?? '未知'}`,
+      checks: [],
+      turns: 1
+    };
   }
 
   const merged = report.merged ?? {};
@@ -1415,12 +1432,108 @@ function printFailure(caseId, result) {
   if (result.error) console.error(`  ✗ ${caseId} · 未捕获异常：${result.error}`);
 }
 
-async function main() {
+/**
+ * 允许跳过的**环境门控**白名单。只有「这台机器客观上跑不了这一例」才配进来：
+ *   kernel-missing —— 没有可 import build123d 的 Python（t12 真起内核出 STEP 用的）。
+ * 加白名单就是加一条「可以让门禁降级」的理由，所以必须写清为什么它不算代码缺陷。
+ */
+export const ENV_SKIP_GATES = Object.freeze(['kernel-missing']);
+
+/**
+ * 汇总 + 判定（纯函数：单测可以直接注入「假跳过」而不必真跑 13 例）。
+ *
+ * fail-closed 的落点：
+ *   - 跳过**不记 pass**（没验证过就不是通过），并在 `TASK_EVAL_SKIP_LIST` 里逐条列出来；
+ *   - 跳过只允许带 `ENV_SKIP_GATES` 里的 gate；**没声明 / 白名单外**一律计失败（exit 1），
+ *     回执里单列 `TASK_EVAL_SKIP_UNDECLARED`——这样「拿 return {skipped:true} 悄悄关掉一例」
+ *     这条捷径直接变红，而不是把摘要刷成 pass=12/13；
+ *   - `requireFull`：连环境门控跳过也算不通过（给装了内核的 job 用）。
+ */
+export function summarizeEvalResults(rows, { total = CASES.length, requireFull = false } = {}) {
+  const list = (Array.isArray(rows) ? rows : []).filter((row) => row && typeof row === 'object');
+  const statuses = new Set(['pass', 'fail', 'skip']);
+  const passed = list.filter((row) => row.status === 'pass').length;
+  const failed = list.filter((row) => row.status === 'fail').length;
+  const skips = list.filter((row) => row.status === 'skip');
+  const declared = (row) => typeof row.gate === 'string' && ENV_SKIP_GATES.includes(row.gate);
+  const envSkips = skips.filter(declared);
+  const undeclared = skips.filter((row) => !declared(row));
+  const unknownStatus = list.filter((row) => !statuses.has(row.status));
+  const turns = list.reduce((sum, row) => sum + (Number(row.turns) || 0), 0);
+  const degraded = skips.length > 0;
+
+  const reasons = [];
+  if (failed > 0) reasons.push(`failed=${failed}`);
+  if (undeclared.length > 0) reasons.push(`undeclared_skips=${undeclared.map((row) => row.id).join(',')}`);
+  if (unknownStatus.length > 0) reasons.push(`unknown_status=${unknownStatus.map((row) => row.id).join(',')}`);
+  if (requireFull && skips.length > 0) reasons.push(`require-full 且 ${skips.length} 例被跳过`);
+  const exitCode = reasons.length > 0 ? 1 : 0;
+
+  const lines = [];
+  for (const row of skips) {
+    lines.push(`TASK_EVAL_SKIP_LIST ${row.id} gate=${row.gate ?? 'none'} reason=${row.reason ?? '-'}`);
+  }
+  if (degraded) {
+    lines.push(`TASK_EVAL_DEGRADED skipped=${skips.length} env_gated=${envSkips.length}`
+      + ` undeclared=${undeclared.length} policy=fail-closed`);
+  }
+  for (const row of undeclared) {
+    lines.push(`TASK_EVAL_SKIP_UNDECLARED ${row.id} gate=${row.gate ?? 'none'}`
+      + `（跳过必须声明 ENV_SKIP_GATES 里的环境门控，否则按失败计）`);
+  }
+  for (const row of unknownStatus) {
+    lines.push(`TASK_EVAL_STATUS_UNKNOWN ${row.id} status=${JSON.stringify(row.status ?? null)}`);
+  }
+  if (requireFull && skips.length > 0) {
+    lines.push(`TASK_EVAL_REQUIRE_FULL skipped=${skips.length}（--require-full：任何跳过都不算通过）`);
+  }
+  lines.push(`TASK_EVAL_SUMMARY pass=${passed}/${total} failed=${failed} skipped=${skips.length}`
+    + ` env_skipped=${envSkips.length} undeclared_skips=${undeclared.length} degraded=${degraded} turns_total=${turns}`);
+  lines.push(exitCode === 0
+    ? `TASK_EVAL_VERDICT PASS exit=0${degraded ? ` degraded=true（${envSkips.length} 例环境门控跳过，未计入 pass）` : ''}`
+    : `TASK_EVAL_VERDICT FAIL exit=1 reasons=${reasons.join('; ')}`);
+
+  return {
+    passed,
+    failed,
+    skipped: skips.length,
+    envSkipped: envSkips.length,
+    undeclaredSkips: undeclared.map((row) => row.id),
+    degraded,
+    turns,
+    exitCode,
+    reasons,
+    lines
+  };
+}
+
+/** 参数解析：未知选项一律报错（不做「忽略掉继续跑」） */
+export function parseEvalArgs(argv = []) {
+  const options = { requireFull: false, help: false };
+  for (const raw of Array.isArray(argv) ? argv : []) {
+    const arg = String(raw);
+    if (arg === '--require-full') options.requireFull = true;
+    else if (arg === '--help' || arg === '-h') options.help = true;
+    else return { ok: false, message: `未知选项：${arg}（可用：--require-full / --help）`, options };
+  }
+  return { ok: true, options };
+}
+
+async function main(argv = []) {
+  const parsed = parseEvalArgs(argv);
+  if (!parsed.ok) {
+    console.error(`TASK_EVAL_USAGE ${parsed.message}`);
+    process.exitCode = 2;
+    return 2;
+  }
+  if (parsed.options.help) {
+    console.log('用法：node scripts/eval-tasks.mjs [--require-full]');
+    console.log('  --require-full  环境门控的跳过也不算通过（给装了 build123d 的 job 用）');
+    return 0;
+  }
+  const requireFull = parsed.options.requireFull;
   const startedAt = Date.now();
-  let passed = 0;
-  let failed = 0;
-  let skipped = 0;
-  let turnsTotal = 0;
+  const rows = [];
 
   for (const [caseId, run] of CASES) {
     let result;
@@ -1435,35 +1548,42 @@ async function main() {
         error: error instanceof Error ? (error.stack ?? error.message) : String(error)
       };
     }
-    turnsTotal += result.turns ?? 0;
     if (result.skipped) {
-      // 显式跳过：不记 pass（避免「没验证」变成「通过」），也不记 fail（环境缺失不是代码缺陷）
-      skipped += 1;
+      // 显式跳过：不记 pass（避免「没验证」变成「通过」），也不记 fail（环境缺失不是代码缺陷）。
+      // gate 决定它算「环境门控降级」还是「未声明跳过（fail-closed）」——判定在 summarizeEvalResults。
+      rows.push({ id: caseId, status: 'skip', gate: result.gate ?? null, reason: result.reason ?? '', turns: result.turns ?? 0 });
       console.log(`TASK_EVAL ${caseId} SKIP ${result.reason ?? ''}`.trim());
       continue;
     }
     if (result.ok) {
-      passed += 1;
+      rows.push({ id: caseId, status: 'pass', turns: result.turns ?? 0 });
       console.log(`TASK_EVAL ${caseId} PASS ${(result.metrics ?? []).join(' ')}`.trim());
     } else {
-      failed += 1;
+      rows.push({ id: caseId, status: 'fail', turns: result.turns ?? 0 });
       console.log(`TASK_EVAL ${caseId} FAIL ${(result.metrics ?? []).join(' ')}`.trim());
       printFailure(caseId, result);
     }
   }
 
-  console.log(
-    `TASK_EVAL_SUMMARY pass=${passed}/${CASES.length} failed=${failed} skipped=${skipped} turns_total=${turnsTotal}`
-  );
+  const summary = summarizeEvalResults(rows, { total: CASES.length, requireFull });
+  // 跳过清单 / 降级标记 / 未声明跳过 / 摘要 / 结论：一条都不许省
+  for (const line of summary.lines) console.log(line);
   console.log(`TASK_EVAL_RUNTIME ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
-  if (failed > 0) process.exitCode = 1;
+  process.exitCode = summary.exitCode;
+  return summary.exitCode;
 }
 
-main()
-  .catch((error) => {
-    console.error(`TASK_EVAL_CRASH ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
-    process.exitCode = 1;
-  })
-  .finally(() => {
-    for (const root of roots) rmSync(root, { recursive: true, force: true });
-  });
+const invokedDirectly = process.argv[1]
+  ? import.meta.url === pathToFileURL(resolve(process.argv[1])).href
+  : false;
+
+if (invokedDirectly) {
+  main(process.argv.slice(2))
+    .catch((error) => {
+      console.error(`TASK_EVAL_CRASH ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
+      process.exitCode = 1;
+    })
+    .finally(() => {
+      for (const root of roots) rmSync(root, { recursive: true, force: true });
+    });
+}

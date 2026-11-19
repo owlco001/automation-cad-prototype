@@ -18,6 +18,9 @@
  *   - `layers: 8` 只等于 **8 个储位**（第 1 层是底层输送线），**不是 16 位**。16 位目前只存在于
  *     `bufferTower` 纯数据槽位模型里。本脚本不会把 8 层冒充 16 位，报告里固定打印
  *     `slotsFromGeometry=8 claimedSlots=16 aligned=false`。
+ *   - `slotsFromGeometry` 是**从盘上工程零件表派生的**（`slotsFromGeometryParts`：托板/托条/
+ *     挡停/层光电四族逐层数，柱数派生塔数），不是 `params.layers` 回声；几何里整层丢件、
+ *     每层件数不对、立柱不足 4 根都会让 `disk.slots.*` 红。
  *   - 90 对 90 只证明「模型件数与场景件数一致」，不证明几何正确：180mm 下的 lift/sweep/push
  *     动态干涉、结构强度、挠度、防坠均未校核。这里的结论只能写成「路径可重复、产物可读回」。
  *   - 本脚本不改产品代码、不写产品 userData、不读任何密钥。
@@ -90,8 +93,13 @@ export const BASELINE = Object.freeze({
    */
   minSolidBreps: 40,
   minAdvancedFaces: 200,
-  /** 几何层数 → 储位数：第 1 层是底层输送线，所以 8 层只有 8 个储位 */
+  /**
+   * 参数声明口径的**期望**储位数（不是几何派生值）。第 1 层是底层输送线，所以 8 层只有
+   * 8 个储位。运行期真正的 `slotsFromGeometry` 走 `slotsFromGeometryParts()`——从盘上
+   * 工程零件表逐族数出来；这个函数只用来写计划里的「期望」与基线断言。
+   */
   slotsFromLayers: (layers) => layers,
+  /** 配置声明的容量（16 位只存在于 bufferTower 纯数据槽位模型里，几何路径没有） */
   claimedSlots: 16
 });
 
@@ -429,7 +437,10 @@ export function planSummary(options, { userData, port, reportPath, runDir }) {
       envelope: [...BASELINE.envelope],
       minStepBytes: BASELINE.minStepBytes,
       minStlBytes: BASELINE.minStlBytes,
+      // 计划阶段的「期望」：参数声明口径。运行期真正的几何派生值见 disk.slots.*（从盘上
+      // project.json 的 partsList 逐族数出来），计划里没有零件表就不冒充。
       slotsFromGeometry: BASELINE.slotsFromLayers(options.params.layers),
+      slotsFromGeometrySource: 'params（计划阶段没有几何；运行期由盘上零件表派生，见 note/disk.slots.*）',
       claimedSlots: BASELINE.claimedSlots,
       slotsAligned: BASELINE.slotsFromLayers(options.params.layers) === BASELINE.claimedSlots
     }
@@ -467,6 +478,203 @@ export function createChecks() {
 /** 基线断言之外的降级说明：非基线参数时只记录，不拿它当门禁 */
 function soft(checks, options) {
   return !options.baseline && options.allowNonBaseline;
+}
+
+// ---------------------------------------------------------------- 储位派生（从几何零件表）
+
+/**
+ * 储位件族表：口径照 `src/machine/buffer-tower-assembly.ts` 的 `SLOT_FAMILIES`——
+ * 「层数 / 每层位数 / 塔数」三项**全部从零件表数出来**，一项都不抄配置；四个独立件族
+ * 逐层核对，所以整层一起丢时不会「两边同减 1」自我抵消（那正是旧实现的漏洞）。
+ *
+ * 为什么这里额外给了 `namePattern`：本脚本能拿到的最硬证据是盘上
+ * `projects/<id>/project.json` 的 `partsList`，而 `electron/projects.ts` 落盘时只保留
+ * `{file,name}` —— 件号（`tray-2`）已经丢了（`file` 是 `NNNN-<件名>.stl`，由件名 sanitize 而来）。
+ * 所以族判据同时给 idPattern 与 namePattern：谁在就认谁；两个都对不上 = 解析不出，
+ * 记错误（fail-closed），绝不按「差不多」猜一个层号。
+ */
+export const PV_SLOT_FAMILIES = Object.freeze([
+  { key: 'tray', label: '托板 tray-*', perLevel: 1, idPattern: /^tray-(\d+)$/, namePattern: /^第\s*(\d+)\s*层托板$/ },
+  { key: 'trayRail', label: '托条 tray-rail-*', perLevel: 2, idPattern: /^tray-rail-(\d+)-(?:left|right)$/, namePattern: /^第\s*(\d+)\s*层托条（(?:左|右)）$/ },
+  { key: 'stop', label: '挡停 stop-*', perLevel: 1, idPattern: /^stop-(\d+)$/, namePattern: /^第\s*(\d+)\s*层挡停板$/ },
+  { key: 'layerSensor', label: '层光电 layer-sensor-*', perLevel: 1, idPattern: /^layer-sensor-(\d+)$/, namePattern: /^第\s*(\d+)\s*层到位光电$/ },
+  { key: 'trayRoller', label: '层传动辊 tray-roller-*', perLevel: 2, optional: true, idPattern: /^tray-roller-(\d+)-(?:in|out)$/, namePattern: /^第\s*(\d+)\s*层传动辊（(?:进|出)）$/ }
+]);
+
+/** 一件一命中：件号优先，件名兜底；都对不上返回 null（不猜） */
+function slotLevelOf(part, family) {
+  const id = typeof part?.id === 'string' ? part.id : '';
+  if (id) {
+    const byId = family.idPattern.exec(id);
+    if (byId) return Number(byId[1]);
+  }
+  const name = typeof part?.name === 'string' ? part.name : '';
+  if (name) {
+    const byName = family.namePattern.exec(name);
+    if (byName) return Number(byName[1]);
+  }
+  return null;
+}
+
+/**
+ * `slotsFromGeometry` 的唯一派生口。**输入是零件表，不是 `params.layers`**：
+ * - 层数：托板件族覆盖第 2..N 层（第 1 层是底层输送线，没有托板），再加回 `transferLevels`；
+ * - 每层位数：每层托板件数（一块托板 = 一个储位），不乘 `params.slotsPerLevel`；
+ * - 塔数：4 根立柱为一塔，按立柱组数数出来。
+ *
+ * 任何一项数不出来（缺族、缺层、每层件数不符、层号越界、立柱不足 4 根）都**记 error 并
+ * `ok:false`**，不抛错、不返回 NaN 冒充数字——门禁要能一次列全「哪层哪族丢了」。
+ */
+export function slotsFromGeometryParts(parts, options = {}) {
+  const layers = Number(options.layers ?? BASELINE.params.layers);
+  const transferLevels = Number(options.transferLevels ?? 1);
+  const claimed = Number(options.claimed ?? BASELINE.claimedSlots);
+  const list = (Array.isArray(parts) ? parts : []).filter((part) => part && typeof part === 'object');
+  const errors = [];
+  const layerTrace = [];
+
+  if (!Number.isSafeInteger(layers) || layers < 2) {
+    errors.push(`层数参数无效（${options.layers}）：至少 2 层才有储位可派生`);
+    return {
+      ok: false, source: 'project-parts', partsCount: list.length, claimed,
+      fromGeometry: null, aligned: null, levelsFromGeometry: null, slotsPerLevelFromGeometry: null,
+      towersFromGeometry: null, transferLevels, usableStorage: null, trayCount: null, layerTrace, errors
+    };
+  }
+  if (list.length === 0) {
+    // 空零件表不许当「0 储位」放过去：没有几何 ≠ 没有储位
+    errors.push('零件表为空（partsList 缺失）：没有几何可派生储位，fail-closed');
+  }
+
+  const expectedLevels = Array.from({ length: layers - 1 }, (_, index) => index + 2);
+  const countsByFamily = new Map();
+  for (const family of PV_SLOT_FAMILIES) {
+    const counts = new Map();
+    for (const part of list) {
+      const level = slotLevelOf(part, family);
+      if (level === null || !Number.isSafeInteger(level) || level < 1) continue;
+      counts.set(level, (counts.get(level) ?? 0) + 1);
+    }
+    countsByFamily.set(family.key, counts);
+  }
+
+  // 非可选族：逐层齐全 + 每层件数 == perLevel + 不许出现越界层号
+  for (const family of PV_SLOT_FAMILIES) {
+    if (family.optional) continue;
+    const counts = countsByFamily.get(family.key) ?? new Map();
+    const missing = expectedLevels.filter((level) => !counts.has(level));
+    const extra = [...counts.keys()].filter((level) => !expectedLevels.includes(level)).sort((a, b) => a - b);
+    if (missing.length > 0) {
+      errors.push(`${family.label} 缺第 ${missing.join('、')} 层（整层丢失必须由本族自己现形，不能靠别的件族同时 −1 自证）`);
+    }
+    if (extra.length > 0) {
+      errors.push(`${family.label} 多出第 ${extra.join('、')} 层（参数 ${layers} 层 ⇒ 应有第 2~${layers} 层）`);
+    }
+    const wrong = expectedLevels.filter((level) => counts.has(level) && counts.get(level) !== family.perLevel);
+    if (wrong.length > 0) {
+      errors.push(`${family.label} 每层应 ${family.perLevel} 件，第 ${wrong.map((level) => `${level} 层（${counts.get(level)} 件）`).join('、')} 不符`);
+    }
+  }
+
+  // 条件族（传动辊）：各层一致，且只能是 0 或 2 件（一条进一条出）
+  const rollerCounts = countsByFamily.get('trayRoller') ?? new Map();
+  const perLevelRollers = expectedLevels.map((level) => rollerCounts.get(level) ?? 0);
+  const rollerSet = new Set(perLevelRollers);
+  const rollerBad = [...rollerSet].filter((count) => count !== 0 && count !== 2);
+  if (rollerSet.size > 1 || rollerBad.length > 0) {
+    errors.push(`层传动辊应各层一致且为 0 或 2 件，实际各层件数 {${[...rollerSet].join('、')}}`);
+  }
+
+  // 层数 = 托板层数 + 进出料层
+  const trayCounts = countsByFamily.get('tray') ?? new Map();
+  const trayCount = trayCounts.size;
+  const levelsFromGeometry = trayCount + transferLevels;
+  if (levelsFromGeometry !== layers) {
+    errors.push(`几何层数 ${levelsFromGeometry}（托板 ${trayCount} 层 + 进出料 ${transferLevels}）≠ 参数 ${layers} 层`);
+  }
+
+  // 每层位数 = 第 2 层托板件数（一块托板 = 一个储位）
+  const slotsPerLevelFromGeometry = trayCounts.get(2) ?? 0;
+  if (slotsPerLevelFromGeometry < 1) {
+    errors.push('第 2 层没有托板：每层储位数读不出来（不从 params.slotsPerLevel 抄）');
+  }
+
+  // 塔数：4 根立柱为一塔
+  const columnCount = list.filter((part) => /^column-(fl|fr|bl|br)$/.test(String(part.id ?? ''))
+    || /^缓存立柱 \d+$/.test(String(part.name ?? ''))).length;
+  const towersFromGeometry = columnCount > 0 && columnCount % 4 === 0 ? columnCount / 4 : null;
+  if (towersFromGeometry === null) {
+    errors.push(`缓存立柱 ${columnCount} 根 ⇒ 塔数读不出（应 4 根/塔）`);
+  }
+
+  const fromGeometry = towersFromGeometry === null || slotsPerLevelFromGeometry < 1
+    ? null
+    : levelsFromGeometry * slotsPerLevelFromGeometry * towersFromGeometry;
+
+  for (const level of expectedLevels) {
+    layerTrace.push(`第 ${level} 层：托板 ${trayCounts.get(level) ?? 0}/托条 ${(countsByFamily.get('trayRail') ?? new Map()).get(level) ?? 0}`
+      + `/挡停 ${(countsByFamily.get('stop') ?? new Map()).get(level) ?? 0}/光电 ${(countsByFamily.get('layerSensor') ?? new Map()).get(level) ?? 0}`
+      + `/辊 ${rollerCounts.get(level) ?? 0}`);
+  }
+
+  const ok = errors.length === 0 && fromGeometry !== null;
+  return {
+    ok,
+    source: 'project-parts',
+    partsCount: list.length,
+    claimed,
+    fromGeometry,
+    aligned: fromGeometry === null ? null : fromGeometry === claimed,
+    levelsFromGeometry,
+    slotsPerLevelFromGeometry,
+    towersFromGeometry,
+    transferLevels,
+    usableStorage: fromGeometry === null || towersFromGeometry === null
+      ? null
+      : fromGeometry - towersFromGeometry * transferLevels,
+    trayCount,
+    layerTrace,
+    errors
+  };
+}
+
+/**
+ * 报告/日志里的「储位」回执。dry-run 阶段没有零件表，派生不出来就写 `null` +
+ * `source='dry-run-no-parts'`——**不拿参数回声冒充几何派生值**（旧实现就是 `(layers)=>layers`
+ * 挂了个 `slotsFromGeometry` 的名字，几何少一层它恒为 true）。
+ */
+export function slotsNote(slots, options) {
+  const claimed = BASELINE.claimedSlots;
+  if (!slots) {
+    const expected = BASELINE.slotsFromLayers(options.params.layers);
+    return {
+      slotsFromGeometry: null,
+      expectedSlotsFromParams: expected,
+      claimedSlots: claimed,
+      aligned: null,
+      source: 'dry-run-no-parts',
+      text: `本轮没有读工程零件表，储位数不从几何派生（不拿参数回声冒充几何）；`
+        + `按参数期望 ${options.params.layers} 层 = ${expected} 个储位，声明 ${claimed} 位，两者不等：`
+        + `本脚本不把 ${options.params.layers} 层冒充 ${claimed} 位。`
+    };
+  }
+  return {
+    slotsFromGeometry: slots.fromGeometry,
+    claimedSlots: claimed,
+    aligned: slots.aligned,
+    source: slots.source,
+    levelsFromGeometry: slots.levelsFromGeometry,
+    slotsPerLevelFromGeometry: slots.slotsPerLevelFromGeometry,
+    towersFromGeometry: slots.towersFromGeometry,
+    transferLevels: slots.transferLevels,
+    layerTrace: slots.layerTrace,
+    errors: slots.errors,
+    text: `几何零件表派生（${slots.partsCount} 件）：托板 ${slots.trayCount} 层 + 进出料 ${slots.transferLevels} 层`
+      + ` = ${slots.levelsFromGeometry} 层 × ${slots.slotsPerLevelFromGeometry} 位/层 × ${slots.towersFromGeometry} 塔`
+      + ` = ${slots.fromGeometry} 个储位；声明 ${claimed} 位，`
+      + (slots.aligned === true ? '一致。' : `不一致（本脚本不把 ${slots.levelsFromGeometry} 层冒充 ${claimed} 位）。`)
+      + '16 层塔身几何由 bufferTower 建造器生成（146 件静态件表），但不在本脚本路径上，故本报告无塔 B-Rep/STEP。'
+  };
 }
 
 // ---------------------------------------------------------------- 纯断言（可单测）
@@ -584,14 +792,14 @@ export function verifyProjectDir(dir, options) {
   const projectFile = join(dir, 'project.json');
   if (!existsSync(projectFile)) {
     checks.add('disk.projectJson', false, { path: projectFile });
-    return { checks, project: null };
+    return { checks, project: null, slots: null };
   }
   let project = null;
   try {
     project = JSON.parse(readFileSync(projectFile, 'utf8'));
   } catch (error) {
     checks.add('disk.projectJsonParsed', false, { error: String(error?.message ?? error) });
-    return { checks, project: null };
+    return { checks, project: null, slots: null };
   }
   checks.add('disk.projectJsonParsed', true);
   checks.eq('disk.name', project.name, options.name);
@@ -646,7 +854,31 @@ export function verifyProjectDir(dir, options) {
   checks.add('disk.partsDir', existsSync(partsDir), { partFiles });
   if (!soft(checks, options)) checks.eq('disk.partFiles', partFiles, BASELINE.parts);
 
-  return { checks, project };
+  /**
+   * 储位派生（P1-3）：唯一输入是盘上零件表 `partsList`，**不是** `params.layers`。
+   * 旧实现 `slotsFromLayers: (layers) => layers` 是参数回声——几何整层丢件它照样 true。
+   * 这里逐族逐层数：缺族 / 缺层 / 每层件数不符 / 立柱不足 4 根都会让 `disk.slots.*` 红。
+   */
+  const slots = slotsFromGeometryParts(project.partsList, {
+    layers: options.params.layers,
+    claimed: BASELINE.claimedSlots
+  });
+  checks.add('disk.slots.derived', slots.ok, {
+    errors: slots.errors,
+    partsList: slots.partsCount,
+    fromGeometry: slots.fromGeometry,
+    levelsFromGeometry: slots.levelsFromGeometry,
+    slotsPerLevel: slots.slotsPerLevelFromGeometry,
+    towers: slots.towersFromGeometry,
+    claimed: slots.claimed,
+    aligned: slots.aligned
+  });
+  checks.eq('disk.slots.levelsFromGeometry', slots.levelsFromGeometry, options.params.layers);
+  checks.add('disk.slots.fromGeometryPositive',
+    Number.isSafeInteger(slots.fromGeometry) && slots.fromGeometry > 0,
+    { fromGeometry: slots.fromGeometry });
+
+  return { checks, project, slots };
 }
 
 // ---------------------------------------------------------------- CDP
@@ -1035,14 +1267,10 @@ async function main(argv) {
 
   const port = await freePort();
   const plan = planSummary(options, { userData, port, reportPath, runDir });
-  const note = {
-    slotsFromGeometry: BASELINE.slotsFromLayers(options.params.layers),
-    claimedSlots: BASELINE.claimedSlots,
-    aligned: BASELINE.slotsFromLayers(options.params.layers) === BASELINE.claimedSlots,
-    text: `几何层数 ${options.params.layers} 层 = ${BASELINE.slotsFromLayers(options.params.layers)} 个储位；`
-      + '16 层塔身几何已由 bufferTower 建造器生成（146 件静态件表），但不在本脚本路径上，'
-      + '故本报告无塔 B-Rep/STEP；本脚本不把 8 层冒充 16 位。'
-  };
+  // dry-run 阶段没有零件表：note 明确写「未派生」，不拿参数回声当几何派生值。
+  // 真跑起来读完盘上工程后会用 slotsNote(disk.slots, options) 覆盖成本轮的真值。
+  let note = slotsNote(null, options);
+  let slots = null;
 
   if (options.dryRun) {
     try {
@@ -1158,6 +1386,10 @@ async function main(argv) {
     const disk = verifyProjectDir(projectDir, options);
     for (const item of disk.checks.items) checks.add(`disk3.${item.name}`, item.ok, item.detail);
     diskProject = disk.project;
+    // 储位真值（从盘上零件表派生）：note 在这里才第一次有几何依据
+    slots = disk.slots ?? null;
+    note = slotsNote(slots, options);
+    log(`PV_REGEN_SLOTS ${JSON.stringify(slotsNote(slots, options))}`);
     if (!diskProject) {
       const names = existsSync(projectsDir) ? readdirSync(projectsDir) : [];
       throw new Error(`盘上没有 ${projectDir}；实际目录：${JSON.stringify(names)}`);
@@ -1209,6 +1441,7 @@ async function main(argv) {
       note,
       userData: resolve(userData),
       port,
+      slots,
       facts,
       scene,
       record: record ? { ...record, params: record.params } : null,

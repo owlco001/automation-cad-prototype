@@ -19,6 +19,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   BASELINE,
+  PV_SLOT_FAMILIES,
   assertBuildFacts,
   assertCleanupUserData,
   assertRecordFacts,
@@ -35,6 +36,8 @@ import {
   parseArgs,
   planSummary,
   sanitizeProjectId,
+  slotsFromGeometryParts,
+  slotsNote,
   terminateOwned,
   validateProjectName,
   verifyProjectDir
@@ -275,10 +278,47 @@ test('场景完整性负例：90 对 89 / complete=false / BOM 行数不对都�
   }
 });
 
-/** 造一个"盘上工程"目录：真 STEP 头 + 47 实体 + 90 个零件 STL */
+/**
+ * 造一份与 `conveyor-assembly.buildBufferStackParts` 同形的**件名表**：
+ * 29 件底层线体件 + 每层（第 2..N 层）托条 2 / 托板 1 / 传动辊 2 / 挡停 1 / 层光电 1 +
+ * 4 根立柱 + 2 根顶部横梁 + 6 件升降机构。8 层 = 29 + 49 + 12 = **90 件**（与实际机型一致）。
+ *
+ * 为什么按件名造：盘上 `project.json` 的 `partsList` 只有 `{file,name}`（`electron/projects.ts`
+ * 落盘时件号丢了），派生函数认件名兜底——这份表就是「真实的盘上工程」形状。
+ */
+function stackPartNames(layers) {
+  const names = Array.from({ length: 29 }, (_, index) => `底层线体件-${index + 1}`);
+  for (let layer = 2; layer <= layers; layer += 1) {
+    names.push(
+      `第 ${layer} 层托条（左）`,
+      `第 ${layer} 层托条（右）`,
+      `第 ${layer} 层托板`,
+      `第 ${layer} 层传动辊（进）`,
+      `第 ${layer} 层传动辊（出）`,
+      `第 ${layer} 层挡停板`,
+      `第 ${layer} 层到位光电`
+    );
+  }
+  names.push(
+    '缓存立柱 1', '缓存立柱 2', '缓存立柱 3', '缓存立柱 4',
+    '顶部横梁（前）', '顶部横梁（后）',
+    '升降导柱（左）', '升降导柱（右）',
+    '升降链条（左）', '升降链条（右）',
+    '升降台', '升降减速电机'
+  );
+  return names;
+}
+
+/** 造一个"盘上工程"目录：真 STEP 头 + 47 实体 + 逐件 STL + project.json(partsList) */
 function makeProjectFixture(root, overrides = {}) {
   const dir = join(root, sanitizeProjectId(BASELINE.name));
   mkdirSync(join(dir, 'parts'), { recursive: true });
+  const { names: nameOverride, ...projectOverrides } = overrides;
+  const names = nameOverride ?? stackPartNames(BASELINE.params.layers);
+  const partsList = names.map((name, index) => ({
+    file: `${String(index + 1).padStart(4, '0')}-part-${index + 1}.stl`,
+    name
+  }));
   const project = {
     name: BASELINE.name,
     process: 'conveyor',
@@ -288,7 +328,8 @@ function makeProjectFixture(root, overrides = {}) {
     envelope: [2430, 1690, 2400],
     hasStep: true,
     hasStl: true,
-    ...overrides
+    partsList,
+    ...projectOverrides
   };
   writeFileSync(join(dir, 'project.json'), JSON.stringify(project, null, 2));
   const step = ['ISO-10303-21;', 'HEADER;', 'ENDSEC;']
@@ -299,8 +340,8 @@ function makeProjectFixture(root, overrides = {}) {
   writeFileSync(join(dir, 'model.step'), step);
   writeFileSync(join(dir, 'model.stl'), 'solid x\n'.padEnd(BASELINE.minStlBytes + 1024, ' '));
   writeFileSync(join(dir, 'session.json'), '{}');
-  for (let index = 0; index < 90; index += 1) {
-    writeFileSync(join(dir, 'parts', `part-${index}.stl`), 'solid y\n');
+  for (const entry of partsList) {
+    writeFileSync(join(dir, 'parts', entry.file), 'solid y\n');
   }
   return dir;
 }
@@ -312,6 +353,12 @@ test('盘上工程校验：真实形状的产物全过，改一个参数就失�
     const good = verifyProjectDir(dir, parseArgs([]));
     assert.deepEqual(failingNames(good.checks), []);
     assert.equal(good.project.params.layerPitchMm, 180);
+    // 储位是从这 90 件零件表里数出来的，不是 params.layers 回声
+    assert.equal(good.slots.ok, true);
+    assert.equal(good.slots.partsCount, 90);
+    assert.equal(good.slots.fromGeometry, 8);
+    assert.equal(good.slots.claimed, 16);
+    assert.equal(good.slots.aligned, false);
 
     const bad = verifyProjectDir(makeProjectFixture(mkdtempSync(join(tmpdir(), 'pv-regen-test-')), {
       params: { ...BASELINE.params, layerPitchMm: 250 }
@@ -320,9 +367,179 @@ test('盘上工程校验：真实形状的产物全过，改一个参数就失�
 
     const empty = verifyProjectDir(join(root, 'nope'), parseArgs([]));
     assert.ok(failingNames(empty.checks).includes('disk.projectJson'));
+    assert.equal(empty.slots, null);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------- 储位派生（P1-3）
+
+const asParts = (names) => names.map((name) => ({ name }));
+
+test('储位派生：8 层 90 件 → 托板 7 层 + 进出料 1 层 = 8 位（与 buffer-tower 口径同形）', () => {
+  const names = stackPartNames(8);
+  assert.equal(names.length, 90, '件名表必须与真实机型一样是 90 件，否则反例没有意义');
+
+  const slots = slotsFromGeometryParts(asParts(names), { layers: 8 });
+  assert.deepEqual(slots.errors, []);
+  assert.equal(slots.ok, true);
+  assert.equal(slots.trayCount, 7);
+  assert.equal(slots.transferLevels, 1);
+  assert.equal(slots.levelsFromGeometry, 8);
+  assert.equal(slots.slotsPerLevelFromGeometry, 1);
+  assert.equal(slots.towersFromGeometry, 1);
+  assert.equal(slots.fromGeometry, 8);
+  assert.equal(slots.usableStorage, 7);
+  assert.equal(slots.claimed, 16);
+  assert.equal(slots.aligned, false, '8 位 ≠ 声明 16 位：本脚本不冒充');
+  assert.equal(slots.layerTrace.length, 7);
+  assert.match(slots.layerTrace[0], /^第 2 层：托板 1\/托条 2\/挡停 1\/光电 1\/辊 2$/);
+});
+
+test('储位派生反例①：抹掉一整层塔件 → 派生必须现形（不许恒等于参数）', () => {
+  const names = stackPartNames(8);
+  const wiped = names.filter((name) => !name.startsWith('第 5 层'));
+  assert.equal(wiped.length, 90 - 7, '第 5 层有 7 件（托条2/托板1/辊2/挡停1/光电1）');
+
+  const slots = slotsFromGeometryParts(asParts(wiped), { layers: 8 });
+  assert.equal(slots.ok, false);
+  assert.equal(slots.levelsFromGeometry, 7, '几何只剩 7 层');
+  assert.notEqual(slots.levelsFromGeometry, 8, '旧实现这里是参数回声，永远等于 8');
+  // 四个独立件族各自报缺：不是「两边同减 1 互相抵消」
+  const missing = slots.errors.filter((error) => /缺第 5 层/.test(error));
+  assert.ok(missing.length >= 4, `四族都要点名第 5 层，实际 ${JSON.stringify(slots.errors)}`);
+  assert.ok(slots.errors.some((error) => /≠ 参数 8 层/.test(error)), '层数不符必须单独报');
+  assert.ok(slots.errors.some((error) => /层传动辊/.test(error)), '滚轮各层不一致也要报');
+});
+
+test('储位派生反例②：只抹掉一层的托板（件数少 1）→ 托板族与层数同时现形', () => {
+  const names = stackPartNames(8).filter((name) => name !== '第 6 层托板');
+  const slots = slotsFromGeometryParts(asParts(names), { layers: 8 });
+  assert.equal(slots.ok, false);
+  assert.equal(slots.levelsFromGeometry, 7);
+  assert.ok(slots.errors.some((error) => /托板 tray-\* 缺第 6 层/.test(error)));
+});
+
+test('储位派生反例③：每层件数不对 / 层号越界 / 立柱不足 / 空表 全部 fail-closed', () => {
+  // 每层托条少一件
+  const shortRail = stackPartNames(8).filter((name) => name !== '第 3 层托条（右）');
+  const railSlots = slotsFromGeometryParts(asParts(shortRail), { layers: 8 });
+  assert.equal(railSlots.ok, false);
+  assert.ok(railSlots.errors.some((error) => /托条 tray-rail-\* 每层应 2 件，第 3 层（1 件）\s+不符/.test(error)));
+
+  // 多出一层（第 9 层的托板），层号越界
+  const extra = slotsFromGeometryParts(asParts([...stackPartNames(8), '第 9 层托板']), { layers: 8 });
+  assert.equal(extra.ok, false);
+  assert.ok(extra.errors.some((error) => /多出第 9 层/.test(error)));
+
+  // 立柱只有 3 根 → 塔数读不出，不许算成 0.75 塔
+  const fewColumns = stackPartNames(8).filter((name) => name !== '缓存立柱 4');
+  const columnSlots = slotsFromGeometryParts(asParts(fewColumns), { layers: 8 });
+  assert.equal(columnSlots.ok, false);
+  assert.equal(columnSlots.towersFromGeometry, null);
+  assert.equal(columnSlots.fromGeometry, null, '读不出塔数就不许给一个数');
+  assert.ok(columnSlots.errors.some((error) => /缓存立柱 3 根/.test(error)));
+
+  // 空零件表 ≠ 0 储位
+  const emptySlots = slotsFromGeometryParts([], { layers: 8 });
+  assert.equal(emptySlots.ok, false);
+  assert.equal(emptySlots.fromGeometry, null);
+  assert.ok(emptySlots.errors.some((error) => /零件表为空/.test(error)));
+
+  // 层数参数本身不合法
+  assert.equal(slotsFromGeometryParts(asParts(stackPartNames(8)), { layers: 1 }).ok, false);
+});
+
+test('储位派生：件号在就认件号（与 buffer-tower-assembly 的 id 判据一致）', () => {
+  const byId = [{ id: 'column-fl' }, { id: 'column-fr' }, { id: 'column-bl' }, { id: 'column-br' }];
+  for (let layer = 2; layer <= 4; layer += 1) {
+    byId.push(
+      { id: `tray-${layer}` },
+      { id: `tray-rail-${layer}-left` },
+      { id: `tray-rail-${layer}-right` },
+      { id: `stop-${layer}` },
+      { id: `layer-sensor-${layer}` },
+      { id: `tray-roller-${layer}-in` },
+      { id: `tray-roller-${layer}-out` }
+    );
+  }
+  const slots = slotsFromGeometryParts(byId, { layers: 4 });
+  assert.equal(slots.ok, true);
+  assert.equal(slots.levelsFromGeometry, 4);
+  assert.equal(slots.fromGeometry, 4);
+
+  // 件号坏了但件名在 → 件名兜底（落盘只留件名）
+  const byNameOnly = stackPartNames(6).map((name) => ({ id: 'unknown-0001', name }));
+  const named = slotsFromGeometryParts(byNameOnly, { layers: 6 });
+  assert.equal(named.ok, true);
+  assert.equal(named.fromGeometry, 6);
+
+  // 件族表本身就是口子：键与 buffer-tower-assembly 对得上
+  assert.deepEqual(PV_SLOT_FAMILIES.map((family) => family.key),
+    ['tray', 'trayRail', 'stop', 'layerSensor', 'trayRoller']);
+});
+
+test('盘上门禁：整层丢失必须红——件数被别处补齐也躲不过去（唯一能抓住它的检查）', () => {
+  const root = mkdtempSync(join(tmpdir(), 'pv-regen-test-'));
+  try {
+    // 反例 A：真删一层（90 → 83），件数检查与储位检查一起红
+    const dirA = makeProjectFixture(mkdtempSync(join(tmpdir(), 'pv-regen-test-')), {
+      names: stackPartNames(8).filter((name) => !name.startsWith('第 4 层'))
+    });
+    const a = verifyProjectDir(dirA, parseArgs([]));
+    assert.ok(failingNames(a.checks).includes('disk.slots.derived'));
+    assert.ok(failingNames(a.checks).includes('disk.slots.levelsFromGeometry'));
+    assert.ok(failingNames(a.checks).includes('disk.partFiles'), '83 个 STL 当然也红');
+    // 派生值本身还是个数（7），只是与参数 8 层对不上——门禁靠 levelsFromGeometry 抓
+    const detailA = a.checks.items.find((item) => item.name === 'disk.slots.derived')?.detail;
+    assert.equal(detailA.levelsFromGeometry, 7);
+    assert.equal(detailA.fromGeometry, 7);
+
+    // 反例 B：抹掉第 5 层 7 件、别处补 7 件 → 件数仍是 90、STL 仍 90 个，
+    // 件数类检查全绿，只有储位派生能发现「第 5 层没了」。
+    const base = stackPartNames(8);
+    const patched = [
+      ...base.filter((name) => !name.startsWith('第 5 层')),
+      ...Array.from({ length: 7 }, () => '底层线体件-1')
+    ];
+    const dirB = makeProjectFixture(mkdtempSync(join(tmpdir(), 'pv-regen-test-')), { names: patched });
+    const b = verifyProjectDir(dirB, parseArgs([]));
+    const failedB = failingNames(b.checks);
+    assert.equal(b.project.partsList.length, 90);
+    assert.equal(failedB.includes('disk.partFiles'), false, '件数检查在这里是瞎的');
+    assert.equal(failedB.includes('disk.parts'), false);
+    assert.ok(failedB.includes('disk.slots.derived'), `储位派生必须红，实际 ${failedB.join(',')}`);
+    assert.ok(failedB.includes('disk.slots.levelsFromGeometry'), '派生层数 7 ≠ 参数 8');
+    const detail = b.checks.items.find((item) => item.name === 'disk.slots.derived')?.detail;
+    assert.ok(detail.errors.some((error) => /缺第 5 层/.test(error)), JSON.stringify(detail));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('储位回执：dry-run 没有零件表就写 null（不拿参数回声冒充几何），真跑写派生值', () => {
+  const dry = slotsNote(null, parseArgs(['--dry-run']));
+  assert.equal(dry.slotsFromGeometry, null);
+  assert.equal(dry.aligned, null);
+  assert.equal(dry.expectedSlotsFromParams, 8);
+  assert.equal(dry.claimedSlots, 16);
+  assert.equal(dry.source, 'dry-run-no-parts');
+  assert.match(dry.text, /8 个储位/);
+  assert.match(dry.text, /不从几何派生/);
+
+  const derived = slotsNote(slotsFromGeometryParts(asParts(stackPartNames(8)), { layers: 8 }), parseArgs([]));
+  assert.equal(derived.slotsFromGeometry, 8);
+  assert.equal(derived.claimedSlots, 16);
+  assert.equal(derived.aligned, false);
+  assert.equal(derived.source, 'project-parts');
+  assert.equal(derived.levelsFromGeometry, 8);
+  assert.equal(derived.slotsPerLevelFromGeometry, 1);
+  assert.equal(derived.towersFromGeometry, 1);
+  assert.match(derived.text, /90 件/);
+  assert.match(derived.text, /8 个储位/);
+  assert.match(derived.text, /不一致/);
+  assert.deepEqual(derived.errors, []);
 });
 
 test('--report 只能新建在本轮运行目录内：外部路径 / 已存在文件 / 软链都拒绝', () => {
