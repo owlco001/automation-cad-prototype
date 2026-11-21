@@ -138,6 +138,23 @@ test('跨工位太近且空间充足：建议可执行，方向指向远离对�
   assert.ok(item.shortByMm > 0);
 });
 
+test('无碰撞的建议不把十处以上余隙不足计为碰撞', () => {
+  const parts = [box('stA-base', [0, 0, 0], [100, 100, 100]), box('stB-base', [110, 0, 0], [100, 100, 100])];
+  for (let i = 0; i < 10; i += 1) {
+    parts.push(box(`fixed${i}a-block`, [i * 500, 500, 0], [100, 100, 100]));
+    parts.push(box(`fixed${i}b-block`, [i * 500 + 110, 500, 0], [100, 100, 100]));
+  }
+  const advice = buildAdvice({ parts }, 20).find((entry) => entry.scope === 'stA');
+  assert.ok(advice);
+  assert.equal(advice.overlapsAfter, 0);
+  assert.equal(advice.actionable, true);
+  const center = [...parts[0].center];
+  center[['x', 'y', 'z'].indexOf(advice.axis)] += advice.direction * advice.shortByMm;
+  const trial = { parts: [{ ...parts[0], center }, ...parts.slice(1)] };
+  assert.equal(screenInterference(trial).suspects, 0);
+  assert.ok(screenClearance(trial, { thresholdMm: 20 }).count >= 10);
+});
+
 test('工位内部太近：标 intraScope 且不可执行（整站挪不改变内部相对距离）', () => {
   // 上下叠、间隙 15 mm：不是「贴面 5 mm 内」的接触，算工位内部的间距问题
   const geometry = {

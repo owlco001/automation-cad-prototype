@@ -337,15 +337,19 @@ const server = createServer(async (req, res) => {
       // 透传 sidecar 的二进制 STL：客户端只渲染，不参与建模
       const base = process.env.FT_BUILD_URL;
       if (!base) return send(res, 404, { error: 'NOT_FOUND', message: '未配置 FT_BUILD_URL，没有可导出的几何' });
-      const upstream = await fetch(`${base.replace(/\/+$/, '')}/stl?documentId=${encodeURIComponent(documentIdOf(url, null))}`,
-        { signal: AbortSignal.timeout(20_000) });
-      if (!upstream.ok) {
-        const detail = await upstream.text().catch(() => '');
-        return send(res, upstream.status === 409 ? 409 : 502, { error: 'GEOMETRY_UNAVAILABLE', message: detail.slice(0, 200) });
-      }
-      const buffer = Buffer.from(await upstream.arrayBuffer());
-      res.writeHead(200, { 'Content-Type': 'model/stl', 'Content-Length': buffer.length });
-      return res.end(buffer);
+      const doc = requireDocument(url, null, res);
+      if (!doc) return undefined;
+      return await doc.enqueue(async () => {
+        const upstream = await fetch(`${base.replace(/\/+$/, '')}/stl?documentId=${encodeURIComponent(doc.geometryKey)}`,
+          { signal: AbortSignal.timeout(20_000) });
+        if (!upstream.ok) {
+          const detail = await upstream.text().catch(() => '');
+          return send(res, upstream.status === 409 ? 409 : 502, { error: 'GEOMETRY_UNAVAILABLE', message: detail.slice(0, 200) });
+        }
+        const buffer = Buffer.from(await upstream.arrayBuffer());
+        res.writeHead(200, { 'Content-Type': 'model/stl', 'Content-Length': buffer.length });
+        return res.end(buffer);
+      });
     }
     if (req.method === 'GET' && url.pathname === '/v1/revisions') {
       const doc = requireDocument(url, null, res);

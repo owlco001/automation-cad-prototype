@@ -8,6 +8,7 @@
  * 输出刻意做「窄」：明细最多 50 行、缺价与告警各 20 条，其余只给数量，避免把整份报告塞进模型上下文。
  */
 import type { Placement, PlateSpec } from '../enclosure/layout.ts';
+import { parseCostPlacements } from './placements.ts';
 import {
   computeCost,
   type CostBomRow,
@@ -163,24 +164,11 @@ export function costRowsFromSceneBom(value: unknown): CostBomRow[] | undefined {
 
 function parsePlacements(value: unknown): Placement[] | undefined {
   if (value === undefined || value === null) return undefined;
-  if (!Array.isArray(value)) fail('INVALID_ARGUMENT', 'placements 必须是数组');
-  return value.map((raw, index) => {
-    if (!isRecord(raw)) fail('INVALID_ARGUMENT', `placements[${index}] 必须是对象`);
-    const x = numberAt(raw, 'x', `placements[${index}].x`);
-    const y = numberAt(raw, 'y', `placements[${index}].y`);
-    if (x === undefined || y === undefined) {
-      fail('INVALID_ARGUMENT', `缺少必填参数：placements[${index}].x/y`);
-    }
-    return {
-      id: textAt(raw, 'id') ?? `p${index + 1}`,
-      partId: textAt(raw, 'partId') ?? '',
-      model: textAt(raw, 'model') ?? '',
-      x,
-      y,
-      w: numberAt(raw, 'w', `placements[${index}].w`) ?? 0,
-      h: numberAt(raw, 'h', `placements[${index}].h`) ?? 0
-    };
-  });
+  try {
+    return parseCostPlacements(value, 'point');
+  } catch (error) {
+    fail('INVALID_ARGUMENT', error instanceof Error ? error.message : String(error));
+  }
 }
 
 function parsePlate(value: unknown): PlateSpec | undefined {

@@ -2,6 +2,8 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { requiresWriteConfirmation } from './router.ts';
+import { isWriteOperationId } from './write-operations.ts';
 import { assertSafeApiKeyUrl } from '../shared/api-key-transport.ts';
 import type { AgentToolSummary } from './tools.ts';
 
@@ -38,6 +40,18 @@ export class DesktopRpcError extends Error {
     super(message);
     this.name = 'DesktopRpcError';
     this.code = code;
+  }
+}
+
+export class DesktopWriteOutcomeUnknownError extends Error {
+  readonly code = 'WRITE_OUTCOME_UNKNOWN';
+
+  readonly operationId: string;
+
+  constructor(operationId: string) {
+    super('未收到写操作回执。请使用原操作 ID 查询结果，不要自动重试。');
+    this.operationId = operationId;
+    this.name = 'DesktopWriteOutcomeUnknownError';
   }
 }
 
@@ -86,6 +100,7 @@ export class DesktopRpcProxy {
   private readonly port: number;
   private readonly tokenFileOverride: string | undefined;
   private readonly timeoutMs: number;
+  private readonly writeTimeoutMs: number;
   private readonly fetchImpl: typeof fetch;
 
   constructor(options: DesktopRpcProxyOptions = {}) {
@@ -94,6 +109,7 @@ export class DesktopRpcProxy {
     this.port = options.port ?? 7420;
     this.tokenFileOverride = options.tokenFile;
     this.timeoutMs = options.timeoutMs ?? 10_000;
+    this.writeTimeoutMs = options.timeoutMs ?? 135_000;
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
@@ -114,38 +130,49 @@ export class DesktopRpcProxy {
     return token;
   }
 
-  private async requestPayload(method: string, params: Record<string, unknown>): Promise<unknown> {
+  private async requestPayload(method: string, params: Record<string, unknown>, options: { signal?: AbortSignal; operationId?: string } = {}): Promise<unknown> {
+    options.signal?.throwIfAborted();
     const token = this.readToken();
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let dispatched = false;
+    let rejectCancellation: ((reason: unknown) => void) | undefined;
+    const cancellation = new Promise<never>((_resolve, reject) => { rejectCancellation = reject; });
+    const onAbort = (): void => {
+      controller.abort();
+      rejectCancellation?.(new DesktopRpcError('REQUEST_CANCELLED', '请求已取消'));
+    };
+    options.signal?.addEventListener('abort', onAbort, { once: true });
     try {
       const timeout = new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => {
           controller.abort();
           reject(new DesktopRpcUnavailableError('连接 AutomationCAD 桌面应用超时'));
-        }, this.timeoutMs);
+        }, options.operationId ? this.writeTimeoutMs : this.timeoutMs);
       });
       const operation = (async (): Promise<unknown> => {
         const host = this.host.includes(':') && !this.host.startsWith('[') ? `[${this.host}]` : this.host;
         const url = new URL(`http://${host}:${this.port}/rpc`);
         assertSafeApiKeyUrl(url, 'desktop RPC host');
+        const id = randomUUID();
+        const body = JSON.stringify({ jsonrpc: '2.0', id, method, params });
+        dispatched = true;
         const response = await this.fetchImpl(url.href, {
           method: 'POST',
           headers: {
             authorization: `Bearer ${token}`,
             'content-type': 'application/json'
           },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: randomUUID(),
-            method,
-            params
-          }),
+          body,
+          redirect: 'error',
           signal: controller.signal
         });
 
         if (response.status === 401) {
           throw new DesktopRpcError('DESKTOP_RPC_UNAUTHORIZED', '桌面 RPC 鉴权失败，请重启 AutomationCAD 后重试');
+        }
+        if (response.status === 403) {
+          throw new DesktopRpcError('DESKTOP_RPC_FORBIDDEN', '桌面 RPC 拒绝了访问');
         }
         if (!response.ok) {
           throw new DesktopRpcError('DESKTOP_RPC_HTTP_ERROR', `桌面 RPC 返回错误：HTTP ${response.status}`);
@@ -163,13 +190,17 @@ export class DesktopRpcProxy {
             typeof payload.error.message === 'string' ? payload.error.message : '桌面 RPC 调用失败'
           );
         }
-        if (!isRecord(payload) || !isRecord(payload.result)) {
+        if (!isRecord(payload) || payload.jsonrpc !== '2.0' || payload.id !== id || !isRecord(payload.result)) {
           throw new DesktopRpcError('DESKTOP_RPC_ERROR', '桌面 RPC 返回格式不合法');
         }
         return payload;
       })();
-      return await Promise.race([operation, timeout]);
+      return await Promise.race([operation, timeout, cancellation]);
     } catch (error) {
+      if (dispatched && options.operationId && !(error instanceof DesktopRpcError &&
+        ['DESKTOP_RPC_UNAUTHORIZED', 'DESKTOP_RPC_FORBIDDEN', '-32601', '-32602'].includes(error.code))) {
+        throw new DesktopWriteOutcomeUnknownError(options.operationId);
+      }
       if (error instanceof DesktopRpcUnavailableError || error instanceof DesktopRpcError) throw error;
       const aborted = isRecord(error) && (error.name === 'AbortError' || error.name === 'TimeoutError');
       if (aborted) {
@@ -177,6 +208,7 @@ export class DesktopRpcProxy {
       }
       throw new DesktopRpcUnavailableError('无法连接 AutomationCAD 桌面应用');
     } finally {
+      options.signal?.removeEventListener('abort', onAbort);
       if (timer !== undefined) clearTimeout(timer);
     }
   }
@@ -194,7 +226,18 @@ export class DesktopRpcProxy {
     });
   }
 
-  async callTool(name: string, args: Record<string, unknown> = {}): Promise<DesktopToolResult> {
-    return resultFromPayload(await this.requestPayload('tools/call', { name, arguments: args }));
+  async callTool(name: string, args: Record<string, unknown> = {}, options: { signal?: AbortSignal; operationId?: string } = {}): Promise<DesktopToolResult> {
+    const operationId = requiresWriteConfirmation(name) ? options.operationId ?? randomUUID() : undefined;
+    if (operationId && !isWriteOperationId(operationId)) throw new DesktopRpcError('INVALID_WRITE_OPERATION_ID', '写操作 ID 格式无效');
+    return resultFromPayload(await this.requestPayload('tools/call', { name, arguments: args, ...(operationId ? { operationId } : {}) }, {
+      ...(options.signal ? { signal: options.signal } : {}), ...(operationId ? { operationId } : {})
+    }));
+  }
+
+  async operationStatus(operationId: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    if (!isWriteOperationId(operationId)) throw new DesktopRpcError('INVALID_WRITE_OPERATION_ID', '写操作 ID 格式无效');
+    const payload = await this.requestPayload('operations/status', { operationId }, signal ? { signal } : {});
+    if (!isRecord(payload) || !isRecord(payload.result)) throw new DesktopRpcError('DESKTOP_RPC_ERROR', '写操作状态格式无效');
+    return payload.result;
   }
 }

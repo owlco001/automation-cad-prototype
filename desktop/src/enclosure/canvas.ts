@@ -240,6 +240,11 @@ export class EnclosureCanvas {
   private placements: Placement[];
   private selectedId: string | null = null;
   private activeDrag: ActiveDrag | null = null;
+  private dragDirty = false;
+  private dragRenderFrame: number | null = null;
+  private activationFrame: number | null = null;
+  private disposed = false;
+  private readonly events = new AbortController();
   private zoom = 1;
   private sequence = 0;
   private active = false;
@@ -302,23 +307,26 @@ export class EnclosureCanvas {
     this.widthInput.value = String(this.plate.width);
     this.heightInput.value = String(this.plate.height);
 
-    host.querySelector<HTMLButtonElement>('#encClear')?.addEventListener('click', () => this.clear());
-    host.querySelector<HTMLButtonElement>('#encExport')?.addEventListener('click', () => this.exportJson());
-    this.widthInput.addEventListener('change', () => this.applySizeInput());
-    this.heightInput.addEventListener('change', () => this.applySizeInput());
+    const signal = this.events.signal;
+    host.querySelector<HTMLButtonElement>('#encClear')?.addEventListener('click', () => this.clear(), { signal });
+    host.querySelector<HTMLButtonElement>('#encExport')?.addEventListener('click', () => this.exportJson(), { signal });
+    this.widthInput.addEventListener('change', () => this.applySizeInput(), { signal });
+    this.heightInput.addEventListener('change', () => this.applySizeInput(), { signal });
     for (const button of this.scaleButtons) {
-      button.addEventListener('click', () => this.setZoom(Number(button.dataset.encZoom)));
+      button.addEventListener('click', () => this.setZoom(Number(button.dataset.encZoom)), { signal });
     }
 
-    this.svg.addEventListener('pointerdown', this.onPointerDown);
-    this.svg.addEventListener('pointermove', this.onPointerMove);
-    this.svg.addEventListener('pointerup', this.onPointerUp);
-    this.svg.addEventListener('pointercancel', this.onPointerUp);
-    window.addEventListener('keydown', this.onKeyDown, true);
-    window.addEventListener('drop', this.onWindowDrop, true);
-    window.addEventListener('dragover', this.onWindowDragOver, true);
-    window.addEventListener('dragleave', this.onWindowDragLeave, true);
-    window.addEventListener('dragend', this.onWindowDragLeave, true);
+    this.svg.addEventListener('pointerdown', this.onPointerDown, { signal });
+    this.svg.addEventListener('pointermove', this.onPointerMove, { signal });
+    this.svg.addEventListener('pointerup', this.onPointerUp, { signal });
+    this.svg.addEventListener('pointercancel', this.onPointerCancel, { signal });
+    this.svg.addEventListener('lostpointercapture', this.onPointerCancel, { signal });
+    const capture = { capture: true, signal };
+    window.addEventListener('keydown', this.onKeyDown, capture);
+    window.addEventListener('drop', this.onWindowDrop, capture);
+    window.addEventListener('dragover', this.onWindowDragOver, capture);
+    window.addEventListener('dragleave', this.onWindowDragLeave, capture);
+    window.addEventListener('dragend', this.onWindowDragLeave, capture);
 
     this.resizeObserver = typeof ResizeObserver === 'function'
       ? new ResizeObserver(() => this.fit())
@@ -339,14 +347,28 @@ export class EnclosureCanvas {
   }
 
   setActive(active: boolean): void {
+    if (this.disposed) return;
+    if (this.activationFrame !== null) window.cancelAnimationFrame(this.activationFrame);
+    this.activationFrame = null;
     this.active = active;
     if (active) {
       this.fit();
-      window.requestAnimationFrame(() => {
+      this.activationFrame = window.requestAnimationFrame(() => {
+        this.activationFrame = null;
         this.fit();
         this.viewport.focus({ preventScroll: true });
       });
+    } else {
+      this.finishDrag();
     }
+  }
+
+  dispose(): void {
+    if (this.disposed) return;
+    this.setActive(false);
+    this.disposed = true;
+    this.events.abort();
+    this.resizeObserver?.disconnect();
   }
 
   fit(): void {
@@ -490,9 +512,9 @@ export class EnclosureCanvas {
   }
 
   clear(): void {
+    this.finishDrag();
     this.placements = [];
     this.selectedId = null;
-    this.activeDrag = null;
     this.sync();
     this.render();
   }
@@ -644,6 +666,8 @@ export class EnclosureCanvas {
   }
 
   private render(): void {
+    if (this.dragRenderFrame !== null) window.cancelAnimationFrame(this.dragRenderFrame);
+    this.dragRenderFrame = null;
     const collisions = this.collisions();
     const collisionIds = new Set<string>();
     for (const [a, b] of collisions) {
@@ -730,7 +754,7 @@ export class EnclosureCanvas {
   }
 
   private readonly onPointerDown = (event: PointerEvent): void => {
-    if (event.button !== 0) return;
+    if (!this.active || this.disposed || event.button !== 0 || this.activeDrag) return;
     const target = event.target;
     if (!(target instanceof Element)) return;
     const coordinate = this.pointFrom(event);
@@ -785,11 +809,13 @@ export class EnclosureCanvas {
       const index = this.placements.findIndex((item) => item.id === drag.id);
       const current = this.placements[index];
       if (!current) return;
-      this.placements[index] = clampToPlate({
+      const next = clampToPlate({
         ...current,
         x: snapMm(coordinate.x - drag.offsetX),
         y: snapMm(coordinate.y - drag.offsetY)
       }, this.plate);
+      if (next.x === current.x && next.y === current.y) return;
+      this.placements[index] = next;
     } else {
       const index = this.plate.rails.findIndex((item) => item.id === drag.id);
       const rail = this.plate.rails[index];
@@ -806,17 +832,36 @@ export class EnclosureCanvas {
         return clampToPlate({ ...placement, y: snapMm(placement.y + delta) }, this.plate);
       });
     }
-    this.sync();
-    this.render();
+    this.dragDirty = true;
+    if (this.dragRenderFrame === null) {
+      this.dragRenderFrame = window.requestAnimationFrame(() => {
+        this.dragRenderFrame = null;
+        this.render();
+      });
+    }
     event.preventDefault();
   };
 
+  private finishDrag(): void {
+    const drag = this.activeDrag;
+    this.activeDrag = null;
+    if (this.dragRenderFrame !== null) this.render();
+    if (this.dragDirty) {
+      this.dragDirty = false;
+      this.sync();
+    }
+    if (drag && this.svg.hasPointerCapture(drag.pointerId)) this.svg.releasePointerCapture(drag.pointerId);
+  }
+
   private readonly onPointerUp = (event: PointerEvent): void => {
     if (!this.activeDrag || this.activeDrag.pointerId !== event.pointerId) return;
-    this.activeDrag = null;
-    if (this.svg.hasPointerCapture(event.pointerId)) this.svg.releasePointerCapture(event.pointerId);
-    this.sync();
-    this.render();
+    this.onPointerMove(event);
+    this.finishDrag();
+  };
+
+  private readonly onPointerCancel = (event: PointerEvent): void => {
+    if (!this.activeDrag || this.activeDrag.pointerId !== event.pointerId) return;
+    this.finishDrag();
   };
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {

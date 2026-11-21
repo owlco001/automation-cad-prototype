@@ -39,6 +39,7 @@ export interface PackMetrics {
 
 interface CachedPack {
   parts: ComponentPart[];
+  searchText: string[];
   loadMs: number;
 }
 
@@ -242,6 +243,13 @@ function lower(value: string): string {
   return value.toLocaleLowerCase('zh-CN');
 }
 
+function searchTextForParts(parts: ComponentPart[]): string[] {
+  return parts.map((part) => lower([
+    part.id, part.model, part.category, part.vendor ?? '', part.packId ?? '', part.packName ?? '',
+    ...Object.values(part.specs).map(String)
+  ].join(' ')));
+}
+
 export class PackRegistry {
   private readonly builtinDir: string;
   private readonly userDir: string;
@@ -340,34 +348,26 @@ export class PackRegistry {
         return categories.length === 0 || categories.some((item) => lower(item) === category);
       });
     }
-    if (q) entries = this.narrowByManifest(entries, q);
-
+    // Manifest metadata is not exhaustive for model/spec text. Keep catalog
+    // order so text search preserves the same duplicate-ID precedence.
     const result: ComponentPart[] = [];
     const seen = new Set<string>();
     for (const entry of entries) {
       let parts: ComponentPart[];
+      let searchText: string[];
       try {
         parts = this.loadEntry(entry);
+        searchText = this.loadedPacks.get(entry.info.id)?.searchText ?? [];
       } catch {
         continue;
       }
-      for (const part of parts) {
+      for (let index = 0; index < parts.length; index += 1) {
+        const part = parts[index]!;
         if (part.aliasOf) continue;
         if (seen.has(part.id)) continue;
         seen.add(part.id);
         if (category && lower(part.category) !== category) continue;
-        if (q) {
-          const haystack = lower([
-            part.id,
-            part.model,
-            part.category,
-            part.vendor ?? '',
-            part.packId ?? '',
-            part.packName ?? '',
-            ...Object.values(part.specs).map(String)
-          ].join(' '));
-          if (!haystack.includes(q)) continue;
-        }
+        if (q && !searchText[index]!.includes(q)) continue;
         result.push(part);
       }
     }
@@ -395,10 +395,9 @@ export class PackRegistry {
     if (rootFolder && rootFolder !== manifest.id) {
       throw new Error(`manifest.id (${manifest.id}) 与 ZIP 根目录名 (${rootFolder}) 不一致`);
     }
-    const partsEntry = entries.find((entry) => safeZipEntryName(entry.entryName) === `${rootPrefix}parts.json`);
-    if (!partsEntry) throw new Error('ZIP 条目不存在：parts.json');
-    const parts = validateParts(JSON.parse(partsEntry.getData().toString('utf8')) as unknown, manifest.id, manifest.name);
-    if (parts.length === 0) throw new Error('parts.json 不能为空');
+    if (!entries.some((entry) => safeZipEntryName(entry.entryName) === `${rootPrefix}parts.json`)) {
+      throw new Error('ZIP 条目不存在：parts.json');
+    }
 
     const target = join(this.userDir, manifest.id);
     if (existsSync(target) || existsSync(join(this.builtinDir, manifest.id))) {
@@ -408,6 +407,10 @@ export class PackRegistry {
     mkdirSync(this.userDir, { recursive: true });
     const tempDir = join(this.userDir, `.import-${manifest.id}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
     mkdirSync(tempDir, { recursive: false });
+    let staged: PackIndexEntry;
+    let parts: ComponentPart[];
+    let searchText: string[];
+    let partsLoadMs = 0;
     try {
       for (const entry of entries) {
         const safeName = safeZipEntryName(entry.entryName);
@@ -424,16 +427,21 @@ export class PackRegistry {
       if (!existsSync(join(tempDir, 'manifest.json')) || !existsSync(join(tempDir, 'parts.json'))) {
         throw new Error('ZIP 条目不存在：manifest.json 或 parts.json');
       }
+      staged = this.readManifestDirectory(tempDir, manifest.id, false, new Set(this.readState().disabled));
+      if (!staged.manifest || staged.info.error) throw new Error(staged.info.error ?? 'ZIP manifest 无效');
+      const partsStartedAt = performance.now();
+      parts = this.readEntryParts(staged.dir, staged.manifest);
+      if (parts.length === 0) throw new Error('parts.json 不能为空');
+      searchText = searchTextForParts(parts);
+      partsLoadMs = performance.now() - partsStartedAt;
       renameSync(tempDir, target);
     } catch (error) {
       rmSync(tempDir, { recursive: true, force: true });
       throw error;
     }
     this.invalidateIndex(manifest.id);
-    const entry = this.requireEntry(manifest.id);
-    if (entry.info.error) throw new Error(entry.info.error);
-    this.loadEntry(entry);
-    return this.infoSnapshot(entry);
+    this.cacheEntryParts(staged, parts, searchText, partsLoadMs);
+    return this.infoSnapshot({ ...staged, dir: target, info: { ...staged.info, path: target } });
   }
 
   async setEnabled(id: string, on: boolean): Promise<void> {
@@ -544,50 +552,34 @@ export class PackRegistry {
     return entry;
   }
 
-  /** 命中 manifest 的包才加载；完全不命中 manifest 时回退全量，保证型号级检索不失效。 */
-  private narrowByManifest(entries: PackIndexEntry[], q: string): PackIndexEntry[] {
-    const matched = entries.filter((entry) => this.matchesManifest(entry, q));
-    return matched.length > 0 ? matched : entries;
-  }
-
-  private matchesManifest(entry: PackIndexEntry, q: string): boolean {
-    const manifest = entry.manifest;
-    if (!manifest) return false;
-    const metadata = lower([
-      manifest.id,
-      manifest.name,
-      manifest.vendor,
-      manifest.description ?? '',
-      ...manifest.categories,
-      ...(manifest.keywords ?? [])
-    ].join(' '));
-    if (metadata.includes(q)) return true;
-    return (manifest.keywords ?? []).some((keyword) => q.includes(lower(keyword)));
-  }
-
   private loadEntry(entry: PackIndexEntry): ComponentPart[] {
     const cached = this.loadedPacks.get(entry.info.id);
     if (cached) return cached.parts;
     if (!entry.manifest) throw new Error(entry.info.error ?? `数据包 manifest 无效：${entry.info.id}`);
     const startedAt = performance.now();
     try {
-      const rawParts = this.readTextFile(join(entry.dir, 'parts.json'));
-      assertPartsIntegrity(rawParts, entry.manifest.partsSha256, entry.manifest.id);
-      const parts = validateParts(
-        JSON.parse(rawParts) as unknown,
-        entry.manifest.id,
-        entry.manifest.name
-      );
-      const loadMs = performance.now() - startedAt;
-      this.loadedPacks.set(entry.info.id, { parts, loadMs });
-      entry.info.partCount = parts.length;
-      this.totalPackLoadMs += loadMs;
-      this.partIndex = null;
+      const raw = this.readTextFile(join(entry.dir, 'parts.json'));
+      assertPartsIntegrity(raw, entry.manifest.partsSha256, entry.manifest.id);
+      const parts = validateParts(JSON.parse(raw) as unknown, entry.manifest.id, entry.manifest.name);
+      this.cacheEntryParts(entry, parts, searchTextForParts(parts), performance.now() - startedAt);
       return parts;
     } catch (error) {
       entry.info.error = error instanceof Error ? error.message : String(error);
       throw error;
     }
+  }
+
+  private readEntryParts(dir: string, manifest: PackManifest): ComponentPart[] {
+    const raw = this.readTextFile(join(dir, 'parts.json'));
+    assertPartsIntegrity(raw, manifest.partsSha256, manifest.id);
+    return validateParts(JSON.parse(raw) as unknown, manifest.id, manifest.name);
+  }
+
+  private cacheEntryParts(entry: PackIndexEntry, parts: ComponentPart[], searchText: string[], loadMs: number): void {
+    this.loadedPacks.set(entry.info.id, { parts, searchText, loadMs });
+    entry.info.partCount = parts.length;
+    this.totalPackLoadMs += loadMs;
+    this.partIndex = null;
   }
 
   private ensurePartIndex(): Map<string, ComponentPart> {

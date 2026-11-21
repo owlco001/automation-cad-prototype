@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
   CallToolRequestSchema,
@@ -7,11 +8,13 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import type { AgentTools } from './tools.ts';
 import { authorizeAgentToolCall, type ConfirmAgentToolWrite } from './policy.ts';
-import { WRITE_TOOLS } from './router.ts';
+import { requiresWriteConfirmation, WRITE_TOOLS } from './router.ts';
+import { isWriteOperationId } from './write-operations.ts';
 import { AGENT_TOOL_MODULES } from '../modules/tool-gates.ts';
 import {
   DesktopRpcError,
   DesktopRpcUnavailableError,
+  DesktopWriteOutcomeUnknownError,
   type DesktopRpcProxy
 } from './mcp-proxy.ts';
 
@@ -79,16 +82,38 @@ export function buildMcpServer(
       }
     }
     return {
-      tools: summaries.map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        inputSchema: tool.inputSchema as Tool['inputSchema']
-      }))
+      tools: [...summaries.map((tool) => {
+        const inputSchema = tool.inputSchema as Tool['inputSchema'];
+        return {
+          name: tool.name,
+          description: tool.description,
+          inputSchema: options.proxy && requiresWriteConfirmation(tool.name) ? {
+            ...inputSchema,
+            required: [...new Set([...(inputSchema.required ?? []), 'operationId'])],
+            properties: { ...inputSchema.properties, operationId: {
+              type: 'string', pattern: '^[A-Za-z0-9_-]{16,128}$',
+              description: '调用前生成并保存写操作 ID（建议 UUID）；取消或超时后用同一 ID 查询，不要自动重试。'
+            } }
+          } : inputSchema
+        };
+      }), ...(options.proxy ? [{
+        name: 'get_write_operation', description: '查询原写操作回执。记录只在桌面进程内短期保留。找不到时不要自动重试。',
+        inputSchema: { type: 'object' as const, properties: { operationId: { type: 'string' } }, required: ['operationId'] }
+      }] : [])]
     };
   });
 
-  server.setRequestHandler(CallToolRequestSchema, async (request): Promise<CallToolResult> => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, { signal }): Promise<CallToolResult> => {
     const { name, arguments: args } = request.params;
+    const argsObject = isRecord(args) ? { ...args } : {};
+    if (name === 'get_write_operation' && options.proxy) {
+      try {
+        if (!isWriteOperationId(argsObject.operationId)) return toolResult({ ok: false, code: 'INVALID_WRITE_OPERATION_ID' });
+        return toolResult(await options.proxy.operationStatus(argsObject.operationId, signal));
+      } catch {
+        return toolResult({ ok: false, code: 'WRITE_STATUS_UNAVAILABLE', message: '无法查询写操作状态，不要自动重试写入。' });
+      }
+    }
     if (!tools.has(name)) {
       return {
         content: [{ type: 'text', text: `未知工具：${name}` }],
@@ -96,10 +121,25 @@ export function buildMcpServer(
       };
     }
 
-    const argsObject = isRecord(args) ? args : {};
     if (options.proxy) {
+      let operationId: string | undefined;
+      if (requiresWriteConfirmation(name)) {
+        if (!Object.hasOwn(argsObject, 'operationId')) {
+          return toolResult({
+            ok: false,
+            code: 'WRITE_OPERATION_ID_REQUIRED',
+            operationId: randomUUID(),
+            message: '未执行。请保存此操作 ID，并在明确发起写入时将其放入 arguments.operationId。'
+          });
+        }
+        if (!isWriteOperationId(argsObject.operationId)) {
+          return toolResult({ ok: false, code: 'INVALID_WRITE_OPERATION_ID', message: '操作 ID 格式无效，未执行。' });
+        }
+        operationId = argsObject.operationId;
+        delete argsObject.operationId;
+      }
       try {
-        const forwarded = await options.proxy.callTool(name, argsObject);
+        const forwarded = await options.proxy.callTool(name, argsObject, { signal, ...(operationId ? { operationId } : {}) });
         const structured = forwarded.structuredContent;
         const text = structured === undefined ? '{"ok":true}' : JSON.stringify(structured);
         return {
@@ -108,6 +148,10 @@ export function buildMcpServer(
           isError: forwarded.isError
         };
       } catch (error) {
+        if (error instanceof DesktopWriteOutcomeUnknownError) {
+          return toolResult({ ok: false, code: error.code, operationId: error.operationId, message: error.message }, true);
+        }
+        if (signal.aborted) return toolResult({ ok: false, code: 'REQUEST_CANCELLED' }, true);
         if (error instanceof DesktopRpcUnavailableError) {
           if (!LOCAL_READ_TOOLS.has(name) && DESKTOP_REQUIRED_TOOLS.has(name)) {
             return toolResult(DESKTOP_NOT_RUNNING, true);

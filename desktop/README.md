@@ -76,6 +76,22 @@ stdio 本身是受信任的本机通道；MCP 进程只在代理写工具时读�
 - 用户包：`%APPDATA%/AutomationCAD/packs`（Linux 为 `~/.config/AutomationCAD/packs`）；
 - 包启停状态：同目录下 `packs-state.json`。
 
+### 写操作 ID 与取消后的对账
+
+MCP 代理写工具的 `arguments.operationId` 为必填项：调用前生成并保存一个 UUID（也接受 16–128 个字母、数字、下划线或连字符）。缺少 ID 时返回 `WRITE_OPERATION_ID_REQUIRED` 和一个建议 ID，**不会执行或弹出审批**；如需继续，明确发起带该 ID 的新调用。只读工具不需要此字段。
+
+```json
+{"name":"insert_component","arguments":{"partId":"MXQ20-50","operationId":"958d9085-f7b1-4d01-a764-8f11792844d9"}}
+```
+
+请求取消或超时后，尚未开始的写操作会取消；已经开始的操作可能仍完成。请用独立的 `get_write_operation` 调用查询原 ID，不要换 ID 自动重试：
+
+```json
+{"name":"get_write_operation","arguments":{"operationId":"958d9085-f7b1-4d01-a764-8f11792844d9"}}
+```
+
+记录只在桌面进程内、同凭据代次和来源 IP 下保留，终态默认保留 15 分钟，重启或凭据轮换后可能不可查。`WRITE_OPERATION_NOT_FOUND` 不证明未执行。大于 64 KiB 的结果保留 `resultOmitted`、`ok`、错误码和截断消息等终态摘要；找不到布尔 `ok` 时摘要为 `null`，不能推断成功。审计写入失败会单独输出诊断，不覆盖已知业务结果。轮换 token 会立即取消旧凭据仍在等待的审批，不会回滚已经开始的写操作。
+
 ## JSON-RPC 接口
 
 桌面主进程启动后会监听 `127.0.0.1:7420`，并加载或创建 token 文件（合法 48 位 token 重启复用；面板可二次确认轮换）：

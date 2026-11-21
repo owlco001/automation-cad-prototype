@@ -299,7 +299,7 @@ async function launchQtWorkbench(): Promise<void> {
   }
   try {
     const notice = qtLaunchNotice(await qt.launch());
-    showNotice(notice.message, notice.error);
+    showNotice(notice.message, notice.error, notice.error ? 10_000 : undefined);
   } catch (error) {
     const notice = qtLaunchNotice({ ok: false, message: `Qt 工作台启动失败：${error instanceof Error ? error.message : String(error)}` });
     showNotice(notice.message, notice.error);
@@ -1122,7 +1122,7 @@ function setBusy(on: boolean, text?: string, error = false): void {
   updateLoading(on, text, error);
 }
 
-function showNotice(message: string, error = false): void {
+function showNotice(message: string, error = false, durationMs = 3600): void {
   let notice = document.getElementById('cadNotice');
   if (!notice) {
     notice = document.createElement('div');
@@ -1134,7 +1134,7 @@ function showNotice(message: string, error = false): void {
   notice.classList.toggle('is-error', error);
   notice.classList.add('is-on');
   window.clearTimeout(noticeTimer);
-  noticeTimer = window.setTimeout(() => notice?.classList.remove('is-on'), 3600);
+  noticeTimer = window.setTimeout(() => notice?.classList.remove('is-on'), durationMs);
 }
 
 function fileNameFromPath(path: string): string {

@@ -1,5 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { requiresWriteConfirmation } from './router.ts';
+import { isWriteOperationId, WriteOperations } from './write-operations.ts';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
@@ -122,8 +124,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+interface CallAccess {
+  remoteAddress: string;
+  origin: 'local' | 'lan';
+  signal: AbortSignal;
+  generation: number;
+}
+
+function writeScope(access: CallAccess): string {
+  return `${access.generation}:${access.remoteAddress}`;
+}
+
 export class AgentRpcServer {
   readonly tools: AgentTools;
+  private readonly writeOperations = new WriteOperations();
+  private authGeneration = 0;
+  private generationAbort = new AbortController();
   private tokenValue: string;
   readonly version: string;
   readonly port: number;
@@ -166,6 +182,11 @@ export class AgentRpcServer {
 
   /** token 轮换只换鉴权值；HTTP 监听仍由 restart 负责重建。 */
   setToken(token: string): void {
+    if (this.tokenValue !== token) {
+      this.authGeneration += 1;
+      this.generationAbort.abort();
+      this.generationAbort = new AbortController();
+    }
     this.tokenValue = token;
   }
 
@@ -294,20 +315,28 @@ export class AgentRpcServer {
       }
 
       if (request.method === 'POST' && url.pathname === '/rpc') {
-        const body = await readBody(request);
-        let parsed: unknown;
+        const controller = new AbortController();
+        const onDisconnect = (): void => controller.abort();
+        response.once('close', onDisconnect);
+        if (response.destroyed) onDisconnect();
+        const requestSignal = AbortSignal.any([controller.signal, this.generationAbort.signal]);
+        const callAccess = { ...access, signal: requestSignal, generation: this.authGeneration };
         try {
-          parsed = JSON.parse(body) as unknown;
-        } catch {
-          sendJson(response, 200, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'JSON 解析失败' } });
-          return;
+          const body = await readBody(request);
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(body) as unknown;
+          } catch {
+            sendJson(response, 200, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'JSON 解析失败' } });
+            return;
+          }
+          const result = Array.isArray(parsed)
+            ? await Promise.all(parsed.map((item) => this.handleRpc(item, callAccess)))
+            : await this.handleRpc(parsed, callAccess);
+          if (!controller.signal.aborted) sendJson(response, 200, result);
+        } finally {
+          response.off('close', onDisconnect);
         }
-        if (Array.isArray(parsed)) {
-          const results = await Promise.all(parsed.map((item) => this.handleRpc(item, access)));
-          sendJson(response, 200, results);
-          return;
-        }
-        sendJson(response, 200, await this.handleRpc(parsed, access));
         return;
       }
 
@@ -323,7 +352,7 @@ export class AgentRpcServer {
 
   private async handleRpc(
     payload: unknown,
-    access: { remoteAddress: string; origin: 'local' | 'lan' }
+    access: CallAccess
   ): Promise<unknown> {
     const id = isRecord(payload) && (payload.id === null || typeof payload.id === 'string' || typeof payload.id === 'number')
       ? payload.id
@@ -341,11 +370,19 @@ export class AgentRpcServer {
       } else if (payload.method === 'resources/read') {
         const uri = typeof params.uri === 'string' ? params.uri : '';
         result = await this.readResource(uri);
+      } else if (payload.method === 'operations/status') {
+        if (!isWriteOperationId(params.operationId)) throw new RpcError(-32602, '写操作 ID 格式无效');
+        result = this.writeOperations.status(writeScope(access), params.operationId);
       } else if (payload.method === 'tools/call') {
         const name = typeof params.name === 'string' ? params.name : '';
         if (!this.tools.has(name)) throw new RpcError(-32601, `工具不存在：${name || '(空)'}`);
         const args = isRecord(params.arguments) ? params.arguments : {};
-        const toolResult = await this.callTool(name, args, access);
+        let operationId: string | undefined;
+        if (params.operationId !== undefined && requiresWriteConfirmation(name)) {
+          if (!isWriteOperationId(params.operationId)) throw new RpcError(-32602, '写操作 ID 格式无效');
+          operationId = params.operationId;
+        }
+        const toolResult = await this.callTool(name, args, access, operationId);
         result = {
           content: [{ type: 'text', text: JSON.stringify(toolResult) }],
           structuredContent: toolResult,
@@ -401,24 +438,45 @@ export class AgentRpcServer {
   private async callTool(
     name: string,
     args: Record<string, unknown>,
-    access: { remoteAddress: string; origin: 'local' | 'lan' }
+    access: CallAccess,
+    operationId?: string
   ): Promise<unknown> {
     const started = Date.now();
-    const authorization = await authorizeAgentToolCall(name, args, this.confirmWrite);
-    const result = authorization.ok ? await this.tools.call(name, args) : authorization;
-    const record = isRecord(result) ? result : null;
-    this.audit?.({
-      tool: name,
-      ok: record?.ok !== false,
-      ...(typeof record?.code === 'string' ? { code: record.code } : {}),
-      source: 'rpc',
-      args,
-      ...(typeof record?.message === 'string' ? { message: record.message } : {}),
-      elapsedMs: Date.now() - started,
-      remoteAddress: access.remoteAddress,
-      origin: access.origin
-    });
-    return result;
+    const execute = async (markExecuting: () => void) => {
+      const cancelled = () => ({
+        result: { ok: false, code: 'WRITE_CANCELLED', message: '写操作在执行前取消。', ...(operationId ? { operationId } : {}) },
+        state: 'cancelled' as const
+      });
+      if (access.signal.aborted || this.authGeneration !== access.generation) return cancelled();
+      const authorization = await authorizeAgentToolCall(name, args, this.confirmWrite, access.signal);
+      if (access.signal.aborted || this.authGeneration !== access.generation) return cancelled();
+      let result: unknown = authorization;
+      if (authorization.ok) {
+        markExecuting();
+        // Once writing starts, do not pretend abort can roll back side effects.
+        result = await this.tools.call(name, args, requiresWriteConfirmation(name) ? undefined : access.signal);
+      }
+      const record = isRecord(result) ? result : null;
+      try {
+        this.audit?.({
+          tool: name,
+          ok: record?.ok !== false,
+          ...(typeof record?.code === 'string' ? { code: record.code } : {}),
+          source: 'rpc',
+          args,
+          ...(typeof record?.message === 'string' ? { message: record.message } : {}),
+          elapsedMs: Date.now() - started,
+          remoteAddress: access.remoteAddress,
+          origin: access.origin
+        });
+      } catch (error) {
+        console.error('[AGENT_AUDIT_FAILED]', error);
+      }
+      return { result, state: 'finished' as const };
+    };
+    return operationId
+      ? await this.writeOperations.run(writeScope(access), operationId, name, args, execute)
+      : (await execute(() => {})).result;
   }
 }
 

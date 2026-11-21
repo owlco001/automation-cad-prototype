@@ -17,19 +17,21 @@
  *      桩的几何是方块/棱柱近似（不含孔/槽），这一点在日志与报告里明说，不冒充 B-Rep。
  *
  * 用法：
- *   npm run machine:e2e              # 完整流程 + 三张截图
- *   MACHINE_E2E_KEEP=1 npm run machine:e2e   # 失败时保留 userData 目录便于排查
+ *   npm run machine:e2e              # 完整流程 + 四张截图
+ *   AUTOMATIONCAD_SCREENSHOT_DIR=<新目录> npm run machine:e2e -- --transfer-material-only
+ *                                   # 只跑顶升移载建模、渲染和材质像素门禁
  *
  * 退出码：0 = 全流程通过；1 = 任一步失败（日志里 MACHINE_E2E_FAIL step=N reason=...）。
  */
-import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
+import { spawnOwnedProcess, stopOwnedProcess } from './lib/owned-process.mjs';
 import { checkGlbMaterials, describeGlbMaterials } from './lib/glb-inspect.mjs';
 import { checkMaterialPixels, describeMaterialPixels } from './lib/material-gate.mjs';
 import { assertSceneMatchesBuild, buildPartCount } from '../src/cad/scene-integrity.ts';
@@ -42,7 +44,8 @@ const runner = join(here, 'electron-run.mjs');
 const shotDir = process.env.AUTOMATIONCAD_SCREENSHOT_DIR
   ? resolve(process.env.AUTOMATIONCAD_SCREENSHOT_DIR)
   : join(repoRoot, 'docs', 'desktop', 'screenshots');
-const KEEP = process.env.MACHINE_E2E_KEEP === '1';
+const TRANSFER_MATERIAL_ONLY = process.argv.includes('--transfer-material-only');
+const TRANSFER_SHOT = '23-pv-04-transfer-3d.png';
 
 const BRIEF = '光伏板加工输送机：输送 2000mm 光伏板，线体长 6000mm、带宽 1200mm，需要把光伏板旋转 90° 改变方向，节拍 6 件/分钟';
 /**
@@ -79,6 +82,9 @@ if (process.argv.includes('--parametric-stub')) {
 function runParametricStub() {
   const argv = process.argv.slice(2);
   const argOf = (name) => {
+    // ParametricManager uses --token=<value> so leading hyphens survive argument parsing.
+    const inline = argv.find((arg) => arg.startsWith(`${name}=`));
+    if (inline !== undefined) return inline.slice(name.length + 1);
     const index = argv.indexOf(name);
     return index >= 0 ? argv[index + 1] : undefined;
   };
@@ -148,7 +154,7 @@ function runParametricStub() {
     });
   });
   server.listen(port, '127.0.0.1', () => {
-    console.log(JSON.stringify({ ok: true, port, token, version: '0.0.0-machine-e2e-stub' }));
+    console.log(JSON.stringify({ ok: true, port: server.address().port, version: '0.0.0-machine-e2e-stub' }));
   });
   for (const signal of ['SIGTERM', 'SIGINT']) {
     process.once(signal, () => { server.close(); process.exit(0); });
@@ -261,36 +267,53 @@ const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a
 // ---------------------------------------------------------------------------
 // 主流程
 // ---------------------------------------------------------------------------
-/** 取一个当前空闲的回环端口（拿不到就退回 9229，交给主进程判断）。 */
+/** 分配回环端口；失败时不能回退连到已有的调试实例。 */
 async function freePort() {
-  return await new Promise((resolvePort) => {
+  return await new Promise((resolvePort, rejectPort) => {
     const server = createNetServer();
-    server.once('error', () => resolvePort(9229));
+    server.once('error', rejectPort);
     server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      const port = address && typeof address === 'object' ? address.port : 9229;
-      server.close(() => resolvePort(port));
+      const { port } = server.address();
+      server.close((error) => error ? rejectPort(error) : resolvePort(port));
     });
   });
 }
 
 async function main() {
+  if (TRANSFER_MATERIAL_ONLY) {
+    const target = join(shotDir, TRANSFER_SHOT);
+    if (!process.env.AUTOMATIONCAD_SCREENSHOT_DIR || existsSync(target)) {
+      throw new Error(`--transfer-material-only 要求 AUTOMATIONCAD_SCREENSHOT_DIR 指向没有 ${TRANSFER_SHOT} 的输出目录：${shotDir}`);
+    }
+  }
   if (!existsSync(electronBin)) {
     console.error(`MACHINE_E2E_FAIL step=0 reason=electron-missing path=${electronBin}`);
     process.exit(1);
   }
   mkdirSync(shotDir, { recursive: true });
 
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const userDataDir = join(tmpdir(), `automationcad-e2e-${stamp}`);
+  const userDataRoot = resolve(tmpdir());
+  const userDataDir = mkdtempSync(join(userDataRoot, 'automationcad-e2e-'));
   const sidecarDir = join(userDataDir, 'e2e-parametric');
-  mkdirSync(sidecarDir, { recursive: true });
   console.log(`MACHINE_E2E_USERDATA ${userDataDir}`);
 
-  cdpPort = await freePort();
-  const llm = await startLlmStub();
+  const abort = new AbortController();
+  const { signal } = abort;
+  const cancel = (reason, exitCode) => {
+    if (signal.aborted) return;
+    process.exitCode = exitCode;
+    abort.abort(new Error(reason));
+  };
+  const onInterrupt = () => cancel('收到 SIGINT', 130);
+  const onTerminate = () => cancel('收到 SIGTERM', 143);
+  process.on('SIGINT', onInterrupt);
+  process.on('SIGTERM', onTerminate);
+  let watchdog;
+  let llm = null;
   let electron = null;
   let cdp = null;
+  let stopping = false;
+  let shotsCheck = '';
   let failedReason = null;
   let stepsOk = 0;
   /** 产品侧已确认的缺口（不是脚本失败）：逐条记下来，最后统一打印。 */
@@ -322,26 +345,31 @@ async function main() {
   const skippableSteps = new Set(
     (process.env.MACHINE_E2E_SKIP_STEPS ?? '').split(',').map((item) => item.trim()).filter(Boolean)
   );
-  const optionalStep = async (index, label, run) => {
-    if (skippableSteps.has(label)) {
-      console.log(`MACHINE_E2E_SKIP step=${index} label=${label} reason=MACHINE_E2E_SKIP_STEPS`);
+  const turnStep = (index, label, run) => TRANSFER_MATERIAL_ONLY ? null : step(index, label, run);
+  const transferOptionalStep = async (index, label, run) => {
+    const reason = TRANSFER_MATERIAL_ONLY ? '--transfer-material-only'
+      : skippableSteps.has(label) ? 'MACHINE_E2E_SKIP_STEPS' : null;
+    if (reason) {
+      console.log(`MACHINE_E2E_SKIP step=${index} label=${label} reason=${reason}`);
       return null;
     }
     return step(index, label, run);
   };
 
   try {
-    // detached: 让 xvfb-run 成为独立进程组组长。收尾时按**进程组**杀，
-    // 否则只杀掉 xvfb-run 这层壳，底下的 electron/Xvfb 变孤儿（实测跑 5 次留下 79 个进程，
-    // 机器 load 冲到 48，`npm test` 里的性能断言全被拖红）。
-    electron = spawn(
+    cdpPort = await freePort();
+    signal.throwIfAborted();
+    llm = await startLlmStub(signal);
+    console.log(`MACHINE_E2E_RESOURCES cdpPort=${cdpPort} llmPort=${llm.port} userData=${userDataDir}`);
+    signal.throwIfAborted();
+    console.log(`MACHINE_E2E_PORTS cdp=${cdpPort} llm=${llm.port}`);
+    electron = spawnOwnedProcess(
       existsSync('/usr/bin/xvfb-run') ? 'xvfb-run' : process.execPath,
       existsSync('/usr/bin/xvfb-run')
         ? ['-a', '-s', '-screen 0 1920x1200x24', process.execPath, runner,
           '--machine-e2e-host', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader']
         : [runner, '--machine-e2e-host', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
       {
-        detached: true,
         cwd: desktopRoot,
         env: {
           ...process.env,
@@ -367,20 +395,19 @@ async function main() {
       electronLog += chunk;
       if (process.env.MACHINE_E2E_VERBOSE === '1') process.stderr.write(`[electron:err] ${chunk}`);
     });
-    electron.once('exit', (code) => {
-      // 收尾时是我们自己杀掉的，code 会是 null —— 只有「非零退出码」才是异常信号
-      if (typeof code === 'number' && code !== 0) console.error(`MACHINE_E2E_ELECTRON_EXIT code=${code}`);
+    console.log(`MACHINE_E2E_LAUNCH scriptPid=${process.pid} launcherPid=${electron.pid ?? '?'} cdp=${cdpPort} llm=${llm.port} sidecarDir=${sidecarDir}`);
+    electron.once('error', (error) => cancel(`启动 Electron 失败：${error.message}`, 1));
+    electron.once('exit', (code, childSignal) => {
+      if (!stopping) cancel(`Electron 启动器提前退出：code=${code} signal=${childSignal}`, 1);
     });
 
-    // 现在一轮跑两台机器（转向 + 移载），10 分钟不够：放宽到 20 分钟。
-    // 它只是防挂死的兜底，真实耗时以 MACHINE_E2E_DONE 的 steps 计时为准。
-    const watchdog = setTimeout(() => {
-      console.error('MACHINE_E2E_TIMEOUT 20 分钟内未完成，强制结束');
-      try { electron?.kill('SIGKILL'); } catch { /* ignore */ }
-    }, 20 * 60_000);
+    // End through finally even if a renderer command never returns.
+    const timeoutMs = Number(process.env.MACHINE_E2E_TIMEOUT_MS ?? 20 * 60_000);
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 1 || timeoutMs > 20 * 60_000) throw new Error('MACHINE_E2E_TIMEOUT_MS 必须在 1..1200000 范围');
+    watchdog = setTimeout(() => cancel(`MACHINE_E2E_TIMEOUT ${timeoutMs}ms 内未完成`, 1), timeoutMs);
     watchdog.unref?.();
 
-    cdp = await connectCdp();
+    cdp = await connectCdp(signal);
     await cdp.fixViewport();
     await cdp.waitFor('window.__AUTOMATION_CAD_EXTENSION_READY__ === true', '桌面扩展就绪', 45_000);
     await cdp.evaluate(`(async () => {
@@ -395,7 +422,7 @@ async function main() {
     console.log(`MACHINE_E2E_STUB_LLM baseUrl=http://127.0.0.1:${llm.port}/v1 model=machine-e2e-stub（本地桩，不出本机）`);
 
     // --- 1. 打开智能体抽屉，发送需求原文 -----------------------------------
-    const design = await step(1, 'send-brief', async () => {
+    const design = await turnStep(1, 'send-brief', async () => {
       await cdp.evaluate(`(async () => {
         const wait = (ms) => new Promise((r) => setTimeout(r, ms));
         const home = document.getElementById('homeScreen');
@@ -421,7 +448,7 @@ async function main() {
     });
 
     // --- 2. 断言方案内容（转向工位 / turner-rotary 90° / BOM）--------------
-    const cardState = await step(2, 'assert-design', async () => {
+    const cardState = await turnStep(2, 'assert-design', async () => {
       const payload = await llm.waitForTool('design_machine', 5_000);
       const body = payload?.data && typeof payload.data === 'object' ? payload.data : payload;
       const design = body?.design ?? body;
@@ -460,7 +487,7 @@ async function main() {
     });
 
     // --- 3. 点「应用到工程」→ 真实确认按钮 → 断言 3D + active.json ----------
-    const applied = await step(3, 'apply-to-project', async () => {
+    const applied = await turnStep(3, 'apply-to-project', async () => {
       const clickedApply = await cdp.evaluate(`(() => {
         const button = document.querySelector('.acp-machine-card [data-apply-machine]');
         if (!button) return false;
@@ -542,7 +569,7 @@ async function main() {
     });
 
     // --- 4. 参数化几何（build_machine_model）→ 断言零件数与 turner-* -------
-    const geometry = await step(4, 'build-machine-model', async () => {
+    const geometry = await turnStep(4, 'build-machine-model', async () => {
       const before = await cdp.evaluate(`document.querySelectorAll('.acp-chat-tool').length`);
       await sendMessage(cdp, '按当前机型生成整机实体模型（参数化几何），需求同前：' + BRIEF);
       await cdp.waitFor(
@@ -573,7 +600,7 @@ async function main() {
     });
 
     // --- 5. PLC 生成 → 断言 io-map.csv 含 ST-TURN-ROT ----------------------
-    const plc = await step(5, 'run-plc-generate', async () => {
+    const plc = await turnStep(5, 'run-plc-generate', async () => {
       const before = await cdp.evaluate(`document.querySelectorAll('.acp-chat-tool').length`);
       await sendMessage(cdp, '按当前机型生成 PLC 程序并落盘（含 IO 点位映射），需求：' + BRIEF);
       await cdp.waitFor(
@@ -632,7 +659,7 @@ async function main() {
     });
 
     // --- 6. export_files + zip/STEP 真实存在 ------------------------------
-    const exports = await step(6, 'export-files', async () => {
+    const exports = await turnStep(6, 'export-files', async () => {
       const before = await cdp.evaluate(`document.querySelectorAll('.acp-chat-tool').length`);
       await sendMessage(cdp, '把当前装配体导出为 glb 文件（文件名 pv-conveyor，覆盖同名），需求：' + BRIEF);
       await cdp.waitFor(
@@ -721,7 +748,7 @@ async function main() {
     });
 
     // --- 7. 干涉初筛（包围盒）→ 期望 0 对 ---------------------------------
-    const interference = await step(7, 'interference-screen', async () => {
+    const interference = await turnStep(7, 'interference-screen', async () => {
       const before = await cdp.evaluate(`document.querySelectorAll('.acp-chat-tool').length`);
       await sendMessage(cdp, '对当前装配体做干涉检查，看看转向工位和既有线体有没有干涉');
       await cdp.waitFor(
@@ -763,7 +790,7 @@ async function main() {
     });
 
     // --- 8. 三张截图（sha256 互异）----------------------------------------
-    const shots = await step(8, 'screenshots', async () => {
+    const shots = await turnStep(8, 'screenshots', async () => {
       const names = [];
       // 8a. 整机 3D（含转向工位）：CAD 覆盖层 + 缩放到适合
       await cdp.evaluate(`(async () => {
@@ -1007,7 +1034,10 @@ async function main() {
       );
       const payload = await llm.waitForTool('build_machine_model', 30_000);
       const body = payload?.data && typeof payload.data === 'object' ? payload.data : payload;
-      if (payload?.ok === false) throw new Error(`build_machine_model 失败：${payload.message ?? payload.code}`);
+      if (payload?.ok === false) {
+        const failure = payload.error ?? payload;
+        throw new Error(`build_machine_model 失败 code=${failure.code ?? '?'}：${failure.message ?? JSON.stringify(failure)}`);
+      }
       const items = Number(body?.parts ?? 0);
       const loaded = Number(body?.loadedParts ?? 0);
       const colored = Number(body?.coloredParts ?? 0);
@@ -1024,7 +1054,7 @@ async function main() {
       return `parts=${items} loaded=${loaded} colored=${colored} bomRows=${bomRows.length} transferRows=${rows.length} (${rows.slice(0, 5).map((row) => row.name).join(' / ')})`;
     });
 
-    const transferPlc = await optionalStep(12, 'transfer-plc', async () => {
+    const transferPlc = await transferOptionalStep(12, 'transfer-plc', async () => {
       await sendMessage(cdp, `按当前机型生成 PLC 程序并落盘（含 IO 点位映射），需求：${TRANSFER_BRIEF}`);
       // 用 namePrefix=pv-transfer 区分两台机器的 PLC 结果卡
       await cdp.waitFor(
@@ -1112,7 +1142,7 @@ async function main() {
       return `blocked=0 steps=${stepCount} handshake=${logicHits.length}/4 [${logicHits.join(' / ')}] ST点位引用=${handshakeRefs}处 io-map=${latest.path} signals=${TRANSFER_SIGNALS.map((p) => `${p}@${rows[p].address}`).join(',')}`;
     });
 
-    const transferStates = await optionalStep(13, 'transfer-interference-states', async () => {
+    const transferStates = await transferOptionalStep(13, 'transfer-interference-states', async () => {
       await sendMessage(cdp, '对当前机型做四态干涉检查（rest/lift/sweep/push），看移载机构和既有线体有没有干涉');
       await cdp.waitFor(
         `Array.from(document.querySelectorAll('.acp-chat-tool')).some((node) => {
@@ -1185,7 +1215,7 @@ async function main() {
         };
       })()`);
       console.log(`MACHINE_E2E_SCENE_COLORS ${JSON.stringify(sceneColors)}`);
-      const name = await capture(cdp, '23-pv-04-transfer-3d.png', '顶升移载整机 3D（3 条 X 窄带 + 带缝里 4 段 Y 短带 + +Y 接料输送机）');
+      const name = await capture(cdp, TRANSFER_SHOT, '顶升移载整机 3D（3 条 X 窄带 + 带缝里 4 段 Y 短带 + +Y 接料输送机）');
       const partCount = await cdp.evaluate(`Number(document.getElementById('cadPartCount').textContent || 0)`);
 
       // 硬闸门：从**刚截下来的这张 PNG** 里数四种材质色的像素。
@@ -1206,10 +1236,8 @@ async function main() {
       return `shot=${name} parts=${partCount} colors=${gate.rows.map((row) => `${row.material}:${row.pixels}px`).join('/')}`;
     });
 
-    const shotsCheck = checkShotHashes();
-    console.log(`MACHINE_E2E_SHOTS ${shotsCheck}`);
-    for (const item of blocked) console.log(`MACHINE_E2E_BLOCKED ${item}`);
-    console.log(`MACHINE_E2E_DONE steps=${stepsOk} failed=0 blocked=${blocked.length} userData=${userDataDir} shots=${shotDir}`);
+    shotsCheck = checkShotHashes();
+    signal.throwIfAborted();
     void design; void cardState; void applied; void geometry; void plc; void exports; void interference; void shots;
     void transferDesign; void transferApplied; void transferGeometry; void transferPlc; void transferStates; void transferShot;
   } catch (error) {
@@ -1217,44 +1245,63 @@ async function main() {
     console.error(`MACHINE_E2E_ABORT ${message}`);
     failedReason = failedReason ?? message;
   } finally {
-    try { cdp?.close(); } catch { /* ignore */ }
-    await stopElectron(electron);
-    await new Promise((resolveClose) => llm.server.close(resolveClose));
-    // 默认**保留** userData：导出物、active.json、io-map.csv 就是验收证据，
-    // 删掉就没法 `ls -l` 复核了。要清干净用 MACHINE_E2E_CLEAN=1（或 MACHINE_E2E_KEEP=0）。
-    const clean = process.env.MACHINE_E2E_CLEAN === '1';
-    if (clean) rmSync(userDataDir, { recursive: true, force: true });
-    else console.error(`MACHINE_E2E_USERDATA_KEPT ${userDataDir}（MACHINE_E2E_CLEAN=1 可在跑完时删除）`);
-  }
-  process.exit(failedReason ? 1 : 0);
-}
-
-/**
- * 停掉整棵进程树：xvfb-run（组长）→ electron → 渲染/GPU 子进程 + Xvfb。
- * 只 kill 子进程本身会留下孤儿，下一轮 E2E 和 `npm test` 都会被它们拖慢。
- */
-async function stopElectron(child) {
-  if (!child || child.exitCode !== null) return;
-  const signal = (sig) => {
-    try { process.kill(-child.pid, sig); } catch { /* 进程组已经没了 */ }
-    try { child.kill(sig); } catch { /* 同上 */ }
-  };
-  signal('SIGTERM');
-  for (let attempt = 0; attempt < 24; attempt += 1) {
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
-    if (child.exitCode !== null) break;
+    stopping = true;
+    clearTimeout(watchdog);
+    ACTIVE_CDP = null;
+    if (cdp && !signal.aborted) {
+      // Give Electron its normal quit path first; retain a hard, bounded
+      // descendant cleanup even if the CDP connection closes without a reply.
+      await Promise.race([cdp.send('Browser.close').catch(() => {}), delay(300)]);
+    }
+    const [processResult, ...otherResults] = await Promise.allSettled([
+      Promise.resolve().then(() => electron && stopOwnedProcess(electron)),
+      Promise.resolve().then(() => cdp?.close()),
+      Promise.resolve().then(() => llm && closeStubServer(llm.server))
+    ]);
+    if (processResult.status === 'fulfilled' && processResult.value) {
+      const { pids, escalated, remaining } = processResult.value;
+      console.log(`MACHINE_E2E_CLEANUP ${JSON.stringify({ pids, escalated, remaining })}`);
+      if (remaining.length > 0) {
+        failedReason ??= '渲染进程未清理';
+        console.error(`MACHINE_E2E_CLEANUP_FAIL remaining=${JSON.stringify(remaining)}`);
+      }
+    }
+    for (const result of [processResult, ...otherResults]) {
+      if (result.status === 'rejected') {
+        failedReason ??= '渲染资源清理失败';
+        console.error('MACHINE_E2E_CLEANUP_FAIL', result.reason);
+      }
+    }
     try {
-      const response = await fetch(`http://127.0.0.1:${cdpPort}/json/version`, { signal: AbortSignal.timeout(400) });
-      if (!response.ok) break;
-    } catch { break; }
+      const clean = process.env.MACHINE_E2E_CLEAN === '1';
+      const processesStopped = processResult.status === 'fulfilled' && !processResult.value?.remaining.length;
+      if (clean && processesStopped) {
+        if (dirname(userDataDir) !== userDataRoot) throw new Error(`非任务临时目录：${userDataDir}`);
+        rmSync(userDataDir, { recursive: true, force: true });
+      } else {
+        console.error(`MACHINE_E2E_USERDATA_KEPT ${userDataDir}`);
+      }
+    } catch (error) {
+      failedReason ??= '临时用户目录清理失败';
+      console.error('MACHINE_E2E_CLEANUP_FAIL', error);
+    } finally {
+      process.off('SIGINT', onInterrupt);
+      process.off('SIGTERM', onTerminate);
+    }
   }
-  if (child.exitCode === null) signal('SIGKILL');
-  await new Promise((resolveDelay) => setTimeout(resolveDelay, 600));
+  if (!failedReason && !signal.aborted) {
+    console.log(`MACHINE_E2E_SHOTS ${shotsCheck}`);
+    for (const item of blocked) console.log(`MACHINE_E2E_BLOCKED ${item}`);
+    console.log(`MACHINE_E2E_DONE steps=${stepsOk} failed=0 blocked=${blocked.length} userData=${userDataDir} shots=${shotDir}`);
+  } else {
+    process.exitCode ||= 1;
+  }
 }
 
-/** 三张截图必须都存在、>20KB、sha256 互异。 */
+/** 校验本轮应产出的截图：文件必须存在、>20KB、sha256 互异。 */
 function checkShotHashes() {
-  const names = ['23-pv-01-3d.png', '23-pv-02-linkage.png', '23-pv-03-exports.png', '23-pv-04-transfer-3d.png'];
+  const names = TRANSFER_MATERIAL_ONLY ? [TRANSFER_SHOT]
+    : ['23-pv-01-3d.png', '23-pv-02-linkage.png', '23-pv-03-exports.png', TRANSFER_SHOT];
   const seen = new Map();
   const parts = [];
   for (const name of names) {
@@ -1274,7 +1321,19 @@ function checkShotHashes() {
 // 本地模型桩：把「用户这句话」映射成 tool_call；工具结果回来后收尾。
 // 只记录工具结果，供断言使用（模型看到的就是这些）。
 // ---------------------------------------------------------------------------
-async function startLlmStub() {
+async function closeStubServer(server) {
+  server.closeAllConnections();
+  await new Promise((resolveClose, rejectClose) => {
+    const timeout = setTimeout(() => rejectClose(new Error('本地模型桩关闭超时')), 2000);
+    server.close(error => {
+      clearTimeout(timeout);
+      if (error && error.code !== 'ERR_SERVER_NOT_RUNNING') rejectClose(error);
+      else resolveClose();
+    });
+  });
+}
+
+async function startLlmStub(signal) {
   const toolResults = [];
   const waiters = [];
   const server = createServer((req, res) => {
@@ -1344,12 +1403,19 @@ async function startLlmStub() {
       return new Promise((resolveWait, rejectWait) => {
         const existing = toolResults.filter((item) => item.name === name).pop();
         if (existing) return resolveWait(existing.parsed);
-        const waiter = { name, resolve: resolveWait };
-        waiters.push(waiter);
-        setTimeout(() => {
+        if (signal?.aborted) { rejectWait(signal.reason); return; }
+        const cleanup = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
           const index = waiters.indexOf(waiter);
-          if (index >= 0) { waiters.splice(index, 1); rejectWait(new Error(`等待工具结果超时：${name}`)); }
-        }, timeoutMs).unref?.();
+          if (index >= 0) waiters.splice(index, 1);
+        };
+        const onAbort = () => { cleanup(); rejectWait(signal.reason); };
+        const waiter = { name, resolve: value => { cleanup(); resolveWait(value); } };
+        const timer = setTimeout(() => { cleanup(); rejectWait(new Error(`等待工具结果超时：${name}`)); }, timeoutMs);
+        timer.unref?.();
+        waiters.push(waiter);
+        signal?.addEventListener('abort', onAbort, { once: true });
       });
     }
   };
@@ -1420,13 +1486,14 @@ function summarize(name, parsed) {
 // ---------------------------------------------------------------------------
 // CDP 客户端：连 127.0.0.1:9229（主进程非 headless 模式固定监听）
 // ---------------------------------------------------------------------------
-async function connectCdp() {
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function connectCdp(signal) {
+  const sleep = (ms) => delay(ms, undefined, { signal });
   let target = null;
   for (let attempt = 0; attempt < 180; attempt += 1) {
     await sleep(500);
     try {
-      const response = await fetch(`http://127.0.0.1:${cdpPort}/json/list`);
+      signal?.throwIfAborted();
+      const response = await fetch(`http://127.0.0.1:${cdpPort}/json/list`, { signal: AbortSignal.any([signal ?? new AbortController().signal, AbortSignal.timeout(2000)]) });
       const list = await response.json();
       target = list.find((item) => item.type === 'page' && String(item.url).includes('index.html'))
         ?? list.find((item) => item.type === 'page');
@@ -1435,13 +1502,38 @@ async function connectCdp() {
   }
   if (!target) throw new Error(`等待 CDP 端点超时（127.0.0.1:${cdpPort} 没起来）`);
 
+  signal?.throwIfAborted();
   const socket = new WebSocket(target.webSocketDebuggerUrl);
-  await new Promise((resolveOpen, rejectOpen) => {
-    socket.addEventListener('open', () => resolveOpen(undefined), { once: true });
-    socket.addEventListener('error', () => rejectOpen(new Error('CDP WebSocket 连接失败')), { once: true });
-  });
   let nextId = 0;
   const pending = new Map();
+  const rejectPending = (error) => {
+    for (const entry of pending.values()) { clearTimeout(entry.timer); entry.reject(error); }
+    pending.clear();
+  };
+  const onAbort = () => {
+    rejectPending(signal.reason ?? new Error('渲染任务取消'));
+    try { socket.close(); } catch { /* not open yet */ }
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
+  socket.addEventListener('close', () => rejectPending(new Error('CDP 连接已关闭')));
+  await new Promise((resolveOpen, rejectOpen) => {
+    const timeout = setTimeout(() => finish(new Error('CDP WebSocket 连接超时')), 5000);
+    const cancelled = () => finish(signal.reason ?? new Error('渲染任务取消'));
+    const opened = () => finish();
+    const errored = () => finish(new Error('CDP WebSocket 连接失败'));
+    const finish = (error) => {
+      clearTimeout(timeout);
+      signal?.removeEventListener('abort', cancelled);
+      socket.removeEventListener('open', opened);
+      socket.removeEventListener('error', errored);
+      if (error) { signal?.removeEventListener('abort', onAbort); try { socket.close(); } catch {} rejectOpen(error); }
+      else resolveOpen();
+    };
+    socket.addEventListener('open', opened, { once: true });
+    socket.addEventListener('error', errored, { once: true });
+    signal?.addEventListener('abort', cancelled, { once: true });
+    if (signal?.aborted) cancelled();
+  });
   socket.addEventListener('message', (event) => {
     let payload = null;
     try { payload = JSON.parse(event.data); } catch { return; }
@@ -1449,13 +1541,20 @@ async function connectCdp() {
     const entry = pending.get(payload.id);
     if (!entry) return;
     pending.delete(payload.id);
+    clearTimeout(entry.timer);
     if (payload.error) entry.reject(new Error(`${entry.method}: ${payload.error.message}`));
     else entry.resolve(payload.result);
   });
   const request = (method, params = {}) => new Promise((resolveRequest, rejectRequest) => {
+    signal?.throwIfAborted();
     const id = ++nextId;
-    pending.set(id, { resolve: resolveRequest, reject: rejectRequest, method });
-    socket.send(JSON.stringify({ id, method, params }));
+    const timer = setTimeout(() => {
+      pending.delete(id);
+      rejectRequest(new Error(`CDP 请求超时：${method}`));
+    }, 60_000);
+    pending.set(id, { resolve: resolveRequest, reject: rejectRequest, method, timer });
+    try { socket.send(JSON.stringify({ id, method, params })); }
+    catch (error) { clearTimeout(timer); pending.delete(id); rejectRequest(error); }
   });
   await request('Runtime.enable');
   await request('Page.enable');
@@ -1514,10 +1613,15 @@ async function connectCdp() {
       const result = await request('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: false });
       return Buffer.from(String(result?.data ?? ''), 'base64');
     },
-    close() { try { socket.close(); } catch { /* ignore */ } },
+    close() {
+      signal?.removeEventListener('abort', onAbort);
+      rejectPending(new Error('CDP 客户端已关闭'));
+      try { socket.close(); } catch { /* already closed */ }
+    },
     async waitFor(expression, label, timeoutMs = 30_000, sideEffect = null) {
       const started = Date.now();
       for (;;) {
+        signal?.throwIfAborted();
         let value = false;
         try { value = Boolean(await evaluate(expression)); } catch { value = false; }
         if (value) return true;
@@ -1531,6 +1635,7 @@ async function connectCdp() {
       const started = Date.now();
       let clicks = 0;
       for (;;) {
+        signal?.throwIfAborted();
         if (await clickConfirmButton()) clicks += 1;
         if (clicks >= minClicks) return clicks;
         if (Date.now() - started > timeoutMs) throw new Error(`等待超时：${label}`);

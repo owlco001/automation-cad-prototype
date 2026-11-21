@@ -30,7 +30,7 @@ interface PackInfo {
 ## 按需加载（2026-10-24）
 
 - `scan()` 只读 `manifest.json`，建立 id/目录/分类/条目数/关键词索引，不读 `parts.json`；
-- `listParts()` 先用 `packId`、`manifest.categories`、包名/厂商/描述/关键词预过滤，命中包才 `loadPack`；
+- `listParts()` 可用 `packId` 和 `manifest.categories` 缩小候选范围。文本检索检查所有候选包的元器件字段，因为 manifest 的描述和关键词不覆盖全部型号和规格。
 - `loadPack(id)` 首次读 `parts.json` 并缓存；`unloadPack(id)` 释放；重复搜索命中缓存；
 - 跨包同 id 去重，内置包优先；`getPartById()` 首次调用懒建全局 partId 索引；
 - `metrics()` 返回 `packLoadMs / loadedPacks / partsLoaded / searchMs / packCount / indexedParts`，diagnose 的 `packMetrics` 与 smoke 的 `SMOKE_PACKS_LAZY_OK` 复用同一口径；

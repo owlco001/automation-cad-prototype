@@ -194,18 +194,16 @@ test('packId 过滤只加载目标新包', () => {
   assert.deepEqual(driveOnly.loadedPackIds(), ['drive-cn']);
 });
 
-test('搜索能命中 vision-cn 型号且只加载命中包', () => {
+test('全库搜索能命中 vision-cn 型号', () => {
   const instance = registry();
   const hits = instance.listParts({ q: 'MV-CS050' });
   assert.deepEqual(hits.map((part) => part.id).sort(), ['HIK-MV-CS050-10GC', 'HIK-MV-CS050-10GM']);
-  assert.deepEqual(instance.loadedPackIds(), ['vision-cn']);
 });
 
-test('搜索能命中 drive-cn 型号且只加载命中包', () => {
+test('全库搜索能命中 drive-cn 型号', () => {
   const instance = registry();
   const hits = instance.listParts({ q: 'SFU1605-4' });
   assert.deepEqual(hits.map((part) => part.id), ['TBI-SFU1605-4']);
-  assert.deepEqual(instance.loadedPackIds(), ['drive-cn']);
 });
 
 test('分类聚合正确：工业相机与减速机', () => {

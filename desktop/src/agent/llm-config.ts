@@ -151,12 +151,17 @@ export function publicLlmConfig(config: AgentLlmConfig): AgentLlmPublicConfig {
 export function mergeLlmConfig(existing: AgentLlmConfig, patch: unknown): AgentLlmConfig {
   const source = isRecord(patch) ? patch : {};
   const incomingKey = typeof source.apiKey === 'string' ? source.apiKey.trim() : '';
-  const keepKey = incomingKey === '' || isMaskedApiKey(incomingKey);
+  const baseUrl = typeof source.baseUrl === 'string'
+    ? (source.baseUrl.trim() ? normalizeBaseUrl(source.baseUrl) : DEFAULT_LLM_CONFIG.baseUrl)
+    : existing.baseUrl;
+  const sameOrigin = new URL(baseUrl).origin === new URL(existing.baseUrl).origin;
+  const explicitKey = incomingKey !== '' && !isMaskedApiKey(incomingKey);
   return normalizeLlmConfig({
-    baseUrl: typeof source.baseUrl === 'string' ? source.baseUrl : existing.baseUrl,
-    apiKey: keepKey ? existing.apiKey : incomingKey,
+    baseUrl,
+    apiKey: explicitKey ? incomingKey : sameOrigin ? existing.apiKey : '',
     model: typeof source.model === 'string' ? source.model : existing.model,
     maxIterations: source.maxIterations === undefined ? existing.maxIterations : source.maxIterations,
+    maxToolCalls: source.maxToolCalls === undefined ? existing.maxToolCalls : source.maxToolCalls,
     // 没传 vision 就沿用已保存的值：设置面板不会因为少一个字段把用户的开关重置回 auto。
     vision: source.vision === undefined ? existing.vision : source.vision
   });

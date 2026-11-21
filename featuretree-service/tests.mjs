@@ -151,7 +151,7 @@ try {
     '重做后高度回到撤销前那一版', `height=${redoIt.json.doc?.features?.find((f) => f.id === 'f-body')?.params?.height}`);
   ok(redoIt.json.revision === undoIt.json.revision + 1, '重做本身也是一次版本推进');
   ok(redoIt.json.history.at(-1).operation === 'redo', '历史里记的是 redo，不是又一次 undo');
-  ok(redoIt.json.redoDepth === 0 && redoIt.json.undoDepth === redoIt.json.revision, '包络带 undoDepth/redoDepth（UI 据此启停按钮）',
+  ok(redoIt.json.redoDepth === 0 && redoIt.json.undoDepth === writeEdit.json.undoDepth, '包络 undoDepth 反映编辑检查点，redo 不增加历史深度',
     `undo=${redoIt.json.undoDepth} redo=${redoIt.json.redoDepth}`);
   ok(undoIt.json.redoDepth === 1, '撤销后 redoDepth=1（有一次可重做）', `redo=${undoIt.json.redoDepth}`);
 

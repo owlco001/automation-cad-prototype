@@ -284,6 +284,20 @@ function settledHandle(result: QtLaunchResult): QtLaunchHandle {
   return withVerdict(result, Promise.resolve(result));
 }
 
+function missingQtMessage(input: QtPathInput): string {
+  const candidates = qtExeCandidates(input);
+  const searched = candidates.map((candidate) => `${candidate.path}（${candidate.source}）`);
+  if (input.isPackaged) {
+    const resource = input.resourcesPath
+      ? join(input.resourcesPath, 'qt', QT_EXE_NAME)
+      : `resources/qt/${QT_EXE_NAME}`;
+    return `当前安装没有可用的 Qt 工作台运行时（未找到受信资源 ${resource}）。Qt 工作台暂不可用；CAD 轻量查看、Agent 和其他桌面功能仍可继续使用。需要原生 OCCT 工作台时，请安装包含 Qt 资源的发行版；若此安装应包含 Qt，请修复或重装。`;
+  }
+  return searched.length
+    ? `找不到 Qt 工作台（${QT_EXE_NAME}）：${searched.join(' / ')}。开发态请先跑 node scripts/vendor-qt.mjs（QT_DIST 指向 CI 产出的 Qt dist）。`
+    : `找不到 Qt 工作台（${QT_EXE_NAME}）：没有可用的候选路径（缺 appRoot/resourcesPath）。`;
+}
+
 /**
  * 拉起随包 Qt 工作台。
  * - 已有存活实例：**不再 spawn**，返回 { ok:true, pid:现有pid, alreadyRunning:true }（连点两下不该漏进程）；
@@ -307,13 +321,8 @@ export function launchQt(options: LaunchQtOptions): QtLaunchHandle {
 
   const exe = resolveQtExe(options);
   if (!exe) {
-    const searched = qtExeCandidates(options).map((candidate) => `${candidate.path}（${candidate.source}）`);
-    return settledHandle({
-      ok: false,
-      message: searched.length
-        ? `找不到 Qt 工作台（${QT_EXE_NAME}）：${searched.join(' / ')}。开发态请先跑 node scripts/vendor-qt.mjs（QT_DIST 指向 CI 产出的 Qt dist）。`
-        : `找不到 Qt 工作台（${QT_EXE_NAME}）：没有可用的候选路径（缺 appRoot/resourcesPath）。`
-    });
+    const message = missingQtMessage(options);
+    return settledHandle({ ok: false, message });
   }
   const pipeline = resolvePipelinePath(options);
   if (!pipeline) {

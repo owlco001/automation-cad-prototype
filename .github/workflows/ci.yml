@@ -60,6 +60,9 @@ jobs:
       - name: Store 单元验收（不经 HTTP）
         timeout-minutes: 5
         run: node ../featuretree-service/store-tests.mjs
+      - name: Store 并发、连续撤销与事务发布回归
+        timeout-minutes: 5
+        run: node --test ../featuretree-service/transaction-tests.mjs ../featuretree-service/storage-tests.mjs
       - name: 落盘/恢复验收（FT_DATA_DIR）
         timeout-minutes: 5
         run: node ../featuretree-service/persistence-tests.mjs
@@ -1042,15 +1045,29 @@ jobs:
       - name: 机型全流程截图（含去重校验）
         timeout-minutes: 10
         run: npm run screenshots:machine
-      # 3D 材质色闸门（像素级，不是「材质对象里有什么」）：
-      # 历史事故——`resolveMachineGeometry` / `buildThreeMachine` 里四色齐全，CadViewer 截图却全灰，
-      # 因为 STL 逐件导入把「件 → 材质色」丢了，而当时没有任何断言会红。
-      # 判定：四种材质标识色（AL6063/Q235/STEEL45/PVC）在截图里各达下限（ΔE76 < 25，单位 px）：
-      #   AL6063 ≥3000 / Q235 ≥3000 / PVC ≥3000 / STEEL45 ≥1200 —— 45# 件（导向柱、同步轴）
-      #   在本机型里被侧梁与皮带包住，整机机位实测上限 2209，3000 不可能达成；几何外露后应抬回 3000。
-      # 与 machine:e2e 第 14 步用的是同一实现（desktop/scripts/lib/material-gate.mjs）。
-      - name: 3D 材质色像素闸门
-        run: npm run gate:materials -- ../docs/desktop/screenshots/23-pv-04-transfer-3d.png
+      # 15–18 是锁螺丝机截图，不能替代顶升移载。复用刚完成的 build:ext，
+      # 让同一个 Electron 进程路径生成新帧，并只对 CAD 画布区域做材质像素断言。
+      - name: 顶升移载 3D 材质色像素闸门（当前构建）
+        id: transfer-material
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          shot_dir="$(mktemp -d "$RUNNER_TEMP/pv-transfer.XXXXXX")"
+          printf 'dir=%s\n' "$shot_dir" >> "$GITHUB_OUTPUT"
+          AUTOMATIONCAD_SCREENSHOT_DIR="$shot_dir" MACHINE_E2E_CLEAN=1 \
+            node scripts/machine-e2e.mjs --transfer-material-only
+          test -s "$shot_dir/23-pv-04-transfer-3d.png"
+      - name: 上传本次顶升移载截图
+        if: ${{ !cancelled() && steps.transfer-material.outputs.dir != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: transfer-material-screenshot
+          path: ${{ steps.transfer-material.outputs.dir }}/23-pv-04-transfer-3d.png
+          if-no-files-found: warn
+      # 真实渲染任务退出后还要核验后代与端口，不以启动器退出代替资源回收。
+      - name: 渲染资源清理回归（正常 / 取消 / 启动器崩溃 / 超时）
+        timeout-minutes: 8
+        run: node scripts/verify-render-cleanup.mjs
       # 外部客户端契约（MCP/JSON-RPC）：401、tools/list、resources、-32602/-32601、只读调用
       - name: 外部客户端冒烟（MCP/JSON-RPC）
         timeout-minutes: 8

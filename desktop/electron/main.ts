@@ -1,9 +1,10 @@
 import { loadMachineLinkage } from './machine-linkage.ts';
 import { createAgentViewCapture } from './agent-capture.ts';
 import { killActiveQt, launchQt } from './qt-client.ts';
+import { desktopRuntimeIdentity, editionUpdateRestriction, runtimeStoragePaths } from './edition.ts';
 import { app, BrowserWindow, dialog, ipcMain, Menu, type IpcMainInvokeEvent, type MenuItemConstructorOptions } from 'electron';
 import { autoUpdater } from 'electron-updater';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import { networkInterfaces, tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -227,8 +228,16 @@ if (HEADLESS_SMOKE && HEADLESS_DESIGN_WEBGL_SMOKE) {
   console.error('SMOKE_MODE_CONFLICT --headless-smoke disables WebGL; use --headless-design-webgl-smoke alone for SwiftShader');
   process.exit(1);
 }
-const APP_NAME = 'AutomationCAD';
+const RUNTIME_IDENTITY = desktopRuntimeIdentity(app.isPackaged, app.getAppPath());
+const APP_NAME = RUNTIME_IDENTITY.appName;
 app.setName(APP_NAME);
+if (RUNTIME_IDENTITY.edition === 'core') {
+  // Set both before Chromium sessions or the single-instance lock can use Full's profile.
+  const storage = runtimeStoragePaths(RUNTIME_IDENTITY, app.getPath('appData'));
+  mkdirSync(storage.sessionData, { recursive: true });
+  app.setPath('userData', storage.userData);
+  app.setPath('sessionData', storage.sessionData);
+}
 
 /**
  * 沙箱策略：默认**开启**（每个渲染进程 + 沙箱化 preload）。
@@ -325,9 +334,9 @@ if (MACHINE_E2E_HOST) {
  */
 const CDP_INTERNAL_PORT = ((): number => {
   const override = Number(process.env.AUTOMATIONCAD_E2E_CDP_PORT ?? '');
-  return MACHINE_E2E_HOST && Number.isInteger(override) && override > 0 && override < 65536 ? override : 9229;
+  return MACHINE_E2E_HOST && Number.isInteger(override) && override > 0 && override < 65536 ? override : RUNTIME_IDENTITY.cdpInternalPort;
 })();
-const CDP_EXTERNAL_PORT = 9222;
+const CDP_EXTERNAL_PORT = RUNTIME_IDENTITY.cdpExternalPort;
 const BOOT_LAN_CONFIG = readLanConfig(app.getPath('userData'));
 if (!HEADLESS && !DIAGNOSE) {
   // 内部调试器始终只绑回环，便于运行中热启停转发器；对外 9222 仍由 cdp-forwarder 白名单控制。
@@ -473,7 +482,7 @@ function localLanAddress(): string | null {
 function currentAgentInfo(): AgentRpcInfo & { toolCount?: number } {
   if (!('error' in agentInfo)) return agentInfo;
   const host = lanHost(lanConfig);
-  const port = HEADLESS ? 0 : 7420;
+  const port = HEADLESS ? 0 : RUNTIME_IDENTITY.rpcPort;
   return {
     host,
     port,
@@ -5713,7 +5722,7 @@ async function startAgent(
     token,
     version: app.getVersion(),
     host: lanHost(lanConfig),
-    port: HEADLESS ? 0 : 7420,
+    port: HEADLESS ? 0 : RUNTIME_IDENTITY.rpcPort,
     lanEnabled: lanConfig.enabled,
     allowlist: lanConfig.allowlist,
     cdpPort: cdpActive() ? CDP_EXTERNAL_PORT : null,
@@ -5733,7 +5742,9 @@ async function startAgent(
     },
     audit: (record) => writeAudit(formatAuditLine(record)),
     // 外部客户端（MCP / JSON-RPC）也走页面内卡片：原生模态在无人值守/远程调试下点不到
-    confirmWrite: async (name, args) => await requestWriteConfirmation(mainWindow, {
+    confirmWrite: async (name, args, signal) => await requestWriteConfirmation(mainWindow, {
+      trustedUiPath: indexHtmlPath(),
+      ...(signal ? { signal } : {}),
       tool: name,
       args,
       detail: 'MCP/JSON-RPC 客户端请求写操作，可能修改当前工程、导入模型或写入文件；允许仅对本次调用生效。',
@@ -5769,6 +5780,8 @@ function persistUpdateChannelPreference(filePath: string, channel: UpdateChannel
 
 /** Core security check: this runs even when the optional system.update module is off. */
 function updateRuntimeAvailability(): { enabled: boolean; message: string } {
+  const editionRestriction = editionUpdateRestriction(RUNTIME_IDENTITY);
+  if (editionRestriction) return editionRestriction;
   if (!app.isPackaged) {
     return { enabled: false, message: '开发态不会查询更新；仅打包的 Windows NSIS 安装版启用更新。' };
   }

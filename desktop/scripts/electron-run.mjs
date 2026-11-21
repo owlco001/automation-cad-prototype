@@ -16,8 +16,8 @@
  *
  * 用法：`xvfb-run -a node scripts/electron-run.mjs --headless-design-webgl-smoke`
  */
-import { spawn } from 'node:child_process';
 import electronPath from 'electron';
+import { spawnOwnedProcess, stopOwnedProcess } from './lib/owned-process.mjs';
 
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
 const passthrough = process.argv.slice(2);
@@ -32,15 +32,25 @@ if (isRoot) {
   console.log('ELECTRON_RUN_SANDBOXED uid=' + process.getuid() + ' —— 不加任何沙箱开关，由主进程 app.enableSandbox() 接管');
 }
 
-const child = spawn(electronPath, ['.', ...flags, ...passthrough], { stdio: 'inherit' });
+const child = spawnOwnedProcess(electronPath, ['.', ...flags, ...passthrough], { stdio: 'inherit' });
+let finishing = null;
+function finish(code) {
+  if (finishing) return finishing;
+  finishing = (async () => {
+    try { await stopOwnedProcess(child); }
+    catch (error) { console.error(`ELECTRON_RUN_CLEANUP_FAILED ${error.message}`); code = 1; }
+    process.exitCode = code;
+  })();
+  return finishing;
+}
 child.on('error', (error) => {
   console.error(`ELECTRON_RUN_FAILED ${error.message}`);
-  process.exit(1);
+  void finish(1);
 });
 child.on('exit', (code, signal) => {
-  if (signal) {
-    console.error(`ELECTRON_RUN_SIGNAL ${signal}`);
-    process.exit(1);
-  }
-  process.exit(code ?? 0);
+  if (signal) console.error(`ELECTRON_RUN_SIGNAL ${signal}`);
+  void finish(signal ? 1 : code ?? 0);
 });
+for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143]]) {
+  process.on(signal, () => { void finish(code); });
+}

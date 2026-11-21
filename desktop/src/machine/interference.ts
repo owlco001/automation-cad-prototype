@@ -112,6 +112,12 @@ const isZCylinder = (part: any): boolean =>
  * 旋转件、斜穿件、圆柱压长方体的边角情形一律 null（AABB 会高估）。
  */
 export function exactOverlapMm3(a: any, b: any, dims: Vec3): number | null {
+  return exactOverlapWithBounds(a, b, dims);
+}
+
+type Bounds = ReturnType<typeof partBounds>;
+
+function exactOverlapWithBounds(a: any, b: any, dims: Vec3, aBounds?: Bounds, bBounds?: Bounds): number | null {
   const [dx, dy, dz] = dims;
   if (!(dx > 0) || !(dy > 0) || !(dz > 0)) return null;
   const rotA = Math.abs(Number(a?.rotationZDeg) || 0);
@@ -130,9 +136,9 @@ export function exactOverlapMm3(a: any, b: any, dims: Vec3): number | null {
     }
     return null;
   }
-  const cylinderInsideBox = (cyl: any, box: any): number | null => {
+  const cylinderInsideBox = (cyl: any, box: any, cachedBounds?: Bounds): number | null => {
     if (Math.abs(Number(box?.rotationZDeg) || 0) > 1e-9) return null;
-    const bounds = partBounds(box);
+    const bounds = cachedBounds ?? partBounds(box);
     const center = cyl.center as Vec3;
     const radius = Number(cyl.shape.radius) || 0;
     if (!(radius > 0)) return null;
@@ -141,8 +147,8 @@ export function exactOverlapMm3(a: any, b: any, dims: Vec3): number | null {
       center[1] - radius >= bounds.min[1] - 1e-9 && center[1] + radius <= bounds.max[1] + 1e-9;
     return inside ? Math.PI * radius * radius * dz : null;
   };
-  if (cylA && boxB) return cylinderInsideBox(a, b);
-  if (cylB && boxA) return cylinderInsideBox(b, a);
+  if (cylA && boxB) return cylinderInsideBox(a, b, bBounds);
+  if (cylB && boxA) return cylinderInsideBox(b, a, aBounds);
   return null;
 }
 
@@ -217,7 +223,7 @@ export interface ScreenOptions {
 export function screenInterference(geometry: any, options: ScreenOptions = {}): ScreenResult {
   const ignored = new Set(options.ignorePairs ?? []);
   const parts = Array.isArray(geometry?.parts) ? geometry.parts : [];
-  const boxes = parts.map((part: any) => ({ part, bounds: partBounds(part) }));
+  const boxes = parts.map((part: any) => ({ part, bounds: partBounds(part), volume: extentVolume(part) }));
   // 优先用生成器自己产出的 joints（几何=唯一事实来源）；
   // 老数据/外部 geometry 没有 joints 字段时，退回按命名规则的表，并在结果里标出来源。
   const generatorJoints = Array.isArray(geometry?.joints) ? geometry.joints : [];
@@ -259,8 +265,9 @@ export function screenInterference(geometry: any, options: ScreenOptions = {}): 
         }
         continue;
       }
-      if (ignored.has(jointKey(String(boxes[i].part.id), String(boxes[j].part.id)))) continue;
-      const declaration = declared.get(jointKey(String(boxes[i].part.id), String(boxes[j].part.id)));
+      const key = jointKey(String(boxes[i].part.id), String(boxes[j].part.id));
+      if (ignored.has(key)) continue;
+      const declaration = declared.get(key);
       // 声明为「只许贴合」的连接：穿模超过容差**仍要算 suspect**。
       // 之前只改了文案没改 kind，结果照样被当成 declared —— 等于没修。
       const penetration = Math.min(dx, dy, dz);
@@ -278,25 +285,18 @@ export function screenInterference(geometry: any, options: ScreenOptions = {}): 
       // 否则缸体×活塞杆会被算成「设计干涉」（这是本次评审误判 FAIL 的直接原因）。
       const mate = reason ? null : mateReason(iPart, jPart);
       const classification: ScreenKind = reason ? 'declared' : mate ? 'mate' : 'suspect';
-      const exact = exactOverlapMm3(iPart, jPart, [dx, dy, dz]);
+      const exact = exactOverlapWithBounds(iPart, jPart, [dx, dy, dz], a, b);
       const confirmation: ScreenConfirmation = exact === null ? 'aabb' : 'exact';
       const pairNote = suspectNote
         ?? mate
         ?? (confirmation === 'aabb' && classification === 'suspect'
           ? '只有包围盒依据（旋转件/斜穿件/过孔都可能误报），实体是否真的相交要另行复核'
           : undefined);
-      const iVolume = extentVolume(iPart);
-
-      const jVolume = extentVolume(jPart);
-      const mover = iVolume <= jVolume ? iPart : jPart;
-      const other = iVolume <= jVolume ? jPart : iPart;
-      const moverBounds = partBounds(mover);
-      const otherBounds = partBounds(other);
-      // 逐个下标取用会命中 noUncheckedIndexedAccess（number | undefined），摊平成数组再索引
-      const moverMin: number[] = [...moverBounds.min];
-      const moverMax: number[] = [...moverBounds.max];
-      const otherMin: number[] = [...otherBounds.min];
-      const otherMax: number[] = [...otherBounds.max];
+      const moveFirst = boxes[i].volume <= boxes[j].volume;
+      const mover = moveFirst ? iPart : jPart;
+      const other = moveFirst ? jPart : iPart;
+      const { min: moverMin, max: moverMax } = moveFirst ? a : b;
+      const { min: otherMin, max: otherMax } = moveFirst ? b : a;
       let bestAxis: 'x' | 'y' | 'z' = 'x';
       let bestDelta = Number.POSITIVE_INFINITY;
       (['x', 'y', 'z'] as const).forEach((axis, index) => {
@@ -348,31 +348,39 @@ export function screenInterference(geometry: any, options: ScreenOptions = {}): 
   pairs.sort((x, y) => (x.kind === y.kind ? y.overlapMm3 - x.overlapMm3 : x.kind === 'suspect' ? -1 : 1));
   // 「确认」的门槛：非配合的 suspect + 解析式精确 + 体积超过 1 mm³。
   // 只有这一档允许下游判 FAIL；confirmation='aabb' 的一律是 screen hit（待复核）。
-  const confirmedPairs = pairs.filter(
-    (pair) => pair.classification === 'suspect' && pair.confirmation === 'exact' && (pair.exactOverlapMm3 ?? 0) > CONFIRM_MIN_MM3
-  );
-  const screenPairs = pairs.filter((pair) => pair.classification === 'suspect' && !confirmedPairs.includes(pair));
-  const matePairs = pairs.filter((pair) => pair.classification === 'mate');
-  const declaredPairs = pairs.filter((pair) => pair.classification === 'declared');
-  // suspects 保留「非声明对」的旧口径（含 mate）：layout.ts / resolve.ts / widen.ts 靠它判
-  // 「还有没有要挪的」，配合面本来也在里面，语义不变；新的细分看 confirmed / screen / mates。
-  const suspects = pairs.filter((pair) => pair.kind !== 'declared').length;
-  const sum = (list: ScreenPair[], pick: (pair: ScreenPair) => number): number =>
-    Math.round(list.reduce((total, pair) => total + pick(pair), 0) * 10) / 10;
+  let confirmed = 0, screen = 0, mates = 0, declaredCount = 0;
+  let confirmedVolume = 0, screenVolume = 0, declaredVolume = 0;
+  // Accumulate in sorted order, as before, so floating-point rounding stays stable.
+  for (const pair of pairs) {
+    if (pair.classification === 'declared') {
+      declaredCount += 1;
+      declaredVolume += pair.exactOverlapMm3 ?? pair.overlapMm3;
+    } else if (pair.classification === 'mate') {
+      mates += 1;
+    } else if (pair.confirmation === 'exact' && (pair.exactOverlapMm3 ?? 0) > CONFIRM_MIN_MM3) {
+      confirmed += 1;
+      confirmedVolume += pair.exactOverlapMm3 ?? 0;
+    } else {
+      screen += 1;
+      screenVolume += pair.overlapMm3;
+    }
+  }
+  // Legacy suspects includes mates; layout and resolve depend on it.
+  const suspects = pairs.length - declaredCount;
   const undeclaredTouching = touching.filter((item) => !item.declared).length;
   return {
     mode: 'aabb',
     partCount: parts.length,
     pairs,
     count: pairs.length,
-    declared: declaredPairs.length,
-    mates: matePairs.length,
+    declared: declaredCount,
+    mates,
     suspects,
-    confirmed: confirmedPairs.length,
-    screen: screenPairs.length,
-    confirmedMm3: sum(confirmedPairs, (pair) => pair.exactOverlapMm3 ?? 0),
-    screenMm3: sum(screenPairs, (pair) => pair.overlapMm3),
-    declaredMm3: sum(declaredPairs, (pair) => pair.exactOverlapMm3 ?? pair.overlapMm3),
+    confirmed,
+    screen,
+    confirmedMm3: Math.round(confirmedVolume * 10) / 10,
+    screenMm3: Math.round(screenVolume * 10) / 10,
+    declaredMm3: Math.round(declaredVolume * 10) / 10,
     touching: touching.length,
     undeclaredTouching,
     touchingPairs: touching,

@@ -111,7 +111,7 @@ test('MCP 代理断开后，已知写工具走桌面路由、未分类写工具�
   await fallbackClient.connect(clientTransport);
   try {
     for (const name of ['apply_machine_design', 'future_write']) {
-      const result = await fallbackClient.callTool({ name, arguments: {} });
+      const result = await fallbackClient.callTool({ name, arguments: { operationId: 'fallback-write-operation-01' } });
       assert.equal(result.isError, true, name);
       const expectedCode = name === 'apply_machine_design'
         ? 'DESKTOP_NOT_RUNNING'

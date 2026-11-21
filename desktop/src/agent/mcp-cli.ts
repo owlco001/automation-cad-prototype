@@ -5,6 +5,7 @@ import { PackRegistry } from '../packs/registry.ts';
 import { AgentTools } from './tools.ts';
 import { buildMcpServer } from './mcp.ts';
 import { defaultUserDataDir, DesktopRpcProxy } from './mcp-proxy.ts';
+import { mcpRuntimeConfig } from '../../electron/edition.ts';
 
 function builtinPacksDir(): string {
   const candidates = [
@@ -17,7 +18,7 @@ function builtinPacksDir(): string {
 }
 
 async function main(): Promise<void> {
-  const userData = defaultUserDataDir();
+  const { identity, userDataDir: userData } = mcpRuntimeConfig(__dirname, defaultUserDataDir());
   const registry = new PackRegistry({
     builtinDir: builtinPacksDir(),
     userDir: join(userData, 'packs'),
@@ -30,7 +31,7 @@ async function main(): Promise<void> {
       name: 'automation-cad',
       version: process.env.npm_package_version || '0.1.0'
     },
-    { proxy: new DesktopRpcProxy({ userDataDir: userData }) }
+    { proxy: new DesktopRpcProxy({ userDataDir: userData, port: identity.rpcPort }) }
   );
   const transport = new StdioServerTransport();
   await server.connect(transport);

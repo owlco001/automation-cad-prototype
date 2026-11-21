@@ -1,0 +1,21 @@
+ratchets:
+  - id: layout-score-is-not-collision-count
+    path: desktop/src/machine/layout.ts
+    literal: Math.floor(bestCost / 10)
+    max_matches: 0
+    rationale: weighted cost cannot be decoded into overlap count
+  - id: undo-is-not-audit-offset
+    path: featuretree-service/store.mjs
+    literal: const target = this.revision - Math.max(1, steps)
+    max_matches: 0
+    rationale: audit revisions include undo and redo events
+  - id: no-global-tool-permit
+    path: desktop/src/agent/confirm-card.ts
+    literal: const sessionAllowed = new Set<string>()
+    max_matches: 0
+    rationale: tool-name permission cache crosses callers and projects
+  - id: no-duplicate-runtime-revision-snapshots
+    path: featuretree-service/store.mjs
+    literal: this.snapshots
+    max_matches: 0
+    rationale: edit checkpoints own runtime undo data; revision snapshots are read only by legacy migration

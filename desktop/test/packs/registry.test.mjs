@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { crc32 } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -189,6 +190,22 @@ test('manifest id 与目录名不一致时拒绝该包', async () => {
   assert.equal(packs[0].id, 'wrong-dir');
   assert.match(packs[0].error, /不一致/);
   assert.equal(registry().listParts().length, 0);
+});
+
+test('ZIP 哈希不符时未安装，修正后可用同一 ID 重试', async () => {
+  const pack = manifest('retry-pack');
+  const content = JSON.stringify(parts());
+  const archive = (label, hash) => zipPath(label, {
+    'manifest.json': { ...pack, partsSha256: hash },
+    'parts.json': content
+  });
+  const instance = registry();
+  await assert.rejects(instance.importZip(archive('bad-hash.zip', '0'.repeat(64))), /PACK_INTEGRITY_FAILED/);
+  assert.deepEqual(readdirSync(userDir), []);
+  assert.deepEqual(await instance.scan(), []);
+  const hash = createHash('sha256').update(content).digest('hex');
+  assert.equal((await instance.importZip(archive('valid-hash.zip', hash))).id, pack.id);
+  assert.equal(instance.listParts({ packId: pack.id }).length, 2);
 });
 
 test('导入包含 ../evil.txt 的 ZIP 会被拒绝且不落盘', async () => {

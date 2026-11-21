@@ -119,6 +119,25 @@ test('默认读取路径可用 fs.readFileSync spy 断言 parts 读取次数', a
   }
 });
 
+test('重复文本搜索复用规范化文本缓存，卸载后从新包内容重建', () => {
+  writePack(builtinDir, 'alpha-pack', { parts: [
+    { id: 'A1', model: '导轨A1', category: '导轨', vendor: '测试厂商', specs: { 型号说明: '精密滑块' } }
+  ], categories: ['导轨'] });
+  const counter = countingRegistry();
+  const first = counter.registry.listParts({ q: '精密滑块' });
+  assert.deepEqual(first.map(part => part.id), ['A1']);
+  assert.deepEqual(counter.registry.listParts({ q: '导轨a1' }).map(part => part.id), ['A1']);
+  assert.equal(counter.partsReads(), 1);
+
+  writeFileSync(join(builtinDir, 'alpha-pack', 'parts.json'), JSON.stringify([
+    { id: 'A2', model: 'NEW-A2', category: '导轨', vendor: '测试厂商', specs: { 型号说明: '新型滑块' } }
+  ]));
+  assert.equal(counter.registry.unloadPack('alpha-pack'), true);
+  assert.deepEqual(counter.registry.listParts({ q: '新型滑块' }).map(part => part.id), ['A2']);
+  assert.deepEqual(counter.registry.listParts({ q: '精密滑块' }), []);
+  assert.equal(counter.partsReads(), 2);
+});
+
 test('首次 listParts 才按需读取 parts.json', async () => {
   writePack(builtinDir, 'alpha-pack');
   const counter = countingRegistry();
@@ -195,14 +214,21 @@ test('packLoadMs 与 searchMs 为可观测的非负指标', () => {
   assert.equal(metrics.packCount, 1);
 });
 
-test('manifest 命中搜索只加载命中包', () => {
-  writePack(builtinDir, 'alpha-pack');
+test('manifest 命中不妨碍搜索其他包的型号和规格', () => {
+  writePack(builtinDir, 'alpha-pack', {
+    parts: [{ ...ALPHA_PARTS[0], model: 'beta-pack-model' }, { ...ALPHA_PARTS[1], specs: { 来源: 'beta-pack' } }]
+  });
   writePack(builtinDir, 'beta-pack', { parts: BETA_PARTS, categories: ['传感器'] });
-  const counter = countingRegistry();
-  const parts = counter.registry.listParts({ q: 'beta-pack' });
-  assert.equal(parts.length, 2);
-  assert.deepEqual(counter.registry.loadedPackIds(), ['beta-pack']);
-  assert.equal(counter.partsReads(), 1);
+  const q = 'beta-pack';
+  const fullScan = countingRegistry().registry.listParts().filter((part) => [
+    part.id, part.model, part.category, part.vendor ?? '', part.packId, part.packName,
+    ...Object.values(part.specs)
+  ].join(' ').toLocaleLowerCase('zh-CN').includes(q));
+  const parts = countingRegistry().registry.listParts({ q });
+  assert.deepEqual(parts, fullScan);
+  assert.deepEqual(parts.map((part) => [part.id, part.packId]), [
+    ['A1', 'alpha-pack'], ['SHARED', 'alpha-pack'], ['B1', 'beta-pack']
+  ]);
 });
 
 test('分类过滤先按 manifest.categories 排除未命中包', () => {

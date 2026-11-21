@@ -1,0 +1,78 @@
+slices:
+  - id: ft-transactions
+    type: implementation
+    status: done
+    findings: [F01, F02, F03]
+    owner: lead
+    touched_paths: [featuretree-service, docs/featuretree-contract.md]
+    deletion_targets: [revision-derived undo cursor, publish-before-persist path]
+    temp_artifacts: []
+    verification_commands: [node --test featuretree-service/transaction-tests.mjs, node featuretree-service/tests.mjs, node featuretree-service/store-tests.mjs, node featuretree-service/mcp-tests.mjs, node featuretree-service/multidoc-tests.mjs, node featuretree-service/persistence-tests.mjs]
+  - id: domain-inputs
+    type: implementation
+    status: done
+    findings: [F04, F08, F09, F10, F11]
+    owner: performance-data-review
+    task: task-1
+    temp_artifacts: []
+  - id: agent-contracts
+    type: implementation
+    status: done
+    findings: [F05, F06, F07]
+    owner: core-security-review
+    task: task-2
+    temp_artifacts: []
+  - id: material-ci
+    type: implementation
+    status: done
+    findings: [F12]
+    owner: tests-ci-review
+    task: task-3
+    temp_artifacts: []
+  - id: interaction-performance
+    type: implementation
+    status: done
+    owner: lead
+    touched_paths: [desktop/src/machine/clearance.ts, desktop/src/enclosure/canvas.ts, desktop/test/machine/clearance-performance.test.mjs, desktop/test/enclosure/drag.test.mjs, desktop/test-support/clearance-baseline.ts, desktop/test-support/clearance-fixture.mjs, desktop/scripts/bench-clearance.mjs]
+    deletion_targets: [per-axis repeated partBounds calls, pointermove synchronous storage writes]
+    temp_artifacts: []
+    verification_commands: [node scripts/bench-clearance.mjs 7, npm test, npm run build:ext]
+  - id: render-cleanup
+    type: implementation
+    status: done
+    owner: lead
+    touched_paths: [desktop/scripts/lib/owned-process.mjs, desktop/scripts/electron-run.mjs, desktop/scripts/machine-e2e.mjs, desktop/scripts/verify-render-cleanup.mjs, desktop/test-support/owned-process-fixture.mjs, desktop/test/scripts/owned-process.test.mjs, .github/workflows/ci.yml]
+    deletion_targets: [launcher-exit-only cleanup, unbounded CDP pending requests, launcher-only watchdog kill]
+    temp_artifacts: []
+    verification_commands: [node --test test/scripts/owned-process.test.mjs, node scripts/verify-render-cleanup.mjs, node --test --test-concurrency=4, npm run build:ext]
+  - id: compact-history
+    type: implementation
+    status: done
+    owner: lead
+    touched_paths: [featuretree-service/store.mjs, featuretree-service/storage-tests.mjs, featuretree-service/transaction-tests.mjs, desktop/scripts/bench-featuretree-history.mjs, docs/featuretree-contract.md, .github/workflows/ci.yml]
+    deletion_targets: [unused runtime revision snapshots, duplicate persisted snapshots field]
+    temp_artifacts: []
+    verification_commands: [node --test featuretree-service/storage-tests.mjs featuretree-service/transaction-tests.mjs, node scripts/bench-featuretree-history.mjs, node --test --test-concurrency=4, npm run build:ext]
+  - id: pack-search-cache
+    type: implementation
+    status: done
+    owner: lead
+    touched_paths: [desktop/src/packs/registry.ts, desktop/test/packs/lazy-loading.test.mjs, desktop/scripts/bench-pack-search.mjs]
+    deletion_targets: [per-query repeated part-field normalization]
+    temp_artifacts: []
+    verification_commands: [node --test test/packs/lazy-loading.test.mjs test/packs/registry.test.mjs test/packs/lifecycle.test.mjs, node scripts/bench-pack-search.mjs, npm test, npm run build:ext]
+  - id: interference-performance
+    type: implementation
+    status: done
+    owner: lead
+    touched_paths: [desktop/src/machine/interference.ts, desktop/test/machine/interference-equivalence.test.mjs, desktop/scripts/bench-interference.mjs]
+    deletion_targets: [per-hit repeated bounds, repeated confirmed-pair membership scans]
+    temp_artifacts: []
+    verification_commands: [node desktop/scripts/bench-interference.mjs, node --test --test-concurrency=4, npm run build:ext, git diff --check]
+  - id: convergence
+    type: convergence
+    status: proposed
+    dependencies: [ft-transactions, domain-inputs, agent-contracts, material-ci]
+    owner: lead
+    verification_commands: [npm test, npm run build:ext, git diff --check]
+    temp_artifacts: []

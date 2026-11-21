@@ -1,6 +1,6 @@
 // FeatureTree 文档存储：包络（revision / origin / history）+ 操作 + 乐观锁 + 原子事务。
 // 流程固定：校验 → 编译 → 重建钩子 → 发布新版本 → 通知订阅者；任一步失败则版本不变。
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -100,11 +100,13 @@ export class Store {
     this.doc = clone(initialDoc);
     this.revision = 0;
     this.history = [];
-    this.snapshots = [clone(this.doc)]; // snapshots[revision] = 该版本文档全文
     this.listeners = new Set();
     this.geometry = null;
-    // undo 不是终点：撤回的那一版必须能再“重做”回来。栈上限 50，避免无限长内存。
+    // Audit revisions are monotonic; editable history uses separate checkpoints.
+    this.undoStack = [];
     this.redoStack = [];
+    this.writeTail = Promise.resolve();
+    this.geometryKey = this.documentId;
     this.dataDir = options.dataDir || null;
     this.dataFile = this.dataDir ? join(this.dataDir, `${this.documentId}.json`) : null;
     const errs = validateDoc(this.doc);
@@ -119,33 +121,77 @@ export class Store {
     if (!this.dataFile || !existsSync(this.dataFile)) return false;
     const raw = await readFile(this.dataFile, 'utf8');
     const saved = JSON.parse(raw);
-    if (!saved || typeof saved !== 'object' || !saved.doc) return false;
+    if (!saved || typeof saved !== 'object') return false;
+    if (saved.formatVersion !== undefined && saved.formatVersion !== 2) {
+      throw new Error(`不支持的特征树存档版本：${saved.formatVersion}`);
+    }
+    if (!saved.doc) {
+      if (saved.formatVersion === 2) throw new Error('特征树存档缺少文档');
+      return false;
+    }
     const errs = validateDoc(saved.doc);
     if (errs.length) {
-      // 存档坏了不要静默覆盖：报出来，让调用方决定（这里保留种子树并记下原因）
+      if (saved.formatVersion === 2) throw new Error(`特征树存档校验失败：${errs.join('；')}`);
+      // Preserve legacy seed fallback; versioned archives fail closed above.
       this.restoreError = `存档校验失败，已回退种子树：${errs.join('；')}`;
       return false;
     }
-    this.doc = clone(saved.doc);
-    this.revision = Number.isInteger(saved.revision) ? saved.revision : 0;
-    this.history = Array.isArray(saved.history) ? saved.history : [];
-    this.snapshots = Array.isArray(saved.snapshots) && saved.snapshots.length
-      ? saved.snapshots.map((entry) => clone(entry))
-      : [clone(this.doc)];
-    if (!this.snapshots[this.revision]) this.snapshots[this.revision] = clone(this.doc);
+    if (saved.formatVersion === 2 && (saved.documentId !== this.documentId ||
+        !Number.isSafeInteger(saved.revision) || saved.revision < 0 ||
+        !Array.isArray(saved.history) || !Array.isArray(saved.undoStack) || !Array.isArray(saved.redoStack))) {
+      throw new Error('特征树存档元数据无效');
+    }
+    const doc = clone(saved.doc);
+    const revision = Number.isSafeInteger(saved.revision) && saved.revision >= 0 ? saved.revision : 0;
+    const history = Array.isArray(saved.history) ? clone(saved.history) : [];
+    let undoStack = [];
+    let redoStack = [];
+    if (Array.isArray(saved.undoStack) && Array.isArray(saved.redoStack)) {
+      undoStack = clone(saved.undoStack);
+      redoStack = clone(saved.redoStack);
+    } else {
+      // Revision snapshots only belong to the legacy reader. Modern runtime
+      // undo/redo uses edit checkpoints, so do not retain this second full copy.
+      const snapshots = Array.isArray(saved.snapshots) && saved.snapshots.length ? saved.snapshots : [doc];
+      for (const entry of history) {
+        if (!entry || typeof entry !== 'object') throw new Error('历史记录无效');
+        const beforeDoc = snapshots[entry.beforeRevision];
+        if (!beforeDoc) continue;
+        if (entry.operation === 'undo') {
+          const count = entry.undoSteps ?? Math.max(1, entry.beforeRevision - entry.undoTarget);
+          if (!Number.isSafeInteger(count) || count < 1) throw new Error('旧存档撤销步数无效');
+          undoStack.splice(Math.max(0, undoStack.length - count));
+          redoStack.push(clone(beforeDoc));
+        } else if (entry.operation === 'redo') {
+          redoStack.splice(Math.max(0, redoStack.length - (entry.redoSteps || 1)));
+          undoStack.push(clone(beforeDoc));
+        } else {
+          undoStack.push(clone(beforeDoc));
+          redoStack = [];
+        }
+      }
+    }
+    if ([...undoStack, ...redoStack].some((checkpoint) => !checkpoint || typeof checkpoint !== 'object' || validateDoc(checkpoint).length)) {
+      throw new Error('撤销/重做存档校验失败');
+    }
+    // Restore is a publication too: validate the whole candidate before touching
+    // live state, otherwise a damaged stack can leave a partially restored doc.
+    Object.assign(this, { doc, revision, history, undoStack, redoStack });
     return true;
   }
 
   /** 原子落盘：先写临时文件再 rename，避免写一半断电留下半个 JSON */
-  async persist() {
+  async persist(state = this) {
     if (!this.dataFile) return;
     await mkdir(dirname(this.dataFile), { recursive: true });
     const payload = JSON.stringify({
+      formatVersion: 2,
       documentId: this.documentId,
-      revision: this.revision,
-      doc: this.doc,
-      history: this.history,
-      snapshots: this.snapshots,
+      revision: state.revision,
+      doc: state.doc,
+      history: state.history,
+      undoStack: state.undoStack,
+      redoStack: state.redoStack,
       savedAt: nowIso()
     }, null, 2);
     const temp = `${this.dataFile}.tmp`;
@@ -153,9 +199,13 @@ export class Store {
     await rename(temp, this.dataFile);
   }
 
-  async init() {
+  init() {
+    return this.enqueue(() => this.initLocked());
+  }
+
+  async initLocked() {
     this.lastInitAttempt = Date.now();
-    const rb = await rebuild(this.doc, this.documentId);
+    const rb = await rebuild(this.doc, this.geometryKey);
     if (rb.ok) {
       this.geometry = rb.geometry;
       this.fingerprint = rb.fingerprint;
@@ -181,7 +231,7 @@ export class Store {
       kind: 'part',
       revision: this.revision,
       // 给 UI 用：能不能撤销/重做不用客户端自己猜
-      undoDepth: Math.max(0, this.revision),
+      undoDepth: this.undoStack.length,
       redoDepth: this.redoStack.length,
       doc: clone(this.doc),
       history: clone(this.history),
@@ -189,7 +239,56 @@ export class Store {
     };
   }
   onChange(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
-  emit(change) { for (const fn of this.listeners) fn(change); }
+  emit(change) {
+    for (const fn of this.listeners) {
+      try { fn(change); } catch (error) { console.error('[FEATURETREE_OBSERVER_FAILED]', error); }
+    }
+  }
+
+  enqueue(work) {
+    const result = this.writeTail.then(work);
+    this.writeTail = result.catch(() => {});
+    return result;
+  }
+
+  async releaseGeometry(key) {
+    const sidecar = process.env.FT_BUILD_URL;
+    if (!sidecar || !key) return;
+    try {
+      await fetch(`${sidecar.replace(/\/+$/, '')}/geometry?documentId=${encodeURIComponent(key)}`, {
+        method: 'DELETE', signal: AbortSignal.timeout(5000)
+      });
+    } catch (error) { console.error('[FEATURETREE_GEOMETRY_CLEANUP_FAILED]', error.message); }
+  }
+
+  async publish(draft, actor, operation, featureIds, undoStack, redoStack, extra = {}) {
+    const errs = validateDoc(draft);
+    if (errs.length) return { error: 'VALIDATION_FAILED', message: errs.join('；') };
+    // Build under a private key: GET geometry continues to serve the committed
+    // revision while rebuild/persistence are pending or fail.
+    const geometryKey = `${this.documentId}@${randomUUID()}`;
+    const rb = await rebuild(draft, geometryKey);
+    if (!rb.ok) {
+      await this.releaseGeometry(geometryKey);
+      return { error: 'REBUILD_FAILED', message: rb.message || '重建失败' };
+    }
+    draft.updatedAt = nowIso();
+    const revision = this.revision + 1;
+    const entry = { revision, beforeRevision: this.revision, timestamp: draft.updatedAt,
+      actor, operation, featureIds, fingerprint: rb.fingerprint,
+      ...(rb.geometry ? { geometry: rb.geometry } : {}), ...extra };
+    const next = { doc: draft, revision, history: [...this.history, entry],
+      undoStack, redoStack,
+      geometry: rb.geometry, fingerprint: rb.fingerprint, geometryKey };
+    try { await this.persist(next); }
+    catch (error) { await this.releaseGeometry(geometryKey); throw error; }
+    const oldKey = this.geometryKey;
+    Object.assign(this, next);
+    const env = this.envelope();
+    this.emit({ documentId: this.documentId, revision, changedFeatureIds: featureIds, actor });
+    await this.releaseGeometry(oldKey);
+    return env;
+  }
 
   // 核心写入口：fn(docDraft) 做修改；随后整树校验 + 重建，失败则丢弃草稿。
   async commit(expectedRevision, actor, operation, featureIds, fn) {
@@ -199,27 +298,16 @@ export class Store {
     const draft = clone(this.doc);
     const opErr = fn(draft);
     if (opErr) return { error: 'VALIDATION_FAILED', message: opErr };
-    const errs = validateDoc(draft);
-    if (errs.length) return { error: 'VALIDATION_FAILED', message: errs.join('；') };
-    const rb = await rebuild(draft, this.documentId);
-    if (!rb.ok) return { error: 'REBUILD_FAILED', message: rb.message || '重建失败' };
-    const before = this.revision;
-    this.doc = draft;
-    this.doc.updatedAt = nowIso();
-    this.revision += 1;
-    this.snapshots[this.revision] = clone(this.doc);
-    this.geometry = rb.geometry;
-    // 一旦发生新的写操作，原来的 redo 分支就作废（否则会重做出一棵不相干的树）
-    this.redoStack = [];
-    const entry = { revision: this.revision, beforeRevision: before, timestamp: this.doc.updatedAt, actor, operation, featureIds, fingerprint: rb.fingerprint, ...(rb.geometry ? { geometry: rb.geometry } : {}) };
-    this.history.push(entry);
-    const env = this.envelope();
-    this.emit({ documentId: env.documentId, revision: env.revision, changedFeatureIds: featureIds, actor });
-    await this.persist();
-    return env;
+    return this.publish(draft, actor, operation, featureIds,
+      [...this.undoStack, clone(this.doc)], []);
   }
 
-  async applyOperation(body) {
+  applyOperation(body) {
+    const request = clone(body);
+    return this.enqueue(() => this.applyOperationLocked(request));
+  }
+
+  async applyOperationLocked(body) {
     const { expectedRevision, actor = 'manual', operation } = body;
     const actorLabel = actor === 'agent' ? `agent:${body.agentId || 'unknown'}` : 'manual';
     switch (operation) {
@@ -315,67 +403,35 @@ export class Store {
     }
   }
 
-  async undo(expectedRevision, actor = 'manual', steps = 1) {
-    // undo 本身也是一次写操作：带 expectedRevision，经过校验与重建，产生新 revision；
-    // 历史不删除，undo 记录进 history，目标是 snapshots[revision - steps] 的全文。
-    if (expectedRevision !== this.revision) {
-      return { error: 'CONFLICT_STALE_REVISION', message: `版本过期：期望 ${expectedRevision}，当前 ${this.revision}`, current: this.envelope() };
-    }
-    const target = this.revision - Math.max(1, steps);
-    if (target < 0 || !this.snapshots[target]) return { error: 'NOT_FOUND', message: `没有可撤销到的版本：${target}` };
-    const restored = clone(this.snapshots[target]);
-    const errs = validateDoc(restored);
-    if (errs.length) return { error: 'VALIDATION_FAILED', message: errs.join('；') };
-    const rb = await rebuild(restored, this.documentId);
-    if (!rb.ok) return { error: 'REBUILD_FAILED', message: rb.message || '重建失败' };
-    const before = this.revision;
-    this.redoStack.push(clone(this.doc));
-    if (this.redoStack.length > 50) this.redoStack.shift();
-    this.doc = restored;
-    this.doc.updatedAt = nowIso();
-    this.revision += 1;
-    this.snapshots[this.revision] = clone(this.doc);
-    this.geometry = rb.geometry;
-    this.history.push({ revision: this.revision, beforeRevision: before, timestamp: this.doc.updatedAt, actor, operation: 'undo', featureIds: [], fingerprint: rb.fingerprint, undoTarget: target });
-    if (rb.geometry) this.history[this.history.length - 1].geometry = rb.geometry;
-    const env = this.envelope();
-    this.emit({ documentId: env.documentId, revision: env.revision, changedFeatureIds: [], actor });
-    await this.persist();
-    return env;
+  undo(expectedRevision, actor = 'manual', steps = 1) {
+    return this.enqueue(() => this.moveHistory('undo', expectedRevision, actor, steps));
   }
 
-  /**
-   * 重做：把最近一次 undo 撤回掉的文档放回来。
-   * 和 undo 一样走乐观锁 + 校验 + 重建，失败则版本与文档都不动。
-   * 新写操作会清空 redo 栈（分支历史不合并）。
-   */
-  async redo(expectedRevision, actor = 'manual', steps = 1) {
+  redo(expectedRevision, actor = 'manual', steps = 1) {
+    return this.enqueue(() => this.moveHistory('redo', expectedRevision, actor, steps));
+  }
+
+  async moveHistory(operation, expectedRevision, actor, steps) {
     if (expectedRevision !== this.revision) {
       return { error: 'CONFLICT_STALE_REVISION', message: `版本过期：期望 ${expectedRevision}，当前 ${this.revision}`, current: this.envelope() };
     }
-    const count = Math.max(1, Math.min(steps, this.redoStack.length));
-    if (!this.redoStack.length) {
-      return { error: 'REDO_EMPTY', message: '没有可重做的操作（redo 栈为空，或之后又发生了新的修改）' };
+    if (!Number.isSafeInteger(steps) || steps < 1) {
+      return { error: 'VALIDATION_FAILED', message: 'steps 必须是正整数' };
     }
-    // 连续重做多步时，最终落在倒数第 count 个快照上
-    const restored = clone(this.redoStack[this.redoStack.length - count]);
-    const errs = validateDoc(restored);
-    if (errs.length) return { error: 'VALIDATION_FAILED', message: errs.join('；') };
-    const rb = await rebuild(restored, this.documentId);
-    if (!rb.ok) return { error: 'REBUILD_FAILED', message: rb.message || '重建失败' };
-    const before = this.revision;
-    this.redoStack.splice(this.redoStack.length - count, count);
-    this.doc = restored;
-    this.doc.updatedAt = nowIso();
-    this.revision += 1;
-    this.snapshots[this.revision] = clone(this.doc);
-    this.geometry = rb.geometry;
-    const entry = { revision: this.revision, beforeRevision: before, timestamp: this.doc.updatedAt, actor, operation: 'redo', featureIds: [], fingerprint: rb.fingerprint, redoSteps: count };
-    if (rb.geometry) entry.geometry = rb.geometry;
-    this.history.push(entry);
-    const env = this.envelope();
-    this.emit({ documentId: env.documentId, revision: env.revision, changedFeatureIds: [], actor });
-    await this.persist();
-    return env;
+    const undoing = operation === 'undo';
+    const source = undoing ? this.undoStack : this.redoStack;
+    if (!source.length) return undoing
+      ? { error: 'NOT_FOUND', message: '没有可撤销的编辑' }
+      : { error: 'REDO_EMPTY', message: '没有可重做的操作（redo 栈为空，或之后又发生了新的修改）' };
+    if (undoing && steps > source.length) return { error: 'NOT_FOUND', message: `没有可撤销 ${steps} 步的编辑` };
+    const count = Math.min(steps, source.length);
+    const target = source.length - count;
+    const restored = clone(source[target]);
+    // A multi-step jump creates one inverse checkpoint, preserving the existing
+    // public steps contract. Audit revisions never serve as history cursors.
+    const undoStack = undoing ? this.undoStack.slice(0, target) : [...this.undoStack, clone(this.doc)];
+    const redoStack = undoing ? [...this.redoStack, clone(this.doc)].slice(-50) : this.redoStack.slice(0, target);
+    return this.publish(restored, actor, operation, [], undoStack, redoStack,
+      undoing ? { undoSteps: count } : { redoSteps: count });
   }
 }

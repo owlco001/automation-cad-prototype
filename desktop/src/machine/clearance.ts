@@ -38,9 +38,9 @@ export interface ClearanceResult {
 
 const AXES: Array<'x' | 'y' | 'z'> = ['x', 'y', 'z'];
 
-function gapOnAxis(left: any, right: any, axis: number): number {
-  const a = partBounds(left);
-  const b = partBounds(right);
+type Bounds = ReturnType<typeof partBounds>;
+
+function gapOnAxis(a: Bounds, b: Bounds, axis: number): number {
   // 分离量：>0 表示这个轴上有间隙，<0 表示重叠
   const forward = (b.min[axis] ?? 0) - (a.max[axis] ?? 0);
   const backward = (a.min[axis] ?? 0) - (b.max[axis] ?? 0);
@@ -58,6 +58,15 @@ export function screenClearance(geometry: any, options: { thresholdMm?: number }
   }
 
   const pairs: ClearancePair[] = [];
+  // Per-call lazy bounds avoid repeated geometry work without retaining stale
+  // data across edits. Laziness preserves the old skip behavior for ID-less
+  // and declared-connected parts.
+  const bounds = new Map<number, Bounds>();
+  const boundsAt = (index: number): Bounds => {
+    let value = bounds.get(index);
+    if (!value) { value = partBounds(parts[index]); bounds.set(index, value); }
+    return value;
+  };
   for (let i = 0; i < parts.length; i += 1) {
     for (let j = i + 1; j < parts.length; j += 1) {
       const left = parts[i];
@@ -68,7 +77,17 @@ export function screenClearance(geometry: any, options: { thresholdMm?: number }
       if (declared.has(`${leftId}|${rightId}`)) continue;
 
       // 三轴间隙：只要有一个轴分开了，两件就没重叠
-      const gaps = [gapOnAxis(left, right, 0), gapOnAxis(left, right, 1), gapOnAxis(left, right, 2)];
+      const a = boundsAt(i);
+      const b = boundsAt(j);
+      const dx = gapOnAxis(a, b, 0);
+      // Euclidean separation cannot be smaller than a positive axis gap.
+      // Reject distant pairs before allocating arrays or computing sqrt.
+      if (dx >= thresholdMm && dx > 0) continue;
+      const dy = gapOnAxis(a, b, 1);
+      if (dy >= thresholdMm && dy > 0) continue;
+      const dz = gapOnAxis(a, b, 2);
+      if (dz >= thresholdMm && dz > 0) continue;
+      const gaps = [dx, dy, dz];
       if (Math.max(...gaps) < 0) continue; // 有重叠 → 归干涉初筛管，不在这里重复报
 
       // AABB 之间的真实距离：只算分离轴，平方和开根。

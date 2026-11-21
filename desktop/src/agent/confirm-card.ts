@@ -4,8 +4,7 @@
 // 原来用 Electron 原生 dialog.showMessageBox 确认。原生模态框在无人值守、远程调试（CDP）时看不见也点不到，
 // 实测会把智能体卡在一个隐形窗口上十几分钟。这里改成渲染进程内的卡片：主进程发请求，卡片回答案。
 //
-// 选项：允许一次 / 本会话允许（同名工具不再问）/ 拒绝；120 秒不答复按拒绝处理（主进程超时）。
-// 「本会话允许」只活在这个渲染进程里，刷新或重开窗口即失效，不落盘。
+// 确认由主进程排队；每张卡只回答本次请求，不缓存许可。
 
 interface ConfirmRequest {
   id: string;
@@ -19,8 +18,8 @@ interface ConfirmRequest {
 }
 
 const STYLE_ID = 'agent-confirm-styles';
-const sessionAllowed = new Set<string>();
 let disposeListener: (() => void) | null = null;
+let activeCard: { id: string; dismiss(): void } | null = null;
 
 function ensureStyles(): void {
   if (document.getElementById(STYLE_ID)) return;
@@ -59,15 +58,15 @@ function escapeHtml(value: string): string {
   );
 }
 
-function reply(id: string, allow: boolean, remember = false): void {
+function reply(id: string, allow: boolean): void {
   const api = window.desktop?.agent;
   if (!api?.replyConfirmWrite) return;
-  void api.replyConfirmWrite({ id, allow, remember });
+  void api.replyConfirmWrite({ id, allow });
 }
 
 function showCard(request: ConfirmRequest): void {
   ensureStyles();
-  document.getElementById('acwConfirmMask')?.remove();
+  activeCard?.dismiss();
   const mask = document.createElement('div');
   mask.className = 'acw-confirm-mask';
   mask.id = 'acwConfirmMask';
@@ -87,20 +86,23 @@ function showCard(request: ConfirmRequest): void {
       <div class="acw-confirm-foot">
         <span class="acw-confirm-hint">120 秒不答复按拒绝处理</span>
         <button type="button" class="acw-confirm-btn danger" data-acw="deny">拒绝</button>
-        <button type="button" class="acw-confirm-btn" data-acw="session">本会话允许「${escapeHtml(request.tool)}」</button>
         <button type="button" class="acw-confirm-btn primary" data-acw="once">${request.steps && request.steps.length > 0 ? '全部允许' : '允许一次'}</button>
       </div>
     </div>`;
   document.body.appendChild(mask);
 
   let settled = false;
-  const close = (allow: boolean, remember = false): void => {
+  const dismiss = (): void => {
     if (settled) return;
     settled = true;
     mask.remove();
     document.removeEventListener('keydown', onKey, true);
-    if (allow && remember) sessionAllowed.add(request.tool);
-    reply(request.id, allow, remember);
+    if (activeCard?.id === request.id) activeCard = null;
+  };
+  const close = (allow: boolean): void => {
+    if (settled) return;
+    dismiss();
+    reply(request.id, allow);
   };
   const onKey = (event: KeyboardEvent): void => {
     if (event.key === 'Escape') {
@@ -109,11 +111,11 @@ function showCard(request: ConfirmRequest): void {
       close(false);
     }
   };
+  activeCard = { id: request.id, dismiss };
   document.addEventListener('keydown', onKey, true);
   mask.querySelector<HTMLElement>('[data-acw="deny"]')?.addEventListener('click', () => close(false));
   mask.querySelector<HTMLElement>('[data-acw="once"]')?.addEventListener('click', () => close(true));
-  mask.querySelector<HTMLElement>('[data-acw="session"]')?.addEventListener('click', () => close(true, true));
-  mask.querySelector<HTMLElement>('[data-acw="once"]')?.focus();
+  mask.querySelector<HTMLElement>('[data-acw="deny"]')?.focus();
 }
 
 /** 安装监听（幂等）。必须在智能体面板初始化后调用一次。 */
@@ -123,17 +125,12 @@ export function installAgentConfirmCard(): void {
   if (disposeListener) return;
   disposeListener = api.onConfirmWrite((payload) => {
     if (!payload || typeof payload !== 'object') return;
-    const request = payload as ConfirmRequest;
-    if (typeof request.id !== 'string' || typeof request.tool !== 'string') return;
-    if (sessionAllowed.has(request.tool)) {
-      reply(request.id, true);
-      return;
+    const request = payload as ConfirmRequest & { dismiss?: boolean };
+    if (typeof request.id !== 'string') return;
+    if (request.dismiss === true) {
+      if (activeCard?.id === request.id) activeCard.dismiss();
+    } else if (typeof request.tool === 'string') {
+      showCard({ ...request, summary: request.summary ?? '{}' });
     }
-    showCard({ ...request, summary: request.summary ?? '{}' });
   });
-}
-
-/** 只给测试/演示用：清空「本会话允许」。 */
-export function resetAgentConfirmSession(): void {
-  sessionAllowed.clear();
 }

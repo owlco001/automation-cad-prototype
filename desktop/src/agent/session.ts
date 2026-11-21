@@ -185,6 +185,7 @@ export interface AgentSessionVisionOptions {
 export type ConfirmWrite = AgentSessionOptions['confirmWrite'];
 
 export interface ConfirmWriteContext {
+  signal?: AbortSignal;
   /** 本轮用户文本命中了绕过确认意图；写工具仍必须由用户确认。 */
   bypass: boolean;
   phrase?: string;
@@ -1300,6 +1301,7 @@ export class AgentSession {
           allowed = await withAbort(
             this.confirmWrite(name, args, {
               bypass: bypass !== null,
+              ...(context.signal ? { signal: context.signal } : {}),
               ...(bypass ? { phrase: bypass.phrase, notice: BYPASS_CONFIRMATION_NOTICE } : {})
             }),
             context.signal

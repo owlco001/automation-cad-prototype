@@ -10,6 +10,7 @@ import { PackRegistry } from '../../src/packs/registry.ts';
 import { AgentTools } from '../../src/agent/tools.ts';
 import { buildMcpServer } from '../../src/agent/mcp.ts';
 import { DesktopRpcProxy, DesktopRpcUnavailableError } from '../../src/agent/mcp-proxy.ts';
+import { requiresWriteConfirmation } from '../../src/agent/router.ts';
 
 let sandbox;
 let registry;
@@ -110,7 +111,7 @@ test('MCP 代理把写工具原样转发到桌面 RPC 并返回结构化结果',
   try {
     const result = await connection.client.callTool({
       name: 'insert_component',
-      arguments: { partId: 'MXQ20-50', name: '定位气缸' }
+      arguments: { partId: 'MXQ20-50', name: '定位气缸', operationId: 'mcp-forward-write-01' }
     });
     assert.equal(result.isError, false);
     assert.equal(result.structuredContent.meshIndex, 2);
@@ -168,7 +169,7 @@ test('桌面不可达时写工具返回 DESKTOP_NOT_RUNNING 中文提示', async
   const connection = await connectedClient(new DesktopRpcProxy({ userDataDir: emptyUserData }));
   try {
     for (const name of ['insert_component', 'import_cad', 'undo_last', 'get_bom', 'run_interference_check', 'verify_plc_program', 'run_plc_generate', 'run_electrical_check', 'run_cost_report', 'export_cost_report']) {
-      const result = await connection.client.callTool({ name, arguments: {} });
+      const result = await connection.client.callTool({ name, arguments: requiresWriteConfirmation(name) ? { operationId: 'mcp-offline-write-01' } : {} });
       assert.equal(result.isError, true);
       assert.equal(result.structuredContent.code, 'DESKTOP_NOT_RUNNING');
       assert.equal(result.structuredContent.message, '请先启动 AutomationCAD 桌面应用，再调用该工具');

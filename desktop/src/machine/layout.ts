@@ -289,7 +289,8 @@ export function buildAdvice(geometry: any, clearanceMm: number): LayoutAdvice[] 
       item.actionable = false;
       continue;
     }
-    let bestCost = Number.POSITIVE_INFINITY;
+    let bestOverlapCount = Number.POSITIVE_INFINITY;
+    let bestStillShort = Number.POSITIVE_INFINITY;
     let bestAxis: 'x' | 'y' | 'z' = item.axis;
     let bestDirection: 1 | -1 = 1;
     const axes: Array<'x' | 'y' | 'z'> = [item.axis, ...(['x', 'y', 'z'] as const).filter((a) => a !== item.axis)];
@@ -305,10 +306,9 @@ export function buildAdvice(geometry: any, clearanceMm: number): LayoutAdvice[] 
         const trial = { ...geometry, parts: shifted };
         const overlapCount = screenInterference(trial).suspects;
         const stillShort = screenClearance(trial, { thresholdMm: clearanceMm }).count;
-        // 重叠比「还没推够」更糟：重叠按 10 倍计权
-        const cost = overlapCount * 10 + stillShort;
-        if (cost < bestCost) {
-          bestCost = cost;
+        if (overlapCount < bestOverlapCount || (overlapCount === bestOverlapCount && stillShort < bestStillShort)) {
+          bestOverlapCount = overlapCount;
+          bestStillShort = stillShort;
           bestAxis = axis;
           bestDirection = direction;
         }
@@ -316,8 +316,7 @@ export function buildAdvice(geometry: any, clearanceMm: number): LayoutAdvice[] 
     }
     item.axis = bestAxis;
     item.direction = bestDirection;
-    // bestCost 里重叠按 10 倍计权，这里把重叠部分还原出来
-    item.overlapsAfter = Math.floor(bestCost / 10);
+    item.overlapsAfter = bestOverlapCount;
     // 推哪儿都要撞（比如工位夹在两台机器之间）：不给按钮，避免「点了更糟」
     item.actionable = item.overlapsAfter === 0;
   }

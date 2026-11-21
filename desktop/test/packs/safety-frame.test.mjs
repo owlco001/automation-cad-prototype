@@ -247,13 +247,10 @@ test('packId 过滤只加载目标新包', () => {
   assert.deepEqual(frameRegistry.loadedPackIds(), ['frame-cn']);
 });
 
-test('搜索命中新型号时只加载对应包', () => {
-  const safetyRegistry = registry();
-  assert.deepEqual(safetyRegistry.listParts({ q: 'F3SG-4PGA0240-14' }).map((part) => part.id), ['F3SG-4PGA0240-14']);
-  assert.deepEqual(safetyRegistry.loadedPackIds(), ['safety-cn']);
-  const frameRegistry = registry();
-  assert.deepEqual(frameRegistry.listParts({ q: 'P10-4590' }).map((part) => part.id), ['APAS-P10-4590']);
-  assert.deepEqual(frameRegistry.loadedPackIds(), ['frame-cn']);
+test('全库搜索能命中新增型号', () => {
+  const instance = registry();
+  assert.deepEqual(instance.listParts({ q: 'F3SG-4PGA0240-14' }).map((part) => part.id), ['F3SG-4PGA0240-14']);
+  assert.deepEqual(instance.listParts({ q: 'P10-4590' }).map((part) => part.id), ['APAS-P10-4590']);
 });
 
 test('分类聚合只加载对应包', () => {

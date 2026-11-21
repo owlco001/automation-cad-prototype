@@ -1,5 +1,6 @@
 import type { Placement, PlateSpec } from '../enclosure/layout.ts';
 import { DEFAULTS } from './defaults.ts';
+import { parseCostPlacements } from './placements.ts';
 import {
   isUsablePricebookItem,
   type Pricebook,
@@ -137,7 +138,9 @@ function nonNegative(value: unknown, fallback: number): number {
 
 /** 金额统一保留两位小数，避免浮点尾差进入报告。 */
 export function roundMoney(value: number): number {
-  return Math.round((value + Number.EPSILON) * 100) / 100;
+  const rounded = Math.round((value + Number.EPSILON) * 100) / 100;
+  if (!Number.isFinite(rounded)) throw new Error('成本金额不是有限数');
+  return rounded;
 }
 
 function resolveNow(now: Date | string | number | undefined): number {
@@ -270,12 +273,11 @@ function assemblyMinutesFor(row: InternalRow): number {
 
 /** 相邻布置元件中心点的曼哈顿距离 × 折损系数，单根最少 0.3 m。 */
 export function estimateCableMeters(placements: readonly Placement[]): number {
-  if (placements.length < 2) return 0;
+  const checked = parseCostPlacements(placements, 'normalized');
   let meters = 0;
-  for (let index = 1; index < placements.length; index += 1) {
-    const previous = placements[index - 1];
-    const current = placements[index];
-    if (!previous || !current) continue;
+  for (let index = 1; index < checked.length; index += 1) {
+    const previous = checked[index - 1]!;
+    const current = checked[index]!;
     const dx = current.x + current.w / 2 - (previous.x + previous.w / 2);
     const dy = current.y + current.h / 2 - (previous.y + previous.h / 2);
     const distanceMm = Math.abs(dx) + Math.abs(dy);

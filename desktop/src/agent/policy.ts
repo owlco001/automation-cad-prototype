@@ -20,7 +20,8 @@ export const BYPASS_CONFIRMATION_NOTICE = '用户要求跳过确认，但写操�
 
 export type ConfirmAgentToolWrite = (
   name: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  signal?: AbortSignal
 ) => Promise<boolean> | boolean;
 
 export type ToolAuthorizationResult =
@@ -31,7 +32,8 @@ export type ToolAuthorizationResult =
 export async function authorizeAgentToolCall(
   name: string,
   args: Record<string, unknown>,
-  confirmWrite?: ConfirmAgentToolWrite
+  confirmWrite?: ConfirmAgentToolWrite,
+  signal?: AbortSignal
 ): Promise<ToolAuthorizationResult> {
   if (!requiresWriteConfirmation(name)) return { ok: true };
   if (typeof confirmWrite !== 'function') {
@@ -42,7 +44,7 @@ export async function authorizeAgentToolCall(
     };
   }
   try {
-    if (await confirmWrite(name, args) === true) return { ok: true };
+    if (await confirmWrite(name, args, signal) === true) return { ok: true };
     return { ok: false, code: 'USER_DENIED', message: '用户拒绝写操作，未执行。' };
   } catch {
     return { ok: false, code: 'CONFIRMATION_FAILED', message: '桌面确认失败，已拒绝写操作。' };

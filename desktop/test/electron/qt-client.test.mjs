@@ -226,6 +226,30 @@ test('headBytes：stderr 只留头 8KB', () => {
 
 // ---- launchQt：真实 spawn，不 mock ----
 
+test('launchQt：打包态缺少受信 Qt 资源时说明当前安装的限制且其余功能可用', async () => {
+  const resourcesPath = join(tempDir(), 'resources');
+  mkdirSync(resourcesPath, { recursive: true });
+  let spawned = false;
+  const result = await launchQt({
+    isPackaged: true,
+    resourcesPath,
+    appRoot: tempDir(),
+    env: { AUTOMATIONCAD_QT_EXE: process.execPath },
+    electronExePath: process.execPath,
+    spawnImpl: () => {
+      spawned = true;
+      throw new Error('不应执行环境变量指定的程序');
+    }
+  });
+  assert.equal(result.ok, false);
+  assert.equal(spawned, false, '打包态必须忽略环境变量中的可执行路径');
+  assert.match(result.message, /未找到受信资源/);
+  assert.match(result.message, /Qt 工作台暂不可用/);
+  assert.match(result.message, /其他桌面功能仍可继续使用/);
+  assert.match(result.message, /安装包含 Qt 资源的发行版/);
+  assert.ok(result.message.includes(join(resourcesPath, 'qt', 'automationcad-qt.exe')));
+});
+
 test('launchQt：exe 不存在返回 { ok:false, message }，不抛', async () => {
   const appRoot = tempDir();
   plantPipeline(appRoot);

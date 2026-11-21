@@ -211,6 +211,22 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._send(404, {"ok": False, "message": f"未知路径：{self.path}"})
 
+    def do_DELETE(self):
+        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(self.path)
+        if parsed.path != '/geometry':
+            self._send(404, {"ok": False, "message": "未知路径"})
+            return
+        document_id = (parse_qs(parsed.query).get('documentId') or [None])[0]
+        if not document_id:
+            self._send(400, {"ok": False, "message": "缺少 documentId"})
+            return
+        global LAST_SOLID
+        removed = SOLIDS.pop(document_id, None)
+        if removed is not None and LAST_SOLID is removed:
+            LAST_SOLID = None
+        self._send(200, {"ok": True})
+
     def do_POST(self):
         if self.path == "/interfere":
             # 干涉：两两求交集体积（mm³）。不是 AABB 初筛，是真实布尔交集。

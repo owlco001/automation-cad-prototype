@@ -153,7 +153,11 @@
 > 历史只追加不删除（`operation: undo | redo`）。撤销前的那一版压进 redo 栈（上限 50），
 > 一旦发生新的写操作 redo 栈清空（分支历史不合并，避免重做出一棵不相干的树）。
 > redo 栈空时返回 `409 REDO_EMPTY`，不假装成功。包络里带 `undoDepth` / `redoDepth`，UI 据此启停按钮，
-> 不用客户端自己猜。
+> 不用客户端自己猜。审计 `revision` 不充当撤销游标：独立的 undo/redo 检查点随工程一起落盘，连续撤销逐次返回更早的编辑。`steps` 必须是正整数；一次多步跳转只产生一个反向检查点。
+>
+> 设置 `FT_DATA_DIR` 后，存档使用 `formatVersion:2`：保留当前 `doc`、完整 `history` 以及 `undoStack` / `redoStack`，不再重复写入按审计版本编号的 `snapshots`。这仅是存储格式版本，特征树 `schemaVersion` 和 HTTP/MCP 包络不变。仍可读取未带格式版本的旧存档：已有检查点时优先使用，只有更旧的存档才从 `snapshots` 与历史重建检查点；下一次成功写入后保存为新格式。读取未来格式版本或损坏的检查点会拒绝恢复，原存档不覆盖，当前状态也不局部替换。`storage-tests.mjs` 覆盖以上迁移与失败路径。
+>
+> 事务发布：同文档修改与初始化串行执行，`expectedRevision` 在串行队列内检查。重建使用私有几何键，持久化新文档、审计与检查点成功后，才发布内存状态、切换 STL 来源并通知客户端；持久化失败保留旧状态与旧几何，不发变更事件。旧/失败几何通过 sidecar 的 `DELETE /geometry?documentId=…` 回收。`transaction-tests.mjs` 覆盖并发、连续撤销、落盘故障和几何发布隔离。
 
 > v0.1 实现：`featuretree-service/mcp.mjs`（stdio JSON-RPC）把契约服务暴露成六个 MCP 工具
 > `ft_get_tree` / `ft_update_params` / `ft_set_suppressed` / `ft_delete_feature` / `ft_undo` / `ft_list_revisions`

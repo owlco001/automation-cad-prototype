@@ -222,6 +222,22 @@ test('线缆公式：相邻元件中心曼哈顿距离 × 1.35，单根最少 0.
   assert.equal(report.extras.duct, 61.6);
 });
 
+test('拒绝非法布局坐标和尺寸，不生成不完整报价', () => {
+  const valid = { x: 0, y: 0, w: 10, h: 10 };
+  for (const invalid of [{}, null, { ...valid, x: '2' }, { ...valid, y: Infinity }, { ...valid, w: -1 }]) {
+    assert.throws(() => run({ placements: [valid, invalid] }), /placements\[1\]/);
+  }
+  assert.throws(() => run({ placements: {} }), /placements 必须是数组/);
+  assert.throws(() => run({ placements: [{}] }), /placements\[0\]/);
+});
+
+test('拒绝有限输入运算溢出后的非有限报价', () => {
+  assert.throws(() => run({
+    bom: [{ partId: 'PART-QF', name: 'QF', qty: 2 }],
+    overrides: { 'PART-QF': Number.MAX_VALUE }
+  }), /金额/);
+});
+
 test('无布置数据时给出线缆估算告警', () => {
   const report = run({ bom: [{ partId: 'PART-QF', name: 'QF', qty: 1 }] });
   assert.ok(report.warnings.includes('无布置数据，无法估算线缆'));

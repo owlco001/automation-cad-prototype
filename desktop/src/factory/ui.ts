@@ -1,4 +1,5 @@
 import type { TagNode, TagValue } from './types';
+import { loadFactoryStationView } from './station-view.ts';
 import {
   buildEntryButton,
   createDrawer,
@@ -129,9 +130,8 @@ function cssEscape(value: string): string {
   return value.replace(/["\\]/g, '\\$&');
 }
 
-function renderStations(nodes: TagNode[]): void {
+function renderStations(stations: TagNode[]): void {
   if (!elements) return;
-  const stations = nodes.filter((node) => node.kind === 'station' || (node.children && node.children.length > 0));
   if (stations.length === 0) {
     elements.stations.innerHTML = '<div class="acp-empty">适配器已连接，但没有可浏览的工位/点位。</div>';
     return;
@@ -161,24 +161,11 @@ function tagRow(tag: TagNode): string {
 async function refreshStations(): Promise<void> {
   const api = desktop();
   if (!api || !elements) return;
-  const result = await api.factory.browse();
-  if (!result.ok) {
-    setStatus(result.message ?? '浏览点位失败', 'error');
-    return;
-  }
-  renderStations(result.data ?? []);
-  const ids: string[] = [];
-  for (const station of result.data ?? []) {
-    for (const tag of station.children ?? []) ids.push(tag.id);
-  }
-  if (ids.length > 0) {
-    const read = await api.factory.readTags(ids);
-    if (read.ok && read.data) {
-      for (const value of Object.values(read.data)) updateTagValue(value);
-    }
-    const subscribed = await api.factory.subscribe(ids);
-    if (!subscribed.ok) setStatus(subscribed.message ?? '订阅点位失败', 'error');
-  }
+  await loadFactoryStationView(api.factory, {
+    renderStations,
+    updateTagValue,
+    showError: (message) => setStatus(message, 'error')
+  });
 }
 
 async function connect(): Promise<void> {

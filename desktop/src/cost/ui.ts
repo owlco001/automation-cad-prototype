@@ -18,6 +18,7 @@ import {
   type DrawerHandle
 } from '../ui/panels';
 import { computeCost, type CostBomRow, type CostInput, type CostReport } from './engine.ts';
+import { parseCostPlacements } from './placements.ts';
 import { readListResult } from '../agent/trim.ts';
 import { isUsablePricebookItem, validatePricebook, type Pricebook } from './pricebook.ts';
 import { costReportCsv, describeCost, money, renderCostReportHtml } from './report.ts';
@@ -350,7 +351,7 @@ function parseBomPayload(text: string): Partial<CostInput> {
   if (!Array.isArray(source.bom)) throw new Error('BOM 对象必须含 bom 数组');
   assertBomRowCount(source.bom.length);
   const payload: Partial<CostInput> = { bom: source.bom as CostBomRow[] };
-  if (Array.isArray(source.placements)) payload.placements = source.placements as NonNullable<CostInput['placements']>;
+  if (source.placements !== undefined) payload.placements = parseCostPlacements(source.placements);
   if (typeof source.plate === 'object' && source.plate !== null) payload.plate = source.plate as NonNullable<CostInput['plate']>;
   if (typeof source.plc === 'object' && source.plc !== null) payload.plc = source.plc as NonNullable<CostInput['plc']>;
   if (typeof source.options === 'object' && source.options !== null) payload.options = source.options as NonNullable<CostInput['options']>;

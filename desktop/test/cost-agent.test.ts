@@ -130,6 +130,16 @@ test('run_cost_report：缺价格簿 / 缺 BOM 给出可操作的中文错误', 
   assert.equal(emptyBom.code, 'NO_BOM');
 });
 
+test('run_cost_report：点位省略宽高时仍按坐标估算线缆', () => {
+  const result = runCostTool({
+    bom: [{ partId: 'PART-QF', name: 'QF', qty: 1 }],
+    pricebook: fixture,
+    placements: [{ x: 0, y: 0 }, { x: 1000, y: 0 }],
+    now: NOW
+  });
+  assert.ok(Number.isFinite(result.extras.wire) && result.extras.wire > 0);
+});
+
 test('run_cost_report：非法入参逐项定位到行号/字段', () => {
   const cases: Array<{ args: Record<string, unknown>; match: RegExp }> = [
     { args: { bom: 'PART-QF' }, match: /bom 必须是数组/ },

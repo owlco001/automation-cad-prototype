@@ -1477,6 +1477,8 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
           ? (confirmContext.notice ?? BYPASS_CONFIRMATION_NOTICE)
           : '';
         return await requestWriteConfirmation(window, {
+          trustedUiPath: context.trustedUiPath,
+          ...(confirmContext?.signal ? { signal: confirmContext.signal } : {}),
           tool: name,
           args,
           detail: bypassNotice ? `该操作会修改当前装配体。${bypassNotice}。` : '该操作会修改当前装配体。',
@@ -2085,6 +2087,8 @@ export function registerAgentChatIpc(context: AgentChatIpcContext): void {
         if (!window || window.isDestroyed()) return false;
         // 多步计划同样走页面卡片（原生对话框在无人值守/远程调试下点不到）
         return await requestWriteConfirmation(window, {
+          trustedUiPath: context.trustedUiPath,
+          signal: controller.signal,
           tool: `计划 · ${request.steps.length} 步`,
           args: request.steps.map((step, index) => `${index + 1}. ${step.tool} ${JSON.stringify(step.args)}`),
           detail: request.message,

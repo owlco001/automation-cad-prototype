@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { scanSyncSubprocessSites } from './sync-subprocess-scan.mjs';
+import { screenInterference } from '../../src/machine/interference.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(here, '..', '..');
@@ -514,41 +515,36 @@ test('工位级建议：只有跨工位的间距问题才可能给建议', { tim
   assert.ok(four.suspects > 0);
   assert.equal((four.advice ?? []).length, 0, '没有间距问题时不该硬凑建议');
 
-  // 六工位 40 mm：59 处间距问题，全是跨工位，且每条推完都会撞 → actionable=false
+  // 六工位 40 mm：应当有跨工位的间距建议；可执行性由下面的几何重放校验。
   const six = (await heavyJson(['--brief', SIX_BRIEF, '--with-geometry', '--layout-compliance', '40'])).geometry.layoutCompliance;
   assert.ok(six.advice.length > 0);
   assert.ok(six.advice.every((item) => item.intraScope === false), '六工位应当全是跨工位问题');
-  assert.ok(six.advice.every((item) => item.actionable === false), '这台机器推哪都撞，不应有可执行建议');
-  assert.ok(six.advice.every((item) => item.overlapsAfter > 0), '要给出预计会撞几对');
 });
 
 test('建议的可执行性：actionable 只给「跨工位且推完不撞」的条目', { timeout: 300_000 }, async () => {
-  const brief = SIX_BRIEF;
-  const read = async (threshold) => {
-    const document = await heavyJson(['--brief', brief, '--with-geometry', '--layout-compliance', String(threshold)]);
-    return document.geometry.layoutCompliance;
-  };
-
   for (const threshold of [35, 40]) {
-    const layout = await read(threshold);
-    assert.ok(layout.advice.length > 0, `${threshold} mm 应当有建议`);
-    for (const item of layout.advice) {
-      // 三条互相印证：内部问题不可执行；三轴两向都撞的也不可执行
+    const { geometry } = await heavyJson(['--brief', SIX_BRIEF, '--with-geometry', '--layout-compliance', String(threshold)]);
+    const { advice } = geometry.layoutCompliance;
+    assert.ok(advice.length > 0, `${threshold} mm 应当有建议`);
+    for (const item of advice) {
       if (item.intraScope) {
         assert.equal(item.actionable, false, `${item.scope} 是工位内部问题，不该可执行`);
-      } else {
-        assert.equal(item.actionable, item.overlapsAfter === 0,
-          `${item.scope} 的 actionable 与 overlapsAfter=${item.overlapsAfter} 不一致`);
+        continue;
       }
-      assert.ok(item.overlapsAfter >= 0);
+      const axis = ['x', 'y', 'z'].indexOf(item.axis);
+      assert.ok(axis >= 0, `无效轴向：${item.axis}`);
+      assert.ok(item.direction === 1 || item.direction === -1, `无效方向：${item.direction}`);
+      assert.ok(Number.isFinite(item.shortByMm) && item.shortByMm > 0, `无效位移：${item.shortByMm}`);
+      const parts = geometry.parts.map((part) => part.id.split('-')[0] === item.scope
+        ? { ...part, center: part.center.map((value, index) => index === axis ? value + item.direction * item.shortByMm : value) }
+        : part);
+      assert.ok(parts.some((part, index) => part !== geometry.parts[index]), `没有移动 ${item.scope} 的零件`);
+      const suspects = screenInterference({ ...geometry, parts }).suspects;
+      const label = `${threshold} mm ${item.scope} 移动后的干涉初筛`;
+      assert.equal(item.overlapsAfter, suspects, label);
+      assert.equal(item.actionable, suspects === 0, label);
     }
   }
-
-  // 这台机器在两个阈值下都推不出「零代价」的整站挪：应当如实说「往哪推都会撞」
-  const forty = await read(40);
-  assert.ok(forty.advice.filter((item) => !item.intraScope).every((item) => item.actionable === false),
-    '40 mm 下这台六工位机器不该有可执行建议');
-  assert.ok(forty.advice.some((item) => item.overlapsAfter > 0), '应当报出「推哪都撞」的预计对数');
 });
 
 test('CLI 子进程到点被硬杀（真正的闸门在子进程上，不在 {timeout}）', () => {
