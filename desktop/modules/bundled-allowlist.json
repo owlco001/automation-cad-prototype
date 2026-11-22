@@ -4,7 +4,6 @@
   "bundledInCore": [
     "agent.resume",
     "plcgen",
-    "elec.validation",
     "commission.io-test",
     "cad.parametric-import",
     "parametric.history",

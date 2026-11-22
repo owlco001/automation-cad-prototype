@@ -31,7 +31,7 @@ import {
   restoreEnclosurePlacement,
   updateEnclosurePlacement
 } from './enclosure/canvas';
-import { initElecCheckPanel } from './elec/ui';
+import type { ElecCheckPanelHandle } from './elec/ui';
 import type { CostPanelHandle } from './cost/ui';
 import type { PlcGenUiHandle } from './plcgen/ui';
 import { MODULE_API_VERSION, createModuleManager, type KeyValueStorage, type ModuleStatus } from './modules/registry';
@@ -147,6 +147,10 @@ let parametricImportModuleEnabled = false;
 let parametricHistoryModuleEnabled = false;
 let drawingsModuleEnabled = false;
 let drawingsUi: DrawingsUiHandle | null = null;
+let elecValidationModuleEnabled = false;
+let elecCheckPanel: ElecCheckPanelHandle | null = null;
+let elecCheckPanelLoad: Promise<void> | null = null;
+let elecCheckPanelInitOptions: { enabled: boolean } = { enabled: false };
 let costEstimationModuleEnabled = false;
 let costPanel: CostPanelHandle | null = null;
 let costPanelLoad: Promise<void> | null = null;
@@ -1016,6 +1020,11 @@ interface CostChunkExports {
   initCostPanel: CostInit;
 }
 
+type ElecCheckInit = typeof import('./elec/ui.ts')['initElecCheckPanel'];
+interface ElecChunkExports {
+  initElecCheckPanel: ElecCheckInit;
+}
+
 let moduleChunkLoader: ModuleChunkLoader | null = null;
 
 /**
@@ -1057,7 +1066,9 @@ function getModuleChunkLoader(): ModuleChunkLoader | null {
       ? { enabled: drawingsModuleEnabled, dependencies: ['core', 'cad.parametric-import'] }
       : id === 'cost.estimation'
         ? { enabled: costEstimationModuleEnabled, dependencies: ['core'] }
-        : null,
+        : id === 'elec.validation'
+          ? { enabled: elecValidationModuleEnabled, dependencies: ['core'] }
+          : null,
     isEnabled: (id) => id === 'core' ? true : id === 'cad.parametric-import' ? parametricImportModuleEnabled : false
   });
   return moduleChunkLoader;
@@ -1179,6 +1190,83 @@ function mountCostPanel(): void {
       showCostPanelNote(`成本估算模块未加载：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       costPanelLoad = null;
+    }
+  })();
+}
+
+/**
+ * 电气校验入口所在位置的状态说明。
+ *
+ * 分块不可用、模块关闭或 API 不匹配时，入口按钮根本不会出现；这里在顶栏原位显示
+ * 原因（含失败码）并允许点击重试，避免「点了没反应」。
+ */
+function showElecCheckPanelNote(message: string): void {
+  const existing = document.getElementById('elecCheckPanelNote');
+  if (existing && !(existing instanceof HTMLButtonElement)) existing.remove();
+  const reusable = existing instanceof HTMLButtonElement ? existing : null;
+  const note = reusable ?? document.createElement('button');
+  if (!reusable) {
+    note.id = 'elecCheckPanelNote';
+    note.type = 'button';
+    note.className = 'acp-pill is-warn';
+    note.setAttribute('role', 'status');
+    note.setAttribute('aria-live', 'polite');
+    note.style.cursor = 'pointer';
+    document.querySelector<HTMLElement>('.tb-right')?.appendChild(note);
+  }
+  note.textContent = message;
+  note.title = `${message}（点击重试）`;
+  note.onclick = () => {
+    mountElecCheckPanel();
+  };
+}
+
+function clearElecCheckPanelNote(): void {
+  document.getElementById('elecCheckPanelNote')?.remove();
+}
+
+async function loadElecCheckPanelChunk(): Promise<void> {
+  const loader = getModuleChunkLoader();
+  if (!loader) {
+    showElecCheckPanelNote('电气校验模块未加载（CHUNK_BRIDGE_UNAVAILABLE）：当前桌面外壳不提供模块分块。');
+    return;
+  }
+  const loaded = await loader.load('elec.validation');
+  if (!loaded.ok) {
+    showElecCheckPanelNote(`电气校验模块未加载（${loaded.code}）：${loaded.message}`);
+    return;
+  }
+  const exports = loaded.exports as ElecChunkExports;
+  if (typeof exports.initElecCheckPanel !== 'function') {
+    showElecCheckPanelNote('电气校验模块版本不匹配（CHUNK_EXPORTS_MISSING）：分块没有提供初始化入口。');
+    return;
+  }
+  if (!elecValidationModuleEnabled) {
+    showElecCheckPanelNote('电气校验模块已关闭（MODULE_DISABLED）：可在模块设置中重新启用。');
+    return;
+  }
+  clearElecCheckPanelNote();
+  // 与迁出前完全相同的 options：以启动时读到的模块开关态建面板，随后由当前开关态接管。
+  elecCheckPanel = exports.initElecCheckPanel(elecCheckPanelInitOptions);
+  elecCheckPanel?.setEnabled(elecValidationModuleEnabled);
+}
+
+function mountElecCheckPanel(): void {
+  if (elecCheckPanel) {
+    elecCheckPanel?.setEnabled(elecValidationModuleEnabled);
+    return;
+  }
+  if (elecCheckPanelLoad) return;
+  elecCheckPanelLoad = (async () => {
+    try {
+      await loadElecCheckPanelChunk();
+    } catch (error) {
+      console.error('[modules] elec.validation 分块加载失败', error);
+      showElecCheckPanelNote(
+        `电气校验模块未加载（CHUNK_LOAD_FAILED）：${error instanceof Error ? error.message : String(error)}`
+      );
+    } finally {
+      elecCheckPanelLoad = null;
     }
   })();
 }
@@ -4500,7 +4588,7 @@ function init(): void {
     setItem: (key, value) => window.localStorage.setItem(key, value)
   };
   const moduleManager = createModuleManager(moduleStorage);
-  const elecCheckPanel = initElecCheckPanel({ enabled: moduleManager.getStatus('elec.validation').enabled });
+  elecCheckPanelInitOptions = { enabled: moduleManager.getStatus('elec.validation').enabled };
   const initialCostEnabled = moduleManager.getStatus('cost.estimation').enabled;
   costPanelInitOptions = { enabled: !window.desktop && initialCostEnabled };
   const updatePanel = initUpdatePanel();
@@ -4562,13 +4650,22 @@ function init(): void {
     try {
       const accepted = window.desktop?.modules.syncElecValidationEnabled(desiredEnabled);
       const enabled = desiredEnabled && (!window.desktop || accepted === true);
-      elecCheckPanel.setEnabled(enabled);
+      elecValidationModuleEnabled = enabled;
+      elecCheckPanel?.setEnabled(enabled);
       if (window.desktop && accepted !== true) {
         console.error('[modules] 主进程未接受 elec.validation 状态；电气校验保持关闭');
       }
     } catch (error) {
-      elecCheckPanel.setEnabled(false);
+      elecValidationModuleEnabled = false;
+      elecCheckPanel?.setEnabled(false);
       console.error('[modules] elec.validation 状态同步失败；电气校验保持关闭', error);
+    }
+    if (elecValidationModuleEnabled) {
+      mountElecCheckPanel();
+    } else if (elecCheckPanel) {
+      clearElecCheckPanelNote();
+    } else {
+      showElecCheckPanelNote('电气校验模块已关闭（MODULE_DISABLED）：可在模块设置中重新启用。');
     }
   };
   const publishPlcSyncState = (states: ModuleStatus[]): void => {

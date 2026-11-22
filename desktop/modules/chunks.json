@@ -8,6 +8,10 @@
     "cost.estimation": {
       "entry": "src/modules/chunks/cost-estimation.ts",
       "coreMustNotContain": "costDrawer"
+    },
+    "elec.validation": {
+      "entry": "src/modules/chunks/elec-validation.ts",
+      "coreMustNotContain": "elecCheckPdf"
     }
   }
 }
