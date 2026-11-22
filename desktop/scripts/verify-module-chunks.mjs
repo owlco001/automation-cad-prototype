@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ModuleChunkReader } from '../electron/module-chunks.ts';
-import { MODULE_API_VERSION } from '../src/modules/registry.ts';
+import { MODULE_API_VERSION, MODULE_REGISTRY } from '../src/modules/registry.ts';
 import { apiCompatible, validateManifest } from '../src/modules/chunk-manifest.ts';
 
 const desktopRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -46,6 +46,26 @@ if (!loaded.ok) {
       coreText = readFileSync(corePath, 'utf8');
     } catch {
       problems.push(`核心包不可读（先跑 build:ext）：${corePath}`);
+    }
+    // 迁移进度门禁：每个可选模块要么已分块，要么显式登记为「仍在核心包」。
+    // 新模块不加登记就进来 → 这里失败，避免"顺手塞进核心包"再次发生。
+    try {
+      const allow = JSON.parse(readFileSync(join(desktopRoot, 'modules', 'bundled-allowlist.json'), 'utf8'));
+      const allowlisted = Array.isArray(allow.bundledInCore) ? allow.bundledInCore : [];
+      const optional = MODULE_REGISTRY.filter((module) => module.kind === 'optional').map((module) => module.id);
+      const chunked = checked.manifest.chunks.map((entry) => entry.id);
+      for (const id of optional) {
+        if (!chunked.includes(id) && !allowlisted.includes(id)) {
+          problems.push(`可选模块既未分块也未登记到 modules/bundled-allowlist.json：${id}`);
+        }
+      }
+      for (const id of allowlisted) {
+        if (!optional.includes(id)) problems.push(`白名单里的模块不存在或不是可选模块：${id}`);
+        if (chunked.includes(id)) problems.push(`模块已迁出核心包，应从白名单删除：${id}`);
+      }
+      console.log(`MODULE_CHUNKS_PROGRESS chunked=${chunked.length}/${optional.length} stillInCore=${allowlisted.length}`);
+    } catch (error) {
+      problems.push(`分块迁移白名单不可读：${error instanceof Error ? error.message : String(error)}`);
     }
     for (const [id, marker] of Object.entries(markers)) {
       if (coreText.includes(marker)) problems.push(`${id} 的代码仍在核心包里（命中 ${marker}）`);

@@ -13,6 +13,10 @@
 - Measured at 1000 edits: full envelope 182,075 B → light 302 B (99.8% smaller); a 50-entry page is 9,045 B.
 - New behaviour test `history-read-tests.mjs` (7 cases) plus all existing FeatureTree acceptance (transaction/storage/store/HTTP 35/MCP/multi-doc/persistence) pass.
 
+## Latest: chunk migration ratchet
+- `desktop/modules/bundled-allowlist.json` records optional modules still inside the core bundle. `npm run modules:verify` now fails when an optional module is neither chunked nor allowlisted, when an allowlisted module disappears, or when an already-chunked module is still listed. It also prints `MODULE_CHUNKS_PROGRESS chunked=1/12 stillInCore=11`.
+- Guarded by `test/modules/bundled-allowlist.test.mjs`; full suite passes with no owned-process survivors.
+
 ## Latest: first module moved to a chunk (drawings.techdraw)
 - The renderer UI of `drawings.techdraw` is no longer statically imported by `extension.ts`; it ships as `dist/modules/drawings.techdraw.js` and is loaded on first mount of the parametric drawer through the verified loader.
 - Delivery path: preload `window.desktop.moduleChunks` -> main `modules:manifest` / `modules:chunk` (trusted main-window main-frame only, ids from the manifest only) -> `ModuleChunkReader` verifies bytes+sha256 -> renderer loader re-verifies and executes a classic script that self-registers.

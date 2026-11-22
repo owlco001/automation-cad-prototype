@@ -51,6 +51,16 @@ globalThis.__cadRegisterModuleChunk({ id: '<module id>', apiVersion: 1, exports:
 - 主进程读取器尚未通过 IPC 暴露给渲染层，因此**本切片没有新增渲染层能力面**；
   接线时必须连同 preload 白名单与权限一起评审。
 
+## 迁移进度门禁
+
+`desktop/modules/bundled-allowlist.json` 列出**尚未迁出核心包**的可选模块。`npm run modules:verify` 会在三种情况下失败：
+
+1. 某个可选模块既没有分块、也没登记在白名单里（新模块不能默认塞进核心包）；
+2. 白名单里的模块已经不存在或已被分块（必须同步删除条目）；
+3. 分块配置里出现了非可选模块。
+
+同时会打印 `MODULE_CHUNKS_PROGRESS chunked=<已迁出>/<可选模块总数> stillInCore=<剩余>`，迁移进度是可核对的，而不是口头描述。当前：1/12。
+
 ## 尚未完成（下一批切片）
 
 1. **移出第一个真实模块**：把某个可选模块的实现从 `src/extension.ts` 的静态依赖里搬进
