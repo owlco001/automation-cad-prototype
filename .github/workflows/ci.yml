@@ -996,9 +996,21 @@ jobs:
         run: npm ci
       - name: 构建扩展（smoke 需要 dist/）
         run: npm run build:ext
-      # 分块清单与产物必须逐字节一致；默认配置为空，这里同时守住「探针/测试分块没被发出去」
+      # 分块清单与产物必须逐字节一致；生产配置只声明真实模块，这里同时守住「探针/测试分块没被发出去」
+      # 迁移进度要能在 CI 页面上直接看到，而不是只埋在本步日志里：门禁脚本会打印
+      # `MODULE_CHUNKS_PROGRESS chunked=N/M stillInCore=K`，这里把它同时回显到 job summary。
+      # 只做展示，不参与判定 —— 红绿仍由 `npm run modules:verify` 的退出码决定。
       - name: 校验模块分块清单与哈希
-        run: npm run modules:verify
+        run: |
+          set -o pipefail
+          npm run modules:verify 2>&1 | tee /tmp/modules-verify.log
+          {
+            echo '### 模块分块迁移进度'
+            echo '```'
+            grep -E '^MODULE_CHUNKS_PROGRESS ' /tmp/modules-verify.log \
+              || echo '(没有 MODULE_CHUNKS_PROGRESS 输出：门禁在迁移进度统计之前就失败了)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       # npm 12 默认拦 install-scripts（日志里 "npm warn install-scripts"），electron 的 postinstall
       # 一旦被跳过，node_modules/electron/dist 就是空的——smoke 后面会以更绕的方式失败。
       # 这里显式跑一次 install.js：已下载时秒退，没下载时补上并打印版本，失败也看得见。

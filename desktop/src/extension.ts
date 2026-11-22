@@ -32,7 +32,7 @@ import {
   updateEnclosurePlacement
 } from './enclosure/canvas';
 import { initElecCheckPanel } from './elec/ui';
-import { initCostPanel } from './cost/ui';
+import type { CostPanelHandle } from './cost/ui';
 import type { PlcGenUiHandle } from './plcgen/ui';
 import { MODULE_API_VERSION, createModuleManager, type KeyValueStorage, type ModuleStatus } from './modules/registry';
 import {
@@ -147,6 +147,10 @@ let parametricImportModuleEnabled = false;
 let parametricHistoryModuleEnabled = false;
 let drawingsModuleEnabled = false;
 let drawingsUi: DrawingsUiHandle | null = null;
+let costEstimationModuleEnabled = false;
+let costPanel: CostPanelHandle | null = null;
+let costPanelLoad: Promise<void> | null = null;
+let costPanelInitOptions: { enabled: boolean } = { enabled: false };
 let projectPortableModuleEnabled = false;
 let root: HTMLElement | null = null;
 let overlayOpen = false;
@@ -1007,6 +1011,11 @@ interface DrawingsChunkExports {
   initDrawingsUi: DrawingsInit;
 }
 
+type CostInit = typeof import('./cost/ui.ts')['initCostPanel'];
+interface CostChunkExports {
+  initCostPanel: CostInit;
+}
+
 let moduleChunkLoader: ModuleChunkLoader | null = null;
 
 /**
@@ -1046,7 +1055,9 @@ function getModuleChunkLoader(): ModuleChunkLoader | null {
     hostApiVersion: MODULE_API_VERSION,
     moduleState: (id) => id === 'drawings.techdraw'
       ? { enabled: drawingsModuleEnabled, dependencies: ['core', 'cad.parametric-import'] }
-      : null,
+      : id === 'cost.estimation'
+        ? { enabled: costEstimationModuleEnabled, dependencies: ['core'] }
+        : null,
     isEnabled: (id) => id === 'core' ? true : id === 'cad.parametric-import' ? parametricImportModuleEnabled : false
   });
   return moduleChunkLoader;
@@ -1095,6 +1106,81 @@ async function mountDrawingsChunk(section: HTMLElement): Promise<void> {
     isEnabled: () => drawingsModuleEnabled && parametricImportModuleEnabled,
     notify: showNotice
   });
+}
+
+/**
+ * 成本估算入口所在位置的状态说明。
+ *
+ * 分块不可用、模块关闭或 API 不匹配时，入口按钮根本不会出现；这里在顶栏原位显示
+ * 原因并允许点击重试，避免「点了没反应」。
+ */
+function showCostPanelNote(message: string): void {
+  const existing = document.getElementById('costPanelNote');
+  if (existing && !(existing instanceof HTMLButtonElement)) existing.remove();
+  const reusable = existing instanceof HTMLButtonElement ? existing : null;
+  const note = reusable ?? document.createElement('button');
+  if (!reusable) {
+    note.id = 'costPanelNote';
+    note.type = 'button';
+    note.className = 'acp-pill is-warn';
+    note.setAttribute('role', 'status');
+    note.setAttribute('aria-live', 'polite');
+    note.style.cursor = 'pointer';
+    document.querySelector<HTMLElement>('.tb-right')?.appendChild(note);
+  }
+  note.textContent = message;
+  note.title = `${message}（点击重试）`;
+  note.onclick = () => {
+    mountCostPanel();
+  };
+}
+
+function clearCostPanelNote(): void {
+  document.getElementById('costPanelNote')?.remove();
+}
+
+async function loadCostPanelChunk(): Promise<void> {
+  const loader = getModuleChunkLoader();
+  if (!loader) {
+    showCostPanelNote('成本估算模块未加载：当前桌面外壳不提供模块分块。');
+    return;
+  }
+  const loaded = await loader.load('cost.estimation');
+  if (!loaded.ok) {
+    showCostPanelNote(`成本估算模块未加载（${loaded.code}）：${loaded.message}`);
+    return;
+  }
+  const exports = loaded.exports as CostChunkExports;
+  if (typeof exports.initCostPanel !== 'function') {
+    showCostPanelNote('成本估算模块版本不匹配：分块没有提供初始化入口。');
+    return;
+  }
+  if (!costEstimationModuleEnabled) {
+    showCostPanelNote('成本估算模块已关闭：可在模块设置中重新启用。');
+    return;
+  }
+  clearCostPanelNote();
+  // 与迁出前完全相同的 options：桌面版先以关闭态建面板，随后由模块开关态接管。
+  costPanel = exports.initCostPanel(costPanelInitOptions);
+  costPanel.setEnabled(costEstimationModuleEnabled);
+}
+
+function mountCostPanel(): void {
+  if (costPanel) {
+    costPanel.setEnabled(costEstimationModuleEnabled);
+    return;
+  }
+  if (costPanelLoad) return;
+  costPanelLoad = (async () => {
+    try {
+      await loadCostPanelChunk();
+    } catch (error) {
+      console.error('[modules] cost.estimation 分块加载失败', error);
+      showCostPanelNote(`成本估算模块未加载：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      costPanelLoad = null;
+    }
+  })();
 }
 
 interface ParametricStateView {
@@ -4416,20 +4502,29 @@ function init(): void {
   const moduleManager = createModuleManager(moduleStorage);
   const elecCheckPanel = initElecCheckPanel({ enabled: moduleManager.getStatus('elec.validation').enabled });
   const initialCostEnabled = moduleManager.getStatus('cost.estimation').enabled;
-  const costPanel = initCostPanel({ enabled: !window.desktop && initialCostEnabled });
+  costPanelInitOptions = { enabled: !window.desktop && initialCostEnabled };
   const updatePanel = initUpdatePanel();
   const publishCostEstimationState = (states: ModuleStatus[]): void => {
     const desiredEnabled = states.find((module) => module.id === 'cost.estimation')?.enabled === true;
     try {
       const accepted = window.desktop?.modules.syncCostEstimationEnabled(desiredEnabled);
       const enabled = desiredEnabled && (!window.desktop || accepted === true);
-      costPanel.setEnabled(enabled);
+      costEstimationModuleEnabled = enabled;
+      costPanel?.setEnabled(enabled);
       if (window.desktop && accepted !== true) {
         console.error('[modules] 主进程未接受 cost.estimation 状态；成本计算与报告保持关闭');
       }
     } catch (error) {
-      costPanel.setEnabled(false);
+      costEstimationModuleEnabled = false;
+      costPanel?.setEnabled(false);
       console.error('[modules] cost.estimation 状态同步失败；成本计算与报告保持关闭', error);
+    }
+    if (costEstimationModuleEnabled) {
+      mountCostPanel();
+    } else if (costPanel) {
+      clearCostPanelNote();
+    } else {
+      showCostPanelNote('成本估算模块已关闭：可在模块设置中重新启用。');
     }
   };
   plcSyncModulesEnabled = () => ({

@@ -4,6 +4,10 @@
     "drawings.techdraw": {
       "entry": "src/modules/chunks/drawings-techdraw.ts",
       "coreMustNotContain": "automationcad.drawings.v1"
+    },
+    "cost.estimation": {
+      "entry": "src/modules/chunks/cost-estimation.ts",
+      "coreMustNotContain": "automationcad.cost.panel"
     }
   }
 }
