@@ -14,7 +14,8 @@ import {
   type KinematicsUiHandle
 } from './cad/kinematics-ui';
 import { initParametricUi, type ParametricUiHandle } from './parametric/ui';
-import { initDrawingsUi, type DrawingsUiHandle } from './drawings/ui.ts';
+import type { DrawingsUiHandle } from './drawings/ui.ts';
+import { ModuleChunkLoader } from './modules/chunk-loader.ts';
 import { serializeDoc } from './parametric/model';
 import type { CadImportResult } from './shared/types';
 import { initFactoryPanel } from './factory/ui';
@@ -33,7 +34,7 @@ import {
 import { initElecCheckPanel } from './elec/ui';
 import { initCostPanel } from './cost/ui';
 import type { PlcGenUiHandle } from './plcgen/ui';
-import { createModuleManager, type KeyValueStorage, type ModuleStatus } from './modules/registry';
+import { MODULE_API_VERSION, createModuleManager, type KeyValueStorage, type ModuleStatus } from './modules/registry';
 import {
   PARAMETRIC_MODULE_DISABLED_MESSAGE,
   parametricModuleDisabledBuildResult
@@ -1001,13 +1002,92 @@ function drawingsProjectKey(): string {
   return currentFileName ? `src:${currentFileName}` : 'untitled';
 }
 
+type DrawingsInit = typeof import('./drawings/ui.ts')['initDrawingsUi'];
+interface DrawingsChunkExports {
+  initDrawingsUi: DrawingsInit;
+}
+
+let moduleChunkLoader: ModuleChunkLoader | null = null;
+
+/**
+ * 可选模块分块的加载器。
+ *
+ * 工程图 UI 不再随核心包一起加载：只有真正挂载参数化抽屉、且模块启用时才取分块。
+ * 取不到（安装包没带、被篡改、模块关闭）就把原因显示在分区里，不静默失败。
+ */
+function getModuleChunkLoader(): ModuleChunkLoader | null {
+  const bridge = window.desktop?.moduleChunks;
+  if (!bridge) return null;
+  if (moduleChunkLoader) return moduleChunkLoader;
+  moduleChunkLoader = new ModuleChunkLoader({
+    readManifest: () => bridge.manifest(),
+    readSource: async (entry) => {
+      const loaded = await bridge.loadChunk(entry.id);
+      if (!loaded?.ok) throw new Error(loaded?.message ?? `分块不可用：${entry.id}`);
+      return loaded.source;
+    },
+    install: (source, onRegister) => {
+      const host = globalThis as unknown as { __cadRegisterModuleChunk?: ((payload: unknown) => void) | undefined };
+      const previous = host.__cadRegisterModuleChunk;
+      host.__cadRegisterModuleChunk = onRegister;
+      try {
+        const script = document.createElement('script');
+        script.textContent = source;
+        document.head.appendChild(script);
+        script.remove();
+      } finally {
+        host.__cadRegisterModuleChunk = previous;
+      }
+    },
+    sha256: async (text) => {
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+      return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+    },
+    hostApiVersion: MODULE_API_VERSION,
+    moduleState: (id) => id === 'drawings.techdraw'
+      ? { enabled: drawingsModuleEnabled, dependencies: ['core', 'cad.parametric-import'] }
+      : null,
+    isEnabled: (id) => id === 'core' ? true : id === 'cad.parametric-import' ? parametricImportModuleEnabled : false
+  });
+  return moduleChunkLoader;
+}
+
+function noteDrawingsUnavailable(section: HTMLElement, message: string): void {
+  section.replaceChildren();
+  const note = document.createElement('p');
+  note.className = 'cad-drawings-unavailable';
+  note.setAttribute('role', 'status');
+  note.textContent = message;
+  section.appendChild(note);
+}
+
 function mountDrawingsUi(container: HTMLElement): void {
   if (drawingsUi || !window.desktop?.drawings) return;
   const body = container.querySelector<HTMLElement>('.cad-param-body');
   if (!body) return;
   const section = document.createElement('section');
   body.appendChild(section);
-  drawingsUi = initDrawingsUi({
+  void mountDrawingsChunk(section);
+}
+
+async function mountDrawingsChunk(section: HTMLElement): Promise<void> {
+  if (drawingsUi) return;
+  const loader = getModuleChunkLoader();
+  if (!loader) {
+    noteDrawingsUnavailable(section, '工程图模块未加载：当前桌面外壳不提供模块分块。');
+    return;
+  }
+  const loaded = await loader.load('drawings.techdraw');
+  if (!loaded.ok) {
+    noteDrawingsUnavailable(section, `工程图模块未加载（${loaded.code}）：${loaded.message}`);
+    return;
+  }
+  const exports = loaded.exports as DrawingsChunkExports;
+  if (typeof exports.initDrawingsUi !== 'function') {
+    noteDrawingsUnavailable(section, '工程图模块版本不匹配：分块没有提供初始化入口。');
+    return;
+  }
+  drawingsUi = exports.initDrawingsUi({
     host: section,
     getDoc: () => parametric?.getDoc() ?? null,
     getSelectedInstanceId: () => parametric?.selectedInstanceId() ?? null,

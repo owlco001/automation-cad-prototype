@@ -61,6 +61,11 @@ const desktopApi = {
     exportProject: (snapshot: unknown) => ipcRenderer.invoke('project-archive:export', snapshot),
     preview: () => ipcRenderer.invoke('project-archive:preview')
   },
+  // 可选模块的分块交付：只按模块 id 取「已校验源码」，没有目录列举/任意路径读取。
+  moduleChunks: {
+    manifest: () => ipcRenderer.invoke('modules:manifest'),
+    loadChunk: (id: string) => ipcRenderer.invoke('modules:chunk', id)
+  },
   design: {
     settings: () => ipcRenderer.invoke('design:settings'),
     loadDraft: () => ipcRenderer.invoke('design:draft-load'),

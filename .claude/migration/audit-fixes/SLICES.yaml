@@ -102,6 +102,14 @@ slices:
     temp_artifacts: []
     notes: 基础设施切片；第一个真实模块的移出与 IPC 接线由下一批切片负责（见 docs/desktop/MODULE-CHUNKS.md）
     verification_commands: [npm run build:ext, npm run modules:verify, node --test test/modules test/scripts/build-module-chunks.test.mjs test/electron/module-chunks.test.mjs, npm test]
+  - id: drawings-chunk
+    type: implementation
+    status: done
+    owner: lead
+    touched_paths: [desktop/src/modules/chunks/drawings-techdraw.ts, desktop/modules/chunks.json, desktop/src/extension.ts, desktop/src/desktop-api.d.ts, desktop/electron/module-chunks-ipc.ts, desktop/electron/preload.ts, desktop/electron/main.ts, desktop/scripts/build-module-chunks.mjs, desktop/scripts/verify-module-chunks.mjs, desktop/test/modules/drawings-chunk.test.mjs]
+    deletion_targets: [static renderer import of drawings/ui.ts from extension.ts]
+    temp_artifacts: []
+    verification_commands: [npm run build:ext, npm run modules:verify, node --test test/modules test/scripts/build-module-chunks.test.mjs test/electron/module-chunks.test.mjs, npm test]
   - id: convergence
     type: convergence
     status: proposed

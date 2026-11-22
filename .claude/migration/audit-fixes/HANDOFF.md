@@ -13,6 +13,13 @@
 - Measured at 1000 edits: full envelope 182,075 B → light 302 B (99.8% smaller); a 50-entry page is 9,045 B.
 - New behaviour test `history-read-tests.mjs` (7 cases) plus all existing FeatureTree acceptance (transaction/storage/store/HTTP 35/MCP/multi-doc/persistence) pass.
 
+## Latest: first module moved to a chunk (drawings.techdraw)
+- The renderer UI of `drawings.techdraw` is no longer statically imported by `extension.ts`; it ships as `dist/modules/drawings.techdraw.js` and is loaded on first mount of the parametric drawer through the verified loader.
+- Delivery path: preload `window.desktop.moduleChunks` -> main `modules:manifest` / `modules:chunk` (trusted main-window main-frame only, ids from the manifest only) -> `ModuleChunkReader` verifies bytes+sha256 -> renderer loader re-verifies and executes a classic script that self-registers.
+- Measured: core `dist/extension.js` 2,949,013 -> 2,937,823 B (gzip 922,777 -> 919,183); chunk 22,408 B. Net on-disk is slightly larger (separate bundle duplicates shared helpers); the win is 11 KB less code parsed/executed at startup and a real on-demand path.
+- Guard: `modules/chunks.json` declares `coreMustNotContain` per chunk; `npm run modules:verify` fails if that marker reappears in `dist/extension.js`. Drawings UI degrades to an explicit "module not loaded (<code>)" note when the chunk is absent/disabled/incompatible.
+- Tests: chunk contract 1, loader 9, manifest 4, build 4, main reader 4; full suite result recorded below.
+
 ## Latest: module chunk infrastructure
 - Optional-module code can now ship as separate classic-script chunks with a manifest carrying per-file sha256/bytes. Renderer loader enforces whitelist -> module/dependency/API state -> size -> hash -> self-registration before executing; main-process reader resolves only ids from the manifest and re-verifies before handing source over.
 - Production `modules/chunks.json` is empty, so no behavioural change ships yet: this slice is the pipeline plus its gates, not a migrated module.

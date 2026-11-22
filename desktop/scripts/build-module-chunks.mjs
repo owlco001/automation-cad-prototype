@@ -53,8 +53,18 @@ export function validateChunkConfig(raw, registry) {
     if (!definition) throw new Error(`模块不在注册表里：${id}`);
     if (definition.kind !== 'optional') throw new Error(`核心模块不能单独分块：${id}`);
     if (!definition.implemented) throw new Error(`模块尚未实现，不能分块：${id}`);
-    if (typeof entry !== 'string' || entry.trim() === '') throw new Error(`${id} 的入口路径必须是非空字符串`);
-    entries.push({ id, entry: entry.trim(), definition });
+    const normalized = typeof entry === 'string' ? { entry } : entry;
+    if (!normalized || typeof normalized !== 'object' || Array.isArray(normalized)) {
+      throw new Error(`${id} 的分块配置必须是入口路径或 { entry, coreMustNotContain }`);
+    }
+    if (typeof normalized.entry !== 'string' || normalized.entry.trim() === '') {
+      throw new Error(`${id} 的入口路径必须是非空字符串`);
+    }
+    const marker = normalized.coreMustNotContain;
+    if (marker !== undefined && (typeof marker !== 'string' || marker.length < 8)) {
+      throw new Error(`${id} 的 coreMustNotContain 必须是至少 8 个字符的字符串`);
+    }
+    entries.push({ id, entry: normalized.entry.trim(), marker, definition });
   }
   entries.sort((left, right) => left.id.localeCompare(right.id));
   return entries;
@@ -79,7 +89,7 @@ export async function buildChunks(options) {
   await mkdir(outDir, { recursive: true });
 
   const chunks = [];
-  for (const { id, entry, definition } of entries) {
+  for (const { id, entry, marker, definition } of entries) {
     const entryPath = resolve(root, entry);
     if (!entryPath.startsWith(resolve(root))) throw new Error(`入口越界：${entry}`);
     await stat(entryPath); // 入口不存在时立刻失败，不要产出半套分块

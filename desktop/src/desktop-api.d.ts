@@ -1213,6 +1213,17 @@ interface Window {
     render: {
       stats(stats: DesktopRenderStats): Promise<{ ok: boolean; message?: string }>;
     };
+    /** 可选模块分块：只按 id 取已校验源码；没有目录列举或任意路径读取。 */
+    moduleChunks?: {
+      manifest(): Promise<
+        | { ok: true; manifest: { schemaVersion: number; moduleApiVersion: number; chunks: Array<{ id: string; apiCompatibility: { min: number; max: number }; file: string; bytes: number; sha256: string }> } }
+        | { ok: false; code: string; message: string }
+      >;
+      loadChunk(id: string): Promise<
+        | { ok: true; id: string; source: string; sha256: string; bytes: number }
+        | { ok: false; code: string; message: string }
+      >;
+    };
     drawings?: {
       freecadStatus(): Promise<{ ok: true; info: DesktopFreecadInfo } | DesktopDrawingsFailure>;
       detectFreecad(): Promise<{ ok: true; info: DesktopFreecadInfo } | DesktopDrawingsFailure>;

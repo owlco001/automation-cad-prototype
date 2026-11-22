@@ -1,6 +1,7 @@
 import { loadMachineLinkage } from './machine-linkage.ts';
 import { createAgentViewCapture } from './agent-capture.ts';
 import { killActiveQt, launchQt } from './qt-client.ts';
+import { registerModuleChunkIpc } from './module-chunks-ipc.ts';
 import { desktopRuntimeIdentity, editionUpdateRestriction, runtimeStoragePaths } from './edition.ts';
 import { app, BrowserWindow, dialog, ipcMain, Menu, type IpcMainInvokeEvent, type MenuItemConstructorOptions } from 'electron';
 import { autoUpdater } from 'electron-updater';
@@ -5888,6 +5889,13 @@ async function bootstrap(): Promise<void> {
     isPackaged: app.isPackaged,
     resourcesPath: process.resourcesPath,
     isEnabled: () => parametricImportModuleEnabled
+  });
+
+  // 可选模块分块：只按 id 交付已校验源码（见 electron/module-chunks-ipc.ts）。
+  registerModuleChunkIpc({
+    rootDir: join(app.getAppPath(), 'dist', 'modules'),
+    trustedUiPath: indexHtmlPath(),
+    mainWindow: () => mainWindow
   });
 
   const registry = registerIpcHandlers({

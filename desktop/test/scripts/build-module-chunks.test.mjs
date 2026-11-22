@@ -16,18 +16,29 @@ const probeConfig = resolve(desktopRoot, 'test-support/module-chunk-probe.config
 
 const tempDir = async () => await mkdtemp(join(tmpdir(), 'cad-chunks-'));
 
-test('生产配置默认为空且合法（不能把探针/测试分块发出去）', async () => {
+test('生产配置只声明真实模块，且绝不包含测试探针', async () => {
+  const config = JSON.parse(await readFile(DEFAULT_CONFIG_PATH, 'utf8'));
+  const entries = validateChunkConfig(config, MODULE_REGISTRY);
+  assert.ok(entries.length > 0, '生产配置应至少声明已迁出的模块');
+  const probeConfigRaw = JSON.parse(await readFile(probeConfig, 'utf8'));
+  for (const probeId of Object.keys(probeConfigRaw.chunks)) {
+    assert.equal(Object.hasOwn(config.chunks, probeId), false, `生产配置不得声明测试探针模块：${probeId}`);
+  }
+  for (const entry of entries) {
+    assert.match(entry.entry, /^src\/modules\/chunks\//, `分块入口应位于 src/modules/chunks：${entry.entry}`);
+    assert.equal(entry.entry.includes('test-support'), false, '生产入口不得指向 test-support');
+  }
+
   const outDir = await tempDir();
   try {
     const result = await buildChunks({
       configPath: DEFAULT_CONFIG_PATH, outDir, root: desktopRoot,
       registry: MODULE_REGISTRY, moduleApiVersion: MODULE_API_VERSION
     });
-    assert.deepEqual(result.manifest.chunks, []);
+    assert.equal(result.manifest.chunks.length, entries.length);
     const written = JSON.parse(await readFile(join(outDir, 'manifest.json'), 'utf8'));
-    assert.deepEqual(written.chunks, []);
-    assert.equal(written.schemaVersion, 1);
     assert.equal(written.moduleApiVersion, MODULE_API_VERSION);
+    assert.deepEqual(written.chunks.map((chunk) => chunk.id).sort(), entries.map((entry) => entry.id).sort());
   } finally {
     await rm(outDir, { recursive: true, force: true });
   }

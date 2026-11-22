@@ -1,4 +1,9 @@
 {
   "schemaVersion": 1,
-  "chunks": {}
+  "chunks": {
+    "drawings.techdraw": {
+      "entry": "src/modules/chunks/drawings-techdraw.ts",
+      "coreMustNotContain": "automationcad.drawings.v1"
+    }
+  }
 }
