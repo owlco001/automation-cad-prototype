@@ -1,3 +1,4 @@
+import * as THREE from 'three';
 import cadStyles from './cad.css?inline';
 import CadImportWorker from './cad/importer.worker?worker&inline';
 import wasmAssetUrl from 'occt-import-js/dist/occt-import-js.wasm?url&no-inline';
@@ -1135,6 +1136,19 @@ interface PlcGenChunkExports {
 let moduleChunkLoader: ModuleChunkLoader | null = null;
 
 /**
+ * 核心已加载的共享依赖表。
+ *
+ * 分块不再各自打包 three：构建时把 `three` 标成 external，运行时分块从
+ * `globalThis.__cadSharedDeps.THREE` 取**核心这份同一实例**。注入必须发生在
+ * 任何分块 install 之前；重复调用只补齐缺失键，不会覆盖已有实例（幂等）。
+ */
+function ensureSharedModuleDeps(): void {
+  const host = globalThis as typeof globalThis & { __cadSharedDeps?: Record<string, unknown> };
+  const registry = host.__cadSharedDeps ?? (host.__cadSharedDeps = {});
+  if (registry.THREE === undefined) registry.THREE = THREE;
+}
+
+/**
  * 可选模块分块的加载器。
  *
  * 工程图 UI 不再随核心包一起加载：只有真正挂载参数化抽屉、且模块启用时才取分块。
@@ -1143,6 +1157,8 @@ let moduleChunkLoader: ModuleChunkLoader | null = null;
 function getModuleChunkLoader(): ModuleChunkLoader | null {
   const bridge = window.desktop?.moduleChunks;
   if (!bridge) return null;
+  // 在创建 loader 之前注入：分块执行时只读这张表，不能等第一次 load 再补。
+  ensureSharedModuleDeps();
   if (moduleChunkLoader) return moduleChunkLoader;
   moduleChunkLoader = new ModuleChunkLoader({
     readManifest: () => bridge.manifest(),
@@ -1152,6 +1168,8 @@ function getModuleChunkLoader(): ModuleChunkLoader | null {
       return loaded.source;
     },
     install: (source, onRegister) => {
+      // 每次执行分块前再确认一次：宿主可能在此之前替换/清空过全局表。
+      ensureSharedModuleDeps();
       const host = globalThis as unknown as { __cadRegisterModuleChunk?: ((payload: unknown) => void) | undefined };
       const previous = host.__cadRegisterModuleChunk;
       host.__cadRegisterModuleChunk = onRegister;

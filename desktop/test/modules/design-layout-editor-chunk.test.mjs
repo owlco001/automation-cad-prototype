@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
+import * as THREE from 'three';
 import test from 'node:test';
 import { MODULE_API_VERSION, MODULE_REGISTRY } from '../../src/modules/registry.ts';
 import { buildChunks } from '../../scripts/build-module-chunks.mjs';
@@ -45,7 +46,7 @@ test('design.layout-editor 分块产物交出 openLayoutEditor 并自注册，�
     }
 
     const registrations = [];
-    const sandbox = { __cadRegisterModuleChunk: (payload) => registrations.push(payload) };
+    const sandbox = { __cadRegisterModuleChunk: (payload) => registrations.push(payload), __cadSharedDeps: { THREE } };
     sandbox.globalThis = sandbox;
     vm.runInNewContext(source, sandbox);
 

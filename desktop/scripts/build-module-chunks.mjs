@@ -10,7 +10,16 @@
 //   node scripts/build-module-chunks.mjs --config <path> --out <dir> [--quiet]
 //
 // 配置格式（desktop/modules/chunks.json）：
-//   { "schemaVersion": 1, "chunks": { "<moduleId>": "<entry path, desktop 相对>" } }
+//   {
+//     "schemaVersion": 1,
+//     "sharedExternals": { "<裸模块名>": "<__cadSharedDeps 上的键>" },
+//     "chunks": { "<moduleId>": "<entry path, desktop 相对>" }
+//   }
+//
+// 共享依赖外置：分块是独立 IIFE，默认会把 three 这类大库各打一份。`sharedExternals`
+// 把这些裸导入交给 esbuild 的 external，并在分块顶部生成一段 require 垫片，从
+// `globalThis.__cadSharedDeps.<键>` 取核心已经加载的同一个实例。运行时分块加载时若
+// 依赖缺失会**立即抛错**（不静默用空对象），错误信息带上模块名与缺少的键。
 //
 // 纪律：
 // - 配置里出现的 id 必须存在于 MODULE_REGISTRY，且必须已经 implemented，否则构建失败
@@ -25,6 +34,7 @@
 import { build } from 'esbuild';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -32,6 +42,20 @@ const desktopRoot = fileURLToPath(new URL('../', import.meta.url));
 export const DEFAULT_CONFIG_PATH = join(desktopRoot, 'modules', 'chunks.json');
 export const DEFAULT_OUT_DIR = join(desktopRoot, 'dist', 'modules');
 const MARKER = '__cadRegisterModuleChunk';
+
+/** 核心注入共享依赖时使用的全局表；与 extension.ts 的 ensureSharedModuleDeps 对齐。 */
+export const SHARED_DEPS_GLOBAL = '__cadSharedDeps';
+
+/**
+ * 随包配置默认启用的共享依赖：three 已经在核心包里，分块不应再打一份。
+ *
+ * 这里只作为默认值的单一来源；配置显式写了 `sharedExternals` 就以配置为准
+ * （传空对象即可关闭默认外置）。
+ */
+export const DEFAULT_SHARED_EXTERNALS = Object.freeze({ three: 'THREE' });
+
+const SHARED_SPECIFIER = /^[A-Za-z0-9@][A-Za-z0-9@._/-]*$/;
+const SHARED_KEY = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 
 /** 分块文件名：模块 id 本身就是白名单字符集（字母数字 . _ -），直接加 .js。 */
 export function chunkFileName(id) {
@@ -69,10 +93,100 @@ async function dropCssSidecar(outDir, jsFileName, log) {
   log(`dropped sidecar ${sidecarName} (${groupThousands(sidecar.size)} B, inlined at runtime)`);
 }
 
+/**
+ * 校验共享依赖表：键是交给 esbuild external 的裸模块名，值是 `__cadSharedDeps` 上的键。
+ *
+ * 缺省时启用 `DEFAULT_SHARED_EXTERNALS`（three → THREE）；显式传 `{}` 可关闭。
+ * 拒绝相对路径、非法标识符与 `__proto__`，避免把分块配置变成任意模块解析入口。
+ */
+export function validateSharedExternals(raw) {
+  const source = raw === undefined ? DEFAULT_SHARED_EXTERNALS : raw;
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    throw new Error('sharedExternals 必须是对象');
+  }
+  const externals = {};
+  for (const [specifier, key] of Object.entries(source)) {
+    const segments = specifier.split('/');
+    if (specifier === '__proto__'
+      || !SHARED_SPECIFIER.test(specifier)
+      || segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
+      throw new Error(`sharedExternals 的模块名不合法：${specifier}`);
+    }
+    if (typeof key !== 'string' || key === '__proto__' || !SHARED_KEY.test(key)) {
+      throw new Error(`sharedExternals.${specifier} 必须是合法的全局键名`);
+    }
+    externals[specifier] = key;
+  }
+  return externals;
+}
+
+/**
+ * 生成共享依赖垫片，并把整个分块包进一个函数作用域。
+ *
+ * esbuild 对 IIFE 里的 external 导入会生成 `require("three")` 调用；这里在分块顶部
+ * 定义一个同名局部 `require`，从 `globalThis.__cadSharedDeps` 取核心已加载的实例。
+ * 缺失时立刻抛错。用外层函数包住可以避免把 `require` 泄漏成页面全局变量。
+ */
+function sharedDepsBanner(sharedExternals) {
+  if (Object.keys(sharedExternals).length === 0) return undefined;
+  const mapping = JSON.stringify(sharedExternals);
+  return '(function(){var require=(function(){var m=' + mapping + ';return function(n){' +
+    "if(!Object.prototype.hasOwnProperty.call(m,n))throw new Error('未声明的共享依赖：'+n);" +
+    `var d=globalThis.${SHARED_DEPS_GLOBAL};var v=d?d[m[n]]:void 0;` +
+    `if(v===void 0)throw new Error('共享依赖 '+n+' 未注入（globalThis.${SHARED_DEPS_GLOBAL}.'+m[n]+'）');` +
+    'return v}})();';
+}
+
+/**
+ * 只把**精确匹配**的共享依赖交给运行时，子路径照常打包。
+ *
+ * esbuild 的 `external: ['three']` 会把 `three/addons/...` 一起外部化，但 addons
+ * 的命名导出并不在 `THREE` 命名空间上；这里用插件精确匹配包名，子路径仍由 esbuild
+ * 正常解析（它内部的 `from 'three'` 依旧命中共享依赖）。这样布局编辑器的
+ * OrbitControls/TransformControls 随分块按需加载，不会为了共享它们把 TransformControls
+ * 塞进每次启动都要加载的核心包。
+ */
+function sharedExternalPlugin(sharedExternals, root) {
+  const names = new Set(Object.keys(sharedExternals));
+  if (names.size === 0) return null;
+  const requireFromRoot = createRequire(join(root, 'package.json'));
+  return {
+    name: 'cad-shared-externals',
+    setup(build) {
+      build.onResolve({ filter: /^[^./]/ }, (args) => {
+        if (names.has(args.path)) return { path: args.path, external: true };
+        for (const name of names) {
+          if (args.path.startsWith(`${name}/`)) {
+            return { path: requireFromRoot.resolve(args.path) };
+          }
+        }
+        return undefined;
+      });
+    }
+  };
+}
+
+/**
+ * 分块自注册 footer。
+ *
+ * 有共享依赖垫片时整个产物在函数作用域里，直接引用 esbuild 的 globalName 变量；
+ * 没有垫片时沿用原来的全局变量方式（并清掉 globalName，避免污染渲染层）。
+ */
+function chunkFooter(id, globalName, moduleApiVersion, wrapped) {
+  const source = wrapped ? globalName : `globalThis.${globalName}`;
+  const cleanup = wrapped ? '' : `try{delete globalThis.${globalName}}catch(_){}`;
+  const register = `;(function(){var m=${source};${cleanup}` +
+    `var x=m&&m.default!==undefined?m.default:m;` +
+    `(globalThis.${MARKER}||function(){throw new Error('chunk host missing')})({id:${JSON.stringify(id)},` +
+    `apiVersion:${moduleApiVersion},exports:x})})();`;
+  return wrapped ? `${register}})();` : register;
+}
+
 /** 读取并校验配置：结构、重复、未知模块、未实现模块。 */
 export function validateChunkConfig(raw, registry) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('分块配置必须是对象');
   if (raw.schemaVersion !== 1) throw new Error(`不支持的分块配置版本：${String(raw.schemaVersion)}`);
+  validateSharedExternals(raw.sharedExternals);
   const chunks = raw.chunks;
   if (!chunks || typeof chunks !== 'object' || Array.isArray(chunks)) throw new Error('chunks 必须是对象');
   const byId = new Map(registry.map((definition) => [definition.id, definition]));
@@ -114,6 +228,9 @@ export async function buildChunks(options) {
   } = options;
   const config = JSON.parse(await readFile(configPath, 'utf8'));
   const entries = validateChunkConfig(config, registry);
+  const sharedExternals = validateSharedExternals(config.sharedExternals);
+  const sharedPlugin = sharedExternalPlugin(sharedExternals, root);
+  const banner = sharedDepsBanner(sharedExternals);
   await rm(outDir, { recursive: true, force: true });
   await mkdir(outDir, { recursive: true });
 
@@ -136,12 +253,9 @@ export async function buildChunks(options) {
       keepNames: true,
       legalComments: 'none',
       logLevel: 'silent',
-      footer: {
-        js: `;(function(){var m=globalThis.${globalName};try{delete globalThis.${globalName}}catch(_){}` +
-            `var x=m&&m.default!==undefined?m.default:m;` +
-            `(globalThis.${MARKER}||function(){throw new Error('chunk host missing')})({id:${JSON.stringify(id)},` +
-            `apiVersion:${moduleApiVersion},exports:x})})();`
-      }
+      plugins: sharedPlugin === null ? [] : [sharedPlugin],
+      banner: banner === undefined ? undefined : { js: banner },
+      footer: { js: chunkFooter(id, globalName, moduleApiVersion, banner !== undefined) }
     });
     const bytes = await readFile(join(outDir, fileName));
     const text = bytes.toString('utf8');

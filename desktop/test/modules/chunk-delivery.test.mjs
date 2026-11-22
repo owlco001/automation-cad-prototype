@@ -13,6 +13,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import vm from 'node:vm';
+import * as THREE from 'three';
 import { ModuleChunkReader } from '../../electron/module-chunks.ts';
 import { ModuleChunkLoader } from '../../src/modules/chunk-loader.ts';
 import { MODULE_API_VERSION, MODULE_REGISTRY } from '../../src/modules/registry.ts';
@@ -55,7 +56,7 @@ function createHarness({ rootDir, declaredIds, readSource }) {
     readSource,
     install: (source, onRegister) => {
       installs.push(source);
-      const sandbox = { __cadRegisterModuleChunk: onRegister };
+      const sandbox = { __cadRegisterModuleChunk: onRegister, __cadSharedDeps: { THREE } };
       sandbox.globalThis = sandbox;
       vm.runInNewContext(source, sandbox, { timeout: 5000 });
     },

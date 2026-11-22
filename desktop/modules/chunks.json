@@ -1,5 +1,8 @@
 {
   "schemaVersion": 1,
+  "sharedExternals": {
+    "three": "THREE"
+  },
   "chunks": {
     "drawings.techdraw": {
       "entry": "src/modules/chunks/drawings-techdraw.ts",
