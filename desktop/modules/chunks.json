@@ -24,6 +24,10 @@
     "system.update": {
       "entry": "src/modules/chunks/system-update.ts",
       "coreMustNotContain": "automationCadUpdateDialog"
+    },
+    "plcgen": {
+      "entry": "src/modules/chunks/plcgen.ts",
+      "coreMustNotContain": "automationcad.plcgen.history.v1"
     }
   }
 }

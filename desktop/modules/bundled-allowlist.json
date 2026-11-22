@@ -3,7 +3,6 @@
   "note": "可选模块若尚未迁出核心包，必须显式登记在这里；未登记的模块会让 npm run modules:verify 失败。每迁出一个模块就从这里删一条。",
   "bundledInCore": [
     "agent.resume",
-    "plcgen",
     "commission.io-test",
     "cad.parametric-import",
     "parametric.history",

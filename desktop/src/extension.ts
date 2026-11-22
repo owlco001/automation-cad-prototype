@@ -35,6 +35,8 @@ import type { ElecCheckPanelHandle } from './elec/ui';
 import type { CostPanelHandle } from './cost/ui';
 import type { ProjectPortableUiHandle, ProjectPortableUiInitOptions } from './modules/chunks/project-portable.ts';
 import type { PlcGenUiHandle } from './plcgen/ui';
+// 分块样式由核心包内联提供：PLC 面板的 CSS 随核心加载，面板 JS 走按需分块。
+import plcgenStyles from './plcgen/plcgen.css?inline';
 import { MODULE_API_VERSION, createModuleManager, type KeyValueStorage, type ModuleStatus } from './modules/registry';
 import {
   PARAMETRIC_MODULE_DISABLED_MESSAGE,
@@ -195,6 +197,8 @@ let kinematics: KinematicsUiHandle | null = null;
 let parametric: ParametricUiHandle | null = null;
 let plcGenUi: PlcGenUiHandle | null = null;
 let plcGenUiLoad: Promise<PlcGenUiHandle> | null = null;
+let plcgenModuleEnabled = false;
+let plcgenManager: ReturnType<typeof createModuleManager> | null = null;
 let mechUiReady = false;
 let stressTabObserver: MutationObserver | null = null;
 type ExportFormat = 'pdf' | 'dxf' | 'glb' | 'obj' | 'csv' | 'xlsx';
@@ -229,25 +233,116 @@ interface ProjectLayoutPointerDrag {
 let savedProjectLayoutSession: SavedProjectLayoutSession | null = null;
 let projectLayoutPointerDrag: ProjectLayoutPointerDrag | null = null;
 
+/**
+ * plcgen 入口所在位置的状态说明。
+ *
+ * 分块不可用、加载失败或 API 不匹配时，电气域的「PLC 程序」按钮根本不会出现；
+ * 这里在顶栏原位显示原因（含失败码）并允许点击重试，避免「点了没反应」。
+ */
+function showPlcGenNote(message: string): void {
+  const existing = document.getElementById('plcGenNote');
+  if (existing && !(existing instanceof HTMLButtonElement)) existing.remove();
+  const reusable = existing instanceof HTMLButtonElement ? existing : null;
+  const note = reusable ?? document.createElement('button');
+  if (!reusable) {
+    note.id = 'plcGenNote';
+    note.type = 'button';
+    note.className = 'acp-pill is-warn';
+    note.setAttribute('role', 'status');
+    note.setAttribute('aria-live', 'polite');
+    note.style.cursor = 'pointer';
+    document.querySelector<HTMLElement>('.tb-right')?.appendChild(note);
+  }
+  note.textContent = message;
+  note.title = `${message}（点击重试）`;
+  note.onclick = () => {
+    retryPlcGenPanel();
+  };
+}
+
+function clearPlcGenNote(): void {
+  document.getElementById('plcGenNote')?.remove();
+}
+
+function injectPlcgenPanelStyles(): void {
+  if (document.getElementById('plcgen-panel-styles')) return;
+  const style = document.createElement('style');
+  style.id = 'plcgen-panel-styles';
+  style.textContent = plcgenStyles;
+  document.head.appendChild(style);
+}
+
+function retryPlcGenPanel(): void {
+  const manager = plcgenManager;
+  if (!manager) return;
+  void activatePlcGenUi(manager).catch((error: unknown) => {
+    console.error('[modules] PLC 程序模块重试失败', error);
+  });
+}
+
+/**
+ * 按需加载 PLC 程序面板分块。
+ *
+ * 与迁出前的动态 import 语义一致：只有模块启用时才取；options 保持原样
+ * （联调机型配置 + 当前模块开关）。失败不缓存，修好后点击顶栏提示即可重试。
+ */
+async function loadPlcGenChunk(manager: ReturnType<typeof createModuleManager>): Promise<PlcGenUiHandle> {
+  plcgenManager = manager;
+  const loader = getModuleChunkLoader();
+  if (!loader) {
+    showPlcGenNote('PLC 程序模块未加载（CHUNK_BRIDGE_UNAVAILABLE）：当前桌面外壳不提供模块分块。');
+    throw new Error('PLC 程序模块未加载（CHUNK_BRIDGE_UNAVAILABLE）');
+  }
+  if (!plcgenModuleEnabled) {
+    showPlcGenNote('PLC 程序模块已关闭（MODULE_DISABLED）：可在模块设置中重新启用。');
+    throw new Error('PLC 程序模块已关闭（MODULE_DISABLED）');
+  }
+  const loaded = await loader.load('plcgen');
+  if (!loaded.ok) {
+    showPlcGenNote(`PLC 程序模块未加载（${loaded.code}）：${loaded.message}`);
+    throw new Error(`PLC 程序模块未加载（${loaded.code}）：${loaded.message}`);
+  }
+  const exports = loaded.exports as PlcGenChunkExports;
+  if (typeof exports.initPlcGenUi !== 'function') {
+    showPlcGenNote('PLC 程序模块版本不匹配（CHUNK_EXPORTS_MISSING）：分块没有提供初始化入口。');
+    throw new Error('PLC 程序模块版本不匹配（CHUNK_EXPORTS_MISSING）');
+  }
+  // 样式必须在分块建 DOM 之前就位：分块内的 injectStyles 看到同 id 的 style 会直接复用。
+  injectPlcgenPanelStyles();
+  const handle = exports.initPlcGenUi({
+    getConfig: () => commission?.getMachineConfig() ?? null,
+    enabled: plcgenModuleEnabled
+  });
+  clearPlcGenNote();
+  return handle;
+}
+
 function activatePlcGenUi(manager: ReturnType<typeof createModuleManager>): Promise<PlcGenUiHandle> {
+  plcgenManager = manager;
+  plcgenModuleEnabled = manager.getStatus('plcgen').enabled;
   if (plcGenUi) {
-    plcGenUi.setEnabled(manager.getStatus('plcgen').enabled);
+    plcGenUi.setEnabled(plcgenModuleEnabled);
     return Promise.resolve(plcGenUi);
   }
   if (!plcGenUiLoad) {
-    plcGenUiLoad = import('./plcgen/ui').then(({ initPlcGenUi }) => {
-      plcGenUi = initPlcGenUi({
-        getConfig: () => commission?.getMachineConfig() ?? null,
-        enabled: manager.getStatus('plcgen').enabled
-      });
-      return plcGenUi;
-    }).catch((error: unknown) => {
-      plcGenUiLoad = null;
-      throw error;
-    });
+    plcGenUiLoad = (async () => {
+      try {
+        const handle = await loadPlcGenChunk(manager);
+        plcGenUi = handle;
+        return handle;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.startsWith('PLC 程序模块')) {
+          showPlcGenNote(`PLC 程序模块未加载（CHUNK_LOAD_FAILED）：${message}`);
+        }
+        throw error;
+      } finally {
+        plcGenUiLoad = null;
+      }
+    })();
   }
   return plcGenUiLoad.then((handle) => {
-    handle.setEnabled(manager.getStatus('plcgen').enabled);
+    handle.setEnabled(plcgenModuleEnabled);
     return handle;
   });
 }
@@ -1032,6 +1127,11 @@ interface SystemUpdateChunkExports {
   initUpdatePanel: SystemUpdateInit;
 }
 
+type PlcGenInit = typeof import('./modules/chunks/plcgen.ts')['initPlcGenUi'];
+interface PlcGenChunkExports {
+  initPlcGenUi: PlcGenInit;
+}
+
 let moduleChunkLoader: ModuleChunkLoader | null = null;
 
 /**
@@ -1087,7 +1187,9 @@ function getModuleChunkLoader(): ModuleChunkLoader | null {
               ? { enabled: layoutEditorModuleEnabled, dependencies: ['core'] }
               : id === 'system.update'
                 ? { enabled: systemUpdateModuleEnabled, dependencies: ['core'] }
-                : null,
+                : id === 'plcgen'
+                  ? { enabled: plcgenModuleEnabled, dependencies: ['core'] }
+                  : null,
     isEnabled: (id) => id === 'core' ? true : id === 'cad.parametric-import' ? parametricImportModuleEnabled : false
   });
   return moduleChunkLoader;
@@ -4811,6 +4913,8 @@ function init(): void {
   };
   const publishPlcgenState = (states: ModuleStatus[]): void => {
     const enabled = states.find((module) => module.id === 'plcgen')?.enabled === true;
+    plcgenModuleEnabled = enabled;
+    plcGenUi?.setEnabled(enabled);
     try {
       const accepted = window.desktop?.modules.syncPlcgenEnabled(enabled);
       if (window.desktop && !accepted) {
