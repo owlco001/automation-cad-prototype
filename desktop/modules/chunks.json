@@ -20,6 +20,10 @@
     "design.layout-editor": {
       "entry": "src/modules/chunks/design-layout-editor.ts",
       "coreMustNotContain": "data-le-array-pitch"
+    },
+    "system.update": {
+      "entry": "src/modules/chunks/system-update.ts",
+      "coreMustNotContain": "automationCadUpdateDialog"
     }
   }
 }

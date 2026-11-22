@@ -7,7 +7,6 @@
     "commission.io-test",
     "cad.parametric-import",
     "parametric.history",
-    "factory.plc-sync",
-    "system.update"
+    "factory.plc-sync"
   ]
 }

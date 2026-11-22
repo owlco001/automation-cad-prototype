@@ -41,7 +41,7 @@ import {
   parametricModuleDisabledBuildResult
 } from './modules/parametric-gate';
 import { initModuleSettingsUi } from './modules/ui';
-import { initUpdatePanel } from './update/ui';
+import type { UpdatePanelHandle } from './update/ui';
 import { initCommissionPanel, type CommissionPanelHandle } from './commission/ui';
 import { initMachineLibraryPanel, type MachineLibraryUiHandle } from './commission/machine-library-drawer.ts';
 import type { MachineConfig } from './commission/machine-config';
@@ -165,6 +165,9 @@ let projectPortableInitOptions: { enabled: boolean } = { enabled: false };
 let layoutEditorModuleEnabled = false;
 let layoutEditorChunk: LayoutEditorChunkExports | null = null;
 let layoutEditorChunkLoad: Promise<LayoutEditorChunkExports> | null = null;
+let systemUpdateModuleEnabled = false;
+let updatePanel: UpdatePanelHandle | null = null;
+let updatePanelLoad: Promise<void> | null = null;
 let root: HTMLElement | null = null;
 let overlayOpen = false;
 let busy = false;
@@ -1024,6 +1027,11 @@ interface LayoutEditorChunkExports {
   setLayoutEditorEnabled: LayoutEditorChunk['setLayoutEditorEnabled'];
 }
 
+type SystemUpdateInit = typeof import('./modules/chunks/system-update.ts')['initUpdatePanel'];
+interface SystemUpdateChunkExports {
+  initUpdatePanel: SystemUpdateInit;
+}
+
 let moduleChunkLoader: ModuleChunkLoader | null = null;
 
 /**
@@ -1077,7 +1085,9 @@ function getModuleChunkLoader(): ModuleChunkLoader | null {
             ? { enabled: projectPortableModuleEnabled, dependencies: ['core'] }
             : id === 'design.layout-editor'
               ? { enabled: layoutEditorModuleEnabled, dependencies: ['core'] }
-              : null,
+              : id === 'system.update'
+                ? { enabled: systemUpdateModuleEnabled, dependencies: ['core'] }
+                : null,
     isEnabled: (id) => id === 'core' ? true : id === 'cad.parametric-import' ? parametricImportModuleEnabled : false
   });
   return moduleChunkLoader;
@@ -1346,6 +1356,80 @@ const layoutEditorPort: LayoutEditorPort = {
 function applyLayoutEditorModuleState(enabled: boolean): void {
   layoutEditorModuleEnabled = enabled;
   layoutEditorChunk?.setLayoutEditorEnabled(enabled);
+}
+
+/**
+ * system.update 入口所在位置的状态说明。
+ *
+ * 分块不可用或 API 不匹配时，工具栏里的「软件更新」按钮根本不会出现；这里在原位显示
+ * 原因（含失败码）并允许点击重试，避免「点了没反应」。
+ */
+function showSystemUpdateNote(message: string): void {
+  const existing = document.getElementById('systemUpdateNote');
+  if (existing && !(existing instanceof HTMLButtonElement)) existing.remove();
+  const reusable = existing instanceof HTMLButtonElement ? existing : null;
+  const note = reusable ?? document.createElement('button');
+  if (!reusable) {
+    note.id = 'systemUpdateNote';
+    note.type = 'button';
+    note.className = 'acp-pill is-warn';
+    note.setAttribute('role', 'status');
+    note.setAttribute('aria-live', 'polite');
+    note.style.cursor = 'pointer';
+    document.querySelector<HTMLElement>('.tb-right')?.appendChild(note);
+  }
+  note.textContent = message;
+  note.title = `${message}（点击重试）`;
+  note.onclick = () => {
+    mountSystemUpdatePanel();
+  };
+}
+
+function clearSystemUpdateNote(): void {
+  document.getElementById('systemUpdateNote')?.remove();
+}
+
+async function loadSystemUpdateChunk(): Promise<void> {
+  const loader = getModuleChunkLoader();
+  if (!loader) {
+    showSystemUpdateNote('软件更新模块未加载（CHUNK_BRIDGE_UNAVAILABLE）：当前桌面外壳不提供模块分块。');
+    return;
+  }
+  const loaded = await loader.load('system.update');
+  if (!loaded.ok) {
+    showSystemUpdateNote(`软件更新模块未加载（${loaded.code}）：${loaded.message}`);
+    return;
+  }
+  const exports = loaded.exports as SystemUpdateChunkExports;
+  if (typeof exports.initUpdatePanel !== 'function') {
+    showSystemUpdateNote('软件更新模块版本不匹配（CHUNK_EXPORTS_MISSING）：分块没有提供初始化入口。');
+    return;
+  }
+  if (!systemUpdateModuleEnabled) return;
+  clearSystemUpdateNote();
+  // 与迁出前相同的调用：面板自己读取 window.desktop.update 并在缺失时返回空句柄。
+  updatePanel = exports.initUpdatePanel();
+  updatePanel.setEnabled(systemUpdateModuleEnabled);
+}
+
+function mountSystemUpdatePanel(): void {
+  if (updatePanel) {
+    updatePanel.setEnabled(systemUpdateModuleEnabled);
+    return;
+  }
+  if (updatePanelLoad) return;
+  updatePanelLoad = (async () => {
+    try {
+      await loadSystemUpdateChunk();
+    } catch (error) {
+      console.error('[modules] system.update 分块加载失败', error);
+      showSystemUpdateNote(
+        `软件更新模块未加载（CHUNK_LOAD_FAILED）：${error instanceof Error ? error.message : String(error)}`
+      );
+    } finally {
+      updatePanelLoad = null;
+    }
+  })();
 }
 
 interface ParametricStateView {
@@ -4679,7 +4763,6 @@ function init(): void {
   projectPortableInitOptions = { enabled: moduleManager.getStatus('project.portable').enabled };
   const initialCostEnabled = moduleManager.getStatus('cost.estimation').enabled;
   costPanelInitOptions = { enabled: !window.desktop && initialCostEnabled };
-  const updatePanel = initUpdatePanel();
   const publishCostEstimationState = (states: ModuleStatus[]): void => {
     const desiredEnabled = states.find((module) => module.id === 'cost.estimation')?.enabled === true;
     try {
@@ -4713,14 +4796,18 @@ function init(): void {
     try {
       const accepted = window.desktop?.modules.syncSystemUpdateEnabled(desiredEnabled);
       const enabled = Boolean(window.desktop && accepted === true && desiredEnabled);
-      updatePanel.setEnabled(enabled);
+      systemUpdateModuleEnabled = enabled;
+      updatePanel?.setEnabled(enabled);
       if (window.desktop && accepted !== true) {
         console.error('[modules] 主进程未接受 system.update 状态；更新界面与 IPC 保持关闭');
       }
     } catch (error) {
-      updatePanel.setEnabled(false);
+      systemUpdateModuleEnabled = false;
+      updatePanel?.setEnabled(false);
       console.error('[modules] system.update 状态同步失败；更新界面与 IPC 保持关闭', error);
     }
+    if (systemUpdateModuleEnabled) mountSystemUpdatePanel();
+    else updatePanel?.setEnabled(false);
   };
   const publishPlcgenState = (states: ModuleStatus[]): void => {
     const enabled = states.find((module) => module.id === 'plcgen')?.enabled === true;
@@ -5180,15 +5267,17 @@ function init(): void {
   }).catch(() => {
     // active 指针缺失或损坏时保持内置样机，不影响启动。
   });
+  // 软件更新分块是异步挂载的：就绪标志必须等它落定，否则启动冒烟可能看不到工具栏按钮。
+  const systemUpdateReady = updatePanelLoad ?? Promise.resolve();
   if (moduleManager.getStatus('plcgen').enabled) {
-    void Promise.all([activatePlcGenUi(moduleManager), appearanceReady]).then(() => {
+    void Promise.all([activatePlcGenUi(moduleManager), appearanceReady, systemUpdateReady]).then(() => {
       window.__AUTOMATION_CAD_EXTENSION_READY__ = true;
     }).catch((error: unknown) => {
       console.error('[modules] PLC 程序模块加载失败，面板保持不可用', error);
       window.__AUTOMATION_CAD_EXTENSION_READY__ = true;
     });
   } else {
-    void appearanceReady.finally(() => {
+    void Promise.all([appearanceReady, systemUpdateReady]).finally(() => {
       window.__AUTOMATION_CAD_EXTENSION_READY__ = true;
     });
   }
