@@ -93,6 +93,15 @@ slices:
     deletion_targets: [unconditional full-history cloning on every tree read]
     temp_artifacts: []
     verification_commands: [node --test featuretree-service/history-read-tests.mjs featuretree-service/transaction-tests.mjs featuretree-service/storage-tests.mjs, node featuretree-service/tests.mjs, node featuretree-service/store-tests.mjs, node featuretree-service/mcp-tests.mjs, node featuretree-service/multidoc-tests.mjs, node featuretree-service/persistence-tests.mjs]
+  - id: module-chunk-infra
+    type: implementation
+    status: done
+    owner: lead
+    touched_paths: [desktop/modules/chunks.json, desktop/scripts/build-module-chunks.mjs, desktop/scripts/verify-module-chunks.mjs, desktop/src/modules/chunk-manifest.ts, desktop/src/modules/chunk-loader.ts, desktop/electron/module-chunks.ts, desktop/test-support/module-chunk-probe.ts, desktop/test-support/module-chunk-probe.config.json, desktop/test/modules, desktop/test/scripts/build-module-chunks.test.mjs, desktop/test/electron/module-chunks.test.mjs, docs/desktop/MODULE-CHUNKS.md, .github/workflows/ci.yml]
+    deletion_targets: [unverified chunk delivery, path-taking chunk loader]
+    temp_artifacts: []
+    notes: 基础设施切片；第一个真实模块的移出与 IPC 接线由下一批切片负责（见 docs/desktop/MODULE-CHUNKS.md）
+    verification_commands: [npm run build:ext, npm run modules:verify, node --test test/modules test/scripts/build-module-chunks.test.mjs test/electron/module-chunks.test.mjs, npm test]
   - id: convergence
     type: convergence
     status: proposed

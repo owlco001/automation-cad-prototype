@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "chunks": {
+    "agent.resume": "test-support/module-chunk-probe.ts"
+  }
+}

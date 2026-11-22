@@ -8,8 +8,10 @@
   "type": "module",
   "main": "dist-electron/main.cjs",
   "scripts": {
-    "build:ext": "tsc --noEmit && vite build && node scripts/build-electron.mjs && node scripts/build-mcp.mjs && node scripts/check-bundle-size.mjs",
+    "build:ext": "tsc --noEmit && vite build && node scripts/build-electron.mjs && node scripts/build-mcp.mjs && node scripts/check-bundle-size.mjs && node scripts/build-module-chunks.mjs --quiet",
     "check:bundle-size": "node scripts/check-bundle-size.mjs",
+    "build:modules": "node scripts/build-module-chunks.mjs",
+    "modules:verify": "node scripts/verify-module-chunks.mjs",
     "check:electron-bundle": "node scripts/check-electron-bundle-security.mjs dist-electron/main.cjs",
     "bench:motion": "node ../scripts/bench-motion-envelope.mjs",
     "start": "electron .",

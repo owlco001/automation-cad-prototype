@@ -13,6 +13,13 @@
 - Measured at 1000 edits: full envelope 182,075 B → light 302 B (99.8% smaller); a 50-entry page is 9,045 B.
 - New behaviour test `history-read-tests.mjs` (7 cases) plus all existing FeatureTree acceptance (transaction/storage/store/HTTP 35/MCP/multi-doc/persistence) pass.
 
+## Latest: module chunk infrastructure
+- Optional-module code can now ship as separate classic-script chunks with a manifest carrying per-file sha256/bytes. Renderer loader enforces whitelist -> module/dependency/API state -> size -> hash -> self-registration before executing; main-process reader resolves only ids from the manifest and re-verifies before handing source over.
+- Production `modules/chunks.json` is empty, so no behavioural change ships yet: this slice is the pipeline plus its gates, not a migrated module.
+- `npm run build:modules` builds chunks, `npm run modules:verify` gates manifest/hash consistency and is wired into CI after `build:ext`.
+- Tests: manifest 4, loader 9, build 4, main-process reader 4. Full suite 3924 total / 3921 passed / 0 failed / 3 skipped, no owned-process survivors.
+- Remaining (documented in `docs/desktop/MODULE-CHUNKS.md`): move the first real module out of `extension.ts`, wire the IPC/preload surface under security review, and only then measure size/startup deltas or add independent signed packages.
+
 ## Latest: broad-phase candidate filtering
 - Interference/clearance now screen only candidate pairs (X-sorted sweep + at-least-two-axis penetration test for interference, all-axes-below-threshold for clearance), while enumerating in the original `i<j` order so stable-sort tie order is unchanged. <32 parts, non-finite bounds, or non-finite/non-positive thresholds fall back to full enumeration.
 - Solver loops reuse identical adjacent screening results (`resolveClearance` always; `resolveConflicts` when `ignorePairs` is empty), and `buildAdvice` skips clearance for trial directions whose overlap count cannot beat the best.

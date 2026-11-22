@@ -996,6 +996,9 @@ jobs:
         run: npm ci
       - name: 构建扩展（smoke 需要 dist/）
         run: npm run build:ext
+      # 分块清单与产物必须逐字节一致；默认配置为空，这里同时守住「探针/测试分块没被发出去」
+      - name: 校验模块分块清单与哈希
+        run: npm run modules:verify
       # npm 12 默认拦 install-scripts（日志里 "npm warn install-scripts"），electron 的 postinstall
       # 一旦被跳过，node_modules/electron/dist 就是空的——smoke 后面会以更绕的方式失败。
       # 这里显式跑一次 install.js：已下载时秒退，没下载时补上并打印版本，失败也看得见。
