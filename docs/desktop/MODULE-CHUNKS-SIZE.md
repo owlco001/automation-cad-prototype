@@ -1,6 +1,6 @@
 # 分块体积实测（字节算术 → 打包产物实测）
 
-日期：2026-11-22 · 分支 `fix-audit-findings` · `HEAD=eeeb4a4` · 工作树干净（`git status --porcelain` 0 行）
+日期：2026-11-22 · 分支 `fix-audit-findings` · 实测时代码状态 `HEAD=2c59899`（`eeeb4a4` + 合并 `fix-shared-three-surface`）· 工作树干净（`git status --porcelain` 0 行）
 
 本文目的：把 [MODULE-CHUNKS.md](MODULE-CHUNKS.md#L75) 里那句「体积收益量化……现在不做数字承诺」
 换成**可核对的本机实测数字**，并把本机**证不了的**部分逐条列成待补证据。
@@ -40,19 +40,22 @@ npm run build:ext          # EXIT=0
 ```
 dist/occt-import-js.wasm  7,604.03 kB │ gzip: 3,114.12 kB
 dist/extension.js         2,783.18 kB │ gzip:   866.24 kB
-{"extensionBytes":2783181,"extensionGzipBytes":866237,"wasmBytes":7604031,"totalBytes":10387212,
+{"extensionBytes":2783215,"extensionGzipBytes":865759,"wasmBytes":7604031,"totalBytes":10387246,
  "nativeBytes":{"main.cjs":6996190,"mcp.cjs":1524510,"preload.cjs":13546}}
 ```
 
 说明：`dist/` 与 `dist-electron/` 的 mtime（23:16）原本已晚于 `src/ electron/ scripts/ modules/` 的最新改动，
 理论上可跳过；但本机当时无法从产物反证「与 HEAD 完全同源」，所以**实际重跑了一遍**，而非假定它是最新。
-产物字节与重跑前一致（`extension.js` 仍是 2,783,181 B）。
+重跑过程中发现代码状态在会话期间前进了：先有合并 `fix-shared-three-surface`（`2c59899`），
+`dist/` 随后被重建（23:20:12，晚于该提交），`extension.js` 从 2,783,181 B 变为 2,783,215 B。
+因此本文的**有效版本号是 `2c59899`**（不是会话开始时的 `eeeb4a4`），并在该状态上重跑了一次 `build:ext` 复核。
+分块的字节与哈希与重跑前**完全一致**；`extension.js` 与重跑前相比从 2,783,181 B 变为 2,783,215 B（+34 B，随代码状态变化），下表一律取**当前 HEAD 的实测值**。
 
 产物字节（`stat -c %s`）：
 
 | 文件 | 字节 |
 |---|---:|
-| `dist/extension.js` | 2,783,181 |
+| `dist/extension.js` | 2,783,215 |
 | `dist/occt-import-js.wasm` | 7,604,031 |
 | `dist-electron/main.cjs` | 6,996,190 |
 | `dist-electron/mcp.cjs` | 1,524,510 |
@@ -201,7 +204,7 @@ Error: ENOENT: no such file or directory, mkdir '/root/.electron-gyp'
 
 ### 3.2 明确不做的算术
 
-- 不用 `dist/` 总字节（10,984,761 B）反推安装包：`dist-electron/*.map`（29,876,398 B）被
+- 不用 `dist/` 总字节（10,976,603 B）反推安装包：`dist-electron/*.map`（29,876,398 B）被
   `!**/*.map` 排除，`dist-electron/occt-import-js.wasm`（7,604,031 B）被单独排除，
   而生产 `dependencies`（`node-opcua`、`mqtt`、`serialport`、`@modelcontextprotocol/sdk`、`xlsx`…）
   默认也会进 asar —— 这几项的净额**本机没有测到**（打包没跑起来），不填。
@@ -229,7 +232,7 @@ Error: ENOENT: no such file or directory, mkdir '/root/.electron-gyp'
   | `vendor/dwg` → `resources/dwg` | **不存在** | 需 `vendor-dwg.mjs` |
   | `vendor/qt` → `resources/qt` | **不存在** | 需 `vendor-qt.mjs`（≥40 文件 / >30 MB） |
   | `vendor/pipeline` → `resources/pipeline` | **不存在** | 需 `build-pipeline.mjs` |
-  | **已存在的部分合计** | **893,692 B** | 不含三个缺失的 vendor |
+  | **已存在的部分合计** | **893,692 B** | = `packs/builtin` 386,812 + web 5 件 345,600 + 2 个 .py 161,280；不含三个缺失的 vendor |
 
 - ⛔ 「asar 内 `dist/modules/manifest.json` + 7 个分块」：未取得。
 - ⛔ 「从 asar 抽取分块比对 sha256」：未取得。**能抽取才算严格**，本机抽不到，所以本文
@@ -276,7 +279,7 @@ grep -a -o '"design.layout-editor"' release/linux-unpacked/resources/app.asar | 
 
 必读的已知数据（**仅历史基线，不是本次测量**）：`AutomationCAD-Setup-0.6.5.exe` =
 **154,246,911 B / 147.1 MB**，sha256 `c4f1031f…558c90`，来自 `main@227e4a0`
-（[STATUS.md:17-22](STATUS.md#L17-L22)）。当前 `fix-audit-findings@eeeb4a4` **没有任何已发布安装包**。
+（[STATUS.md:17-22](STATUS.md#L17-L22)）。当前 `fix-audit-findings@2c59899` **没有任何已发布安装包**。
 
 建议验收步骤（Windows runner，与 §5.2 一次跑完）：
 
