@@ -7,6 +7,12 @@
 - Agent fixes: per-request approval queue, cancellation/unknown write outcome records with bounded dedupe, origin-bound LLM credentials, maxToolCalls preservation, and MCP resource/status wiring.
 - CI material gate now creates the current transfer screenshot in RUNNER_TEMP and checks only that artifact; added negative/auth regressions.
 
+## Latest: joints rule precomputation
+- `declaredJoints` now profiles each part once (two 6-bit rule masks, sensor stem, sensor-body flag) and enumerates only parts that can be one end of a connection. First-match priority, sensor same-stem semantics, duplicate IDs and output order are unchanged; the frozen pre-optimization oracle and the pinned interference/clearance hashes both pass.
+- Re-run benchmark (`allEquivalent: true`, 12 scenarios): joints matching 1000 sparse 171.6 → 0.4 ms, 1000 named dense 188.6 → 6.2 ms; end-to-end interference 1000 sparse 217.1 → 47.5 ms, named dense 361.3 → 185.4 ms. Pair enumeration remains quadratic.
+- Integrated from the night run's isolated copy by porting only the joints files after review. Full suite in the main worktree: 3889 tests, 3886 passed, 0 failed, 3 skipped, no owned-process survivors; `npm run build:ext` passed.
+- Details and raw data: `JOINTS-PERFORMANCE.md`, `.claude/migration/audit-fixes/baselines/joints-benchmark-2026-11-20.json`.
+
 ## Latest: interference screening
 - Reused per-part bounds and extent volume in exact checks and displacement suggestions. Replaced repeated pair membership scans with one aggregation pass in existing sort order.
 - Three deterministic assemblies retained identical full ordered JSON fingerprints. Local median (9 samples): 100 sparse parts 3.528 → 2.845 ms; 500 sparse parts 49.145 → 49.131 ms; 200 dense parts with 18,204 hits 112.543 → 54.484 ms. Pair enumeration is still quadratic.

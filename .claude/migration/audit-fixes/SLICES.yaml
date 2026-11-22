@@ -69,6 +69,14 @@ slices:
     deletion_targets: [per-hit repeated bounds, repeated confirmed-pair membership scans]
     temp_artifacts: []
     verification_commands: [node desktop/scripts/bench-interference.mjs, node --test --test-concurrency=4, npm run build:ext, git diff --check]
+  - id: joints-precompute
+    type: implementation
+    status: done
+    owner: night-runner (reviewed and integrated by lead)
+    touched_paths: [desktop/src/machine/joints.ts, desktop/test-support/joints-baseline.ts, desktop/test-support/joints-fixture.mjs, desktop/test/machine/joints-equivalence.test.mjs, desktop/scripts/bench-joints.mjs]
+    deletion_targets: [per-pair regex and sensor-stem evaluation in declaredJoints]
+    temp_artifacts: []
+    verification_commands: [node --test test/machine/joints-equivalence.test.mjs test/machine/interference-equivalence.test.mjs, node --expose-gc scripts/bench-joints.mjs, npm test, npm run build:ext]
   - id: convergence
     type: convergence
     status: proposed

@@ -1,0 +1,731 @@
+{
+  "node": "v26.7.0",
+  "platform": "linux",
+  "arch": "x64",
+  "iterations": 7,
+  "gcExposed": true,
+  "baseline": "desktop/test-support/joints-baseline.ts",
+  "scenarios": [
+    {
+      "label": "sparse-500",
+      "parts": 500,
+      "participantParts": 0,
+      "allPairs": 124750,
+      "candidatePairs": 0,
+      "joints": {
+        "baseline": {
+          "p50Ms": 40.27,
+          "p95Ms": 44.222
+        },
+        "current": {
+          "p50Ms": 0.243,
+          "p95Ms": 0.284
+        },
+        "speedup": 165.72,
+        "equal": true,
+        "baselineSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "currentSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "baselineCount": 0,
+        "currentCount": 0
+      },
+      "interference": {
+        "baseline": {
+          "p50Ms": 64.269,
+          "p95Ms": 231.494,
+          "pairs": 321
+        },
+        "current": {
+          "p50Ms": 13.139,
+          "p95Ms": 37.679,
+          "pairs": 321
+        },
+        "speedup": 4.89,
+        "equal": true,
+        "baselineSha256": "7e63d525667135d1616a8d8a829a2451aa1d41a48f5335cba857ac0fba65c580",
+        "currentSha256": "7e63d525667135d1616a8d8a829a2451aa1d41a48f5335cba857ac0fba65c580",
+        "baselineCount": 321,
+        "currentCount": 321
+      },
+      "clearance": {
+        "baseline": {
+          "p50Ms": 85.564,
+          "p95Ms": 124.768,
+          "pairs": 895
+        },
+        "current": {
+          "p50Ms": 43.112,
+          "p95Ms": 57.933,
+          "pairs": 895
+        },
+        "speedup": 1.98,
+        "equal": true,
+        "baselineSha256": "48d5877b281e8cbab4507bc95ee5ba29e2bb09646fea5f60d64f14016d81cece",
+        "currentSha256": "48d5877b281e8cbab4507bc95ee5ba29e2bb09646fea5f60d64f14016d81cece",
+        "baselineCount": 895,
+        "currentCount": 895
+      },
+      "equivalent": true
+    },
+    {
+      "label": "sparse-1000",
+      "parts": 1000,
+      "participantParts": 0,
+      "allPairs": 499500,
+      "candidatePairs": 0,
+      "joints": {
+        "baseline": {
+          "p50Ms": 158.235,
+          "p95Ms": 160.894
+        },
+        "current": {
+          "p50Ms": 0.409,
+          "p95Ms": 0.414
+        },
+        "speedup": 386.88,
+        "equal": true,
+        "baselineSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "currentSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "baselineCount": 0,
+        "currentCount": 0
+      },
+      "interference": {
+        "baseline": {
+          "p50Ms": 201.386,
+          "p95Ms": 202.491,
+          "pairs": 674
+        },
+        "current": {
+          "p50Ms": 44.924,
+          "p95Ms": 47.285,
+          "pairs": 674
+        },
+        "speedup": 4.48,
+        "equal": true,
+        "baselineSha256": "e8e60e131f055b41227f91caba896ae0cceaf7fac747b73ee064f5a829d5b508",
+        "currentSha256": "e8e60e131f055b41227f91caba896ae0cceaf7fac747b73ee064f5a829d5b508",
+        "baselineCount": 674,
+        "currentCount": 674
+      },
+      "clearance": {
+        "baseline": {
+          "p50Ms": 342.689,
+          "p95Ms": 384.983,
+          "pairs": 1775
+        },
+        "current": {
+          "p50Ms": 191.717,
+          "p95Ms": 201.984,
+          "pairs": 1775
+        },
+        "speedup": 1.79,
+        "equal": true,
+        "baselineSha256": "ca8a4f0eacf1369dcab4043ac607370d137df78bf8f46da8303a2d9ec2b5be3a",
+        "currentSha256": "ca8a4f0eacf1369dcab4043ac607370d137df78bf8f46da8303a2d9ec2b5be3a",
+        "baselineCount": 1775,
+        "currentCount": 1775
+      },
+      "equivalent": true
+    },
+    {
+      "label": "dense-500",
+      "parts": 500,
+      "participantParts": 0,
+      "allPairs": 124750,
+      "candidatePairs": 0,
+      "joints": {
+        "baseline": {
+          "p50Ms": 39.567,
+          "p95Ms": 42.209
+        },
+        "current": {
+          "p50Ms": 0.197,
+          "p95Ms": 0.225
+        },
+        "speedup": 200.85,
+        "equal": true,
+        "baselineSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "currentSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "baselineCount": 0,
+        "currentCount": 0
+      },
+      "interference": {
+        "baseline": {
+          "p50Ms": 88.353,
+          "p95Ms": 94.431,
+          "pairs": 14758
+        },
+        "current": {
+          "p50Ms": 49.47,
+          "p95Ms": 60.189,
+          "pairs": 14758
+        },
+        "speedup": 1.79,
+        "equal": true,
+        "baselineSha256": "5c2080789af32d17eb422a905755e1e3a6ee3f1381a66aed6033919ef665b78f",
+        "currentSha256": "5c2080789af32d17eb422a905755e1e3a6ee3f1381a66aed6033919ef665b78f",
+        "baselineCount": 14758,
+        "currentCount": 14758
+      },
+      "clearance": {
+        "baseline": {
+          "p50Ms": 118.559,
+          "p95Ms": 120.155,
+          "pairs": 14871
+        },
+        "current": {
+          "p50Ms": 74.491,
+          "p95Ms": 83.006,
+          "pairs": 14871
+        },
+        "speedup": 1.59,
+        "equal": true,
+        "baselineSha256": "81597d515e1e8009c2147e43a8f2f2442becf261ebbba69d7816aa3f6bdf4446",
+        "currentSha256": "81597d515e1e8009c2147e43a8f2f2442becf261ebbba69d7816aa3f6bdf4446",
+        "baselineCount": 14871,
+        "currentCount": 14871
+      },
+      "equivalent": true
+    },
+    {
+      "label": "dense-1000",
+      "parts": 1000,
+      "participantParts": 0,
+      "allPairs": 499500,
+      "candidatePairs": 0,
+      "joints": {
+        "baseline": {
+          "p50Ms": 154.141,
+          "p95Ms": 159.45
+        },
+        "current": {
+          "p50Ms": 0.413,
+          "p95Ms": 0.437
+        },
+        "speedup": 373.22,
+        "equal": true,
+        "baselineSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "currentSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "baselineCount": 0,
+        "currentCount": 0
+      },
+      "interference": {
+        "baseline": {
+          "p50Ms": 287.229,
+          "p95Ms": 293.565,
+          "pairs": 32235
+        },
+        "current": {
+          "p50Ms": 132.6,
+          "p95Ms": 134.823,
+          "pairs": 32235
+        },
+        "speedup": 2.17,
+        "equal": true,
+        "baselineSha256": "08deea58a00427b15d4199311fc13cd7abd63ca620b73e2325ebdace39de070d",
+        "currentSha256": "08deea58a00427b15d4199311fc13cd7abd63ca620b73e2325ebdace39de070d",
+        "baselineCount": 32235,
+        "currentCount": 32235
+      },
+      "clearance": {
+        "baseline": {
+          "p50Ms": 425.03,
+          "p95Ms": 449.896,
+          "pairs": 33992
+        },
+        "current": {
+          "p50Ms": 274.963,
+          "p95Ms": 293.562,
+          "pairs": 33992
+        },
+        "speedup": 1.55,
+        "equal": true,
+        "baselineSha256": "8bd9297c08e9affa0684e7fea8ed28b31d4d404e7e40865b37609691f07afcd5",
+        "currentSha256": "8bd9297c08e9affa0684e7fea8ed28b31d4d404e7e40865b37609691f07afcd5",
+        "baselineCount": 33992,
+        "currentCount": 33992
+      },
+      "equivalent": true
+    },
+    {
+      "label": "named-sparse-500",
+      "parts": 500,
+      "participantParts": 473,
+      "allPairs": 124750,
+      "candidatePairs": 111628,
+      "joints": {
+        "baseline": {
+          "p50Ms": 45.881,
+          "p95Ms": 48.3
+        },
+        "current": {
+          "p50Ms": 1.765,
+          "p95Ms": 9.972
+        },
+        "speedup": 25.99,
+        "equal": true,
+        "baselineSha256": "7987a6d5de22e0e1e8942f24642e6415a96fdb39c9feed028a5db9cd6b4192ce",
+        "currentSha256": "7987a6d5de22e0e1e8942f24642e6415a96fdb39c9feed028a5db9cd6b4192ce",
+        "baselineCount": 12935,
+        "currentCount": 12935
+      },
+      "interference": {
+        "baseline": {
+          "p50Ms": 60.008,
+          "p95Ms": 84.864,
+          "pairs": 321
+        },
+        "current": {
+          "p50Ms": 18.13,
+          "p95Ms": 40.201,
+          "pairs": 321
+        },
+        "speedup": 3.31,
+        "equal": true,
+        "baselineSha256": "6c8f7b95c3f4369ecc70a0b4b54cae908ad7bbf3efd361d5059eae38643a60ff",
+        "currentSha256": "6c8f7b95c3f4369ecc70a0b4b54cae908ad7bbf3efd361d5059eae38643a60ff",
+        "baselineCount": 321,
+        "currentCount": 321
+      },
+      "clearance": {
+        "baseline": {
+          "p50Ms": 92.032,
+          "p95Ms": 93.06,
+          "pairs": 853
+        },
+        "current": {
+          "p50Ms": 49.693,
+          "p95Ms": 51.995,
+          "pairs": 853
+        },
+        "speedup": 1.85,
+        "equal": true,
+        "baselineSha256": "1e8230ef45865ab56fe7172e5ca6fca198be25e88b1e7bce6ce5fd07c97d93fe",
+        "currentSha256": "1e8230ef45865ab56fe7172e5ca6fca198be25e88b1e7bce6ce5fd07c97d93fe",
+        "baselineCount": 853,
+        "currentCount": 853
+      },
+      "equivalent": true
+    },
+    {
+      "label": "named-sparse-1000",
+      "parts": 1000,
+      "participantParts": 942,
+      "allPairs": 499500,
+      "candidatePairs": 443211,
+      "joints": {
+        "baseline": {
+          "p50Ms": 172.215,
+          "p95Ms": 177.277
+        },
+        "current": {
+          "p50Ms": 5.682,
+          "p95Ms": 5.922
+        },
+        "speedup": 30.31,
+        "equal": true,
+        "baselineSha256": "0fad3d4409acc186676dab2bbc4fa9510beb9c6fe7afae4a94fc5b9987f999b6",
+        "currentSha256": "0fad3d4409acc186676dab2bbc4fa9510beb9c6fe7afae4a94fc5b9987f999b6",
+        "baselineCount": 51535,
+        "currentCount": 51535
+      },
+      "interference": {
+        "baseline": {
+          "p50Ms": 241.907,
+          "p95Ms": 248.031,
+          "pairs": 674
+        },
+        "current": {
+          "p50Ms": 66.139,
+          "p95Ms": 72.391,
+          "pairs": 674
+        },
+        "speedup": 3.66,
+        "equal": true,
+        "baselineSha256": "36d1b025332da1b432f556b9ed5e67971ba62c9aceabe98ddc80ca9f0c05aa4a",
+        "currentSha256": "36d1b025332da1b432f556b9ed5e67971ba62c9aceabe98ddc80ca9f0c05aa4a",
+        "baselineCount": 674,
+        "currentCount": 674
+      },
+      "clearance": {
+        "baseline": {
+          "p50Ms": 414.734,
+          "p95Ms": 439.924,
+          "pairs": 1701
+        },
+        "current": {
+          "p50Ms": 246.223,
+          "p95Ms": 295.188,
+          "pairs": 1701
+        },
+        "speedup": 1.68,
+        "equal": true,
+        "baselineSha256": "095753fd113d0e2a67069bcba13dba015c1d4934b87d25a9a6232d332a89cc69",
+        "currentSha256": "095753fd113d0e2a67069bcba13dba015c1d4934b87d25a9a6232d332a89cc69",
+        "baselineCount": 1701,
+        "currentCount": 1701
+      },
+      "equivalent": true
+    },
+    {
+      "label": "named-dense-500",
+      "parts": 500,
+      "participantParts": 473,
+      "allPairs": 124750,
+      "candidatePairs": 111628,
+      "joints": {
+        "baseline": {
+          "p50Ms": 44.272,
+          "p95Ms": 47.735
+        },
+        "current": {
+          "p50Ms": 1.653,
+          "p95Ms": 1.757
+        },
+        "speedup": 26.78,
+        "equal": true,
+        "baselineSha256": "7987a6d5de22e0e1e8942f24642e6415a96fdb39c9feed028a5db9cd6b4192ce",
+        "currentSha256": "7987a6d5de22e0e1e8942f24642e6415a96fdb39c9feed028a5db9cd6b4192ce",
+        "baselineCount": 12935,
+        "currentCount": 12935
+      },
+      "interference": {
+        "baseline": {
+          "p50Ms": 97.629,
+          "p95Ms": 103.97,
+          "pairs": 14758
+        },
+        "current": {
+          "p50Ms": 55.13,
+          "p95Ms": 57.85,
+          "pairs": 14758
+        },
+        "speedup": 1.77,
+        "equal": true,
+        "baselineSha256": "0b4702c7d25cfebe681b0b404dc9cc80cb4b88c734da6dfc7fb13a42ddfb6ae7",
+        "currentSha256": "0b4702c7d25cfebe681b0b404dc9cc80cb4b88c734da6dfc7fb13a42ddfb6ae7",
+        "baselineCount": 14758,
+        "currentCount": 14758
+      },
+      "clearance": {
+        "baseline": {
+          "p50Ms": 127.965,
+          "p95Ms": 133.296,
+          "pairs": 13841
+        },
+        "current": {
+          "p50Ms": 82.826,
+          "p95Ms": 85.326,
+          "pairs": 13841
+        },
+        "speedup": 1.54,
+        "equal": true,
+        "baselineSha256": "ca02bc1c4d411cecf3214550ca314c902955a55327f3d34ac7d0e6528b83bce4",
+        "currentSha256": "ca02bc1c4d411cecf3214550ca314c902955a55327f3d34ac7d0e6528b83bce4",
+        "baselineCount": 13841,
+        "currentCount": 13841
+      },
+      "equivalent": true
+    },
+    {
+      "label": "named-dense-1000",
+      "parts": 1000,
+      "participantParts": 942,
+      "allPairs": 499500,
+      "candidatePairs": 443211,
+      "joints": {
+        "baseline": {
+          "p50Ms": 170.216,
+          "p95Ms": 183.491
+        },
+        "current": {
+          "p50Ms": 5.956,
+          "p95Ms": 6.449
+        },
+        "speedup": 28.58,
+        "equal": true,
+        "baselineSha256": "0fad3d4409acc186676dab2bbc4fa9510beb9c6fe7afae4a94fc5b9987f999b6",
+        "currentSha256": "0fad3d4409acc186676dab2bbc4fa9510beb9c6fe7afae4a94fc5b9987f999b6",
+        "baselineCount": 51535,
+        "currentCount": 51535
+      },
+      "interference": {
+        "baseline": {
+          "p50Ms": 332.465,
+          "p95Ms": 339.591,
+          "pairs": 32235
+        },
+        "current": {
+          "p50Ms": 170.026,
+          "p95Ms": 172.346,
+          "pairs": 32235
+        },
+        "speedup": 1.96,
+        "equal": true,
+        "baselineSha256": "ef92d03072ea7994510aa3b004732f1596ca0d73690530e7cbe8ea827e9d7746",
+        "currentSha256": "ef92d03072ea7994510aa3b004732f1596ca0d73690530e7cbe8ea827e9d7746",
+        "baselineCount": 32235,
+        "currentCount": 32235
+      },
+      "clearance": {
+        "baseline": {
+          "p50Ms": 521.355,
+          "p95Ms": 535.314,
+          "pairs": 31424
+        },
+        "current": {
+          "p50Ms": 335.426,
+          "p95Ms": 369.447,
+          "pairs": 31424
+        },
+        "speedup": 1.55,
+        "equal": true,
+        "baselineSha256": "22f31f3add0a5d2c4368e53260764a7514abad85ab91216845646d0351a89094",
+        "currentSha256": "22f31f3add0a5d2c4368e53260764a7514abad85ab91216845646d0351a89094",
+        "baselineCount": 31424,
+        "currentCount": 31424
+      },
+      "equivalent": true
+    },
+    {
+      "label": "real-56",
+      "parts": 56,
+      "participantParts": 39,
+      "allPairs": 1540,
+      "candidatePairs": 741,
+      "joints": {
+        "baseline": {
+          "p50Ms": 0.721,
+          "p95Ms": 0.792
+        },
+        "current": {
+          "p50Ms": 0.084,
+          "p95Ms": 0.246
+        },
+        "speedup": 8.58,
+        "equal": true,
+        "baselineSha256": "2740380d2a4b9c210d84a52fb679093271ffab6ff03603761933d24239c0f1de",
+        "currentSha256": "2740380d2a4b9c210d84a52fb679093271ffab6ff03603761933d24239c0f1de",
+        "baselineCount": 77,
+        "currentCount": 77
+      },
+      "interference": {
+        "baseline": {
+          "p50Ms": 1.782,
+          "p95Ms": 2.918,
+          "pairs": 2
+        },
+        "current": {
+          "p50Ms": 1.017,
+          "p95Ms": 2.182,
+          "pairs": 2
+        },
+        "speedup": 1.75,
+        "equal": true,
+        "baselineSha256": "e2dbf49f9d971d1789db3ec8fdad96303fc28ca442f7d95c29963aff580df568",
+        "currentSha256": "e2dbf49f9d971d1789db3ec8fdad96303fc28ca442f7d95c29963aff580df568",
+        "baselineCount": 2,
+        "currentCount": 2
+      },
+      "clearance": {
+        "baseline": {
+          "p50Ms": 2.38,
+          "p95Ms": 2.596,
+          "pairs": 29
+        },
+        "current": {
+          "p50Ms": 1.834,
+          "p95Ms": 2.074,
+          "pairs": 29
+        },
+        "speedup": 1.3,
+        "equal": true,
+        "baselineSha256": "25602e81e25b2f4f7195f4d677c91b39d10dc0406882899fe32053e43f2ef395",
+        "currentSha256": "25602e81e25b2f4f7195f4d677c91b39d10dc0406882899fe32053e43f2ef395",
+        "baselineCount": 29,
+        "currentCount": 29
+      },
+      "equivalent": true
+    },
+    {
+      "label": "real-45",
+      "parts": 45,
+      "participantParts": 24,
+      "allPairs": 990,
+      "candidatePairs": 276,
+      "joints": {
+        "baseline": {
+          "p50Ms": 0.4,
+          "p95Ms": 0.442
+        },
+        "current": {
+          "p50Ms": 0.06,
+          "p95Ms": 0.079
+        },
+        "speedup": 6.67,
+        "equal": true,
+        "baselineSha256": "7f82206e14d1d7eb837d4b4218aa4f0b31b34088eaf5595bf6d471f71c20665b",
+        "currentSha256": "7f82206e14d1d7eb837d4b4218aa4f0b31b34088eaf5595bf6d471f71c20665b",
+        "baselineCount": 48,
+        "currentCount": 48
+      },
+      "interference": {
+        "baseline": {
+          "p50Ms": 1.47,
+          "p95Ms": 1.545,
+          "pairs": 4
+        },
+        "current": {
+          "p50Ms": 1.125,
+          "p95Ms": 1.193,
+          "pairs": 4
+        },
+        "speedup": 1.31,
+        "equal": true,
+        "baselineSha256": "6a6f45b175b7df6151e19dab873dfb5825797e255debbe9252cd4867916a8e4f",
+        "currentSha256": "6a6f45b175b7df6151e19dab873dfb5825797e255debbe9252cd4867916a8e4f",
+        "baselineCount": 4,
+        "currentCount": 4
+      },
+      "clearance": {
+        "baseline": {
+          "p50Ms": 1.03,
+          "p95Ms": 1.523,
+          "pairs": 14
+        },
+        "current": {
+          "p50Ms": 0.621,
+          "p95Ms": 0.993,
+          "pairs": 14
+        },
+        "speedup": 1.66,
+        "equal": true,
+        "baselineSha256": "527880bd9d62842833737db853549e3dee6f79e003a86171104b398f623be25e",
+        "currentSha256": "527880bd9d62842833737db853549e3dee6f79e003a86171104b398f623be25e",
+        "baselineCount": 14,
+        "currentCount": 14
+      },
+      "equivalent": true
+    },
+    {
+      "label": "real-87",
+      "parts": 87,
+      "participantParts": 1,
+      "allPairs": 3741,
+      "candidatePairs": 0,
+      "joints": {
+        "baseline": {
+          "p50Ms": 1.251,
+          "p95Ms": 1.29
+        },
+        "current": {
+          "p50Ms": 0.055,
+          "p95Ms": 0.056
+        },
+        "speedup": 22.75,
+        "equal": true,
+        "baselineSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "currentSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "baselineCount": 0,
+        "currentCount": 0
+      },
+      "interference": {
+        "baseline": {
+          "p50Ms": 2.695,
+          "p95Ms": 4.318,
+          "pairs": 54
+        },
+        "current": {
+          "p50Ms": 1.643,
+          "p95Ms": 3.406,
+          "pairs": 54
+        },
+        "speedup": 1.64,
+        "equal": true,
+        "baselineSha256": "3df79bc1552056771eca4901b0f950014db673fad9ae00bb08ac5b5ae9507935",
+        "currentSha256": "3df79bc1552056771eca4901b0f950014db673fad9ae00bb08ac5b5ae9507935",
+        "baselineCount": 54,
+        "currentCount": 54
+      },
+      "clearance": {
+        "baseline": {
+          "p50Ms": 2.821,
+          "p95Ms": 2.942,
+          "pairs": 120
+        },
+        "current": {
+          "p50Ms": 1.741,
+          "p95Ms": 1.847,
+          "pairs": 120
+        },
+        "speedup": 1.62,
+        "equal": true,
+        "baselineSha256": "6f0ec94982a23793b1d1151cb743e460dac73d0409d172b3f65a9fd596ccce76",
+        "currentSha256": "6f0ec94982a23793b1d1151cb743e460dac73d0409d172b3f65a9fd596ccce76",
+        "baselineCount": 120,
+        "currentCount": 120
+      },
+      "equivalent": true
+    },
+    {
+      "label": "real-109",
+      "parts": 109,
+      "participantParts": 2,
+      "allPairs": 5886,
+      "candidatePairs": 1,
+      "joints": {
+        "baseline": {
+          "p50Ms": 1.965,
+          "p95Ms": 2.148
+        },
+        "current": {
+          "p50Ms": 0.054,
+          "p95Ms": 0.059
+        },
+        "speedup": 36.39,
+        "equal": true,
+        "baselineSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "currentSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "baselineCount": 0,
+        "currentCount": 0
+      },
+      "interference": {
+        "baseline": {
+          "p50Ms": 3.774,
+          "p95Ms": 4.002,
+          "pairs": 50
+        },
+        "current": {
+          "p50Ms": 2.019,
+          "p95Ms": 2.182,
+          "pairs": 50
+        },
+        "speedup": 1.87,
+        "equal": true,
+        "baselineSha256": "b6a688b85906f335d61341617b08f626b4c0c87e5cb03b0289ede0fa6b315b3a",
+        "currentSha256": "b6a688b85906f335d61341617b08f626b4c0c87e5cb03b0289ede0fa6b315b3a",
+        "baselineCount": 50,
+        "currentCount": 50
+      },
+      "clearance": {
+        "baseline": {
+          "p50Ms": 3.964,
+          "p95Ms": 4.048,
+          "pairs": 63
+        },
+        "current": {
+          "p50Ms": 2.279,
+          "p95Ms": 2.33,
+          "pairs": 63
+        },
+        "speedup": 1.74,
+        "equal": true,
+        "baselineSha256": "56a11b44c4fdc6de1ddc9d12bdb6f3dfa99be73d4e25f3371694d6cf19f08cd0",
+        "currentSha256": "56a11b44c4fdc6de1ddc9d12bdb6f3dfa99be73d4e25f3371694d6cf19f08cd0",
+        "baselineCount": 63,
+        "currentCount": 63
+      },
+      "equivalent": true
+    }
+  ],
+  "allEquivalent": true
+}
