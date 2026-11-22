@@ -1048,6 +1048,12 @@ function getModuleChunkLoader(): ModuleChunkLoader | null {
       const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
       return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
     },
+    // 两级来源：随包分块优先；未随包发布但已离线安装的模块走已安装包来源。
+    readInstalledSource: async (id) => {
+      const loaded = await bridge.loadInstalledChunk(id);
+      if (!loaded?.ok) return null;
+      return { source: loaded.source, sha256: loaded.sha256, bytes: loaded.bytes, apiCompatibility: loaded.apiCompatibility };
+    },
     hostApiVersion: MODULE_API_VERSION,
     moduleState: (id) => id === 'drawings.techdraw'
       ? { enabled: drawingsModuleEnabled, dependencies: ['core', 'cad.parametric-import'] }

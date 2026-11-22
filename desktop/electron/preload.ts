@@ -62,9 +62,11 @@ const desktopApi = {
     preview: () => ipcRenderer.invoke('project-archive:preview')
   },
   // 可选模块的分块交付：只按模块 id 取「已校验源码」，没有目录列举/任意路径读取。
+  // loadInstalledChunk 走已安装签名包来源，同样只接受 id；安装路径由主进程决定。
   moduleChunks: {
     manifest: () => ipcRenderer.invoke('modules:manifest'),
-    loadChunk: (id: string) => ipcRenderer.invoke('modules:chunk', id)
+    loadChunk: (id: string) => ipcRenderer.invoke('modules:chunk', id),
+    loadInstalledChunk: (id: string) => ipcRenderer.invoke('modules:installed-chunk', id)
   },
   design: {
     settings: () => ipcRenderer.invoke('design:settings'),

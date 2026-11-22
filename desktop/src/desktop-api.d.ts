@@ -1223,6 +1223,21 @@ interface Window {
         | { ok: true; id: string; source: string; sha256: string; bytes: number }
         | { ok: false; code: string; message: string }
       >;
+      /**
+       * 已安装签名包的分块：只接受模块 id。成功时返回源码与签名清单声明的
+       * 字节数/sha256/API 区间；不返回安装路径、版本目录或包内文件名。
+       */
+      loadInstalledChunk(id: string): Promise<
+        | {
+            ok: true;
+            id: string;
+            source: string;
+            sha256: string;
+            bytes: number;
+            apiCompatibility: { min: number; max: number };
+          }
+        | { ok: false; code: string; message: string }
+      >;
     };
     drawings?: {
       freecadStatus(): Promise<{ ok: true; info: DesktopFreecadInfo } | DesktopDrawingsFailure>;
