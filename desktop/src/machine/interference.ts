@@ -18,6 +18,7 @@
 // 不是包围盒误报，而是配合面被当成零件对来比了。
 
 import { declaredJoints, jointKey } from './joints.ts';
+import { interferenceCandidates } from './broad-phase.ts';
 
 /** declared = 已声明/配合；mate = 同轴嵌套配合；suspect = 没声明，需要人看 */
 export type ScreenKind = 'declared' | 'mate' | 'suspect';
@@ -244,8 +245,13 @@ export function screenInterference(geometry: any, options: ScreenOptions = {}): 
   const touching: Array<{ a: string; b: string; declared: boolean }> = [];
   const EPS = 0.5;  // mm：小于这个量的接触（贴面/装配面）不算
   const CONTACT_TOLERANCE_MM = 1.0;  // 声明为贴合的连接，最多容忍 1 mm 互穿
+  // 候选对只做超集筛选；顺序仍是原始 (i<j) 升序，报告顺序不受影响。
+  const candidateBuckets = interferenceCandidates(boxes.map((box: { bounds: { min: [number, number, number]; max: [number, number, number] } }) => box.bounds), EPS);
   for (let i = 0; i < boxes.length; i += 1) {
-    for (let j = i + 1; j < boxes.length; j += 1) {
+    const bucket = candidateBuckets?.[i];
+    const slotCount = bucket ? bucket.length : boxes.length - 1 - i;
+    for (let slot = 0; slot < slotCount; slot += 1) {
+      const j = bucket ? bucket[slot]! : i + 1 + slot;
       const a = boxes[i].bounds;
       const b = boxes[j].bounds;
       const dx = Math.min(a.max[0], b.max[0]) - Math.max(a.min[0], b.min[0]);

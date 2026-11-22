@@ -77,6 +77,14 @@ slices:
     deletion_targets: [per-pair regex and sensor-stem evaluation in declaredJoints]
     temp_artifacts: []
     verification_commands: [node --test test/machine/joints-equivalence.test.mjs test/machine/interference-equivalence.test.mjs, node --expose-gc scripts/bench-joints.mjs, npm test, npm run build:ext]
+  - id: broad-phase
+    type: implementation
+    status: done
+    owner: lead
+    touched_paths: [desktop/src/machine/broad-phase.ts, desktop/src/machine/interference.ts, desktop/src/machine/clearance.ts, desktop/src/machine/resolve.ts, desktop/src/machine/layout.ts, desktop/test/machine/broad-phase.test.mjs, desktop/test-support/interference-baseline.ts, desktop/test-support/clearance-pre-broad-phase.ts, desktop/test-support/screen-fixtures.mjs, desktop/scripts/bench-broad-phase.mjs]
+    deletion_targets: [unconditional pair enumeration, duplicated identical screening calls in solver loops, clearance screening for dominated trial directions]
+    temp_artifacts: []
+    verification_commands: [node --test test/machine/broad-phase.test.mjs test/machine/interference-equivalence.test.mjs test/machine/cli.test.mjs, node --expose-gc scripts/bench-broad-phase.mjs, npm test, npm run build:ext]
   - id: convergence
     type: convergence
     status: proposed

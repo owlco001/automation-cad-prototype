@@ -305,6 +305,9 @@ export function buildAdvice(geometry: any, clearanceMm: number): LayoutAdvice[] 
         });
         const trial = { ...geometry, parts: shifted };
         const overlapCount = screenInterference(trial).suspects;
+        // 叠得比当前最优还多的方向不可能胜出（比较是「重叠数优先」的字典序），
+        // 先跳过它的间距筛查；顺序与最终选择完全不变。
+        if (overlapCount > bestOverlapCount) continue;
         const stillShort = screenClearance(trial, { thresholdMm: clearanceMm }).count;
         if (overlapCount < bestOverlapCount || (overlapCount === bestOverlapCount && stillShort < bestStillShort)) {
           bestOverlapCount = overlapCount;

@@ -67,8 +67,12 @@ export function resolveConflicts(geometry: any, options: ResolveOptions = {}): R
   const moves: ResolveMove[] = [];
   let iterations = 0;
 
+  // 每轮开头与上一轮挪完后的诊断参数完全相同（仅当 ignore 为空时），
+  // 直接复用上一轮结果，省掉一半全量初筛；ignore 非空时两者语义不同，仍各算一次。
+  let carried: ReturnType<typeof screenInterference> | null = null;
   while (iterations < maxIterations) {
-    const result = screenInterference({ ...geometry, parts, joints }, { ignorePairs: ignore });
+    const result = carried ?? screenInterference({ ...geometry, parts, joints }, { ignorePairs: ignore });
+    carried = null;
     if (result.suspects === 0) {
       return { parts, moves, before, after: 0, iterations, converged: true };
     }
@@ -95,6 +99,7 @@ export function resolveConflicts(geometry: any, options: ResolveOptions = {}): R
     const to = [...((afterPart?.center as number[]) ?? [0, 0, 0])];
     iterations += 1;
     const after = screenInterference({ ...geometry, parts, joints });
+    if (ignore.length === 0) carried = after;
     moves.push({ partId, axis, delta, remainingAfter: after.suspects, from, to });
     if (after.suspects >= result.suspects) {
       // 挪了一件但某个数没降（可能把别处推到一起了）——继续试，但要有上限
@@ -164,8 +169,11 @@ export function resolveClearance(geometry: any, options: ClearanceResolveOptions
   const moves: ClearanceMove[] = [];
   let iterations = 0;
 
+  // 上一轮末尾的 recheck 与本轮开头的 screen 参数完全相同，直接复用（纯函数）。
+  let carriedClearance: ReturnType<typeof screenClearance> | null = null;
   while (iterations < maxIterations) {
-    const screen = screenClearance({ ...geometry, parts }, { thresholdMm });
+    const screen = carriedClearance ?? screenClearance({ ...geometry, parts }, { thresholdMm });
+    carriedClearance = null;
     if (screen.count === 0) {
       return { parts, moves, before, after: 0, iterations, converged: true, thresholdMm };
     }
@@ -213,6 +221,7 @@ export function resolveClearance(geometry: any, options: ClearanceResolveOptions
     const to = [...((afterPart?.center as number[]) ?? [0, 0, 0])];
     iterations += 1;
     const recheck = screenClearance({ ...geometry, parts }, { thresholdMm });
+    carriedClearance = recheck;
     const stillThere = recheck.pairs.find(
       (candidate) => (candidate.a === pair.a && candidate.b === pair.b) || (candidate.a === pair.b && candidate.b === pair.a)
     );

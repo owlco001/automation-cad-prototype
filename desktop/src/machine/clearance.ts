@@ -5,6 +5,7 @@
 
 import { partBounds } from './interference.ts';
 import { declaredJoints, jointKey } from './joints.ts';
+import { clearanceCandidates } from './broad-phase.ts';
 
 /**
  * contact = 同一工位内、沿 Z 上下叠着、间隙 ≤ 5 mm：多半是装配贴合（底座上放台面），
@@ -67,8 +68,16 @@ export function screenClearance(geometry: any, options: { thresholdMm?: number }
     if (!value) { value = partBounds(parts[index]); bounds.set(index, value); }
     return value;
   };
+  // 候选对只做超集筛选；顺序仍是原始 (i<j) 升序。坐标结构不完整时退回全量。
+  const usable = parts.every((part) => Array.isArray(part?.center) && part.center.length >= 3);
+  const candidateBuckets = usable
+    ? clearanceCandidates(parts.map((part) => partBounds(part)), thresholdMm)
+    : null;
   for (let i = 0; i < parts.length; i += 1) {
-    for (let j = i + 1; j < parts.length; j += 1) {
+    const bucket = candidateBuckets?.[i];
+    const slotCount = bucket ? bucket.length : parts.length - 1 - i;
+    for (let slot = 0; slot < slotCount; slot += 1) {
+      const j = bucket ? bucket[slot]! : i + 1 + slot;
       const left = parts[i];
       const right = parts[j];
       const leftId = String(left?.id ?? '');

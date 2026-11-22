@@ -7,6 +7,12 @@
 - Agent fixes: per-request approval queue, cancellation/unknown write outcome records with bounded dedupe, origin-bound LLM credentials, maxToolCalls preservation, and MCP resource/status wiring.
 - CI material gate now creates the current transfer screenshot in RUNNER_TEMP and checks only that artifact; added negative/auth regressions.
 
+## Latest: broad-phase candidate filtering
+- Interference/clearance now screen only candidate pairs (X-sorted sweep + at-least-two-axis penetration test for interference, all-axes-below-threshold for clearance), while enumerating in the original `i<j` order so stable-sort tie order is unchanged. <32 parts, non-finite bounds, or non-finite/non-positive thresholds fall back to full enumeration.
+- Solver loops reuse identical adjacent screening results (`resolveClearance` always; `resolveConflicts` when `ignorePairs` is empty), and `buildAdvice` skips clearance for trial directions whose overlap count cannot beat the best.
+- Complete ordered reports match frozen pre-change oracles on six fixtures × six thresholds; layout fingerprints match on three machines. Sparse 1000-part screening: interference 60.5 → 9.0 ms, clearance 147.5 → 1.7 ms; six-station layout 494.5 → 284.4 ms.
+- Full suite: 3903 tests, 3900 passed, 0 failed, 3 skipped, 59.1 s, no owned-process survivors; `npm run build:ext` passed. Details: `BROAD-PHASE.md`.
+
 ## Latest: joints rule precomputation
 - `declaredJoints` now profiles each part once (two 6-bit rule masks, sensor stem, sensor-body flag) and enumerates only parts that can be one end of a connection. First-match priority, sensor same-stem semantics, duplicate IDs and output order are unchanged; the frozen pre-optimization oracle and the pinned interference/clearance hashes both pass.
 - Re-run benchmark (`allEquivalent: true`, 12 scenarios): joints matching 1000 sparse 171.6 → 0.4 ms, 1000 named dense 188.6 → 6.2 ms; end-to-end interference 1000 sparse 217.1 → 47.5 ms, named dense 361.3 → 185.4 ms. Pair enumeration remains quadratic.

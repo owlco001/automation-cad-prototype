@@ -1,0 +1,139 @@
+{
+  "node": "v26.7.0",
+  "platform": "linux",
+  "iterations": 7,
+  "results": [
+    {
+      "label": "far apart 200",
+      "parts": 200,
+      "pairs": 19900,
+      "interferenceHits": 0,
+      "interference": {
+        "beforeMs": 1.806,
+        "afterMs": 0.639
+      },
+      "clearance": [
+        {
+          "thresholdMm": 20,
+          "beforeMs": 4.292,
+          "afterMs": 0.231
+        },
+        {
+          "thresholdMm": 50,
+          "beforeMs": 4.272,
+          "afterMs": 0.248
+        }
+      ]
+    },
+    {
+      "label": "far apart 1000",
+      "parts": 1000,
+      "pairs": 499500,
+      "interferenceHits": 0,
+      "interference": {
+        "beforeMs": 60.489,
+        "afterMs": 9.027
+      },
+      "clearance": [
+        {
+          "thresholdMm": 20,
+          "beforeMs": 147.543,
+          "afterMs": 1.692
+        },
+        {
+          "thresholdMm": 50,
+          "beforeMs": 158.646,
+          "afterMs": 1.767
+        }
+      ]
+    },
+    {
+      "label": "near touch 120",
+      "parts": 120,
+      "pairs": 7140,
+      "interferenceHits": 0,
+      "interference": {
+        "beforeMs": 1.588,
+        "afterMs": 0.735
+      },
+      "clearance": [
+        {
+          "thresholdMm": 20,
+          "beforeMs": 2.966,
+          "afterMs": 0.588
+        },
+        {
+          "thresholdMm": 50,
+          "beforeMs": 2.988,
+          "afterMs": 0.621
+        }
+      ]
+    },
+    {
+      "label": "dense cluster 60",
+      "parts": 60,
+      "pairs": 1770,
+      "interferenceHits": 1766,
+      "interference": {
+        "beforeMs": 4.454,
+        "afterMs": 4.542
+      },
+      "clearance": [
+        {
+          "thresholdMm": 20,
+          "beforeMs": 0.577,
+          "afterMs": 0.694
+        },
+        {
+          "thresholdMm": 50,
+          "beforeMs": 0.578,
+          "afterMs": 0.908
+        }
+      ]
+    },
+    {
+      "label": "mixed 12",
+      "parts": 12,
+      "pairs": 66,
+      "interferenceHits": 7,
+      "interference": {
+        "beforeMs": 0.121,
+        "afterMs": 0.113
+      },
+      "clearance": [
+        {
+          "thresholdMm": 20,
+          "beforeMs": 0.065,
+          "afterMs": 0.084
+        },
+        {
+          "thresholdMm": 50,
+          "beforeMs": 0.061,
+          "afterMs": 0.075
+        }
+      ]
+    },
+    {
+      "label": "non-finite 3",
+      "parts": 3,
+      "pairs": 3,
+      "interferenceHits": 3,
+      "interference": {
+        "beforeMs": 0.024,
+        "afterMs": 0.022
+      },
+      "clearance": [
+        {
+          "thresholdMm": 20,
+          "beforeMs": 0.005,
+          "afterMs": 0.006
+        },
+        {
+          "thresholdMm": 50,
+          "beforeMs": 0.005,
+          "afterMs": 0.006
+        }
+      ]
+    }
+  ]
+}
