@@ -110,8 +110,10 @@ import { assertCadFileSize } from './shared/input-limits';
 import { recordDiagnosticError, setDiagnosticOperation } from './shared/diagnostics';
 import { identifyCadModelObjects, type CadModelObjectIdentity, type CadProjectIdentity } from './project-archive/identity';
 import { cadImportFailureView, parseCadImportTransaction } from './cad/import-transaction';
-import { initDesignWizard } from './design/wizard-ui.ts';
-import { setLayoutEditorEnabled } from './layout-editor/ui.ts';
+import { initDesignWizard, type LayoutEditorPort } from './design/wizard-ui.ts';
+import type { LayoutEditorHandle, LayoutEditorHost } from './layout-editor/ui.ts';
+// 分块样式由核心包内联提供：layout-editor 的 CSS 随核心加载，编辑器 JS 走按需分块。
+import layoutEditorStyles from './layout-editor/layout-editor.css?inline';
 import { projectGeometryReviewLabel, reopenedGeometryReviewMessage, type DesignSceneInfo, type ProjectGeometryReview, type SceneGeometrySource } from './design/geometry-review.ts';
 import { isValidProjectLayoutGeometry, MAX_PROJECT_LAYOUT_COORDINATE, projectLayoutBounds, renderProjectLayoutSvg } from './design/project-layout.ts';
 import { buildProjectLayoutValidationView, canSaveProjectLayout, projectLayoutItemStatus, projectLayoutOverlapConfirmation } from './design/project-layout-validation.ts';
@@ -160,6 +162,9 @@ let projectPortableModuleEnabled = false;
 let projectPortableUi: ProjectPortableUiHandle | null = null;
 let projectPortableUiLoad: Promise<void> | null = null;
 let projectPortableInitOptions: { enabled: boolean } = { enabled: false };
+let layoutEditorModuleEnabled = false;
+let layoutEditorChunk: LayoutEditorChunkExports | null = null;
+let layoutEditorChunkLoad: Promise<LayoutEditorChunkExports> | null = null;
 let root: HTMLElement | null = null;
 let overlayOpen = false;
 let busy = false;
@@ -1012,6 +1017,13 @@ interface ProjectPortableChunkExports {
   initProjectPortableUi: ProjectPortableInit;
 }
 
+type LayoutEditorChunk = typeof import('./modules/chunks/design-layout-editor.ts');
+interface LayoutEditorChunkExports {
+  openLayoutEditor: LayoutEditorChunk['openLayoutEditor'];
+  closeLayoutEditor: LayoutEditorChunk['closeLayoutEditor'];
+  setLayoutEditorEnabled: LayoutEditorChunk['setLayoutEditorEnabled'];
+}
+
 let moduleChunkLoader: ModuleChunkLoader | null = null;
 
 /**
@@ -1063,7 +1075,9 @@ function getModuleChunkLoader(): ModuleChunkLoader | null {
           ? { enabled: elecValidationModuleEnabled, dependencies: ['core'] }
           : id === 'project.portable'
             ? { enabled: projectPortableModuleEnabled, dependencies: ['core'] }
-            : null,
+            : id === 'design.layout-editor'
+              ? { enabled: layoutEditorModuleEnabled, dependencies: ['core'] }
+              : null,
     isEnabled: (id) => id === 'core' ? true : id === 'cad.parametric-import' ? parametricImportModuleEnabled : false
   });
   return moduleChunkLoader;
@@ -1264,6 +1278,74 @@ function mountElecCheckPanel(): void {
       elecCheckPanelLoad = null;
     }
   })();
+}
+
+/**
+ * design.layout-editor：按需加载整机布局 3D 编辑器分块。
+ *
+ * 编辑器由设计向导第 4 步打开；这里只负责取分块、注入样式并交给向导一个句柄。
+ * 失败时把带 code 的原因抛回向导，由向导在原位显示并允许点击重试（不缓存失败）。
+ */
+function injectLayoutEditorStyles(): void {
+  if (document.getElementById('layout-editor-styles')) return;
+  const style = document.createElement('style');
+  style.id = 'layout-editor-styles';
+  style.textContent = layoutEditorStyles;
+  document.head.appendChild(style);
+}
+
+async function loadLayoutEditorChunk(): Promise<LayoutEditorChunkExports> {
+  const loader = getModuleChunkLoader();
+  if (!loader) {
+    throw new Error('布局编辑模块未加载（CHUNK_BRIDGE_UNAVAILABLE）：当前桌面外壳不提供模块分块。');
+  }
+  if (!layoutEditorModuleEnabled) {
+    throw new Error('布局编辑模块已关闭（MODULE_DISABLED）：可在模块设置中重新启用。');
+  }
+  const loaded = await loader.load('design.layout-editor');
+  if (!loaded.ok) {
+    throw new Error(`布局编辑模块未加载（${loaded.code}）：${loaded.message}`);
+  }
+  const exports = loaded.exports as LayoutEditorChunkExports;
+  if (typeof exports.openLayoutEditor !== 'function'
+    || typeof exports.closeLayoutEditor !== 'function'
+    || typeof exports.setLayoutEditorEnabled !== 'function') {
+    throw new Error('布局编辑模块版本不匹配（CHUNK_EXPORTS_MISSING）：分块没有提供编辑器入口。');
+  }
+  // 样式必须在分块建 DOM 之前就位：分块内的 ensureStyles 看到同 id 的 style 会直接复用。
+  injectLayoutEditorStyles();
+  exports.setLayoutEditorEnabled(layoutEditorModuleEnabled);
+  layoutEditorChunk = exports;
+  return exports;
+}
+
+/** 单飞：失败不缓存，下一次点击仍会重新读取并复核分块。 */
+function ensureLayoutEditorChunk(): Promise<LayoutEditorChunkExports> {
+  if (layoutEditorChunk) return Promise.resolve(layoutEditorChunk);
+  if (!layoutEditorChunkLoad) {
+    layoutEditorChunkLoad = (async () => {
+      try {
+        return await loadLayoutEditorChunk();
+      } finally {
+        layoutEditorChunkLoad = null;
+      }
+    })();
+  }
+  return layoutEditorChunkLoad;
+}
+
+const layoutEditorPort: LayoutEditorPort = {
+  isEnabled: () => layoutEditorModuleEnabled,
+  open: async (host: LayoutEditorHost): Promise<LayoutEditorHandle | null> => {
+    const exports = await ensureLayoutEditorChunk();
+    return exports.openLayoutEditor(host);
+  }
+};
+
+/** 模块开关变化：已加载的分块立即接管（关闭会收起已打开的编辑器）；未加载则等下一次打开。 */
+function applyLayoutEditorModuleState(enabled: boolean): void {
+  layoutEditorModuleEnabled = enabled;
+  layoutEditorChunk?.setLayoutEditorEnabled(enabled);
 }
 
 interface ParametricStateView {
@@ -4776,9 +4858,9 @@ function init(): void {
   publishAgentResumeState(moduleManager.list());
   publishProjectPortableState(moduleManager.list());
   publishSystemUpdateState(moduleManager.list());
-  setLayoutEditorEnabled(moduleManager.getStatus('design.layout-editor').enabled);
+  applyLayoutEditorModuleState(moduleManager.getStatus('design.layout-editor').enabled);
   moduleManager.subscribe((states: ModuleStatus[]) => {
-    setLayoutEditorEnabled(states.find((module) => module.id === 'design.layout-editor')?.enabled === true);
+    applyLayoutEditorModuleState(states.find((module) => module.id === 'design.layout-editor')?.enabled === true);
     const enabled = states.find((module) => module.id === 'plcgen')?.enabled === true;
     commission?.setIoTestsEnabled(states.find((module) => module.id === 'commission.io-test')?.enabled === true);
     publishPlcgenState(states);
@@ -4825,7 +4907,8 @@ function init(): void {
     openProject: async (id) => { await openSavedProject(id); },
     sceneInfo: (): DesignSceneInfo => ({ source: currentSceneSource, ...(currentFileName ? { sourceName: currentFileName } : {}) }),
     importCad: importCadForDesign,
-    notify: showNotice
+    notify: showNotice,
+    layoutEditor: layoutEditorPort
   });
   window.desktop?.onNewDesign(() => designWizard.open());
   refreshProjectArchiveControls();

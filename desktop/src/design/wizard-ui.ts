@@ -33,7 +33,7 @@ import { analyzeConceptMotionEnvelopes, motionEnvelopeColor, renderMotionEnvelop
 import { withStationGeometryOffset } from '../machine/station-layout.ts';
 import { layoutHistory } from '../orbit/ui.ts';
 import { applyLayoutSnapshot, layoutSnapshot } from '../layout-editor/model.ts';
-import { closeLayoutEditor, isLayoutEditorEnabled, openLayoutEditor, refreshLayoutEditor } from '../layout-editor/ui.ts';
+import type { LayoutEditorHandle, LayoutEditorHost } from '../layout-editor/ui.ts';
 import { createStationIdentity, stationIdentitiesFor } from '../machine/station-identity.ts';
 import {
   briefToMachineBrief, canAdvance, DESIGN_STEPS, DESIGN_STEP_LABELS, shanghaiIso,
@@ -48,12 +48,26 @@ import {
   type DesignPartIssue
 } from './parts.ts';
 
+/**
+ * 整机布局 3D 编辑（可选模块 `design.layout-editor`）的宿主端口。
+ *
+ * 向导只在第 4 步渲染入口并在点击时取编辑器，不再静态 import 编辑器实现；
+ * 实现方负责按需加载分块、注入样式并返回可用的编辑器句柄。
+ */
+export interface LayoutEditorPort {
+  /** 模块开关；关闭时不渲染第 4 步的「3D 布局编辑」按钮（与迁出前一致）。 */
+  isEnabled(): boolean;
+  /** 按需打开；不可用时抛错（消息里带失败码），由向导在原位显示并允许重试。 */
+  open(host: LayoutEditorHost): Promise<LayoutEditorHandle | null>;
+}
+
 export interface DesignWizardOptions {
   onSaved(id: string): Promise<void>;
   openProject(id: string): Promise<unknown>;
   sceneInfo(): DesignSceneInfo;
   importCad(): Promise<boolean>;
   notify(message: string, error?: boolean): void;
+  layoutEditor?: LayoutEditorPort;
 }
 
 let activeWizard: { open(): void; close(): Promise<void> } | null = null;
@@ -82,6 +96,8 @@ function renderDesignPartIssues(issues: readonly DesignPartIssue[]): string {
 
 export function initDesignWizard(options: DesignWizardOptions): { open(): void; close(): Promise<void> } {
   if (activeWizard) return activeWizard;
+  // 捕获一次：第 4 步模板里有同名局部 `options`（下拉选项），不能直接用 options.layoutEditor。
+  const layoutEditorPort = options.layoutEditor;
   let draft = initialDraft();
   let savedDraft = false;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -96,6 +112,10 @@ export function initDesignWizard(options: DesignWizardOptions): { open(): void; 
   let layoutScroll = { left: 0, top: 0 };
   let review: DesignReview | null = null;
   let notice = '';
+  /** 3D 布局编辑器的当前句柄；分块按需加载，未打开时保持 null。 */
+  let layoutEditorHandle: LayoutEditorHandle | null = null;
+  /** 3D 布局编辑器加载/打开失败的原位提示（含失败码，可点击重试）。 */
+  let layoutEditorNotice = '';
   let finishActiveDrag: (() => void) | null = null;
   let finishActiveGeometryDrag: (() => void) | null = null;
   let partPicker: { station: number; kind: 'actuator' | 'sensor'; index: number } | null = null;
@@ -389,9 +409,10 @@ export function initDesignWizard(options: DesignWizardOptions): { open(): void; 
           <label>Y 平移（mm）<input type="number" step="any" data-geometry-station-offset="y" aria-label="所选工位 Y 平移毫米" value="${numberText(offset.yMm)}"></label>
           <button type="button" class="design-button primary" data-geometry-offset-apply>应用到当前几何</button>
           <button type="button" class="design-button" data-preview-current>预览当前 3D 几何</button>
-          ${isLayoutEditorEnabled() ? '<button type="button" class="design-button primary design-geometry-3d-entry" data-layout-editor-open title="在 3D 视口中直接拖动/旋转工位、对齐分布、吸附与干涉提示">3D 布局编辑</button>' : ''}
+          ${layoutEditorPort?.isEnabled() ? '<button type="button" class="design-button primary design-geometry-3d-entry" data-layout-editor-open title="在 3D 视口中直接拖动/旋转工位、对齐分布、吸附与干涉提示">3D 布局编辑</button>' : ''}
           <small>拖动标尺：SVG 坐标单位为 mm；图中网格按比例显示。偏移是相对生成器原始工位位置的绝对 X/Y 值。</small>
         </div>
+        ${layoutEditorNotice ? `<div class="design-notice" role="status"><span>${escapeHtml(layoutEditorNotice)}</span> <button type="button" class="design-button" data-layout-editor-retry>重试</button></div>` : ''}
         ${identityNotice ? `<div class="design-notice" role="status">${escapeHtml(identityNotice)}</div>` : ''}
         ${notice ? `<div class="design-notice" role="status">${escapeHtml(notice)}</div>` : ''}
         <p class="design-geometry-plan-metrics" data-geometry-plan-envelope>${geometryPlanMetrics(projection)}</p>
@@ -712,9 +733,19 @@ export function initDesignWizard(options: DesignWizardOptions): { open(): void; 
     if (!before || !draft.design) return;
     layoutHistory.record({ label, before: layoutSnapshot(before), after: layoutSnapshot(draft.design), at: Date.now(), ...(mergeKey ? { mergeKey } : {}) });
   }
+  function closeLayoutEditorHandle(): void {
+    layoutEditorHandle?.close();
+    layoutEditorHandle = null;
+  }
   function openLayoutEditorForDraft(): void {
     if (!draft.design) { options.notify('请先选择方案，再编辑整机布局。', true); return; }
-    openLayoutEditor({
+    const port = options.layoutEditor;
+    if (!port) {
+      layoutEditorNotice = '整机布局 3D 编辑模块未加载（CHUNK_BRIDGE_UNAVAILABLE）：当前桌面外壳不提供模块分块。';
+      render();
+      return;
+    }
+    void port.open({
       getDesign: () => draft.design ?? null,
       commit: (next, label, mergeKey) => {
         const before = draft.design ?? null;
@@ -728,6 +759,20 @@ export function initDesignWizard(options: DesignWizardOptions): { open(): void; 
       },
       footprintRequirement: () => draft.brief.footprint ?? null,
       notify: options.notify
+    }).then((handle) => {
+      if (!handle) {
+        layoutEditorNotice = '整机布局 3D 编辑未启动（CHUNK_UNAVAILABLE）：分块没有返回编辑器句柄。';
+        render();
+        return;
+      }
+      layoutEditorHandle = handle;
+      if (layoutEditorNotice) {
+        layoutEditorNotice = '';
+        render();
+      }
+    }).catch((error: unknown) => {
+      layoutEditorNotice = `整机布局 3D 编辑模块未加载：${errorMessage(error)}`;
+      render();
     });
   }
   layoutHistory.setApplier((snapshot, label) => {
@@ -738,7 +783,7 @@ export function initDesignWizard(options: DesignWizardOptions): { open(): void; 
     notice = `已撤销/重做布局：${label}`;
     markDraftChanged(true);
     render();
-    refreshLayoutEditor();
+    layoutEditorHandle?.refresh();
     return true;
   });
   function currentSceneParts() {
@@ -827,7 +872,7 @@ export function initDesignWizard(options: DesignWizardOptions): { open(): void; 
       if (!result.ok) throw new Error('草稿删除失败');
       persistence.reset();
       layoutHistory.clear();
-      closeLayoutEditor();
+      closeLayoutEditorHandle();
       draft = initialDraft();
       savedDraft = false;
       review = null;
@@ -1083,6 +1128,7 @@ export function initDesignWizard(options: DesignWizardOptions): { open(): void; 
     root.querySelectorAll<HTMLElement>('[data-preview]').forEach((button) => button.addEventListener('click', (event) => { event.stopPropagation(); const design = draft.candidates?.[Number(button.dataset.preview)]; if (design) openPreview(design); }));
     root.querySelectorAll<HTMLElement>('[data-preview-current]').forEach((button) => button.addEventListener('click', (event) => { event.stopPropagation(); if (draft.design) openPreview(draft.design); }));
     root.querySelector<HTMLElement>('[data-layout-editor-open]')?.addEventListener('click', (event) => { event.stopPropagation(); openLayoutEditorForDraft(); });
+    root.querySelector<HTMLElement>('[data-layout-editor-retry]')?.addEventListener('click', (event) => { event.stopPropagation(); openLayoutEditorForDraft(); });
     root.querySelectorAll<HTMLElement>('[data-candidate]').forEach((card) => card.addEventListener('click', () => {
       const index = Number(card.dataset.candidate) as 0 | 1 | 2;
       const preserved = draft.stations;
@@ -1405,7 +1451,7 @@ export function initDesignWizard(options: DesignWizardOptions): { open(): void; 
   }
   async function close(): Promise<void> {
     if (root.hidden) return;
-    closeLayoutEditor();
+    closeLayoutEditorHandle();
     if (isLoading) {
       loadVersion += 1;
       isLoading = false;

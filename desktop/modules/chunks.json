@@ -16,6 +16,10 @@
     "project.portable": {
       "entry": "src/modules/chunks/project-portable.ts",
       "coreMustNotContain": "cadProjectArchivePreview"
+    },
+    "design.layout-editor": {
+      "entry": "src/modules/chunks/design-layout-editor.ts",
+      "coreMustNotContain": "data-le-array-pitch"
     }
   }
 }
