@@ -133,6 +133,68 @@ import { projectMeshSignature } from './project-session/mesh-signature.ts';
 import { deserializeDoc } from './parametric/model.ts';
 import { deserializeAnnotation } from './cad/kinematics-ui.ts';
 
+/**
+ * 分块共享的 three 表面。
+ *
+ * 这里刻意**不**把整个 `THREE` 命名空间直接交给分块：Rollup 只要看到命名空间被
+ * 整体传递，就会把 three 的所有导出都留在每次启动都要加载的核心包里。下面的对象
+ * 逐个引用静态属性，Rollup 只保留这些导出；实例与核心其它 three 用法完全相同
+ * （ES 模块导出是同一引用，不会出现第二份 three）。
+ *
+ * 维护约定：某个分块开始使用新的 `THREE.Xxx` 时，把 Xxx 加进这里；分块侧仍然
+ * `import * as THREE from 'three'`，构建时统一从 `__cadSharedDeps.THREE` 取。
+ */
+const THREE_SHARED = {
+  Box3: THREE.Box3,
+  Box3Helper: THREE.Box3Helper,
+  BoxGeometry: THREE.BoxGeometry,
+  BufferAttribute: THREE.BufferAttribute,
+  BufferGeometry: THREE.BufferGeometry,
+  Camera: THREE.Camera,
+  Color: THREE.Color,
+  Controls: THREE.Controls,
+  CylinderGeometry: THREE.CylinderGeometry,
+  DirectionalLight: THREE.DirectionalLight,
+  DoubleSide: THREE.DoubleSide,
+  EdgesGeometry: THREE.EdgesGeometry,
+  Euler: THREE.Euler,
+  Float32BufferAttribute: THREE.Float32BufferAttribute,
+  FrontSide: THREE.FrontSide,
+  GridHelper: THREE.GridHelper,
+  Group: THREE.Group,
+  HemisphereLight: THREE.HemisphereLight,
+  Line: THREE.Line,
+  LineBasicMaterial: THREE.LineBasicMaterial,
+  LineDashedMaterial: THREE.LineDashedMaterial,
+  LineSegments: THREE.LineSegments,
+  MOUSE: THREE.MOUSE,
+  Material: THREE.Material,
+  MathUtils: THREE.MathUtils,
+  Matrix3: THREE.Matrix3,
+  Matrix4: THREE.Matrix4,
+  Mesh: THREE.Mesh,
+  MeshBasicMaterial: THREE.MeshBasicMaterial,
+  MeshStandardMaterial: THREE.MeshStandardMaterial,
+  Object3D: THREE.Object3D,
+  OctahedronGeometry: THREE.OctahedronGeometry,
+  OrthographicCamera: THREE.OrthographicCamera,
+  PerspectiveCamera: THREE.PerspectiveCamera,
+  Plane: THREE.Plane,
+  PlaneGeometry: THREE.PlaneGeometry,
+  Quaternion: THREE.Quaternion,
+  Ray: THREE.Ray,
+  Raycaster: THREE.Raycaster,
+  SRGBColorSpace: THREE.SRGBColorSpace,
+  Scene: THREE.Scene,
+  SphereGeometry: THREE.SphereGeometry,
+  Spherical: THREE.Spherical,
+  TOUCH: THREE.TOUCH,
+  TorusGeometry: THREE.TorusGeometry,
+  Vector2: THREE.Vector2,
+  Vector3: THREE.Vector3,
+  WebGLRenderer: THREE.WebGLRenderer
+};
+
 const ICONS = {
   cube: '<svg viewBox="0 0 16 16"><path d="M8 1.9l5.4 3.1v6L8 14.1 2.6 11V5z"/><path d="M8 8.1l5.4-3.1M8 8.1L2.6 5M8 8.1V14"/></svg>',
   open: '<svg viewBox="0 0 16 16"><path d="M2 4.2h4l1.4 1.8H14v6.6H2z"/><path d="M9.2 9.1h3.6M11 7.3l1.8 1.8-1.8 1.8"/></svg>',
@@ -1145,7 +1207,7 @@ let moduleChunkLoader: ModuleChunkLoader | null = null;
 function ensureSharedModuleDeps(): void {
   const host = globalThis as typeof globalThis & { __cadSharedDeps?: Record<string, unknown> };
   const registry = host.__cadSharedDeps ?? (host.__cadSharedDeps = {});
-  if (registry.THREE === undefined) registry.THREE = THREE;
+  if (registry.THREE === undefined) registry.THREE = THREE_SHARED;
 }
 
 /**
