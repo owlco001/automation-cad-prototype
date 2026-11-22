@@ -59,7 +59,19 @@ globalThis.__cadRegisterModuleChunk({ id: '<module id>', apiVersion: 1, exports:
 2. 白名单里的模块已经不存在或已被分块（必须同步删除条目）；
 3. 分块配置里出现了非可选模块。
 
-同时会打印 `MODULE_CHUNKS_PROGRESS chunked=<已迁出>/<可选模块总数> stillInCore=<剩余>`，迁移进度是可核对的，而不是口头描述。当前：1/12。
+同时会打印 `MODULE_CHUNKS_PROGRESS chunked=<已迁出>/<可选模块总数> stillInCore=<剩余>`，迁移进度是可核对的，而不是口头描述。当前：7/12（`cad.parametric-import`、`parametric.history`、`commission.io-test`、`factory.plc-sync`、`agent.resume` 经评估因 UI 与核心强耦合未迁出）。
+
+## 重要更正：分块默认不减小安装包
+
+`package.json` 的 `files` 包含 `dist/**/*`，因此 7 个分块**全部仍打进 asar**。
+「按需加载」减少的是**启动时解析与执行的代码量**，不是安装包字节。想真正把分块从安装包里拿掉，
+需要本文第 4 条「独立安装包/按需下载」那条尚未实现的路径。
+
+本批次真正减少字节的是**共享依赖外置**（`a4cfd6a`/`2c59899`：分块复用核心的 three，
+而不是各自打包一份）。实测：`design.layout-editor` 分块 876,370 → 315,580 B，
+核心包 2,937,823 → 2,783,215 B（−154,608）。这些是**产物字节**，不是安装包体积。
+
+安装包体积、安装后占用、冷启动、双版本共存四项仍未实测，见 [MODULE-CHUNKS-SIZE.md](MODULE-CHUNKS-SIZE.md)。
 
 ## 尚未完成（下一批切片）
 
