@@ -1,6 +1,6 @@
 # 分块体积实测（字节算术 → 打包产物实测）
 
-日期：2026-11-22 · 分支 `fix-audit-findings` · 实测时代码状态 `HEAD=2c59899`（`eeeb4a4` + 合并 `fix-shared-three-surface`）· 工作树干净（`git status --porcelain` 0 行）
+日期：2026-11-22 · 分支 `fix-audit-findings` · 实测时代码状态 `HEAD=2c59899`（= `eeeb4a4` + 合并 `fix-shared-three-surface`）· 实测期间工作树干净（`git status --porcelain -uall` 0 行，`dist/` `dist-electron/` 已被 `.gitignore` 忽略）
 
 本文目的：把 [MODULE-CHUNKS.md](MODULE-CHUNKS.md#L75) 里那句「体积收益量化……现在不做数字承诺」
 换成**可核对的本机实测数字**，并把本机**证不了的**部分逐条列成待补证据。
@@ -432,3 +432,6 @@ console.log('orphans=' + (orphans.join(',') || '(none)'));
 - 没有联网（未下载 electron、app-builder、NSIS、node 头部）。
 - 没有编造 `app.asar` 字节、安装包体积、安装占用、冷启动数值。
 - 没有删除或移动任何既有文件；本文是本次唯一新增文件。
+- 会话期间该工作树的 `HEAD` 被外部推进过两次（合并 `2c59899`；以及对本文自身的提交）。
+  本文的实测数字以 `2c59899` 的代码状态为准，并在该状态上重跑 `build:ext` 复核；
+  若后续代码继续前进，§1 的数字需要重测，不能直接沿用。
