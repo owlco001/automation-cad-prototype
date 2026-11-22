@@ -7,7 +7,7 @@
     },
     "cost.estimation": {
       "entry": "src/modules/chunks/cost-estimation.ts",
-      "coreMustNotContain": "automationcad.cost.panel"
+      "coreMustNotContain": "costDrawer"
     }
   }
 }
