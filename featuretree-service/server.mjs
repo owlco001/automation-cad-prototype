@@ -117,6 +117,41 @@ function send(res, code, obj) {
   res.end(JSON.stringify(obj));
 }
 
+/**
+ * GET /v1/tree?includeHistory=0|1 —— 省略时按完整包络返回。
+ * 返回 null 表示取值非法（调用方报 422）。
+ */
+function parseIncludeHistory(url) {
+  const raw = url.searchParams.get('includeHistory');
+  if (raw === null) return true;
+  if (raw === '1' || raw === 'true') return true;
+  if (raw === '0' || raw === 'false') return false;
+  return null;
+}
+
+const HISTORY_PAGE_MAX = 500;
+
+/**
+ * GET /v1/revisions?limit=&offset= —— 两个参数都可省。
+ * limit 缺省表示不分页（保持原有响应）；offset 缺省为 0。
+ */
+function parseHistoryPaging(url) {
+  const limitRaw = url.searchParams.get('limit');
+  const offsetRaw = url.searchParams.get('offset');
+  if (limitRaw === null && offsetRaw === null) return { limit: null, offset: 0 };
+  if (limitRaw === null) return { error: 'offset 必须与 limit 一起使用' };
+  if (!/^\d+$/.test(limitRaw)) return { error: `limit 必须是 1..${HISTORY_PAGE_MAX} 的整数` };
+  const limit = Number(limitRaw);
+  if (limit < 1 || limit > HISTORY_PAGE_MAX) return { error: `limit 必须是 1..${HISTORY_PAGE_MAX} 的整数` };
+  let offset = 0;
+  if (offsetRaw !== null) {
+    if (!/^\d+$/.test(offsetRaw)) return { error: 'offset 必须是非负整数' };
+    offset = Number(offsetRaw);
+    if (!Number.isSafeInteger(offset)) return { error: 'offset 必须是非负整数' };
+  }
+  return { limit, offset };
+}
+
 function documentIdOf(url, body) {
   const fromQuery = url.searchParams.get('documentId');
   if (fromQuery && fromQuery.trim()) return fromQuery.trim();
@@ -329,9 +364,14 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/v1/tree') {
       const doc = requireDocument(url, null, res);
       if (!doc) return undefined;
+      // 可选轻量读：只要当前树，不要整段审计历史（默认仍返回完整包络）。
+      const includeHistory = parseIncludeHistory(url);
+      if (includeHistory === null) {
+        return send(res, 422, { error: 'VALIDATION_FAILED', message: 'includeHistory 只能是 0 或 1' });
+      }
       // sidecar 晚于服务起来时（build123d 首次 import 慢），这里补一次重建，别让界面永远「没有几何」
       if (!doc.geometry) await doc.retryInit();
-      return send(res, 200, doc.envelope());
+      return send(res, 200, doc.envelope({ includeHistory }));
     }
     if (req.method === 'GET' && url.pathname === '/v1/geometry.stl') {
       // 透传 sidecar 的二进制 STL：客户端只渲染，不参与建模
@@ -354,7 +394,14 @@ const server = createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/v1/revisions') {
       const doc = requireDocument(url, null, res);
       if (!doc) return undefined;
-      return send(res, 200, { documentId: doc.documentId, revision: doc.revision, history: doc.history });
+      // 不带 limit 时保持原有的「整段历史」响应；带上 limit 才分页。
+      const paging = parseHistoryPaging(url);
+      if (paging.error) return send(res, 422, { error: 'VALIDATION_FAILED', message: paging.error });
+      if (!paging.limit) {
+        return send(res, 200, { documentId: doc.documentId, revision: doc.revision, history: doc.history });
+      }
+      const page = doc.historyPage(paging.limit, paging.offset);
+      return send(res, 200, { documentId: doc.documentId, revision: doc.revision, ...page });
     }
     if (req.method === 'GET' && url.pathname === '/v1/events') {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });

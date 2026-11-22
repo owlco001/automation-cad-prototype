@@ -7,6 +7,12 @@
 - Agent fixes: per-request approval queue, cancellation/unknown write outcome records with bounded dedupe, origin-bound LLM credentials, maxToolCalls preservation, and MCP resource/status wiring.
 - CI material gate now creates the current transfer screenshot in RUNNER_TEMP and checks only that artifact; added negative/auth regressions.
 
+## Latest: FeatureTree lightweight reads
+- `GET /v1/tree?includeHistory=0` returns the same tree without cloning the audit history, marked `historyOmitted:true`; default responses are unchanged.
+- `GET /v1/revisions?limit=&offset=` pages history (`total/offset/limit/entries/nextOffset`); no params keeps the original full array; invalid params are 422.
+- Measured at 1000 edits: full envelope 182,075 B → light 302 B (99.8% smaller); a 50-entry page is 9,045 B.
+- New behaviour test `history-read-tests.mjs` (7 cases) plus all existing FeatureTree acceptance (transaction/storage/store/HTTP 35/MCP/multi-doc/persistence) pass.
+
 ## Latest: broad-phase candidate filtering
 - Interference/clearance now screen only candidate pairs (X-sorted sweep + at-least-two-axis penetration test for interference, all-axes-below-threshold for clearance), while enumerating in the original `i<j` order so stable-sort tie order is unchanged. <32 parts, non-finite bounds, or non-finite/non-positive thresholds fall back to full enumeration.
 - Solver loops reuse identical adjacent screening results (`resolveClearance` always; `resolveConflicts` when `ignorePairs` is empty), and `buildAdvice` skips clearance for trial directions whose overlap count cannot beat the best.

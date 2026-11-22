@@ -202,7 +202,7 @@
 |---|---|
 | `GET /v1/tree?documentId=…` | 读当前包络 |
 | `POST /v1/operations` | 提交单个操作或 `applyTransaction`（请求体含 `expectedRevision`） |
-| `GET /v1/revisions?documentId=…` | 读历史记录 |
+| `GET /v1/revisions?documentId=…&limit=&offset=` | 读历史记录；带 `limit` 时分页 |
 | `POST /v1/undo` | 撤销指定步数 |
 | `GET /v1/events?documentId=…` | 订阅变更事件（SSE 或长轮询，二选一，待定） |
 
@@ -213,6 +213,8 @@
   - **内存态**：无持久化，进程重启回到种子树（revision 0），历史清空。
   - **无鉴权**：只监听 `127.0.0.1`；同机任意进程都能改树，开放局域网前必须补 token（§15.5）。
   - 错误码 → HTTP：`CONFLICT_STALE_REVISION` / `REFERENCE_IN_USE` → 409，`NOT_FOUND` → 404，超 1MB 请求体 → 413 `PAYLOAD_TOO_LARGE`，其余校验类 → 422。
+
+> 读接口的可选能力（默认行为不变）：`GET /v1/tree` 默认仍返回含完整 `history` 的包络；`?includeHistory=0` 返回同样的 `doc`/`revision`/`geometry`/`undoDepth`/`redoDepth`，但省略 `history` 并显式给 `historyOmitted:true`，避免被读成「历史为空」。`GET /v1/revisions` 默认仍返回整段 `history`；带 `limit`（1..500）时分页，响应为 `{total, offset, limit, entries, nextOffset}`，窗口按时间正序、连续不重叠，`offset` 越界返回空页而不是报错；`offset` 必须与 `limit` 同时出现，非法取值一律 422 `VALIDATION_FAILED`。长历史下轻量读取把 1000 次编辑的响应从约 182 KB 降到约 0.3 KB。
 
 ## 13. 错误码（调用方按码处理，不按文案猜）
 

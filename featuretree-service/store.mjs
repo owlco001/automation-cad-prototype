@@ -225,7 +225,13 @@ export class Store {
     await this.init();
   }
 
-  envelope() {
+  /**
+   * 包络默认带完整审计历史（调用方无需改）。`{ includeHistory: false }` 用于只需要
+   * 当前树的读路径：省掉整段历史的克隆与序列化，并显式标注 `historyOmitted`，
+   * 免得调用方把「没有 history 字段」误读成「历史为空」。
+   */
+  envelope(options = {}) {
+    const includeHistory = options.includeHistory !== false;
     return {
       documentId: this.documentId,
       kind: 'part',
@@ -234,8 +240,26 @@ export class Store {
       undoDepth: this.undoStack.length,
       redoDepth: this.redoStack.length,
       doc: clone(this.doc),
-      history: clone(this.history),
+      ...(includeHistory ? { history: clone(this.history) } : { historyOmitted: true }),
       ...(this.geometry ? { geometry: clone(this.geometry) } : {})
+    };
+  }
+
+  /**
+   * 历史分页：按时间正序（与 `/v1/revisions` 的 history 一致），窗口连续、不重叠。
+   * offset 超界返回空页，不报错（读操作不该因为翻过头就失败）。
+   */
+  historyPage(limit, offset = 0) {
+    const total = this.history.length;
+    const start = Math.min(offset, total);
+    const entries = this.history.slice(start, start + limit).map((entry) => clone(entry));
+    const end = start + entries.length;
+    return {
+      total,
+      offset: start,
+      limit,
+      entries,
+      nextOffset: end < total ? end : null
     };
   }
   onChange(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }

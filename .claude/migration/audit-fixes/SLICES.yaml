@@ -85,6 +85,14 @@ slices:
     deletion_targets: [unconditional pair enumeration, duplicated identical screening calls in solver loops, clearance screening for dominated trial directions]
     temp_artifacts: []
     verification_commands: [node --test test/machine/broad-phase.test.mjs test/machine/interference-equivalence.test.mjs test/machine/cli.test.mjs, node --expose-gc scripts/bench-broad-phase.mjs, npm test, npm run build:ext]
+  - id: ft-history-reads
+    type: implementation
+    status: done
+    owner: lead
+    touched_paths: [featuretree-service/store.mjs, featuretree-service/server.mjs, featuretree-service/history-read-tests.mjs, docs/featuretree-contract.md]
+    deletion_targets: [unconditional full-history cloning on every tree read]
+    temp_artifacts: []
+    verification_commands: [node --test featuretree-service/history-read-tests.mjs featuretree-service/transaction-tests.mjs featuretree-service/storage-tests.mjs, node featuretree-service/tests.mjs, node featuretree-service/store-tests.mjs, node featuretree-service/mcp-tests.mjs, node featuretree-service/multidoc-tests.mjs, node featuretree-service/persistence-tests.mjs]
   - id: convergence
     type: convergence
     status: proposed
