@@ -18,6 +18,9 @@
 // - 分块文件必须自注册 `window.__cadRegisterModuleChunk({ id, apiVersion, exports })`；
 //   构建后会检查产物里确实带这个标记与正确 id。
 // - 清单的字节数与哈希来自**实际产物**，不是配置。
+// - esbuild 会把分块 import 的 CSS 额外写成同基名的 `.css`（如 cost.estimation.css）。
+//   分块样式在运行时由核心包内联提供，这份 CSS 不进清单也不投递，构建后按产物基名删除，
+//   避免变成安装包里的死字节；删除必须留日志，不能静默。
 
 import { build } from 'esbuild';
 import { createHash } from 'node:crypto';
@@ -38,6 +41,32 @@ export function chunkFileName(id) {
 
 function safeGlobal(id) {
   return `__cadChunk_${id.replace(/[^A-Za-z0-9_]/g, '_')}`;
+}
+
+/** 千分位分组，日志里的字节数按 28,904 这种形式写，避免与 28.904 混淆。 */
+function groupThousands(value) {
+  return String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+/**
+ * 删除某个分块由 esbuild 附带的 CSS sidecar。
+ *
+ * 只按**本次产物基名**推导路径（`cost.estimation.js` → `cost.estimation.css`），
+ * 不扫描目录，避免误删别人的 .css。没有 sidecar 就静默返回；存在就删除并留日志。
+ */
+async function dropCssSidecar(outDir, jsFileName, log) {
+  const sidecarName = `${jsFileName.slice(0, -'.js'.length)}.css`;
+  const sidecarPath = join(outDir, sidecarName);
+  let sidecar;
+  try {
+    sidecar = await stat(sidecarPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return;
+    throw error;
+  }
+  if (!sidecar.isFile()) throw new Error(`${sidecarName} 不是普通文件，拒绝删除`);
+  await rm(sidecarPath);
+  log(`dropped sidecar ${sidecarName} (${groupThousands(sidecar.size)} B, inlined at runtime)`);
 }
 
 /** 读取并校验配置：结构、重复、未知模块、未实现模块。 */
@@ -128,6 +157,7 @@ export async function buildChunks(options) {
       sha256
     });
     log(`chunk ${id} → ${fileName} (${bytes.byteLength} B, sha256 ${sha256.slice(0, 12)}…)`);
+    await dropCssSidecar(outDir, fileName, log);
   }
 
   const manifest = { schemaVersion: 1, moduleApiVersion, chunks };

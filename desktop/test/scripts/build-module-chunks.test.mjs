@@ -1,7 +1,7 @@
 // 分块构建产物的行为断言：清单来自实际产物、哈希可校验、分块真的能自注册执行。
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -74,6 +74,72 @@ test('构建产出真实分块：清单哈希=文件哈希，且分块能自注�
     assert.equal(Object.keys(sandbox).filter((key) => key.startsWith('__cadChunk_')).length, 0);
   } finally {
     await rm(outDir, { recursive: true, force: true });
+  }
+});
+
+test('构建后删除 CSS sidecar：dist/modules 无 .css，清单字节/哈希仍对应 JS 产物', async () => {
+  const outDir = await tempDir();
+  const logs = [];
+  try {
+    const result = await buildChunks({
+      configPath: DEFAULT_CONFIG_PATH, outDir, root: desktopRoot,
+      registry: MODULE_REGISTRY, moduleApiVersion: MODULE_API_VERSION,
+      log: (line) => logs.push(line)
+    });
+
+    const files = (await readdir(outDir)).sort();
+    assert.deepEqual(files.filter((name) => name.endsWith('.css')), [], 'dist/modules 不应留下 .css sidecar');
+    assert.deepEqual(
+      files,
+      [...result.manifest.chunks.map((chunk) => chunk.file), 'manifest.json'].sort(),
+      '产物目录只能有 JS 分块与 manifest.json'
+    );
+
+    const written = JSON.parse(await readFile(join(outDir, 'manifest.json'), 'utf8'));
+    assert.deepEqual(
+      written.chunks.map((chunk) => chunk.id).sort(),
+      result.manifest.chunks.map((chunk) => chunk.id).sort()
+    );
+    for (const entry of written.chunks) {
+      assert.match(entry.file, /\.js$/, `清单只登记 JS：${entry.file}`);
+      const bytes = await readFile(join(outDir, entry.file));
+      assert.equal(bytes.byteLength, entry.bytes, `${entry.file} 清单字节数必须等于实际 JS 产物`);
+      assert.equal(
+        createHash('sha256').update(bytes).digest('hex'),
+        entry.sha256,
+        `${entry.file} 清单哈希必须等于实际 JS 产物`
+      );
+    }
+
+    // 生产配置里的 cost.estimation 确实会触发 esbuild 的 CSS sidecar；删除必须留日志，不能静默。
+    const dropped = logs.filter((line) => line.startsWith('dropped sidecar '));
+    assert.ok(
+      dropped.some((line) => /^dropped sidecar cost\.estimation\.css \(\d{1,3}(?:,\d{3})* B, inlined at runtime\)$/.test(line)),
+      `删除 sidecar 必须留下显式日志，实际：${logs.join(' | ')}`
+    );
+  } finally {
+    await rm(outDir, { recursive: true, force: true });
+  }
+});
+
+test('空配置产出空清单，目录里只有 manifest.json', async () => {
+  const root = await tempDir();
+  const configPath = join(root, 'chunks.json');
+  const outDir = join(root, 'modules');
+  try {
+    await writeFile(configPath, JSON.stringify({ schemaVersion: 1, chunks: {} }), 'utf8');
+    const result = await buildChunks({
+      configPath, outDir, root: desktopRoot,
+      registry: MODULE_REGISTRY, moduleApiVersion: MODULE_API_VERSION
+    });
+    assert.deepEqual(result.manifest.chunks, []);
+    assert.deepEqual(await readdir(outDir), ['manifest.json']);
+    const written = JSON.parse(await readFile(join(outDir, 'manifest.json'), 'utf8'));
+    assert.equal(written.schemaVersion, 1);
+    assert.equal(written.moduleApiVersion, MODULE_API_VERSION);
+    assert.deepEqual(written.chunks, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 
