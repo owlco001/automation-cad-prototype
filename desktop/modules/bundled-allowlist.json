@@ -8,7 +8,6 @@
     "cad.parametric-import",
     "parametric.history",
     "factory.plc-sync",
-    "project.portable",
     "design.layout-editor",
     "system.update"
   ]

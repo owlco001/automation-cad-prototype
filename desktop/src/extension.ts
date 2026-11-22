@@ -33,6 +33,7 @@ import {
 } from './enclosure/canvas';
 import type { ElecCheckPanelHandle } from './elec/ui';
 import type { CostPanelHandle } from './cost/ui';
+import type { ProjectPortableUiHandle, ProjectPortableUiInitOptions } from './modules/chunks/project-portable.ts';
 import type { PlcGenUiHandle } from './plcgen/ui';
 import { MODULE_API_VERSION, createModuleManager, type KeyValueStorage, type ModuleStatus } from './modules/registry';
 import {
@@ -156,6 +157,9 @@ let costPanel: CostPanelHandle | null = null;
 let costPanelLoad: Promise<void> | null = null;
 let costPanelInitOptions: { enabled: boolean } = { enabled: false };
 let projectPortableModuleEnabled = false;
+let projectPortableUi: ProjectPortableUiHandle | null = null;
+let projectPortableUiLoad: Promise<void> | null = null;
+let projectPortableInitOptions: { enabled: boolean } = { enabled: false };
 let root: HTMLElement | null = null;
 let overlayOpen = false;
 let busy = false;
@@ -357,9 +361,6 @@ function buildOverlay(): void {
             <span class="cad-export-sep"></span>
             <button type="button" data-export="csv"><span>BOM (CSV)</span><em>表格</em></button>
             <button type="button" data-export="xlsx"><span>BOM (XLSX)</span><em>Excel</em></button>
-            <span class="cad-export-sep" data-project-archive-entry${projectPortableModuleEnabled && window.desktop?.projectArchive ? '' : ' hidden'}></span>
-            <button type="button" data-project-archive="export-cad" data-project-archive-entry${projectPortableModuleEnabled && window.desktop?.projectArchive ? '' : ' hidden'}><span>导出可支持工程状态</span><em>.acproj</em></button>
-            <button type="button" data-project-archive="preview" data-project-archive-entry${projectPortableModuleEnabled && window.desktop?.projectArchive ? '' : ' hidden'}><span>校验/预览工程档案</span><em>只读</em></button>
           </div>
         </div>
         <button type="button" class="cad-btn" data-cad-action="close">${ICONS.close}<span>关闭</span></button>
@@ -423,13 +424,6 @@ function buildOverlay(): void {
       <aside class="cad-kinematics-drawer" id="cadKinematicsDrawer" hidden></aside>
       <aside class="cad-parametric-drawer" id="cadParametricDrawer" hidden></aside>
     </main>
-    <dialog id="cadProjectArchivePreview" class="cad-project-archive-dialog" aria-labelledby="cadProjectArchivePreviewTitle">
-      <div class="cad-project-archive-dialog-head">
-        <div><h2 id="cadProjectArchivePreviewTitle">工程档案只读预览</h2><p>内容已通过结构、依赖与 SHA-256 校验；本操作不会应用或覆盖当前工程。</p></div>
-        <button type="button" class="cad-project-archive-close" data-project-archive-close aria-label="关闭预览">×</button>
-      </div>
-      <pre id="cadProjectArchivePreviewBody"></pre>
-    </dialog>
     <dialog id="cadSavedProjectLayout" class="cad-project-layout-dialog" aria-label="已保存的二维布局">
       <div id="cadSavedProjectLayoutBody"></div>
     </dialog>
@@ -455,11 +449,6 @@ function buildOverlay(): void {
 
   root.addEventListener('click', (event) => {
     event.stopPropagation();
-    if ((event.target as HTMLElement).closest('[data-project-archive-close]')) {
-      const preview = document.getElementById('cadProjectArchivePreview') as HTMLDialogElement | null;
-      preview?.close();
-      return;
-    }
     if ((event.target as HTMLElement).closest('[data-project-layout-close]')) {
       closeSavedProjectLayout();
       return;
@@ -528,13 +517,6 @@ function buildOverlay(): void {
       return;
     }
     if (!(event.target as HTMLElement).closest('.cad-file-wrap')) toggleProjectMenu(false);
-    const archiveAction = (event.target as HTMLElement).closest<HTMLElement>('[data-project-archive]');
-    if (archiveAction) {
-      toggleExportMenu(false);
-      if (archiveAction.dataset.projectArchive === 'export-cad') void exportPortableProjectArchive();
-      else if (archiveAction.dataset.projectArchive === 'preview') void chooseAndPreviewPortableArchive();
-      return;
-    }
     const sideTab = (event.target as HTMLElement).closest<HTMLElement>('[data-cad-side]');
     if (sideTab) {
       const value = sideTab.dataset.cadSide;
@@ -1025,6 +1007,11 @@ interface ElecChunkExports {
   initElecCheckPanel: ElecCheckInit;
 }
 
+type ProjectPortableInit = typeof import('./modules/chunks/project-portable.ts')['initProjectPortableUi'];
+interface ProjectPortableChunkExports {
+  initProjectPortableUi: ProjectPortableInit;
+}
+
 let moduleChunkLoader: ModuleChunkLoader | null = null;
 
 /**
@@ -1068,7 +1055,9 @@ function getModuleChunkLoader(): ModuleChunkLoader | null {
         ? { enabled: costEstimationModuleEnabled, dependencies: ['core'] }
         : id === 'elec.validation'
           ? { enabled: elecValidationModuleEnabled, dependencies: ['core'] }
-          : null,
+          : id === 'project.portable'
+            ? { enabled: projectPortableModuleEnabled, dependencies: ['core'] }
+            : null,
     isEnabled: (id) => id === 'core' ? true : id === 'cad.parametric-import' ? parametricImportModuleEnabled : false
   });
   return moduleChunkLoader;
@@ -1320,6 +1309,7 @@ function openOverlay(): void {
   if (!root) return;
   overlayOpen = true;
   root.hidden = false;
+  mountProjectPortableUi();
   mountProjectContext(root);
   if (!cadInspector) cadInspector = installCadInspector({
     root,
@@ -1348,6 +1338,7 @@ function closeOverlay(options: { restoreCanvas?: boolean } = {}): void {
   document.body.classList.remove('cad-overlay-open');
   if (root) root.hidden = true;
   toggleExportMenu(false);
+  projectPortableUi?.closePreview();
   viewer?.setActive(false);
   document.getElementById(CAD_ENTRY)?.classList.remove('is-active');
   document.getElementById('cadStressRootTab')?.classList.remove('is-active');
@@ -3488,126 +3479,134 @@ function createPortableProjectExportSnapshot(): DesktopProjectExportSnapshot | n
   };
 }
 
-function describePortableStateExclusions(codes: readonly string[]): string[] {
-  const labels: Record<string, string> = {
-    'feature-tree-module-disabled': '参数化模块关闭，未收录特征树',
-    'feature-tree-not-loaded': '特征树状态未加载',
-    'feature-tree-source-mismatch': '特征树来源与当前 CAD 不匹配',
-    'kinematics-stable-object-binding-unavailable': '运动学缺少无歧义 stable objectId 映射',
-    'kinematics-not-loaded': '运动学标注未加载',
-    'cad-view-state-unavailable': '无法安全采集 CAD 视角状态'
-  };
-  return codes.map((code) => labels[code] ?? code);
-}
-
-async function exportPortableProjectArchive(): Promise<void> {
-  if (!projectPortableModuleEnabled) {
-    showNotice('功能模块「project.portable」当前已关闭。', true);
-    return;
-  }
-  const api = window.desktop?.projectArchive;
-  if (!api) {
-    showNotice('工程档案文件操作仅在桌面版可用。', true);
-    return;
-  }
-  const snapshot = createPortableProjectExportSnapshot();
-  if (!snapshot) {
-    showNotice('无法安全导出：当前 CAD 尚无持久工程身份，已禁用导出；请重新导入 CAD 后重试。', true);
-    return;
-  }
-  try {
-    const result = await api.exportProject(snapshot);
-    if (!result.ok) {
-      if (result.code !== 'CANCELED') showNotice(result.message, true);
-      return;
-    }
-    const value = result.value;
-    const included = Object.entries(value.includedState).filter(([, includedState]) => includedState).map(([key]) => key).join('、') || '无状态';
-    const excluded = value.excludedState.length ? `；未收录：${describePortableStateExclusions(value.excludedState).join('；')}` : '';
-    showNotice(`已创建 ${value.path}（含 CAD 原件与候选状态：${included}；schema v2，导入仍为只读预览${excluded}）`);
-  } catch (error) {
-    showNotice(error instanceof Error ? error.message : String(error), true);
-  }
-}
-
-function openPortableArchivePreview(preview: DesktopProjectArchivePreview): void {
-  const dialog = document.getElementById('cadProjectArchivePreview') as HTMLDialogElement | null;
-  const body = document.getElementById('cadProjectArchivePreviewBody');
-  if (!dialog || !body) {
-    showNotice('档案预览界面不可用。', true);
-    return;
-  }
-  const stateLines = [
-    `参数化特征树：${preview.state.featureTree ? '档案中有候选数据；尚未应用' : '不包含'}`,
-    `运动学标注：${preview.state.kinematics ? '档案中有候选数据；stable objectId 已校验，但尚未针对本机 CAD 重导入验证' : '不包含'}`,
-    `视角状态：${preview.state.viewState ? '档案中有候选数据；当前视口未应用' : '不包含'}`
-  ];
-  const dependencyLines = preview.dependencies.length > 0
-    ? preview.dependencies.map((item) => `- ${item.originalName} (${item.format}, ${item.size} bytes, SHA-256 ${item.sha256})`)
-    : ['- 无'];
-  const omittedStateLines = preview.omittedState.length
-    ? describePortableStateExclusions(preview.omittedState).map((reason) => `- ${reason}`)
-    : ['- 无'];
-  const identityLines = preview.project.identity
-    ? [
-        `来源身份：${preview.project.identity.sourceName} · ${preview.project.identity.sourceSize} bytes`,
-        `源 SHA-256：${preview.project.identity.sourceSha256}`,
-        `稳定模型对象：${preview.project.identity.modelObjects.length} 个（相同几何重复对象不分配 ID）`
-      ]
-    : ['来源身份：旧版 schema 无稳定 source identity'];
-  body.textContent = [
-    `项目名称：${preview.project.name}`,
-    `档案 ID：${preview.project.id}`,
-    `档案/Core schema：${preview.schemaVersion}/${preview.coreSchemaVersion}`,
-    `创建版本/时间：${preview.appVersion} · ${preview.createdAt}`,
-    ...identityLines,
-    '',
-    '状态候选：',
-    ...stateLines,
-    '',
-    '未收录状态：',
-    ...omittedStateLines,
-    '',
-    'CAD 依赖：',
-    ...dependencyLines,
-    '',
-    `完整性：${preview.integrity.algorithm} (${preview.integrity.authenticity})，仅校验条目与 manifest 一致性。`,
-    `尚不支持：${preview.unsupported.join('、')}`,
-    '',
-    '此处只显示经过校验的候选清单，不会导入、重建或覆盖当前工程。'
-  ].join('\n');
-  if (!dialog.open) dialog.showModal();
-}
-
-async function chooseAndPreviewPortableArchive(): Promise<void> {
-  if (!projectPortableModuleEnabled) {
-    showNotice('功能模块「project.portable」当前已关闭。', true);
-    return;
-  }
-  const api = window.desktop?.projectArchive;
-  if (!api) {
-    showNotice('工程档案文件操作仅在桌面版可用。', true);
-    return;
-  }
-  try {
-    const result = await api.preview();
-    if (!result.ok) {
-      if (result.code !== 'CANCELED') showNotice(result.message, true);
-      return;
-    }
-    openPortableArchivePreview(result.value);
-  } catch (error) {
-    showNotice(error instanceof Error ? error.message : String(error), true);
-  }
-}
-
 function refreshProjectArchiveControls(): void {
-  const button = root?.querySelector<HTMLButtonElement>('[data-project-archive="export-cad"]');
-  if (!button) return;
-  button.disabled = !projectPortableModuleEnabled || !window.desktop?.projectArchive || !currentProjectIdentity;
-  button.title = currentProjectIdentity
-    ? '导出当前持久身份对应的可支持状态与 CAD 原件'
-    : '尚未加载可建立持久身份的 CAD；请重新导入后再导出';
+  projectPortableUi?.refresh();
+}
+
+/**
+ * 工程档案入口所在位置的状态说明。
+ *
+ * 分块不可用、模块关闭、未声明或 API 不匹配时，导出菜单里的入口根本不会出现；
+ * 这里在 CAD 顶栏的导出区原位显示原因（含失败码）并允许点击重试，避免「点了没反应」。
+ */
+function showProjectPortableNote(message: string): void {
+  const existing = document.getElementById('projectPortableNote');
+  if (existing && !(existing instanceof HTMLButtonElement)) existing.remove();
+  const reusable = existing instanceof HTMLButtonElement ? existing : null;
+  const note = reusable ?? document.createElement('button');
+  if (!reusable) {
+    const actions = document.querySelector<HTMLElement>('.cad-actions');
+    if (!actions) return;
+    note.id = 'projectPortableNote';
+    note.type = 'button';
+    note.className = 'acp-pill is-warn';
+    note.setAttribute('role', 'status');
+    note.setAttribute('aria-live', 'polite');
+    note.setAttribute('aria-label', '工程档案模块状态，点击重试');
+    note.style.display = 'inline-block';
+    note.style.cursor = 'pointer';
+    note.style.maxWidth = '420px';
+    note.style.overflow = 'hidden';
+    note.style.textOverflow = 'ellipsis';
+    note.style.whiteSpace = 'nowrap';
+    note.style.fontSize = '11px';
+    note.style.padding = '4px 8px';
+    const close = actions.querySelector<HTMLElement>('[data-cad-action="close"]');
+    actions.insertBefore(note, close);
+  }
+  note.textContent = message;
+  note.title = `${message}（点击重试）`;
+  note.onclick = () => {
+    mountProjectPortableUi();
+  };
+}
+
+function clearProjectPortableNote(): void {
+  document.getElementById('projectPortableNote')?.remove();
+}
+
+async function loadProjectPortableChunk(): Promise<void> {
+  const loader = getModuleChunkLoader();
+  if (!loader) {
+    showProjectPortableNote('工程档案模块未加载（CHUNK_BRIDGE_UNAVAILABLE）：当前桌面外壳不提供模块分块。');
+    return;
+  }
+  if (!projectPortableModuleEnabled) {
+    showProjectPortableNote('工程档案模块已关闭（MODULE_DISABLED）：可在模块设置中重新启用。');
+    return;
+  }
+  const loaded = await loader.load('project.portable');
+  if (!loaded.ok) {
+    showProjectPortableNote(`工程档案模块未加载（${loaded.code}）：${loaded.message}`);
+    return;
+  }
+  const exports = loaded.exports as ProjectPortableChunkExports;
+  if (typeof exports.initProjectPortableUi !== 'function') {
+    showProjectPortableNote('工程档案模块版本不匹配（CHUNK_EXPORTS_MISSING）：分块没有提供初始化入口。');
+    return;
+  }
+  const host = document.getElementById('cadExportMenu');
+  if (!host) {
+    showProjectPortableNote('工程档案模块未加载（CHUNK_HOST_UNAVAILABLE）：CAD 导出菜单尚未就绪。');
+    return;
+  }
+  let ui: ProjectPortableUiHandle;
+  try {
+    // 与迁出前完全相同的 options：启动时的模块开关态、当前工程身份、同一份导出快照与同一个工程档案桥。
+    const initOptions: ProjectPortableUiInitOptions = {
+      enabled: projectPortableInitOptions.enabled,
+      host,
+      notify: showNotice,
+      closeMenu: () => toggleExportMenu(false),
+      hasProjectIdentity: () => currentProjectIdentity !== null,
+      captureSnapshot: createPortableProjectExportSnapshot,
+      projectArchive: () => window.desktop?.projectArchive ?? null
+    };
+    ui = exports.initProjectPortableUi(initOptions);
+    if (!ui
+      || typeof ui.setEnabled !== 'function'
+      || typeof ui.refresh !== 'function'
+      || typeof ui.openExport !== 'function'
+      || typeof ui.openPreview !== 'function'
+      || typeof ui.closePreview !== 'function') {
+      throw new Error('分块初始化入口没有返回完整句柄');
+    }
+  } catch (error) {
+    console.error('[modules] project.portable 分块初始化失败', error);
+    showProjectPortableNote(
+      `工程档案模块初始化失败（CHUNK_INIT_FAILED）：${error instanceof Error ? error.message : String(error)}`
+    );
+    return;
+  }
+  projectPortableUi = ui;
+  projectPortableUi.setEnabled(projectPortableModuleEnabled);
+  refreshProjectArchiveControls();
+  if (projectPortableModuleEnabled) clearProjectPortableNote();
+  else showProjectPortableNote('工程档案模块已关闭（MODULE_DISABLED）：可在模块设置中重新启用。');
+}
+
+function mountProjectPortableUi(): void {
+  if (projectPortableUi) {
+    projectPortableUi.setEnabled(projectPortableModuleEnabled);
+    return;
+  }
+  if (!projectPortableModuleEnabled) {
+    showProjectPortableNote('工程档案模块已关闭（MODULE_DISABLED）：可在模块设置中重新启用。');
+    return;
+  }
+  if (projectPortableUiLoad) return;
+  projectPortableUiLoad = (async () => {
+    try {
+      await loadProjectPortableChunk();
+    } catch (error) {
+      console.error('[modules] project.portable 分块加载失败', error);
+      showProjectPortableNote(
+        `工程档案模块未加载（CHUNK_LOAD_FAILED）：${error instanceof Error ? error.message : String(error)}`
+      );
+    } finally {
+      projectPortableUiLoad = null;
+    }
+  })();
 }
 
 async function importPack(path: string): Promise<void> {
@@ -4589,6 +4588,7 @@ function init(): void {
   };
   const moduleManager = createModuleManager(moduleStorage);
   elecCheckPanelInitOptions = { enabled: moduleManager.getStatus('elec.validation').enabled };
+  projectPortableInitOptions = { enabled: moduleManager.getStatus('project.portable').enabled };
   const initialCostEnabled = moduleManager.getStatus('cost.estimation').enabled;
   costPanelInitOptions = { enabled: !window.desktop && initialCostEnabled };
   const updatePanel = initUpdatePanel();
@@ -4750,14 +4750,15 @@ function init(): void {
       projectPortableModuleEnabled = false;
       console.error('[modules] project.portable 状态同步失败；工程档案操作保持关闭', error);
     }
-    root?.querySelectorAll<HTMLElement>('[data-project-archive-entry]').forEach((entry) => {
-      entry.hidden = !projectPortableModuleEnabled || !window.desktop?.projectArchive;
-    });
-    refreshProjectArchiveControls();
-    if (!projectPortableModuleEnabled) {
-      const preview = document.getElementById('cadProjectArchivePreview') as HTMLDialogElement | null;
-      if (preview?.open) preview.close();
+    if (projectPortableModuleEnabled) {
+      projectPortableUi?.setEnabled(true);
+      if (root && overlayOpen) mountProjectPortableUi();
+      else if (projectPortableUi) clearProjectPortableNote();
+    } else {
+      projectPortableUi?.setEnabled(false);
+      if (root) showProjectPortableNote('工程档案模块已关闭（MODULE_DISABLED）：可在模块设置中重新启用。');
     }
+    refreshProjectArchiveControls();
   };
   publishPlcgenState(moduleManager.list());
   publishElecValidationState(moduleManager.list());

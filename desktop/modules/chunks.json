@@ -12,6 +12,10 @@
     "elec.validation": {
       "entry": "src/modules/chunks/elec-validation.ts",
       "coreMustNotContain": "elecCheckPdf"
+    },
+    "project.portable": {
+      "entry": "src/modules/chunks/project-portable.ts",
+      "coreMustNotContain": "cadProjectArchivePreview"
     }
   }
 }
