@@ -330,6 +330,188 @@ jobs:
           Write-Host $summary
           $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
+      # 体积证据：打包成功后把「每个 exe 的字节/sha256、app.asar、resources/**、win-unpacked/**、
+      # asar 内 manifest + 每个分块的逐字节 sha256」落成 JSON 与 step summary。
+      # 脚本缺产物时非零退出；asar 分块不一致时 exit 3。CI 装了 @electron/asar，
+      # 所以这里再把 notVerified 判红——否则「没验」会被当成「验过」。
+      - name: 报告安装包体积（JSON + 人读摘要）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $reportPath = Join-Path $env:GITHUB_WORKSPACE 'desktop/release/package-size-report.json'
+          node scripts/report-package-size.mjs --dir release --json $reportPath
+          if ($LASTEXITCODE -ne 0) {
+            throw "report-package-size 失败（exit $LASTEXITCODE）：见上方 PACKAGE_SIZE_* 输出"
+          }
+          $report = Get-Content -Path $reportPath -Raw -Encoding utf8 | ConvertFrom-Json
+          if ($report.asarChunkIntegrity.status -ne 'verified') {
+            throw "asar 分块完整性未验证：status=$($report.asarChunkIntegrity.status) reason=$($report.asarChunkIntegrity.reason)"
+          }
+          # 本 job 刚跑完 build:ext 和 dist:win，asar 内清单必须与 desktop/dist 同源；
+          # 脚本本身把 disk.match 当信息字段（便于审计旧 release），CI 这里收紧为硬门槛。
+          if ($report.asarChunkIntegrity.manifest.disk.match -ne $true) {
+            throw "asar 内 manifest 与 desktop/dist 不同源：disk.match=$($report.asarChunkIntegrity.manifest.disk.match)"
+          }
+
+          $lines = @('### 安装包体积（实测）', '')
+          $lines += '| exe | 字节 | sha256 |'
+          $lines += '|---|---:|---|'
+          foreach ($item in @($report.exe)) {
+            $lines += ('| `{0}` | {1:N0} | `{2}` |' -f $item.path, [int64]$item.bytes, $item.sha256)
+          }
+          $lines += ''
+          $lines += ('- `app.asar`：**{0:N0} B**（`{1}`）' -f [int64]$report.appAsar.bytes, $report.appAsar.path)
+          $lines += ('- `resources/**`：**{0:N0} B** / {1:N0} 个文件（`{2}`）' -f [int64]$report.resources.bytes, [int64]$report.resources.files, ($report.resources.paths -join '`, `'))
+          $lines += ('- `win-unpacked/**`：**{0:N0} B** / {1:N0} 个文件' -f [int64]$report.winUnpacked.bytes, [int64]$report.winUnpacked.files)
+          $lines += ('- asar 分块完整性：**{0}**（checked={1}, ok={2}, failures={3}）' -f $report.asarChunkIntegrity.status, $report.asarChunkIntegrity.checked, $report.asarChunkIntegrity.ok, @($report.asarChunkIntegrity.failures).Count)
+          $lines += ''
+          $lines += '<details><summary>package-size-report.json（完整机器可读报告）</summary>'
+          $lines += ''
+          $lines += '```json'
+          $lines += (Get-Content -Path $reportPath -Raw -Encoding utf8).Trim()
+          $lines += '```'
+          $lines += '</details>'
+          $lines | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          Write-Host "PACKAGE_SIZE_REPORT_OK json=$reportPath"
+
+      # 冷启动证据：运行打包后的 Electron 主进程自带回执（main.ts 的 STARTUP_METRICS）N=5。
+      # 只认「新进程 + exit 0 + 非 degraded + totalMs 有限正数」的样本；拿不到就 SKIPPED 写原因，
+      # 绝不补数字。口径：totalMs 从 main 模块求值起算，不含 Electron bootstrap 与静态 import；
+      # headless 无首帧，readyToShow 可能为 null；未清 OS 文件缓存，故是进程级冷启动。
+      - name: 冷启动测量（headless STARTUP_METRICS，N=5）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = Join-Path $env:GITHUB_WORKSPACE 'desktop/release'
+          $unpacked = Join-Path $release 'win-unpacked'
+          $exe = Join-Path $unpacked 'AutomationCAD.exe'
+          if (-not (Test-Path $exe)) {
+            $candidate = Get-ChildItem -Path $unpacked -Filter '*.exe' -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -ne 'automationcad-qt.exe' } |
+              Sort-Object Length -Descending | Select-Object -First 1
+            if ($candidate) { $exe = $candidate.FullName }
+          }
+          $lines = @('### 冷启动（headless STARTUP_METRICS）', '')
+          $writeSummary = {
+            param($content)
+            if ($env:GITHUB_STEP_SUMMARY) {
+              $content | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            }
+          }
+          if (-not (Test-Path $exe)) {
+            $lines += 'COLD_START SKIPPED reason=missing-packaged-exe（win-unpacked 下没有 Electron 可执行文件）'
+            & $writeSummary $lines
+            Write-Host $lines[-1]
+            return
+          }
+
+          $tempDir = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
+          $samples = @()
+          $failures = @()
+          $runs = 5
+          $timeoutMs = 180000
+          for ($i = 1; $i -le $runs; $i++) {
+            $outFile = Join-Path $tempDir "cold-start-$i.out.log"
+            $errFile = Join-Path $tempDir "cold-start-$i.err.log"
+            Remove-Item -Path $outFile, $errFile -Force -ErrorAction SilentlyContinue
+            try {
+              $proc = Start-Process -FilePath $exe `
+                -ArgumentList @('--headless-smoke', '--disable-gpu', '--disable-gpu-compositing', '--disable-software-rasterizer') `
+                -WorkingDirectory (Split-Path $exe) -PassThru -NoNewWindow `
+                -RedirectStandardOutput $outFile -RedirectStandardError $errFile
+              if (-not $proc.WaitForExit($timeoutMs)) {
+                & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null
+                Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+                $failures += "run=$i reason=timeout-${timeoutMs}ms"
+                continue
+              }
+              $exitCode = $proc.ExitCode
+            } catch {
+              $failures += "run=$i reason=launch-failed:$($_.Exception.Message)"
+              continue
+            }
+
+            $text = ''
+            foreach ($file in @($outFile, $errFile)) {
+              if (Test-Path $file) {
+                $text += (Get-Content -Path $file -Raw -Encoding utf8 -ErrorAction SilentlyContinue)
+              }
+            }
+            $match = [regex]::Match($text, '(?m)^\s*STARTUP_METRICS\s+(\{.*\})\s+trigger=([^\r\n]*)')
+            if (-not $match.Success) {
+              $failures += "run=$i reason=no-STARTUP_METRICS exit=$exitCode"
+              continue
+            }
+            $trigger = $match.Groups[2].Value.Trim()
+            if ($exitCode -ne 0) {
+              $failures += "run=$i reason=exit-$exitCode trigger=$trigger"
+              continue
+            }
+            if ($trigger -match 'degraded=' -or $trigger -like 'fallback-timer*') {
+              $failures += "run=$i reason=degraded-receipt:$trigger"
+              continue
+            }
+            try {
+              $snapshot = $match.Groups[1].Value | ConvertFrom-Json
+              $totalMs = [double]$snapshot.totalMs
+            } catch {
+              $failures += "run=$i reason=invalid-STARTUP_METRICS-json:$($_.Exception.Message)"
+              continue
+            }
+            if (-not ([double]::IsFinite($totalMs)) -or $totalMs -le 0) {
+              $failures += "run=$i reason=bad-totalMs"
+              continue
+            }
+            $samples += [pscustomobject]@{ Run = $i; TotalMs = $totalMs; Trigger = $trigger }
+            Write-Host ("COLD_START_RUN {0} totalMs={1} trigger={2}" -f $i, $totalMs, $trigger)
+          }
+
+          $n = $samples.Count
+          if ($n -eq 0) {
+            $lines += ('COLD_START SKIPPED reason=0/{0}-valid-runs' -f $runs)
+            foreach ($failure in $failures) { $lines += "- $failure" }
+            & $writeSummary $lines
+            Write-Host ($lines -join "`n")
+            return
+          }
+
+          $sorted = @($samples | Sort-Object -Property TotalMs)
+          $mid = [int][math]::Floor($n / 2)
+          if ($n % 2 -eq 1) {
+            $median = [double]$sorted[$mid].TotalMs
+          } else {
+            $median = ([double]$sorted[$mid - 1].TotalMs + [double]$sorted[$mid].TotalMs) / 2
+          }
+          $p95Index = [int][math]::Ceiling(0.95 * $n) - 1
+          if ($p95Index -lt 0) { $p95Index = 0 }
+          if ($p95Index -ge $n) { $p95Index = $n - 1 }
+          $p95 = [double]$sorted[$p95Index].TotalMs
+
+          $lines += ('- 产物：`{0}`' -f $exe)
+          $lines += '- 运行方式：`--headless-smoke --disable-gpu`，每次独立进程；未清 OS 文件缓存（进程级冷启动，不是 OS 冷缓存）。'
+          $lines += '- 口径：`STARTUP_METRICS.totalMs`，零点 = main 模块求值起点，不含 Electron bootstrap 与静态 import；headless 无首帧。'
+          $lines += ('- 样本（ms）：{0}' -f (($samples | ForEach-Object { [math]::Round($_.TotalMs, 3) }) -join ', '))
+          if ($n -lt $runs) {
+            $lines += ('COLD_START INCOMPLETE valid={0}/{1}' -f $n, $runs)
+            $lines += ('- **INCOMPLETE**：只有 {0}/{1} 次有效，不足 N={1}，不给 median/p95。' -f $n, $runs)
+          } else {
+            $lines += ('COLD_START MEASURED n={0}/{1} median_ms={2:N1} p95_ms={3:N1}' -f $n, $runs, $median, $p95)
+            $lines += ('- **median = {0:N1} ms**' -f $median)
+            $lines += ('- **p95 = {0:N1} ms**（nearest-rank；N=5 时等于最大值）' -f $p95)
+            $lines += ('- status: MEASURED（{0}/{1}）' -f $n, $runs)
+          }
+          foreach ($failure in $failures) { $lines += "- 失败样本：$failure" }
+          & $writeSummary $lines
+          Write-Host ($lines -join "`n")
+
+      - name: 上传体积报告 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AutomationCAD-Package-Size-Report
+          path: desktop/release/package-size-report.json
+          if-no-files-found: error
+          retention-days: 14
+
       - name: 校验生产更新产物
         if: startsWith(github.ref, 'refs/tags/v')
         run: node scripts/update-release-preflight.mjs --artifacts --channel ${{ steps.release-preflight.outputs.channel }}

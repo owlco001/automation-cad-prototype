@@ -6,6 +6,11 @@
 换成**可核对的本机实测数字**，并把本机**证不了的**部分逐条列成待补证据。
 **没有实测到的数字，本文一律不填。**
 
+> **2026-11-23 增补**：§8 给出把「安装包体积 / 解包后占用 / 冷启动」变成 CI 可复现数字的
+> 脚本与 workflow 接线，并列出仍需人工做的 Full/Core 双版本共存验收。本轮**没有触发任何
+> workflow 运行**，所以 §8 只写字段、命令与判据，不填任何 CI 实测值；真实数字要等
+> `windows-build` 跑完后从 step summary 与 artifact 里取。
+
 ## 0. 结论先行
 
 | 项目 | 状态 | 结果 |
@@ -176,7 +181,7 @@ Error: ENOENT: no such file or directory, mkdir '/root/.electron-gyp'
    `files: dist/**/*` 进入 asar」，运行时读取路径是 `app.getAppPath()/dist/modules`。
    所以 7 个分块 **587,496 B + 清单 1,861 B = 589,357 B** 是**照样随包发布**的。
 2. **「按需加载」省的是内存与启动期执行，不是安装包字节。** 模块文件仍完整躺在 asar 里；
-   只有把分块改成「不在包内、单独下载/单独安装包」（[MODULE-CHUNKS.md:73-74](MODULE-CHUNKS.md#L73-L74) 的第 4 条，
+   只有把分块改成「不在包内、单独下载/单独安装包」（[MODULE-CHUNKS.md:85-86](MODULE-CHUNKS.md#L85-L86) 的第 4 条，
    目前**未实现**），这 589,357 B 才会真正从安装包里消失。
 3. **让字节真正下降的是同一批提交里的另一件事**：`a4cfd6a`「Share three.js from the core bundle
    instead of duplicating it per chunk」。分块是独立 IIFE，若不外置共享依赖，`three` 会**每块各打一份**；
@@ -427,6 +432,8 @@ console.log('orphans=' + (orphans.join(',') || '(none)'));
 
 ## 7. 本文没有做的事（划清边界）
 
+> 本节只描述 2026-11-22 那一轮的边界；2026-11-23 的体积脚本/workflow 增补见 §8。
+
 - 没有改任何源码、`package.json`、CI、`modules/chunks.json`。
 - 没有为「让打包跑通」而设置 `HOME=` / `npm_config_devdir=` / `npmRebuild=false` 等绕行手段。
 - 没有联网（未下载 electron、app-builder、NSIS、node 头部）。
@@ -435,3 +442,306 @@ console.log('orphans=' + (orphans.join(',') || '(none)'));
 - 会话期间该工作树的 `HEAD` 被外部推进过两次（合并 `2c59899`；以及对本文自身的提交）。
   本文的实测数字以 `2c59899` 的代码状态为准，并在该状态上重跑 `build:ext` 复核；
   若后续代码继续前进，§1 的数字需要重测，不能直接沿用。
+
+## 8. CI 可复现证据（2026-11-23 增补）
+
+本节不是一次新的实测：只增加「以后怎么在 CI 里稳定拿到体积与冷启动数字」的脚本、workflow
+接线和验收判据。**本轮没有触发任何 workflow 运行**，所以下面不填任何 CI 实测值；真实数字要等
+`windows-build` 跑完后，从该次 run 的 step summary 与 artifact 里取。
+
+### 8.1 `report-package-size.mjs`：体积证据脚本
+
+文件：[desktop/scripts/report-package-size.mjs](../../desktop/scripts/report-package-size.mjs)。
+
+```bash
+cd desktop
+
+# 语法检查
+node --check scripts/report-package-size.mjs
+
+# 打包后运行：默认扫描 desktop/release；--json 可选，写了才有机器可读文件
+node scripts/report-package-size.mjs \
+  --dir release \
+  --json release/package-size-report.json
+```
+
+- `--dir` 省略时默认 `desktop/release`（按脚本自身位置解析，不依赖当前目录）；`--dir` 写相对路径时
+  按当前工作目录解析。
+- stdout 是人读摘要；`--json` 额外落一份 UTF-8 JSON。脚本不联网、不改产物。
+- 扫描内容：
+  - 递归扫描 `--dir` 下**每个 `.exe`**（NSIS 安装器、`win-unpacked` 里的 Electron 主程序、
+    `resources/qt` 里的 Qt 辅助程序都算），记录字节数与 sha256；
+  - `resources/app.asar` 的字节数；
+  - `resources/**` 与 `win-unpacked/**` 的合计字节/文件数；
+  - 若 `@electron/asar`（`node_modules` 内 3.4.1）可用，用 `extractFile` 抽取
+    `dist/modules/manifest.json` 与清单里的每个分块，逐字节核对 `bytes` 与 `sha256`。
+- **缺产物时非零退出**：目录不存在、没有 `.exe`、没有 `resources/app.asar`、没有
+  `win-unpacked/`，任一成立即 exit 2，并在 `missing` 数组里写清缺什么。
+- **asar 分块不一致时 exit 3**：清单抽不出、清单不是合法 JSON、分块抽不出、字节或 sha256
+  不匹配，都会进 `asarChunkIntegrity.failures[]`。
+- 没有 `@electron/asar`、或没有 asar 可抽时，`asarChunkIntegrity.status` 是 `notVerified`，
+  人读摘要也写 `notVerified` / `reason=...`，**不会打印 `ok` 或 `verified`**。这是「没验」，
+  不是「验过」。若 asar 存在但清单/分块抽不出，则是 `failed`（exit 3），不是 `notVerified`。
+
+退出码与 `asarChunkIntegrity.status`：
+
+| 退出码 | 含义 |
+|---:|---|
+| `0` | 报告已生成；asar 完整性为 `verified`（或本机没有 `@electron/asar` 而明确 `notVerified`） |
+| `2` | 产物缺失（`missing[]` 说明缺什么） |
+| `3` | asar 存在，但清单/分块抽取或逐字节比对失败（`failures[]` 给 id、文件、期望/实际哈希） |
+
+| `status` | 含义 |
+|---|---|
+| `verified` | 清单与每个分块的 `bytes`/`sha256` 全部一致 |
+| `failed` | 至少一条失败；CI 看到 exit 3 |
+| `notVerified` | 没有 asar、没有 `@electron/asar`、或清单抽不出；**不主张完整性** |
+
+JSON 顶层结构（字段名稳定，CI 用 PowerShell `ConvertFrom-Json` 读取）：
+
+```json
+{
+  "schemaVersion": 1,
+  "generatedAt": "<ISO-8601>",
+  "tool": "report-package-size",
+  "dir": "<扫描目录绝对路径>",
+  "status": "ok",
+  "missing": [],
+  "exe": [
+    {
+      "path": "AutomationCAD-Setup-<version>.exe",
+      "bytes": 0,
+      "sha256": "<64 hex>",
+      "area": "release-root"
+    }
+  ],
+  "appAsar": { "path": "win-unpacked/resources/app.asar", "bytes": 0 },
+  "resources": { "bytes": 0, "files": 0, "paths": ["win-unpacked/resources"] },
+  "winUnpacked": { "path": "win-unpacked", "bytes": 0, "files": 0 },
+  "asarChunkIntegrity": {
+    "status": "verified",
+    "checked": 7,
+    "ok": 7,
+    "failures": [],
+    "reason": null,
+    "manifest": {
+      "path": "dist/modules/manifest.json",
+      "bytes": 1861,
+      "sha256": "<64 hex>",
+      "chunksDeclared": 7,
+      "disk": { "path": "dist/modules/manifest.json", "bytes": 1861, "sha256": "<64 hex>", "match": true }
+    }
+  }
+}
+```
+
+> 上面的 `0` 是字段占位，不是实测值。`checked`/`ok` 是**条数**；`failures` 为空数组才表示
+> 逐条都通过。顶层 `status` 是汇总：`ok`（产物齐全且完整性 `verified`）/ `missing`（缺产物）/
+> `integrity-failed`（分块不一致）/ `unverified`（asar 没验）。逐条失败原因仍看
+> `asarChunkIntegrity.failures[]`。
+> `manifest.disk` 是「asar 内清单 vs 当前 `desktop/dist/modules/manifest.json`」的
+> 附加信息，**不参与** `verified/failed` 判定：有磁盘清单时 `match` 为 `true/false`，没有时
+> `match: null, reason: "not-available"`。用旧 release 配新 `dist/` 跑时 `match` 可能为 `false`，
+> 这只是提示「产物与当前工作树不同源」，不能单独判打包链坏。
+
+本机用假 release + 真 `dist/modules` 做过的结构验证（**不是真实安装包数字**）：
+
+```text
+PACKAGE_SIZE_REPORT dir=.../release
+status=ok
+EXE (...)
+  AutomationCAD-Setup-<version>.exe  <bytes> B  sha256=<64hex>  area=release-root
+  win-unpacked/AutomationCAD.exe      <bytes> B  sha256=<64hex>  area=win-unpacked
+APP_ASAR win-unpacked/resources/app.asar  <bytes> B
+RESOURCES  <bytes> B in <n> files  paths=win-unpacked/resources
+WIN_UNPACKED  <bytes> B in <n> files  path=win-unpacked
+ASAR_CHUNK_INTEGRITY status=verified checked=7 ok=7 failures=0
+  manifest sha256=<64hex> bytes=1,861 diskMatch=true
+```
+
+### 8.2 `windows.yml` 里新增了哪几步
+
+改动只发生在**已有的** `build` job 内，紧跟现有「打包后自证」步骤；**不新增 job，不改触发条件**
+（仍是 `workflow_dispatch`）。新增三步：
+
+| 顺序 | 步骤名 | 作用 |
+|---:|---|---|
+| 1 | `报告安装包体积（JSON + 人读摘要）` | `node scripts/report-package-size.mjs --dir release --json release/package-size-report.json`；把 Markdown 摘要 + 完整 JSON（折叠块）写进 `$GITHUB_STEP_SUMMARY`；脚本 exit 2/3、`asarChunkIntegrity.status != verified` 或 `manifest.disk.match != true` 时本步失败 |
+| 2 | `冷启动测量（headless STARTUP_METRICS，N=5）` | 对打包后的 `win-unpacked/AutomationCAD.exe` 跑 5 次 headless；解析每行 `STARTUP_METRICS`，把样本、median、p95 写进 summary；环境不支持则 `SKIPPED` + 原因，不伪造数字 |
+| 3 | `上传体积报告 artifact`（`actions/upload-artifact@v4`，artifact 名 `AutomationCAD-Package-Size-Report`） | 上传 `desktop/release/package-size-report.json`，保留 14 天 |
+
+> 体积报告步骤排在「打包后自证」之后：此时 NSIS 安装器、`win-unpacked`、`resources/app.asar`
+> 都已存在；排在便携包压缩之前，所以不需要等 zip。
+
+### 8.3 CI 里能看到哪些数字
+
+全部从该次 `windows-build` run 的 step summary 或 artifact 读，不需要在本机复现：
+
+| 数字 | 位置 | 口径/限制 |
+|---|---|---|
+| NSIS 安装器字节 + sha256 | summary 的 exe 表；JSON `exe[]` | 每个 `.exe` 都列，`area=release-root` 的那行是安装包 |
+| `win-unpacked` 里 Electron 主程序 / Qt 辅助程序的字节 + sha256 | 同上，`area=win-unpacked` | 便于核对「安装后的可执行文件」与安装器不是同一份 |
+| `app.asar` 字节 | summary；JSON `appAsar` | 只报字节，不含解包开销 |
+| `resources/**` 合计字节 / 文件数 | summary；JSON `resources` | **包含** `win-unpacked/resources/**`；与下一行重叠，不能相加 |
+| `win-unpacked/**` 合计字节 / 文件数 | summary；JSON `winUnpacked` | 解包目录的文件字节合计；**不是** NTFS 实际占用（簇大小/稀疏/压缩）、不含快捷方式、卸载器写入与 `%APPDATA%` 的 userData |
+| asar 分块完整性 | summary；JSON `asarChunkIntegrity` | `checked`/`ok`/`failures`；CI 要求 `status=verified` 且 `manifest.disk.match=true` 才通过 |
+| 冷启动 5 个 `totalMs` 样本、median、p95 | summary 的「冷启动」块 | 见 §8.4 的口径；`INCOMPLETE`/`SKIPPED` 时没有 median/p95 |
+| 失败原因 | summary；脚本 stdout/stderr | `PACKAGE_SIZE_MISSING` / `PACKAGE_SIZE_ASAR_FAILED` / `COLD_START SKIPPED` |
+
+注意：
+
+- `win-unpacked/**` 是「安装后占用」的**可复现代理**，不是 §5.2 那种在 Windows 上装完后的
+  实际目录占用；后者仍要人工按 §5.2 做（NTFS 分配、快捷方式、卸载器、userData 都会影响最终数字）。
+- 这些数字是**单次构建的绝对值**，不是分块 A/B 差分。要回答「分块让包变小了吗」，仍必须按
+  §5.1 做同 runner、同 electron-builder 的 A/B；CI 当前的体积步骤不能单独证明因果。
+- 冷启动同理：CI 给的是同一构建在 runner 上的重复测量，不含「分块前/后」对照；因果结论仍按
+  §5.3 的 A/B 方法做。
+
+### 8.4 冷启动步骤的口径（为什么这些数字能信、又不能过度解读）
+
+`windows.yml` 的新步骤实际执行：
+
+```text
+desktop/release/win-unpacked/AutomationCAD.exe \
+  --headless-smoke --disable-gpu --disable-gpu-compositing --disable-software-rasterizer
+```
+
+重复 5 次，每次都是**新进程**。解析主进程打印的唯一一行：
+
+```text
+STARTUP_METRICS {"readyMs":...,"windowMs":...,"readyToShowMs":...,"loadMs":...,"extensionMs":...,"totalMs":...,"phases":[...],"boundary":"..."} trigger=...
+```
+
+计入样本的条件（任一不满足就丢弃并记原因）：
+
+1. 进程 exit code = 0；
+2. 能匹配到 `STARTUP_METRICS` 行；
+3. `trigger` 不含 `degraded=`，也不是 `fallback-timer:*`（兜底回执只有部分阶段，不能当首帧）；
+4. `totalMs` 是有限正数。
+
+统计：
+
+- **median**：5 个样本排序后的中位数；
+- **p95**：nearest-rank（`ceil(0.95 × N) - 1`）；N=5 时等于最大值。summary 里会写明这一点，
+  不把 p95 伪装成比 max 更精细的统计量；
+- 5/5 有效才输出 `MEASURED` 与 median/p95；1–4 个有效输出 `INCOMPLETE`，只列样本与失败原因，
+  **不给 median/p95**；0 个有效输出 `COLD_START SKIPPED reason=...`。没有数字时不会补数字。
+
+口径边界（与 §5.3 一致，必须一起读）：
+
+- `totalMs` 的零点 = **main 模块求值起点**，不含 Electron bootstrap、不含 main 的静态 import；
+  它回答的是「应用代码开始执行到首帧/回执」这一段，不是「双击到窗口」的整段时间。
+- headless 下没有真实首帧，`readyToShowMs` 可能为 `null`；兜底回执会被本步骤丢弃。
+- 每次都是新进程，但**没有清 OS 文件缓存**，所以是「进程级冷启动」，不是「OS 冷缓存」；
+  真正的冷缓存重复测量仍按 §5.3 用 RAMMap/`EmptyStandbyList` 做。
+- 如果 runner 不支持 Electron headless（无桌面会话、缺依赖等），步骤会打印
+  `COLD_START SKIPPED reason=...` 并继续，不会把 job 弄红，也不会造数。Linux 上的 `xvfb-run`
+  不适用于 `windows-latest`；这里用的是 Electron 自己的 `--headless-smoke`。
+
+### 8.5 结论：分块仍随包发布，所以体积不因分块而减小
+
+**这条结论不因新增 CI 而改变，反而被 CI 的 asar 检查再次证明：**
+
+1. `desktop/package.json` 的 `files` 仍含 `dist/**/*`（[package.json:92](../../desktop/package.json#L92)），
+   `dist/modules` 在 `dist/` 下，所以 7 个分块 **587,496 B** + `manifest.json` **1,861 B** =
+   **589,357 B** 仍被打进 `app.asar`，随安装包发布。
+2. 新增的 `asarChunkIntegrity` 做的是「从 `app.asar` 里把分块抽出来，逐字节比对 manifest」；
+   它证明的是**分块确实在包里**且字节一致，不是「分块让包变小」。如果哪天分块被移出包体，
+   这项检查会以 `not-found-or-unreadable` 失败——那才是分发形态改变。
+3. 分块优化的是**加载/启动期执行**（按需读块、核心包少解析），不是分发字节；要让安装包真正
+   减小，必须把分块改成包外下载/独立安装（[MODULE-CHUNKS.md:85-86](MODULE-CHUNKS.md#L85-L86)
+   的第 4 条，**目前未实现**）。
+4. 同一批提交里让字节下降的是 `a4cfd6a`「three.js 不再逐块重复」，不是分块本身；两者不要混为
+   一谈。CI 的单构建体积数字也不能替代 §5.1 的 A/B 归因。
+
+### 8.6 仍需人工：Full / Core 双版本共存验收
+
+CI 的 `windows.yml` 只打 **Full**（`npm run dist:win`），不打 Core；本轮也不新增 job。Core
+安装包要人工在 Windows 上构建：
+
+```powershell
+cd desktop
+npm run dist:win        # Full  -> release\AutomationCAD-Setup-<version>.exe
+npm run dist:win:core   # Core  -> release-core\AutomationCAD-Core-Setup-<version>.exe
+```
+
+静态事实（构建配置可核对，但**不等于**安装验收）：
+
+- Full：appId `cn.automationcad.desktop`、productName `AutomationCAD`；
+  Core：appId `cn.automationcad.desktop.core`、productName `AutomationCAD Core`、输出
+  `release-core`（[dist-win-core.mjs](../../desktop/scripts/dist-win-core.mjs)）。
+- userData 按 `identity.appName` 分：`%APPDATA%\AutomationCAD` vs
+  `%APPDATA%\AutomationCAD Core`；Core 的 sessionData 再落到
+  `%APPDATA%\AutomationCAD Core\session`（[edition.ts:13-19](../../desktop/electron/edition.ts#L13-L19)、
+  [edition.ts:60](../../desktop/electron/edition.ts#L60)）。
+- rpc 端口 7420（Full）/ 7421（Core）；Core 的 `extraResources` 不含 `vendor/qt`，所以
+  `resources/qt` 不应出现在 Core 包里。
+
+必须人工做的检查（建议在一台干净 Win11 快照上按顺序做，并把结果贴进发布记录）：
+
+| # | 步骤 | 判据 |
+|---:|---|---|
+| 1 | 安装 Full 与 Core 到**不同目录**（NSIS 允许改目录） | 两个安装器都成功；两个 `InstallLocation` 不同；两个主程序都能启动并报各自版本 |
+| 2 | 查注册表卸载项 | `DisplayName` 有两条（`AutomationCAD` / `AutomationCAD Core`）；`UninstallString`、`InstallLocation` 互不覆盖 |
+| 3 | 查安装目录资源 | Full 有 `resources\qt\automationcad-qt.exe` 且 `resources\qt` 文件数 ≥40；Core **没有** `resources\qt`；两包都有 `resources\pipeline\machine-design-cli.cjs` |
+| 4 | 查包内身份标记 | 从各自 `resources\app.asar` 抽 `package.json`：Full 无 `automationCadEdition`（或不是 `core`），Core 为 `"core"`；防止 Core 包误装成 Full 身份 |
+| 5 | 同时启动两个版本 | 两个窗口可同时存在；Full 用 7420、Core 用 7421；单实例锁不互踢（若互踢，记录哪个先退） |
+| 6 | userData 隔离 | 在 Full 里建工程/改设置，检查写入只在 `%APPDATA%\AutomationCAD`；在 Core 里同样操作，只在 `%APPDATA%\AutomationCAD Core`；两侧的 `packs-state.json`、工程、日志、`session` 不互相出现 |
+| 7 | 卸载 Full（保留 Core） | Core 仍能启动、Core userData 不变、Core 安装目录文件数不变；Full 自己的安装目录被卸载器清掉（userData 默认可能保留，记录实际行为） |
+| 8 | 重装 Full，再卸载 Core | Full 仍能启动、Full userData 不变；Core 安装目录被清掉；没有把 Full 的注册表项/快捷方式一起删掉 |
+| 9 | 更新隔离 | Core 不提供应用内更新（`editionUpdateRestriction` 的提示可见）；Full 的更新检查/下载不写 Core 的 userData，也不覆盖 Core 安装目录 |
+| 10 | 反向共存（可选但建议） | 先装 Core 再装 Full、先卸 Core 再卸 Full，重复 #6–#8 的判据；确认安装顺序不影响结果 |
+
+关键取证命令（PowerShell，路径以实际 `InstallLocation` 为准）：
+
+```powershell
+# 两个安装器与字节
+Get-Item .\release\AutomationCAD-Setup-*.exe, .\release-core\AutomationCAD-Core-Setup-*.exe |
+  Select-Object FullName, Length
+
+# 注册表两条卸载项
+Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+                 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' |
+  Where-Object { $_.DisplayName -like '*AutomationCAD*' } |
+  Select-Object DisplayName, DisplayVersion, InstallLocation, UninstallString
+
+# userData 是否分开（先记基线，再启动/操作，再比对 LastWriteTime）
+$full = Join-Path $env:APPDATA 'AutomationCAD'
+$core = Join-Path $env:APPDATA 'AutomationCAD Core'
+Get-ChildItem $full -Force -ErrorAction SilentlyContinue | Select-Object Name, LastWriteTime
+Get-ChildItem $core -Force -ErrorAction SilentlyContinue | Select-Object Name, LastWriteTime
+Get-ChildItem (Join-Path $core 'session') -Force -ErrorAction SilentlyContinue | Select-Object Name, LastWriteTime
+
+# 包内 package.json（直接读 asar，不落盘、不改安装目录；在 desktop/ 下执行以便 require 到 @electron/asar）
+node -e "const a=require('@electron/asar'); const p=JSON.parse(a.extractFile(process.argv[1],'package.json').toString('utf8')); console.log(JSON.stringify({name:p.name,version:p.version,automationCadEdition:p.automationCadEdition}))" `
+  'C:\Program Files\AutomationCAD\resources\app.asar'
+node -e "const a=require('@electron/asar'); const p=JSON.parse(a.extractFile(process.argv[1],'package.json').toString('utf8')); console.log(JSON.stringify({name:p.name,version:p.version,automationCadEdition:p.automationCadEdition}))" `
+  'C:\Program Files\AutomationCAD Core\resources\app.asar'
+```
+
+判据汇总：**Full 与 Core 的安装目录、注册表项、userData、端口、`resources/qt` 必须互不串**；
+卸载任一方后另一方仍可启动；任何一侧的 userData 被另一侧写入，都算阻塞级问题（会破坏
+「Core 作为精简版/独立数据」的承诺）。同 appId 的旧版/新版共存另见 §5.4，不要和 Full/Core
+共存混为一谈。
+
+### 8.7 本机可跑的校验（本轮实际执行）
+
+```bash
+cd /root/workspace/automation-cad-audit-main
+
+# 1) 脚本语法
+node --check desktop/scripts/report-package-size.mjs
+
+# 2) 缺产物时必须非零退出（desktop/dist 没有 .exe / app.asar / win-unpacked）
+node desktop/scripts/report-package-size.mjs --dir desktop/dist; echo "exit=$?"   # 期望 2
+
+# 3) workflow YAML 解析
+python3 - <<'PY'
+import yaml
+yaml.safe_load(open('.github/workflows/windows.yml', encoding='utf-8'))
+print('YAML_OK')
+PY
+```
+
+> 这一轮**没有**执行 `gh workflow run`、没有 push、没有改任何触发条件；CI 数字要等下一次
+> 手动触发 `windows-build` 后才有。不要把本节的字段样例当成实测值。
